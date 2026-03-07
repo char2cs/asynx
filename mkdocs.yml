@@ -17,6 +17,9 @@ theme:
     - content.code.copy
     - content.code.select
 
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js
+
 nav:
   - Home: index.md
   - Specification:
