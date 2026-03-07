@@ -1,4 +1,8 @@
-# Asynx Specification
+# What is Asynx
+
+Asynx is an event sourcing + CQRS framework for Go. Developers express intent through commands — Asynx handles events, state, and history automatically. Bring your infrastructure, Asynx handles the rest.
+
+---
 
 ## Philosophy
 
@@ -203,10 +207,10 @@ exists, err := asynx.Exists(ctx, aggregateID)
 
 `asynx.Preload(ctx, aggregateID)` triggers eager rehydration for aggregates that would otherwise hit the cold path on first `Send()`.
 
-| Need | Solution | Consistency |
+|Need|Solution|Consistency|
 |---|---|---|
-| Current state of one aggregate | `asynx.Get()` — **StateView** | Strong |
-| Derived, cross-aggregate, filtered views | `projection` callbacks | Eventual |
+|Current state of one aggregate|`asynx.Get()` — **StateView**|Strong|
+|Derived, cross-aggregate, filtered views|`projection` callbacks|Eventual|
 
 #### Sub-module: `writer`
 
@@ -560,13 +564,13 @@ If a snapshot's version doesn't align with the event stream's latest version for
 
 Asynx is crash-tolerant for everything past the eventstore write. The eventstore is the save point — once an event is appended to the stream it is durable. Everything before it is in-memory by design.
 
-| Scenario | Outcome |
+|Scenario|Outcome|
 |---|---|
-| Commands in shard queue at crash | Lost — developer must handle |
-| Event appended to stream | Safe ✓ |
-| Snapshot partial write | Auto-recovered via version mismatch detection in `eventstore` ✓ |
-| Projection callback mid-execution | Lost — developer uses `asynx.Replay()` to recover |
-| Primary handler failed, fallback mid-execution | Lost — developer uses `asynx.Replay()` to recover |
+|Commands in shard queue at crash|Lost — developer must handle|
+|Event appended to stream|Safe ✓|
+|Snapshot partial write|Auto-recovered via version mismatch detection in `eventstore` ✓|
+|Projection callback mid-execution|Lost — developer uses `asynx.Replay()` to recover|
+|Primary handler failed, fallback mid-execution|Lost — developer uses `asynx.Replay()` to recover|
 
 > **Important:** Commands accepted into the shard queue but not yet processed are held in memory only. An unexpected crash will lose these commands permanently. If your application cannot tolerate lost commands, persist them on your side before calling `asynx.Send()` and implement a recovery mechanism to resubmit them on startup.
 
@@ -661,11 +665,11 @@ instance, err := asynx.New[Order]().
 
 ### Infrastructure methods (what you plug in)
 
-| Method | Required | Default |
+|Method|Required|Default|
 |---|---|---|
-| `WithEventStore(Store)` | Yes — `Build()` errors if missing | none |
-| `WithSnapshotStore(Store)` | No | same store as `WithEventStore` |
-| `WithBus(Bus)` | No | in-process channel bus |
+|`WithEventStore(Store)`|Yes — `Build()` errors if missing|none|
+|`WithSnapshotStore(Store)`|No|same store as `WithEventStore`|
+|`WithBus(Bus)`|No|in-process channel bus|
 
 ### Behavioural methods (how Asynx operates)
 
@@ -746,9 +750,9 @@ The defaults cover this completely. In-process bus and any durable store (SQLite
 
 ### Multi-node
 
-> **v1 note:** Multi-node support is not a primary target for v1. The following is provided for awareness, not as a supported configuration.
+Asynx works on multiple nodes. The developer is responsible for two things:
 
-**Cross-node command races.** The sharded worker pool guarantees serial ordering per aggregate within a single process. Across nodes, two commands for the same aggregate can land on different machines simultaneously. The store's `(aggregateID, version)` uniqueness constraint is the only guard — the losing write gets a version conflict, surfaces as `ErrPipelineFailed`, and the caller retries from scratch. Developers must implement retry logic at the `Send()` call site. Asynx does not attempt to solve cross-node ordering at the framework level.
+**Cross-node command races.** The sharded worker pool guarantees serial ordering per aggregate within a single process. Across nodes, two commands for the same aggregate can land on different machines simultaneously. The store's `(aggregateID, version)` uniqueness constraint is the coordination mechanism — the losing write gets a version conflict, surfaces as `ErrPipelineFailed`, and the caller retries from scratch. Developers must implement retry logic at the `Send()` call site. Asynx does not attempt to solve cross-node ordering at the framework level — the store is the guard.
 
 **Bus behaviour across nodes.** The default in-process bus only delivers events to subscribers on the same node that processed the command. Swap the bus for an external broker (Kafka, NATS, Redis Streams) to fan events out across all nodes. Subscription ID durability across restarts and rolling deploys is the external bus implementation's responsibility — see the `bus` section.
 
