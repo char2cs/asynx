@@ -1,0 +1,38 @@
+site_name: Asynx
+site_description: An event sourcing + CQRS framework for Go
+site_author: Rabbyte
+repo_url: https://github.com/Rabbyte-xyz/asynx
+repo_name: asynx
+edit_uri: edit/docs/initial-spec/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tabs
+    - navigation.sections
+    - toc.integrate
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.select
+
+nav:
+  - Home: index.md
+  - Specification:
+    - Overview: spec/overview.md
+
+plugins:
+  - search
+
+markdown_extensions:
+  - pymdownx.highlight:
+      use_pygments: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - pymdownx.details
+  - pymdownx.inlinehilite
+  - toc:
+      permalink: true
