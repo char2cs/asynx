@@ -1,7 +1,7 @@
 site_name: Asynx
 site_description: An event sourcing + CQRS framework for Go
 site_author: Rabbyte
-repo_url: https://github.com/Rabbyte-xyz/asynx
+repo_url: https://github.com/char2cs/asynx
 repo_name: asynx
 edit_uri: edit/docs/initial-spec/docs/
 

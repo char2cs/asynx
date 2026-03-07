@@ -13,7 +13,7 @@ Asynx makes no consistency guarantees beyond what your Store implementation prov
 ## Getting Started
 
 - **[Full Specification](spec/overview.md)** - Complete architecture and module documentation
-- **GitHub** - [Rabbyte-xyz/asynx](https://github.com/Rabbyte-xyz/asynx)
+- **GitHub** - [char2cs/asynx](https://github.com/char2cs/asynx)
 
 ## Key Concepts
 
