@@ -3,10 +3,12 @@ name: Deploy Documentation to GitHub Pages
 on:
   push:
     branches:
+      - master
       - docs/initial-spec
     paths:
       - docs/**
       - mkdocs.yml
+      - requirements.txt
       - .github/workflows/deploy-docs.yml
 
 permissions:
