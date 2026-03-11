@@ -1,7 +1,6 @@
 package asynx
 
 import (
-	"context"
 	"maps"
 
 	"github.com/char2cs/asynx/models"
@@ -14,26 +13,20 @@ type ShardingOpts struct {
 	QueueDepth int
 }
 
-type Upcaster func(
-	ctx context.Context,
-	eventName string,
-	raw []byte,
-) ([]byte, error)
-
 type Builder[T any] struct {
 	eventStore    models.Store
 	snapshotStore models.Store
 	bus           models.Bus[T]
 	shardingOpts  ShardingOpts
 	schemaVersion int
-	upcasters     map[int]Upcaster
+	upcasters     map[int]models.Upcaster
 	panicHandler  models.PanicHandler[T]
 }
 
 func New[T any]() *Builder[T] {
 	return &Builder[T]{
 		schemaVersion: 1,
-		upcasters:     make(map[int]Upcaster),
+		upcasters:     make(map[int]models.Upcaster),
 		shardingOpts:  ShardingOpts{Shards: 8},
 	}
 }
@@ -77,7 +70,7 @@ func (b *Builder[T]) WithSchemaVersion(
 
 func (b *Builder[T]) WithUpcaster(
 	fromVersion int,
-	fn Upcaster,
+	fn models.Upcaster,
 ) *Builder[T] {
 	b.upcasters[fromVersion] = fn
 	return b

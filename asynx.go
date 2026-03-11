@@ -48,7 +48,7 @@ type asynxImpl[T any] struct {
 	bus           models.Bus[T]
 	shardingOpts  ShardingOpts
 	schemaVersion int
-	upcasters     map[int]Upcaster
+	upcasters     map[int]models.Upcaster
 	panicHandler  models.PanicHandler[T]
 }
 
