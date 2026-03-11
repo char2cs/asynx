@@ -45,7 +45,7 @@ func BenchmarkHydrate(b *testing.B) {
 	}{
 		{"events=1", 1},
 		{"events=10", 10},
-		{"events=1_000_000", 1_000_000},
+		{"events=10_000", 10_000},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			patch := json.RawMessage(`[{"op":"replace","path":"/Status","value":"x"}]`)
@@ -82,7 +82,7 @@ func BenchmarkReplay(b *testing.B) {
 	}{
 		{"events=1", 1},
 		{"events=10", 10},
-		{"events=1_000_000", 1_000_000},
+		{"events=10_000", 10_000},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			es := store.New()

@@ -240,6 +240,8 @@ func TestWrite_MarshalNewStateError(t *testing.T) {
 }
 
 func TestWriteSnapshot_MarshalStateError(t *testing.T) {
+	// call 1+2: jsondiff.Compare marshals previousState and newState internally.
+	// call 3: json.Marshal(newState) in Write before writeSnapshotFromBytes.
 	w := &Writer[*mocks.CountedMarshal]{
 		EventStore:           store.New(),
 		SnapshotStore:        store.New(),
@@ -249,7 +251,7 @@ func TestWriteSnapshot_MarshalStateError(t *testing.T) {
 	cm := &mocks.CountedMarshal{FailAt: 3}
 	_, err := w.Write(context.Background(), "agg1", "Evt", cm, cm, true)
 	if err == nil {
-		t.Fatal("expected marshal error in writeSnapshot")
+		t.Fatal("expected marshal error on newState before writeSnapshotFromBytes")
 	}
 }
 

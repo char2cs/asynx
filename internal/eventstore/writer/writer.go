@@ -44,25 +44,12 @@ func (w *Writer[T]) Write(
 		return asynxmd.Event[T]{}, err
 	}
 
-	oldJSON, err := json.Marshal(previousState)
+	patch, err := jsondiff.Compare(previousState, newState)
 	if err != nil {
 		return asynxmd.Event[T]{}, err
 	}
 
-	newJSON, err := json.Marshal(newState)
-	if err != nil {
-		return asynxmd.Event[T]{}, err
-	}
-
-	patch, err := jsondiff.CompareJSON(oldJSON, newJSON)
-	if err != nil {
-		return asynxmd.Event[T]{}, err
-	}
-
-	patchJSON, err := json.Marshal(patch)
-	if err != nil {
-		return asynxmd.Event[T]{}, err
-	}
+	patchJSON, _ := json.Marshal(patch) // jsondiff.Patch is always marshalable
 
 	eventID := asynxutils.NewID()
 	now := time.Now().UTC()
@@ -76,10 +63,7 @@ func (w *Writer[T]) Write(
 		Patches:       json.RawMessage(patchJSON),
 	}
 
-	evtJSON, err := json.Marshal(evt)
-	if err != nil {
-		return asynxmd.Event[T]{}, err
-	}
+	evtJSON, _ := json.Marshal(evt) // InternalEvent has only basic types; always marshalable
 
 	// SAVE POINT: event is durable after this succeeds.
 	if err := w.EventStore.Append(ctx, "events:"+aggregateID, version, evtJSON); err != nil {
@@ -87,7 +71,11 @@ func (w *Writer[T]) Write(
 	}
 
 	if shouldSnapshot {
-		if err := w.writeSnapshot(ctx, aggregateID, version, newState); err != nil {
+		newJSON, err := json.Marshal(newState)
+		if err != nil {
+			return asynxmd.Event[T]{}, err
+		}
+		if err := w.writeSnapshotFromBytes(ctx, aggregateID, version, newJSON); err != nil {
 			return asynxmd.Event[T]{}, err
 		}
 	}
@@ -134,27 +122,17 @@ func (w *Writer[T]) nextVersion(ctx context.Context, aggregateID string) (int64,
 	return snapVersion + int64(len(deltaBlobs)) + 1, nil
 }
 
-func (w *Writer[T]) writeSnapshot(
+func (w *Writer[T]) writeSnapshotFromBytes(
 	ctx context.Context,
 	aggregateID string,
 	version int64,
-	state T,
+	stateJSON []byte,
 ) error {
-	stateBytes, err := json.Marshal(state)
-	if err != nil {
-		return err
-	}
-
 	snap := esmodels.SnapshotBlob{
 		Version:       version,
 		SchemaVersion: w.CurrentSchemaVersion,
-		State:         stateBytes,
+		State:         stateJSON,
 	}
-
-	snapJSON, err := json.Marshal(snap)
-	if err != nil {
-		return err
-	}
-
+	snapJSON, _ := json.Marshal(snap) // SnapshotBlob fields are basic types; never fails
 	return w.SnapshotStore.Append(ctx, "snapshots:"+aggregateID, version, snapJSON)
 }

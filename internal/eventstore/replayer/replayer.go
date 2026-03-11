@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	jsonpatch "github.com/evanphx/json-patch/v5"
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
 	asynxmd "github.com/char2cs/asynx/models"
+	jsonpatch "github.com/evanphx/json-patch/v5"
 )
 
 // Replayer applies patches sequentially to reconstruct aggregate state,
@@ -35,7 +35,15 @@ func (r *Replayer[T]) Hydrate(
 	seedState T,
 	events []esmodels.InternalEvent,
 ) (T, error) {
-	current := seedState
+	if len(events) == 0 {
+		return seedState, nil
+	}
+
+	stateJSON, err := json.Marshal(seedState)
+	if err != nil {
+		return r.StateZeroValue, err
+	}
+
 	upcasted := false
 	var lastVersion int64
 
@@ -49,7 +57,7 @@ func (r *Replayer[T]) Hydrate(
 			return r.StateZeroValue, err
 		}
 
-		current, err = r.applyPatches(current, upcastedEvt.Patches)
+		stateJSON, err = applyPatchesToJSON(stateJSON, upcastedEvt.Patches)
 		if err != nil {
 			return r.StateZeroValue, err
 		}
@@ -57,25 +65,20 @@ func (r *Replayer[T]) Hydrate(
 		lastVersion = evt.Version
 	}
 
+	var current T
+	if err := json.Unmarshal(stateJSON, &current); err != nil {
+		return r.StateZeroValue, err
+	}
+
 	// Seal the schema migration by writing a snapshot so subsequent
 	// loads use the fast warm path instead of replaying old events again.
-	if upcasted && len(events) > 0 {
-		stateBytes, err := json.Marshal(current)
-		if err != nil {
-			return current, err
-		}
-
+	if upcasted {
 		snap := esmodels.SnapshotBlob{
 			Version:       lastVersion,
 			SchemaVersion: r.CurrentSchemaVersion,
-			State:         stateBytes,
+			State:         stateJSON,
 		}
-
-		snapJSON, err := json.Marshal(snap)
-		if err != nil {
-			return current, err
-		}
-
+		snapJSON, _ := json.Marshal(snap) // SnapshotBlob fields are basic types; never fails
 		if err := r.SnapshotStore.Append(ctx, "snapshots:"+aggregateID, lastVersion, snapJSON); err != nil {
 			// Auto-snapshot failed — state is correct and durable.
 			// Propagate so the caller can decide whether to retry.
@@ -114,22 +117,34 @@ func (r *Replayer[T]) Replay(
 		return err
 	}
 
-	current := r.StateZeroValue
+	if len(eventBlobs) == 0 {
+		return nil
+	}
+
+	currentJSON, err := json.Marshal(r.StateZeroValue)
+	if err != nil {
+		return err
+	}
+
+	previous := r.StateZeroValue
 	for _, blob := range eventBlobs {
 		var evt esmodels.InternalEvent
 		if err := json.Unmarshal(blob, &evt); err != nil {
 			return err
 		}
 
-		previous := current
-
 		upcastedEvt, err := r.upcastInternalEvent(ctx, evt)
 		if err != nil {
 			return err
 		}
 
-		current, err = r.applyPatches(current, upcastedEvt.Patches)
+		currentJSON, err = applyPatchesToJSON(currentJSON, upcastedEvt.Patches)
 		if err != nil {
+			return err
+		}
+
+		var current T
+		if err := json.Unmarshal(currentJSON, &current); err != nil {
 			return err
 		}
 
@@ -143,6 +158,7 @@ func (r *Replayer[T]) Replay(
 			Aggregate:         current,
 			PreviousAggregate: previous,
 		})
+		previous = current
 	}
 
 	return nil
@@ -174,6 +190,19 @@ func (r *Replayer[T]) upcastInternalEvent(
 	}
 
 	return evt, nil
+}
+
+// applyPatchesToJSON applies patches to raw JSON bytes and returns the patched bytes.
+// A nil, "null", or "[]" patch set is a no-op.
+func applyPatchesToJSON(stateJSON []byte, patches json.RawMessage) ([]byte, error) {
+	if len(patches) == 0 || string(patches) == "null" || string(patches) == "[]" {
+		return stateJSON, nil
+	}
+	patch, err := jsonpatch.DecodePatch(patches)
+	if err != nil {
+		return nil, err
+	}
+	return patch.Apply(stateJSON)
 }
 
 // applyPatches serializes state to JSON, applies the RFC 6902 patch set, and

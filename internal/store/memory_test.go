@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	asynxmd "github.com/char2cs/asynx/models"
@@ -237,5 +238,131 @@ func TestReadRange_UnknownAggregate_ReturnsEmpty(t *testing.T) {
 	}
 	if len(blobs) != 0 {
 		t.Errorf("expected empty, got %d blobs", len(blobs))
+	}
+}
+
+func TestReadRange_CountZero_ReturnsEmpty(t *testing.T) {
+	s := New()
+	ctx := context.Background()
+
+	s.Append(ctx, "agg1", 1, []byte("v1")) //nolint:errcheck
+
+	blobs, err := s.ReadRange(ctx, "agg1", 1, 0)
+	if err != nil {
+		t.Fatalf("ReadRange: %v", err)
+	}
+	if len(blobs) != 0 {
+		t.Errorf("expected empty for count=0, got %d blobs", len(blobs))
+	}
+}
+
+// --- Out-of-order appends ---
+
+func TestAppend_OutOfOrder_ReadsInVersionOrder(t *testing.T) {
+	s := New()
+	ctx := context.Background()
+
+	// Append out of order.
+	s.Append(ctx, "agg1", 3, []byte("v3")) //nolint:errcheck
+	s.Append(ctx, "agg1", 1, []byte("v1")) //nolint:errcheck
+	s.Append(ctx, "agg1", 2, []byte("v2")) //nolint:errcheck
+
+	blobs, err := s.ReadFrom(ctx, "agg1", 1)
+	if err != nil {
+		t.Fatalf("ReadFrom: %v", err)
+	}
+	if len(blobs) != 3 {
+		t.Fatalf("expected 3 blobs, got %d", len(blobs))
+	}
+	if string(blobs[0]) != "v1" || string(blobs[1]) != "v2" || string(blobs[2]) != "v3" {
+		t.Errorf("got %v, want [v1 v2 v3]", blobs)
+	}
+}
+
+// --- Context cancellation ---
+
+func TestAppend_CancelledContext_ReturnsError(t *testing.T) {
+	s := New()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := s.Append(ctx, "agg1", 1, []byte("data"))
+	if err == nil {
+		t.Fatal("expected error for cancelled context, got nil")
+	}
+}
+
+func TestReadFrom_CancelledContext_ReturnsError(t *testing.T) {
+	s := New()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := s.ReadFrom(ctx, "agg1", 1)
+	if err == nil {
+		t.Fatal("expected error for cancelled context, got nil")
+	}
+}
+
+func TestReadRange_CancelledContext_ReturnsError(t *testing.T) {
+	s := New()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := s.ReadRange(ctx, "agg1", 1, 10)
+	if err == nil {
+		t.Fatal("expected error for cancelled context, got nil")
+	}
+}
+
+// --- Concurrent access ---
+
+func TestConcurrentAppend_UniqueVersions_AllSucceed(t *testing.T) {
+	s := New()
+	const n = 50
+
+	var wg sync.WaitGroup
+	for i := 1; i <= n; i++ {
+		wg.Add(1)
+		go func(v int) {
+			defer wg.Done()
+			s.Append(context.Background(), "agg1", int64(v), []byte("data")) //nolint:errcheck
+		}(i)
+	}
+	wg.Wait()
+
+	blobs, err := s.ReadFrom(context.Background(), "agg1", 1)
+	if err != nil {
+		t.Fatalf("ReadFrom: %v", err)
+	}
+	if len(blobs) != n {
+		t.Errorf("expected %d blobs after concurrent appends, got %d", n, len(blobs))
+	}
+}
+
+func TestConcurrentAppend_SameVersion_ExactlyOneSucceeds(t *testing.T) {
+	s := New()
+	const n = 20
+
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		success int
+	)
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := s.Append(context.Background(), "agg1", 1, []byte("data"))
+			if err == nil {
+				mu.Lock()
+				success++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if success != 1 {
+		t.Errorf("expected exactly 1 success, got %d", success)
 	}
 }

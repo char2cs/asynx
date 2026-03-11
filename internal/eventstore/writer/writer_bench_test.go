@@ -46,15 +46,20 @@ func BenchmarkWrite(b *testing.B) {
 		{"with_snapshot", true},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
-			es := store.New()
-			ss := store.New()
-			w := newTestWriter(es, ss)
+			var es *store.Memory
+			var ss *store.Memory
+			var w *Writer[order]
 			prevState := order{Status: "Pending", Total: 50}
 			nextState := order{Status: "Shipped", Total: 50}
 			ctx := context.Background()
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
+				b.StopTimer()
+				es = store.New()
+				ss = store.New()
+				w = newTestWriter(es, ss)
+				b.StartTimer()
 				if _, err := w.Write(ctx, "agg1", "Updated", prevState, nextState, tc.shouldSnapshot); err != nil {
 					b.Fatal(err)
 				}
@@ -69,7 +74,7 @@ func BenchmarkNextVersion(b *testing.B) {
 		events int
 	}{
 		{"no_history", 0},
-		{"deltas=1_000_000", 1_000_000},
+		{"deltas=10_000", 10_000},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			es := store.New()

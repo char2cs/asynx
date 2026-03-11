@@ -181,10 +181,9 @@ func TestHydrate_AutoSnapshotFail_ReturnsStateAndError(t *testing.T) {
 	}
 }
 
-func TestHydrate_AutoSnapshot_MarshalCurrentError(t *testing.T) {
-	// mocks.ErrMarshal.MarshalJSON always fails. Patches=[] is a no-op so
-	// applyPatches returns early, reaching the auto-snapshot marshal at
-	// replayer.go:63–65.
+func TestHydrate_MarshalSeedError(t *testing.T) {
+	// ErrMarshal.MarshalJSON always fails. With non-empty events, Hydrate
+	// marshals seedState first; that marshal fails immediately.
 	upcasters := map[int]asynxmd.Upcaster{
 		1: func(_ context.Context, _ string, p []byte) ([]byte, error) { return p, nil },
 	}
@@ -201,7 +200,27 @@ func TestHydrate_AutoSnapshot_MarshalCurrentError(t *testing.T) {
 
 	_, err := r.Hydrate(context.Background(), "agg1", mocks.ErrMarshal{}, events)
 	if err == nil {
-		t.Fatal("expected marshal error from auto-snapshot path")
+		t.Fatal("expected marshal error on seed state")
+	}
+}
+
+func TestHydrate_UnmarshalResultError(t *testing.T) {
+	// BadUnmarshal.MarshalJSON succeeds ({}) so the seed marshals and patches
+	// apply, but final json.Unmarshal(stateJSON, &current) always fails.
+	r := &Replayer[mocks.BadUnmarshal]{
+		EventStore:           store.New(),
+		SnapshotStore:        store.New(),
+		Upcasters:            make(map[int]asynxmd.Upcaster),
+		CurrentSchemaVersion: 1,
+	}
+
+	events := []esmodels.InternalEvent{
+		{ID: "e1", Version: 1, SchemaVersion: 1, Patches: json.RawMessage(`[]`)},
+	}
+
+	_, err := r.Hydrate(context.Background(), "agg1", mocks.BadUnmarshal{}, events)
+	if err == nil {
+		t.Fatal("expected unmarshal error after applying patches")
 	}
 }
 
@@ -247,6 +266,19 @@ func TestHydrate_UpcasterPanic_Propagates(t *testing.T) {
 }
 
 // --- Replay ---
+
+func TestReplay_EmptyStore_ReturnsNil(t *testing.T) {
+	r := newTestReplayer(store.New(), store.New(), nil, 1)
+
+	var called bool
+	err := r.Replay(context.Background(), "agg1", 1, 0, func(asynxmd.Event[order]) { called = true })
+	if err != nil {
+		t.Fatalf("Replay on empty store: %v", err)
+	}
+	if called {
+		t.Error("fn should not be called when store is empty")
+	}
+}
 
 func TestReplay_AllEvents(t *testing.T) {
 	es := store.New()
@@ -544,5 +576,114 @@ func TestReplay_ApplyPatchesError(t *testing.T) {
 	err := r.Replay(ctx, "agg1", 1, 0, func(asynxmd.Event[order]) {})
 	if err == nil {
 		t.Fatal("expected error from failed patch application in Replay")
+	}
+}
+
+func TestReplay_MarshalStateZeroValueError(t *testing.T) {
+	// ErrMarshal.MarshalJSON always fails. With events in the store the
+	// short-circuit is skipped and json.Marshal(r.StateZeroValue) fails.
+	es := store.New()
+	ctx := context.Background()
+	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, json.RawMessage(`[]`))) //nolint:errcheck
+
+	r := &Replayer[mocks.ErrMarshal]{
+		EventStore:           es,
+		SnapshotStore:        store.New(),
+		Upcasters:            make(map[int]asynxmd.Upcaster),
+		CurrentSchemaVersion: 1,
+	}
+
+	err := r.Replay(ctx, "agg1", 1, 0, func(asynxmd.Event[mocks.ErrMarshal]) {})
+	if err == nil {
+		t.Fatal("expected marshal error on StateZeroValue")
+	}
+}
+
+func TestReplay_UnmarshalCurrentError(t *testing.T) {
+	// BadUnmarshal.MarshalJSON succeeds ({}) so the initial marshal passes,
+	// but json.Unmarshal(currentJSON, &current) always fails in the loop.
+	es := store.New()
+	ctx := context.Background()
+	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, json.RawMessage(`[]`))) //nolint:errcheck
+
+	r := &Replayer[mocks.BadUnmarshal]{
+		EventStore:           es,
+		SnapshotStore:        store.New(),
+		Upcasters:            make(map[int]asynxmd.Upcaster),
+		CurrentSchemaVersion: 1,
+	}
+
+	err := r.Replay(ctx, "agg1", 1, 0, func(asynxmd.Event[mocks.BadUnmarshal]) {})
+	if err == nil {
+		t.Fatal("expected unmarshal error in Replay loop")
+	}
+}
+
+// --- applyPatchesToJSON ---
+
+func TestApplyPatchesToJSON_Nil_NoOp(t *testing.T) {
+	stateJSON := []byte(`{"Status":"Pending"}`)
+	result, err := applyPatchesToJSON(stateJSON, nil)
+	if err != nil {
+		t.Fatalf("applyPatchesToJSON(nil): %v", err)
+	}
+	if string(result) != string(stateJSON) {
+		t.Errorf("got %s, want %s", result, stateJSON)
+	}
+}
+
+func TestApplyPatchesToJSON_Null_NoOp(t *testing.T) {
+	stateJSON := []byte(`{"Status":"Pending"}`)
+	result, err := applyPatchesToJSON(stateJSON, json.RawMessage("null"))
+	if err != nil {
+		t.Fatalf("applyPatchesToJSON(null): %v", err)
+	}
+	if string(result) != string(stateJSON) {
+		t.Errorf("got %s, want %s", result, stateJSON)
+	}
+}
+
+func TestApplyPatchesToJSON_Empty_NoOp(t *testing.T) {
+	stateJSON := []byte(`{"Status":"Pending"}`)
+	result, err := applyPatchesToJSON(stateJSON, json.RawMessage(`[]`))
+	if err != nil {
+		t.Fatalf("applyPatchesToJSON([]): %v", err)
+	}
+	if string(result) != string(stateJSON) {
+		t.Errorf("got %s, want %s", result, stateJSON)
+	}
+}
+
+func TestApplyPatchesToJSON_InvalidPatch(t *testing.T) {
+	_, err := applyPatchesToJSON([]byte(`{"Status":"Pending"}`), json.RawMessage(`not-json`))
+	if err == nil {
+		t.Fatal("expected error on invalid patch JSON")
+	}
+}
+
+func TestApplyPatchesToJSON_ApplyError(t *testing.T) {
+	_, err := applyPatchesToJSON(
+		[]byte(`{"Status":"Pending"}`),
+		json.RawMessage(`[{"op":"test","path":"/Status","value":"wrong"}]`),
+	)
+	if err == nil {
+		t.Fatal("expected error from failing test op")
+	}
+}
+
+func TestApplyPatchesToJSON_Success(t *testing.T) {
+	result, err := applyPatchesToJSON(
+		[]byte(`{"ID":"1","Status":"Pending","Total":0}`),
+		json.RawMessage(`[{"op":"replace","path":"/Status","value":"Shipped"}]`),
+	)
+	if err != nil {
+		t.Fatalf("applyPatchesToJSON: %v", err)
+	}
+	var got order
+	if err := json.Unmarshal(result, &got); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if got.Status != "Shipped" {
+		t.Errorf("Status = %q, want Shipped", got.Status)
 	}
 }

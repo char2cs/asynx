@@ -2,7 +2,10 @@
 package store
 
 import (
+	"cmp"
 	"context"
+	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/char2cs/asynx/models"
@@ -11,12 +14,12 @@ import (
 // Memory is a thread-safe in-memory implementation of models.Store.
 // Only for testing.
 type Memory struct {
-	mu    sync.RWMutex
-	blobs map[string][]blob
-	errOn map[string]error
+	mu      sync.RWMutex
+	streams map[string][]entry
+	errOn   map[string]error
 }
 
-type blob struct {
+type entry struct {
 	version int64
 	data    []byte
 }
@@ -24,8 +27,8 @@ type blob struct {
 // New returns an empty Memory store.
 func New() *Memory {
 	return &Memory{
-		blobs: make(map[string][]blob),
-		errOn: make(map[string]error),
+		streams: make(map[string][]entry),
+		errOn:   make(map[string]error),
 	}
 }
 
@@ -37,45 +40,85 @@ func (s *Memory) SetError(aggregateID string, err error) {
 	s.errOn[aggregateID] = err
 }
 
-func (s *Memory) Append(_ context.Context, aggregateID string, version int64, data []byte) error {
+func (s *Memory) Append(ctx context.Context, aggregateID string, version int64, data []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	if err, ok := s.errOn[aggregateID]; ok {
 		delete(s.errOn, aggregateID)
 		return err
 	}
-	for _, b := range s.blobs[aggregateID] {
-		if b.version == version {
-			return models.ErrPipelineFailed
-		}
+
+	entries := s.streams[aggregateID]
+	idx, found := slices.BinarySearchFunc(entries, version, func(e entry, v int64) int {
+		return cmp.Compare(e.version, v)
+	})
+	if found {
+		return fmt.Errorf("%w: (%s, %d) already exists", models.ErrPipelineFailed, aggregateID, version)
 	}
-	s.blobs[aggregateID] = append(s.blobs[aggregateID], blob{version: version, data: data})
+
+	s.streams[aggregateID] = slices.Insert(entries, idx, entry{version: version, data: data})
 	return nil
 }
 
-func (s *Memory) ReadFrom(_ context.Context, aggregateID string, fromVersion int64) ([][]byte, error) {
+func (s *Memory) ReadFrom(ctx context.Context, aggregateID string, fromVersion int64) ([][]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out [][]byte
-	for _, b := range s.blobs[aggregateID] {
-		if b.version >= fromVersion {
-			out = append(out, b.data)
-		}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	return out, nil
+
+	return toBlobs(s.entriesFrom(aggregateID, fromVersion)), nil
 }
 
-func (s *Memory) ReadRange(_ context.Context, aggregateID string, fromVersion, count int64) ([][]byte, error) {
+func (s *Memory) ReadRange(ctx context.Context, aggregateID string, fromVersion, count int64) ([][]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out [][]byte
-	for _, b := range s.blobs[aggregateID] {
-		if b.version >= fromVersion {
-			out = append(out, b.data)
-			if int64(len(out)) >= count {
-				break
-			}
-		}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	return out, nil
+
+	entries := s.entriesFrom(aggregateID, fromVersion)
+	if int64(len(entries)) > count {
+		entries = entries[:count]
+	}
+
+	return toBlobs(entries), nil
+}
+
+func (s *Memory) entriesFrom(aggregateID string, fromVersion int64) []entry {
+	entries := s.streams[aggregateID]
+	if len(entries) == 0 {
+		return nil
+	}
+	startIdx, _ := slices.BinarySearchFunc(entries, fromVersion, func(e entry, v int64) int {
+		return cmp.Compare(e.version, v)
+	})
+	return entries[startIdx:]
+}
+
+func toBlobs(entries []entry) [][]byte {
+	result := make([][]byte, len(entries))
+	for i, e := range entries {
+		result[i] = e.data
+	}
+	return result
 }
