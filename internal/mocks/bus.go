@@ -3,21 +3,22 @@ package mocks
 import (
 	"context"
 
-	"github.com/char2cs/asynx"
+	"github.com/char2cs/asynx/models"
 )
 
 type Bus[T any] struct{}
 
 func (b *Bus[T]) Publish(
 	_ context.Context,
-	_ asynx.Event[T],
+	_ models.Event[T],
 ) error {
 	return nil
 }
 
 func (b *Bus[T]) Subscribe(
 	_ string,
-	_ func(asynx.Event[T]),
+	_ models.ProjectionHandler[T],
+	_ ...models.SubscriptionOpt[T],
 ) (string, error) {
 	return "id", nil
 }

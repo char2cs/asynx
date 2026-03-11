@@ -5,7 +5,8 @@ import (
 	"testing"
 
 	"github.com/char2cs/asynx"
-	"github.com/char2cs/asynx/mocks"
+	"github.com/char2cs/asynx/internal/mocks"
+	"github.com/char2cs/asynx/models"
 )
 
 func TestNewBuilderDefaults(t *testing.T) {
@@ -17,7 +18,7 @@ func TestNewBuilderDefaults(t *testing.T) {
 
 func TestBuildRequiresEventStore(t *testing.T) {
 	_, err := asynx.New[mocks.Order]().Build()
-	if err != asynx.ErrMissingEventStore {
+	if err != models.ErrMissingEventStore {
 		t.Errorf("expected ErrMissingEventStore, got %v", err)
 	}
 }
@@ -53,7 +54,7 @@ func TestBuildMultipleTimesIndependent(t *testing.T) {
 
 func TestBuilderFluent(t *testing.T) {
 	upcaster := func(ctx context.Context, eventName string, raw []byte) ([]byte, error) { return raw, nil }
-	panicHandler := func(e asynx.PanicEvent[mocks.Order]) {}
+	panicHandler := func(_ context.Context, _ models.Event[mocks.Order], _ any) {}
 
 	_, err := asynx.New[mocks.Order]().
 		WithEventStore(&mocks.Store{}).
@@ -71,26 +72,6 @@ func TestBuilderFluent(t *testing.T) {
 	}
 }
 
-func TestPanicEventFields(t *testing.T) {
-	handler := func(e asynx.Event[mocks.Order]) {}
-
-	pe := asynx.PanicEvent[mocks.Order]{
-		EventName:  "OrderCreated",
-		Aggregate:  mocks.Order{ID: "o1"},
-		Projection: handler,
-		Err:        asynx.ErrValidation,
-	}
-
-	if pe.EventName != "OrderCreated" {
-		t.Errorf("EventName: got %s", pe.EventName)
-	}
-	if pe.Projection == nil {
-		t.Error("Projection must be set")
-	}
-	if pe.Err != asynx.ErrValidation {
-		t.Errorf("Err: got %v", pe.Err)
-	}
-}
 
 func TestShardingOptsZeroValue(t *testing.T) {
 	opts := asynx.ShardingOpts{}

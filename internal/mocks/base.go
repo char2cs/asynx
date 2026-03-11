@@ -1,6 +1,6 @@
 package mocks
 
-import "github.com/char2cs/asynx"
+import "github.com/char2cs/asynx/models"
 
 type Order struct {
 	ID     string
@@ -29,7 +29,7 @@ func (c CreateOrderCmd) Validate(
 	current *Order,
 ) error {
 	if c.Total <= 0 {
-		return asynx.ErrValidation
+		return models.ErrValidation
 	}
 	return nil
 }
@@ -60,7 +60,7 @@ func (c CancelOrderCmd) Validate(
 	current *Order,
 ) error {
 	if current == nil || current.Status == "Cancelled" {
-		return asynx.ErrValidation
+		return models.ErrValidation
 	}
 	return nil
 }

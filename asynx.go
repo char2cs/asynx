@@ -1,11 +1,15 @@
 package asynx
 
-import "context"
+import (
+	"context"
+
+	"github.com/char2cs/asynx/models"
+)
 
 type Asynx[T any] interface {
 	Send(
 		ctx context.Context,
-		cmd Command[T],
+		cmd models.Command[T],
 	) error
 	Shutdown(ctx context.Context) error
 
@@ -24,8 +28,8 @@ type Asynx[T any] interface {
 
 	Subscribe(
 		pattern string,
-		handler func(Event[T]),
-		opts ...SubscriptionOpt[T],
+		handler models.ProjectionHandler[T],
+		opts ...models.SubscriptionOpt[T],
 	) (string, error)
 	Unsubscribe(id string) error
 
@@ -34,23 +38,23 @@ type Asynx[T any] interface {
 		aggregateID string,
 		fromVersion int64,
 		toVersion int64,
-		fn func(Event[T]),
+		fn models.ProjectionHandler[T],
 	) error
 }
 
 type asynxImpl[T any] struct {
-	eventStore    Store
-	snapshotStore Store
-	bus           Bus[T]
+	eventStore    models.Store
+	snapshotStore models.Store
+	bus           models.Bus[T]
 	shardingOpts  ShardingOpts
 	schemaVersion int
 	upcasters     map[int]Upcaster
-	panicHandler  func(PanicEvent[T])
+	panicHandler  models.PanicHandler[T]
 }
 
 func (i *asynxImpl[T]) Send(
 	ctx context.Context,
-	cmd Command[T],
+	cmd models.Command[T],
 ) error {
 	panic("not implemented")
 }
@@ -82,8 +86,8 @@ func (i *asynxImpl[T]) Preload(
 
 func (i *asynxImpl[T]) Subscribe(
 	pattern string,
-	handler func(Event[T]),
-	opts ...SubscriptionOpt[T],
+	handler models.ProjectionHandler[T],
+	opts ...models.SubscriptionOpt[T],
 ) (string, error) {
 	panic("not implemented")
 }
@@ -97,7 +101,7 @@ func (i *asynxImpl[T]) Replay(
 	aggregateID string,
 	fromVersion int64,
 	toVersion int64,
-	fn func(Event[T]),
+	fn models.ProjectionHandler[T],
 ) error {
 	panic("not implemented")
 }

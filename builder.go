@@ -3,6 +3,8 @@ package asynx
 import (
 	"context"
 	"maps"
+
+	"github.com/char2cs/asynx/models"
 )
 
 // ShardingOpts configures the processor's worker pool.
@@ -12,14 +14,6 @@ type ShardingOpts struct {
 	QueueDepth int
 }
 
-// PanicEvent is delivered to the panic handler when a projection callback panics.
-type PanicEvent[T any] struct {
-	EventName  string
-	Aggregate  T
-	Projection func(Event[T])
-	Err        error
-}
-
 type Upcaster func(
 	ctx context.Context,
 	eventName string,
@@ -27,13 +21,13 @@ type Upcaster func(
 ) ([]byte, error)
 
 type Builder[T any] struct {
-	eventStore    Store
-	snapshotStore Store
-	bus           Bus[T]
+	eventStore    models.Store
+	snapshotStore models.Store
+	bus           models.Bus[T]
 	shardingOpts  ShardingOpts
 	schemaVersion int
 	upcasters     map[int]Upcaster
-	panicHandler  func(PanicEvent[T])
+	panicHandler  models.PanicHandler[T]
 }
 
 func New[T any]() *Builder[T] {
@@ -45,7 +39,7 @@ func New[T any]() *Builder[T] {
 }
 
 func (b *Builder[T]) WithEventStore(
-	s Store,
+	s models.Store,
 ) *Builder[T] {
 	b.eventStore = s
 	return b
@@ -54,14 +48,14 @@ func (b *Builder[T]) WithEventStore(
 // WithSnapshotStore sets a dedicated snapshot store.
 // Defaults to the event store when not provided.
 func (b *Builder[T]) WithSnapshotStore(
-	s Store,
+	s models.Store,
 ) *Builder[T] {
 	b.snapshotStore = s
 	return b
 }
 
 func (b *Builder[T]) WithBus(
-	bus Bus[T],
+	bus models.Bus[T],
 ) *Builder[T] {
 	b.bus = bus
 	return b
@@ -90,7 +84,7 @@ func (b *Builder[T]) WithUpcaster(
 }
 
 func (b *Builder[T]) WithPanicHandler(
-	fn func(PanicEvent[T]),
+	fn models.PanicHandler[T],
 ) *Builder[T] {
 	b.panicHandler = fn
 	return b
@@ -99,7 +93,7 @@ func (b *Builder[T]) WithPanicHandler(
 // Build requires WithEventStore; all other options have defaults.
 func (b *Builder[T]) Build() (Asynx[T], error) {
 	if b.eventStore == nil {
-		return nil, ErrMissingEventStore
+		return nil, models.ErrMissingEventStore
 	}
 
 	snapshotStore := b.snapshotStore
