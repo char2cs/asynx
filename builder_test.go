@@ -1,0 +1,100 @@
+package asynx_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/char2cs/asynx"
+	"github.com/char2cs/asynx/mocks"
+)
+
+func TestNewBuilderDefaults(t *testing.T) {
+	b := asynx.New[mocks.Order]()
+	if b == nil {
+		t.Fatal("New returned nil")
+	}
+}
+
+func TestBuildRequiresEventStore(t *testing.T) {
+	_, err := asynx.New[mocks.Order]().Build()
+	if err != asynx.ErrMissingEventStore {
+		t.Errorf("expected ErrMissingEventStore, got %v", err)
+	}
+}
+
+func TestBuildSucceeds(t *testing.T) {
+	instance, err := asynx.New[mocks.Order]().WithEventStore(&mocks.Store{}).Build()
+	if err != nil {
+		t.Fatalf("Build() error: %v", err)
+	}
+	if instance == nil {
+		t.Fatal("Build() returned nil instance")
+	}
+}
+
+func TestBuildSnapshotStoreDefaultsToEventStore(t *testing.T) {
+	store := &mocks.Store{}
+	_, err := asynx.New[mocks.Order]().WithEventStore(store).Build()
+	if err != nil {
+		t.Fatalf("Build() error: %v", err)
+	}
+}
+
+func TestBuildMultipleTimesIndependent(t *testing.T) {
+	b := asynx.New[mocks.Order]().WithEventStore(&mocks.Store{})
+
+	i1, _ := b.Build()
+	i2, _ := b.Build()
+
+	if i1 == i2 {
+		t.Error("Build() must return a new instance each call")
+	}
+}
+
+func TestBuilderFluent(t *testing.T) {
+	upcaster := func(ctx context.Context, eventName string, raw []byte) ([]byte, error) { return raw, nil }
+	panicHandler := func(e asynx.PanicEvent[mocks.Order]) {}
+
+	_, err := asynx.New[mocks.Order]().
+		WithEventStore(&mocks.Store{}).
+		WithSnapshotStore(&mocks.Store{}).
+		WithBus(&mocks.Bus[mocks.Order]{}).
+		WithShardingOpts(asynx.ShardingOpts{Shards: 16, QueueDepth: 100}).
+		WithSchemaVersion(3).
+		WithUpcaster(1, upcaster).
+		WithUpcaster(2, upcaster).
+		WithPanicHandler(panicHandler).
+		Build()
+
+	if err != nil {
+		t.Fatalf("Build() error: %v", err)
+	}
+}
+
+func TestPanicEventFields(t *testing.T) {
+	handler := func(e asynx.Event[mocks.Order]) {}
+
+	pe := asynx.PanicEvent[mocks.Order]{
+		EventName:  "OrderCreated",
+		Aggregate:  mocks.Order{ID: "o1"},
+		Projection: handler,
+		Err:        asynx.ErrValidation,
+	}
+
+	if pe.EventName != "OrderCreated" {
+		t.Errorf("EventName: got %s", pe.EventName)
+	}
+	if pe.Projection == nil {
+		t.Error("Projection must be set")
+	}
+	if pe.Err != asynx.ErrValidation {
+		t.Errorf("Err: got %v", pe.Err)
+	}
+}
+
+func TestShardingOptsZeroValue(t *testing.T) {
+	opts := asynx.ShardingOpts{}
+	if opts.Shards != 0 || opts.QueueDepth != 0 {
+		t.Errorf("unexpected zero ShardingOpts: %+v", opts)
+	}
+}
