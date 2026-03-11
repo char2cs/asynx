@@ -1,4 +1,4 @@
-package eventstore
+package writer
 
 import (
 	"context"
@@ -6,24 +6,26 @@ import (
 	"time"
 
 	"github.com/wI2L/jsondiff"
-	asynxmd "github.com/char2cs/asynx/models"
+	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
 	asynxutils "github.com/char2cs/asynx/internal/utils"
+	asynxmd "github.com/char2cs/asynx/models"
 )
 
 // Writer computes RFC 6902 diffs between state transitions and durably appends
-// them as internalEvents to the event stream. It optionally writes a snapshot
+// them as InternalEvents to the event stream. It optionally writes a snapshot
 // when the command requests one.
 //
 // Writer is stateless and safe for concurrent use.
 type Writer[T any] struct {
-	eventStore           asynxmd.Store
-	snapshotStore        asynxmd.Store
-	currentSchemaVersion int
+	EventStore           asynxmd.Store
+	SnapshotStore        asynxmd.Store
+	CurrentSchemaVersion int
 }
 
-// Write computes the RFC 6902 diff from previousState to newState, serializes
-// it as an internalEvent, and appends it to the event stream at version.
-// A snapshot is written to the snapshot stream if shouldSnapshot is true.
+// Write determines the next version from storage, computes the RFC 6902 diff
+// from previousState to newState, serializes it as an InternalEvent, and
+// appends it to the event stream. A snapshot is written if shouldSnapshot is
+// true.
 //
 // The event stream append is the save point: once it succeeds the event is
 // durable even if the snapshot write fails.
@@ -35,9 +37,13 @@ func (w *Writer[T]) Write(
 	eventName string,
 	previousState T,
 	newState T,
-	version int64,
 	shouldSnapshot bool,
 ) (asynxmd.Event[T], error) {
+	version, err := w.nextVersion(ctx, aggregateID)
+	if err != nil {
+		return asynxmd.Event[T]{}, err
+	}
+
 	oldJSON, err := json.Marshal(previousState)
 	if err != nil {
 		return asynxmd.Event[T]{}, err
@@ -61,11 +67,11 @@ func (w *Writer[T]) Write(
 	eventID := asynxutils.NewID()
 	now := time.Now().UTC()
 
-	evt := internalEvent{
+	evt := esmodels.InternalEvent{
 		ID:            eventID,
 		EventName:     eventName,
 		Version:       version,
-		SchemaVersion: w.currentSchemaVersion,
+		SchemaVersion: w.CurrentSchemaVersion,
 		OccurredAt:    now,
 		Patches:       json.RawMessage(patchJSON),
 	}
@@ -76,7 +82,7 @@ func (w *Writer[T]) Write(
 	}
 
 	// SAVE POINT: event is durable after this succeeds.
-	if err := w.eventStore.Append(ctx, "events:"+aggregateID, version, evtJSON); err != nil {
+	if err := w.EventStore.Append(ctx, "events:"+aggregateID, version, evtJSON); err != nil {
 		return asynxmd.Event[T]{}, err
 	}
 
@@ -91,11 +97,41 @@ func (w *Writer[T]) Write(
 		AggregateID:       aggregateID,
 		EventName:         eventName,
 		Version:           version,
-		SchemaVersion:     w.currentSchemaVersion,
+		SchemaVersion:     w.CurrentSchemaVersion,
 		OccurredAt:        now,
 		Aggregate:         newState,
 		PreviousAggregate: previousState,
 	}, nil
+}
+
+// nextVersion determines the version at which the next event should be written.
+// It reads the snapshot (to skip over sealed history) then counts delta events
+// to compute latestVersion + 1.
+//
+// For a brand-new aggregate (no snapshot, no events) it returns 1.
+func (w *Writer[T]) nextVersion(ctx context.Context, aggregateID string) (int64, error) {
+	var snapVersion int64
+
+	snapBlobs, err := w.SnapshotStore.ReadFrom(ctx, "snapshots:"+aggregateID, 0)
+	if err != nil {
+		return 0, err
+	}
+
+	if len(snapBlobs) > 0 {
+		var snap esmodels.SnapshotBlob
+		if err := json.Unmarshal(snapBlobs[len(snapBlobs)-1], &snap); err == nil {
+			snapVersion = snap.Version
+		}
+	}
+
+	deltaBlobs, err := w.EventStore.ReadFrom(ctx, "events:"+aggregateID, snapVersion+1)
+	if err != nil {
+		return 0, err
+	}
+
+	// Versions are consecutive integers starting at 1, so the next version is
+	// simply (last known version) + 1 without unmarshalling individual blobs.
+	return snapVersion + int64(len(deltaBlobs)) + 1, nil
 }
 
 func (w *Writer[T]) writeSnapshot(
@@ -109,9 +145,9 @@ func (w *Writer[T]) writeSnapshot(
 		return err
 	}
 
-	snap := snapshotBlob{
+	snap := esmodels.SnapshotBlob{
 		Version:       version,
-		SchemaVersion: w.currentSchemaVersion,
+		SchemaVersion: w.CurrentSchemaVersion,
 		State:         stateBytes,
 	}
 
@@ -120,5 +156,5 @@ func (w *Writer[T]) writeSnapshot(
 		return err
 	}
 
-	return w.snapshotStore.Append(ctx, "snapshots:"+aggregateID, version, snapJSON)
+	return w.SnapshotStore.Append(ctx, "snapshots:"+aggregateID, version, snapJSON)
 }

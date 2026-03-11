@@ -1,4 +1,4 @@
-package eventstore
+package replayer
 
 import (
 	"context"
@@ -6,51 +6,52 @@ import (
 	"fmt"
 
 	jsonpatch "github.com/evanphx/json-patch/v5"
+	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
 // Replayer applies patches sequentially to reconstruct aggregate state,
 // upcasting events to the current schema version as needed.
 //
-// hydrate is the core method, called by Reader for both warm and cold paths.
+// Hydrate is the core method, called by Reader for both warm and cold paths.
 // Replay is the public read-only method for manual recovery and projections.
 type Replayer[T any] struct {
-	eventStore           asynxmd.Store
-	snapshotStore        asynxmd.Store
-	upcasters            map[int]asynxmd.Upcaster
-	currentSchemaVersion int
-	stateZeroValue       T
+	EventStore           asynxmd.Store
+	SnapshotStore        asynxmd.Store
+	Upcasters            map[int]asynxmd.Upcaster
+	CurrentSchemaVersion int
+	StateZeroValue       T
 }
 
-// hydrate applies a sequence of internalEvents to seedState and returns the
+// Hydrate applies a sequence of InternalEvents to seedState and returns the
 // final aggregate state. If any event required upcasting, it writes an
 // auto-snapshot to seal the schema migration for future warm-path loads.
 //
 // Returns (finalState, error). When the error is a failed auto-snapshot write,
 // finalState is still correct and durable — the caller decides how to handle.
-func (r *Replayer[T]) hydrate(
+func (r *Replayer[T]) Hydrate(
 	ctx context.Context,
 	aggregateID string,
 	seedState T,
-	events []internalEvent,
+	events []esmodels.InternalEvent,
 ) (T, error) {
 	current := seedState
 	upcasted := false
 	var lastVersion int64
 
 	for _, evt := range events {
-		if evt.SchemaVersion < r.currentSchemaVersion {
+		if evt.SchemaVersion < r.CurrentSchemaVersion {
 			upcasted = true
 		}
 
 		upcastedEvt, err := r.upcastInternalEvent(ctx, evt)
 		if err != nil {
-			return r.stateZeroValue, err
+			return r.StateZeroValue, err
 		}
 
 		current, err = r.applyPatches(current, upcastedEvt.Patches)
 		if err != nil {
-			return r.stateZeroValue, err
+			return r.StateZeroValue, err
 		}
 
 		lastVersion = evt.Version
@@ -64,9 +65,9 @@ func (r *Replayer[T]) hydrate(
 			return current, err
 		}
 
-		snap := snapshotBlob{
+		snap := esmodels.SnapshotBlob{
 			Version:       lastVersion,
-			SchemaVersion: r.currentSchemaVersion,
+			SchemaVersion: r.CurrentSchemaVersion,
 			State:         stateBytes,
 		}
 
@@ -75,7 +76,7 @@ func (r *Replayer[T]) hydrate(
 			return current, err
 		}
 
-		if err := r.snapshotStore.Append(ctx, "snapshots:"+aggregateID, lastVersion, snapJSON); err != nil {
+		if err := r.SnapshotStore.Append(ctx, "snapshots:"+aggregateID, lastVersion, snapJSON); err != nil {
 			// Auto-snapshot failed — state is correct and durable.
 			// Propagate so the caller can decide whether to retry.
 			return current, err
@@ -103,19 +104,19 @@ func (r *Replayer[T]) Replay(
 	)
 
 	if toVersion <= 0 {
-		eventBlobs, err = r.eventStore.ReadFrom(ctx, "events:"+aggregateID, fromVersion)
+		eventBlobs, err = r.EventStore.ReadFrom(ctx, "events:"+aggregateID, fromVersion)
 	} else {
 		count := toVersion - fromVersion + 1
-		eventBlobs, err = r.eventStore.ReadRange(ctx, "events:"+aggregateID, fromVersion, count)
+		eventBlobs, err = r.EventStore.ReadRange(ctx, "events:"+aggregateID, fromVersion, count)
 	}
 
 	if err != nil {
 		return err
 	}
 
-	current := r.stateZeroValue
+	current := r.StateZeroValue
 	for _, blob := range eventBlobs {
-		var evt internalEvent
+		var evt esmodels.InternalEvent
 		if err := json.Unmarshal(blob, &evt); err != nil {
 			return err
 		}
@@ -148,24 +149,24 @@ func (r *Replayer[T]) Replay(
 }
 
 // upcastInternalEvent applies the registered upcaster chain to bring evt from
-// its SchemaVersion up to r.currentSchemaVersion. Each upcaster receives the
+// its SchemaVersion up to CurrentSchemaVersion. Each upcaster receives the
 // JSON-encoded RFC 6902 patch array and must return a compatible replacement.
 //
 // If an upcaster returns an error, the chain fails immediately (fail fast).
 // If an upcaster panics, the panic propagates to the caller.
 func (r *Replayer[T]) upcastInternalEvent(
 	ctx context.Context,
-	evt internalEvent,
-) (internalEvent, error) {
-	for v := evt.SchemaVersion; v < r.currentSchemaVersion; v++ {
-		upcaster, ok := r.upcasters[v]
+	evt esmodels.InternalEvent,
+) (esmodels.InternalEvent, error) {
+	for v := evt.SchemaVersion; v < r.CurrentSchemaVersion; v++ {
+		upcaster, ok := r.Upcasters[v]
 		if !ok {
 			continue
 		}
 
 		upcastedPatchesJSON, err := upcaster(ctx, evt.EventName, evt.Patches)
 		if err != nil {
-			return internalEvent{}, fmt.Errorf("eventstore: upcaster %d failed: %w", v, err)
+			return esmodels.InternalEvent{}, fmt.Errorf("eventstore: upcaster %d failed: %w", v, err)
 		}
 
 		evt.Patches = upcastedPatchesJSON
@@ -187,22 +188,22 @@ func (r *Replayer[T]) applyPatches(
 
 	patch, err := jsonpatch.DecodePatch(patches)
 	if err != nil {
-		return r.stateZeroValue, err
+		return r.StateZeroValue, err
 	}
 
 	stateJSON, err := json.Marshal(state)
 	if err != nil {
-		return r.stateZeroValue, err
+		return r.StateZeroValue, err
 	}
 
 	patchedJSON, err := patch.Apply(stateJSON)
 	if err != nil {
-		return r.stateZeroValue, err
+		return r.StateZeroValue, err
 	}
 
 	var patchedState T
 	if err := json.Unmarshal(patchedJSON, &patchedState); err != nil {
-		return r.stateZeroValue, err
+		return r.StateZeroValue, err
 	}
 
 	return patchedState, nil

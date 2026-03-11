@@ -1,9 +1,11 @@
-package eventstore
+package reader
 
 import (
 	"context"
 	"encoding/json"
 
+	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
+	"github.com/char2cs/asynx/internal/eventstore/replayer"
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
@@ -13,10 +15,10 @@ import (
 //
 // Reader is stateless and safe for concurrent use.
 type Reader[T any] struct {
-	eventStore     asynxmd.Store
-	snapshotStore  asynxmd.Store
-	replayer       *Replayer[T]
-	stateZeroValue T
+	EventStore     asynxmd.Store
+	SnapshotStore  asynxmd.Store
+	Replayer       *replayer.Replayer[T]
+	StateZeroValue T
 }
 
 // Get returns the current aggregate state, selecting warm or cold path
@@ -31,17 +33,17 @@ func (r *Reader[T]) Get(
 	ctx context.Context,
 	aggregateID string,
 ) (T, error) {
-	snapshotBlobs, err := r.snapshotStore.ReadFrom(ctx, "snapshots:"+aggregateID, 0)
+	snapshotBlobs, err := r.SnapshotStore.ReadFrom(ctx, "snapshots:"+aggregateID, 0)
 	if err != nil {
-		return r.stateZeroValue, err
+		return r.StateZeroValue, err
 	}
 
 	if len(snapshotBlobs) == 0 {
 		return r.coldPath(ctx, aggregateID)
 	}
 
-	var snap snapshotBlob
-	if err := json.Unmarshal(snapshotBlobs[0], &snap); err != nil {
+	var snap esmodels.SnapshotBlob
+	if err := json.Unmarshal(snapshotBlobs[len(snapshotBlobs)-1], &snap); err != nil {
 		// Snapshot corrupted — fall back to full replay.
 		return r.coldPath(ctx, aggregateID)
 	}
@@ -52,17 +54,17 @@ func (r *Reader[T]) Get(
 		return r.coldPath(ctx, aggregateID)
 	}
 
-	eventBlobs, err := r.eventStore.ReadFrom(ctx, "events:"+aggregateID, snap.Version+1)
+	eventBlobs, err := r.EventStore.ReadFrom(ctx, "events:"+aggregateID, snap.Version+1)
 	if err != nil {
-		return r.stateZeroValue, err
+		return r.StateZeroValue, err
 	}
 
 	events, err := deserializeEvents(eventBlobs)
 	if err != nil {
-		return r.stateZeroValue, err
+		return r.StateZeroValue, err
 	}
 
-	return r.replayer.hydrate(ctx, aggregateID, snapshotState, events)
+	return r.Replayer.Hydrate(ctx, aggregateID, snapshotState, events)
 }
 
 // coldPath performs a full replay from event 1 using the zero value as seed.
@@ -70,21 +72,21 @@ func (r *Reader[T]) coldPath(
 	ctx context.Context,
 	aggregateID string,
 ) (T, error) {
-	eventBlobs, err := r.eventStore.ReadFrom(ctx, "events:"+aggregateID, 1)
+	eventBlobs, err := r.EventStore.ReadFrom(ctx, "events:"+aggregateID, 1)
 	if err != nil {
-		return r.stateZeroValue, err
+		return r.StateZeroValue, err
 	}
 
 	if len(eventBlobs) == 0 {
-		return r.stateZeroValue, asynxmd.ErrNotFound
+		return r.StateZeroValue, asynxmd.ErrNotFound
 	}
 
 	events, err := deserializeEvents(eventBlobs)
 	if err != nil {
-		return r.stateZeroValue, err
+		return r.StateZeroValue, err
 	}
 
-	return r.replayer.hydrate(ctx, aggregateID, r.stateZeroValue, events)
+	return r.Replayer.Hydrate(ctx, aggregateID, r.StateZeroValue, events)
 }
 
 // Exists returns true if the aggregate has at least one event.
@@ -93,7 +95,7 @@ func (r *Reader[T]) Exists(
 	ctx context.Context,
 	aggregateID string,
 ) (bool, error) {
-	events, err := r.eventStore.ReadRange(ctx, "events:"+aggregateID, 1, 1)
+	events, err := r.EventStore.ReadRange(ctx, "events:"+aggregateID, 1, 1)
 	if err != nil {
 		return false, err
 	}
@@ -117,11 +119,11 @@ func (r *Reader[T]) Preload(
 	return nil
 }
 
-// deserializeEvents unmarshals a slice of raw event blobs into internalEvents.
-func deserializeEvents(blobs [][]byte) ([]internalEvent, error) {
-	events := make([]internalEvent, 0, len(blobs))
+// deserializeEvents unmarshals a slice of raw event blobs into InternalEvents.
+func deserializeEvents(blobs [][]byte) ([]esmodels.InternalEvent, error) {
+	events := make([]esmodels.InternalEvent, 0, len(blobs))
 	for _, blob := range blobs {
-		var evt internalEvent
+		var evt esmodels.InternalEvent
 		if err := json.Unmarshal(blob, &evt); err != nil {
 			return nil, err
 		}

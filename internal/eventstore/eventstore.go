@@ -1,9 +1,9 @@
 // Package eventstore provides the persistence layer for Asynx aggregates.
 //
 // EventStore[T] coordinates three sub-modules:
-//   - Reader  — optimistic snapshot + delta warm path, full replay cold path
-//   - Writer  — RFC 6902 full-state diffs, conditional snapshots
-//   - Replayer — sequential patch application, schema upcasting, auto-snapshots
+//   - reader   — optimistic snapshot + delta warm path, full replay cold path
+//   - writer   — RFC 6902 full-state diffs, conditional snapshots
+//   - replayer — sequential patch application, schema upcasting, auto-snapshots
 //
 // All operations are stateless (no in-memory cache). Storage is the single
 // source of truth; operators may layer caching (Redis, Memcached) on top.
@@ -11,20 +11,20 @@ package eventstore
 
 import (
 	"context"
-	"encoding/json"
 	"maps"
 
+	"github.com/char2cs/asynx/internal/eventstore/reader"
+	"github.com/char2cs/asynx/internal/eventstore/replayer"
+	"github.com/char2cs/asynx/internal/eventstore/writer"
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
 // EventStore[T] is the public API for durable aggregate persistence.
 // Construct it with New; all fields are set up by the constructor.
 type EventStore[T any] struct {
-	eventStore    asynxmd.Store
-	snapshotStore asynxmd.Store
-	reader        *Reader[T]
-	writer        *Writer[T]
-	replayer      *Replayer[T]
+	reader   *reader.Reader[T]
+	writer   *writer.Writer[T]
+	replayer *replayer.Replayer[T]
 }
 
 // New builds a fully-configured EventStore. eventStore and snapshotStore may
@@ -43,33 +43,31 @@ func New[T any](
 		clonedUpcasters = make(map[int]asynxmd.Upcaster)
 	}
 
-	replayer := &Replayer[T]{
-		eventStore:           eventStore,
-		snapshotStore:        snapshotStore,
-		upcasters:            clonedUpcasters,
-		currentSchemaVersion: schemaVersion,
-		stateZeroValue:       zero,
+	r := &replayer.Replayer[T]{
+		EventStore:           eventStore,
+		SnapshotStore:        snapshotStore,
+		Upcasters:            clonedUpcasters,
+		CurrentSchemaVersion: schemaVersion,
+		StateZeroValue:       zero,
 	}
 
-	reader := &Reader[T]{
-		eventStore:     eventStore,
-		snapshotStore:  snapshotStore,
-		replayer:       replayer,
-		stateZeroValue: zero,
+	rd := &reader.Reader[T]{
+		EventStore:     eventStore,
+		SnapshotStore:  snapshotStore,
+		Replayer:       r,
+		StateZeroValue: zero,
 	}
 
-	writer := &Writer[T]{
-		eventStore:           eventStore,
-		snapshotStore:        snapshotStore,
-		currentSchemaVersion: schemaVersion,
+	w := &writer.Writer[T]{
+		EventStore:           eventStore,
+		SnapshotStore:        snapshotStore,
+		CurrentSchemaVersion: schemaVersion,
 	}
 
 	return &EventStore[T]{
-		eventStore:    eventStore,
-		snapshotStore: snapshotStore,
-		reader:        reader,
-		writer:        writer,
-		replayer:      replayer,
+		reader:   rd,
+		writer:   w,
+		replayer: r,
 	}
 }
 
@@ -100,28 +98,26 @@ func (es *EventStore[T]) Preload(
 	return es.reader.Preload(ctx, aggregateID)
 }
 
-// Write validates the command against current state, emits the new state,
-// computes the RFC 6902 diff, and durably appends the event. It writes a
-// snapshot if cmd.ShouldSnapshot() returns true.
+// Write validates the command, computes the new state via cmd.EmitEvent,
+// and durably appends the event. It writes a snapshot if cmd.ShouldSnapshot()
+// returns true.
 //
-// Write determines the next version by reading the latest event from storage,
-// so each call incurs one extra read. This enables optimistic concurrency:
-// if a concurrent writer already appended at the same version, Store.Append
+// If cmd.Validate returns an error, Write returns it immediately without
+// touching storage.
+//
+// If a concurrent writer already appended at the same version, Store.Append
 // returns an error which Write propagates to the caller (ErrPipelineFailed
 // semantics — the caller should re-read state and retry).
-//
-// Returns ErrValidation if cmd.Validate fails.
 func (es *EventStore[T]) Write(
 	ctx context.Context,
-	aggregateID string,
 	current *T,
-	newState T,
 	cmd asynxmd.Command[T],
 ) (asynxmd.Event[T], error) {
-	nextVersion, err := es.nextVersion(ctx, aggregateID)
-	if err != nil {
+	if err := cmd.Validate(current); err != nil {
 		return asynxmd.Event[T]{}, err
 	}
+
+	newState := cmd.EmitEvent(current)
 
 	var previousState T
 	if current != nil {
@@ -130,11 +126,10 @@ func (es *EventStore[T]) Write(
 
 	return es.writer.Write(
 		ctx,
-		aggregateID,
+		cmd.AggregateID(),
 		cmd.EventName(),
 		previousState,
 		newState,
-		nextVersion,
 		cmd.ShouldSnapshot(),
 	)
 }
@@ -153,37 +148,4 @@ func (es *EventStore[T]) Replay(
 	fn func(asynxmd.Event[T]),
 ) error {
 	return es.replayer.Replay(ctx, aggregateID, fromVersion, toVersion, fn)
-}
-
-// nextVersion determines the version at which the next event should be written.
-// It reads the snapshot (to skip over sealed history) then counts delta events
-// to compute latestVersion + 1.
-//
-// For a brand-new aggregate (no snapshot, no events) it returns 1.
-func (es *EventStore[T]) nextVersion(
-	ctx context.Context,
-	aggregateID string,
-) (int64, error) {
-	var snapVersion int64
-
-	snapBlobs, err := es.snapshotStore.ReadFrom(ctx, "snapshots:"+aggregateID, 0)
-	if err != nil {
-		return 0, err
-	}
-
-	if len(snapBlobs) > 0 {
-		var snap snapshotBlob
-		if err := json.Unmarshal(snapBlobs[0], &snap); err == nil {
-			snapVersion = snap.Version
-		}
-	}
-
-	deltaBlobs, err := es.eventStore.ReadFrom(ctx, "events:"+aggregateID, snapVersion+1)
-	if err != nil {
-		return 0, err
-	}
-
-	// Versions are consecutive integers starting at 1, so the next version is
-	// simply (last known version) + 1 without unmarshalling individual blobs.
-	return snapVersion + int64(len(deltaBlobs)) + 1, nil
 }
