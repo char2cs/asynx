@@ -6,12 +6,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/char2cs/asynx"
-	"github.com/char2cs/asynx/bus"
+	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/internal/bus"
 )
 
 // noop is a zero-cost handler used to isolate publish-path overhead.
-var noop = func(asynx.Event[string]) {}
+var noop = func(_ context.Context, _ models.Event[string]) {}
 
 // BenchmarkPublish_ExactMatch measures Publish throughput when the event name
 // exactly matches the subscription pattern, varying the total number of
@@ -26,7 +26,7 @@ func BenchmarkPublish_ExactMatch(b *testing.B) {
 				cb.Subscribe(fmt.Sprintf("Event%d", i), noop)
 			}
 
-			event := asynx.Event[string]{EventName: "Event0"}
+			event := models.Event[string]{EventName: "Event0"}
 			ctx := context.Background()
 
 			b.ResetTimer()
@@ -53,7 +53,7 @@ func BenchmarkPublish_NoMatch(b *testing.B) {
 				cb.Subscribe(fmt.Sprintf("Event%d", i), noop)
 			}
 
-			event := asynx.Event[string]{EventName: "NoMatch"}
+			event := models.Event[string]{EventName: "NoMatch"}
 			ctx := context.Background()
 
 			b.ResetTimer()
@@ -79,7 +79,7 @@ func BenchmarkPublish_Regex(b *testing.B) {
 				cb.Subscribe(fmt.Sprintf("^Event%d.*", i), noop)
 			}
 
-			event := asynx.Event[string]{EventName: "Event0Created"}
+			event := models.Event[string]{EventName: "Event0Created"}
 			ctx := context.Background()
 
 			b.ResetTimer()
@@ -105,7 +105,7 @@ func BenchmarkPublish_Fanout(b *testing.B) {
 				cb.Subscribe("OrderPlaced", noop)
 			}
 
-			event := asynx.Event[string]{EventName: "OrderPlaced"}
+			event := models.Event[string]{EventName: "OrderPlaced"}
 			ctx := context.Background()
 
 			b.ResetTimer()
@@ -127,7 +127,7 @@ func BenchmarkPublish_Parallel(b *testing.B) {
 
 	cb.Subscribe("OrderPlaced", noop)
 
-	event := asynx.Event[string]{EventName: "OrderPlaced"}
+	event := models.Event[string]{EventName: "OrderPlaced"}
 	ctx := context.Background()
 
 	b.ResetTimer()
@@ -157,7 +157,7 @@ func BenchmarkPublish_MixedSubs(b *testing.B) {
 					cb.Subscribe(fmt.Sprintf("^Regex%d.*", i), noop)
 				}
 
-				event := asynx.Event[string]{EventName: "Exact0"}
+				event := models.Event[string]{EventName: "Exact0"}
 				ctx := context.Background()
 
 				b.ResetTimer()
@@ -182,6 +182,20 @@ func BenchmarkSubscribe(b *testing.B) {
 
 	for range b.N {
 		cb.Subscribe("OrderPlaced", noop)
+	}
+}
+
+// BenchmarkSubscribe_Regex measures Subscribe throughput for regex patterns,
+// which take the slice-append COW path instead of the map-copy path.
+func BenchmarkSubscribe_Regex(b *testing.B) {
+	cb := bus.NewChannelBus[string]()
+	b.Cleanup(func() { cb.Close(context.Background()) })
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for range b.N {
+		cb.Subscribe("^Order.*", noop)
 	}
 }
 
@@ -213,9 +227,9 @@ func BenchmarkPublish_Timeout(b *testing.B) {
 		cb.Close(ctx)
 	})
 
-	cb.Subscribe("OrderPlaced", noop, asynx.WithHandlerTimeout[string](time.Second))
+	cb.Subscribe("OrderPlaced", noop, models.WithHandlerTimeout[string](time.Second))
 
-	event := asynx.Event[string]{EventName: "OrderPlaced"}
+	event := models.Event[string]{EventName: "OrderPlaced"}
 	ctx := context.Background()
 
 	b.ResetTimer()
