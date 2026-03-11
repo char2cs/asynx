@@ -18,6 +18,7 @@ func (b *Bus[T]) Publish(
 func (b *Bus[T]) Subscribe(
 	_ string,
 	_ func(asynx.Event[T]),
+	_ ...asynx.SubscriptionOpt[T],
 ) (string, error) {
 	return "id", nil
 }

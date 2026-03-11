@@ -16,6 +16,7 @@ type Bus[T any] interface {
 	Subscribe(
 		pattern string,
 		handler func(Event[T]),
+		opts ...SubscriptionOpt[T],
 	) (string, error)
 
 	Unsubscribe(
@@ -50,19 +51,19 @@ type Store interface {
 	) ([][]byte, error)
 }
 
-type SubscriptionOpt[T any] func(*subscriptionConfig[T])
+type SubscriptionOpt[T any] func(*SubscriptionConfig[T])
 
-type subscriptionConfig[T any] struct {
-	fallback func(Event[T])
-	timeout  time.Duration
+type SubscriptionConfig[T any] struct {
+	Fallback func(Event[T])
+	Timeout  time.Duration
 }
 
 // WithFallback registers a secondary handler invoked when the primary panics.
 func WithFallback[T any](
 	handler func(Event[T]),
 ) SubscriptionOpt[T] {
-	return func(cfg *subscriptionConfig[T]) {
-		cfg.fallback = handler
+	return func(cfg *SubscriptionConfig[T]) {
+		cfg.Fallback = handler
 	}
 }
 
@@ -70,7 +71,7 @@ func WithFallback[T any](
 func WithHandlerTimeout[T any](
 	d time.Duration,
 ) SubscriptionOpt[T] {
-	return func(cfg *subscriptionConfig[T]) {
-		cfg.timeout = d
+	return func(cfg *SubscriptionConfig[T]) {
+		cfg.Timeout = d
 	}
 }
