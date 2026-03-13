@@ -286,6 +286,49 @@ func TestReplay_WithVersionRange(t *testing.T) {
 	}
 }
 
+func TestReplay_PreviousAggregate_CorrectForMidStreamStart(t *testing.T) {
+	// This test verifies the fix for the PreviousAggregate bug when replaying from a version > 1.
+	// Before the fix, PreviousAggregate would incorrectly be the zero value.
+	es := store.New()
+	ctx := context.Background()
+
+	// Create 3 events that modify state
+	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1,
+		json.RawMessage(`[{"op":"replace","path":"/Status","value":"Created"}]`))) //nolint:errcheck
+	es.Append(ctx, "events:agg1", 2, makeEventBlob(t, "e2", "Updated", 2, 1,
+		json.RawMessage(`[{"op":"replace","path":"/Status","value":"Updated"}]`))) //nolint:errcheck
+	es.Append(ctx, "events:agg1", 3, makeEventBlob(t, "e3", "Shipped", 3, 1,
+		json.RawMessage(`[{"op":"replace","path":"/Status","value":"Shipped"}]`))) //nolint:errcheck
+
+	r := newTestReplayer(es, nil, 1)
+
+	// Replay only events 3, which should have PreviousAggregate with Status="Updated" (from event 2)
+	var got []asynxmd.Event[order]
+	err := r.Replay(ctx, "agg1", 3, 3, func(e asynxmd.Event[order]) { got = append(got, e) })
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(got))
+	}
+
+	event := got[0]
+	if event.Version != 3 {
+		t.Errorf("Version = %d, want 3", event.Version)
+	}
+
+	// The critical check: PreviousAggregate should be the state from event 2, not the zero value
+	if event.PreviousAggregate.Status != "Updated" {
+		t.Errorf("PreviousAggregate.Status = %q, want Updated (state from event 2)", event.PreviousAggregate.Status)
+	}
+
+	// The current aggregate should be the result after event 3
+	if event.Aggregate.Status != "Shipped" {
+		t.Errorf("Aggregate.Status = %q, want Shipped (state after event 3)", event.Aggregate.Status)
+	}
+}
+
 func TestReplay_StorageError(t *testing.T) {
 	r := newTestReplayer(&mocks.ErrStore{Err: storageErr}, nil, 1)
 

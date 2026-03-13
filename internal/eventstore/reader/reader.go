@@ -88,9 +88,9 @@ func (r *Reader[T]) Get(
 	}
 
 	if result.DidUpcast {
-		if snapErr := r.writeAutoSnapshot(ctx, aggregateID, result.LastVersion, result.State); snapErr != nil {
-			return result.State, snapErr
-		}
+		// Auto-snapshot write is best-effort; snapshot failures don't affect state availability
+		// since the state is already durable in the event store. Failures are silently ignored.
+		_ = r.writeAutoSnapshot(ctx, aggregateID, result.LastVersion, result.State)
 	}
 
 	return result.State, nil
@@ -121,9 +121,9 @@ func (r *Reader[T]) coldPath(
 	}
 
 	if result.DidUpcast {
-		if snapErr := r.writeAutoSnapshot(ctx, aggregateID, result.LastVersion, result.State); snapErr != nil {
-			return result.State, snapErr
-		}
+		// Auto-snapshot write is best-effort; snapshot failures don't affect state availability
+		// since the state is already durable in the event store. Failures are silently ignored.
+		_ = r.writeAutoSnapshot(ctx, aggregateID, result.LastVersion, result.State)
 	}
 
 	return result.State, nil

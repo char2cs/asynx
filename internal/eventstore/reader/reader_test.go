@@ -245,7 +245,9 @@ func TestGet_SnapshotStorageError(t *testing.T) {
 
 // --- Get — auto-snapshot on upcasting (moved from replayer_test) ---
 
-func TestGet_AutoSnapshotFail_ReturnsStateAndError(t *testing.T) {
+func TestGet_AutoSnapshotFail_ReturnsState(t *testing.T) {
+	// This test verifies the fix: auto-snapshot failures should not prevent
+	// returning valid state. The state is already durable in the event store.
 	es := store.New()
 	ss := store.New()
 	ctx := context.Background()
@@ -263,11 +265,11 @@ func TestGet_AutoSnapshotFail_ReturnsStateAndError(t *testing.T) {
 	ss.SetError("snapshots:agg1", storageErr)
 
 	state, err := r.Get(ctx, "agg1")
-	if err == nil {
-		t.Fatal("expected error from auto-snapshot failure")
+	if err != nil {
+		t.Fatalf("Get: expected no error, got %v", err)
 	}
 	if state.Status != "Shipped" {
-		t.Errorf("state.Status = %q, want Shipped (state correct despite error)", state.Status)
+		t.Errorf("state.Status = %q, want Shipped (state from events)", state.Status)
 	}
 }
 
@@ -364,5 +366,70 @@ func TestPreload_PropagatesStorageError(t *testing.T) {
 	err := r.Preload(context.Background(), "agg1")
 	if !errors.Is(err, storageErr) {
 		t.Errorf("err = %v, want storageErr", err)
+	}
+}
+
+// --- Auto-snapshot error handling ---
+
+func TestGet_WarmPath_AutoSnapshotError_ReturnsStateNotError(t *testing.T) {
+	// This test verifies the fix for auto-snapshot error handling.
+	// When a snapshot write fails during upcasting in the warm path,
+	// the state should still be returned (not an error) because the state
+	// is already durable in the event store.
+	es := store.New()
+	ss := store.New()
+	ctx := context.Background()
+
+	// Create a snapshot at version 1
+	ss.Append(ctx, "snapshots:agg1", 1, makeSnapshotBlob(t, 1, 1, order{Status: "Old"})) //nolint:errcheck
+
+	// Create an event at version 2 that will trigger upcasting
+	es.Append(ctx, "events:agg1", 2, makeEventBlob(t, "e1", "Updated", 2, 1, json.RawMessage(`[{"op":"replace","path":"/Status","value":"New"}]`))) //nolint:errcheck
+
+	// Create a reader with upcasters to trigger DidUpcast
+	upcasters := map[int]asynxmd.Upcaster{
+		1: func(_ context.Context, _ string, p []byte) ([]byte, error) { return p, nil },
+	}
+	rep := replayer.New[order](es, upcasters, 2, order{})
+	r := New[order](es, ss, rep, 2, order{}, nil)
+
+	// Make snapshot store return an error on the next write (for auto-snapshot)
+	ss.SetError("snapshots:agg1", storageErr)
+
+	// Get should still return the state even though auto-snapshot write fails
+	state, err := r.Get(ctx, "agg1")
+	if err != nil {
+		t.Fatalf("Get: expected no error, got %v", err)
+	}
+	if state.Status != "New" {
+		t.Errorf("Status = %q, want New (correct state from events)", state.Status)
+	}
+}
+
+func TestGet_ColdPath_AutoSnapshotError_ReturnsStateNotError(t *testing.T) {
+	// Similar to warm path: auto-snapshot errors should not prevent returning valid state.
+	es := store.New()
+	ss := store.New()
+	ctx := context.Background()
+
+	// Create events that trigger upcasting
+	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, json.RawMessage(`[{"op":"replace","path":"/Status","value":"Pending"}]`))) //nolint:errcheck
+
+	upcasters := map[int]asynxmd.Upcaster{
+		1: func(_ context.Context, _ string, p []byte) ([]byte, error) { return p, nil },
+	}
+	rep := replayer.New[order](es, upcasters, 2, order{})
+	r := New[order](es, ss, rep, 2, order{}, nil)
+
+	// Make snapshot store return an error on write (for auto-snapshot)
+	ss.SetError("snapshots:agg1", storageErr)
+
+	// Get should still return the state even though auto-snapshot write fails
+	state, err := r.Get(ctx, "agg1")
+	if err != nil {
+		t.Fatalf("Get: expected no error, got %v", err)
+	}
+	if state.Status != "Pending" {
+		t.Errorf("Status = %q, want Pending (correct state from events)", state.Status)
 	}
 }

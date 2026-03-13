@@ -36,8 +36,10 @@ func New[T any](es, ss asynxmd.Store, schemaVersion int) *Writer[T] {
 // appends it to the event stream. A snapshot is written if shouldSnapshot is
 // true.
 //
-// The event stream append is the save point: once it succeeds the event is
-// durable even if the snapshot write fails.
+// The event stream append is the save point: once it succeeds, the event is
+// durable in the store. If snapshot write fails, the append is not rolled back
+// (snapshot failures don't prevent durability of the event), but the error is
+// still returned to the caller.
 //
 // Returns the public Event[T] (for bus publish) or an error.
 func (w *Writer[T]) Write(
@@ -58,7 +60,10 @@ func (w *Writer[T]) Write(
 		return asynxmd.Event[T]{}, err
 	}
 
-	patchJSON, _ := json.Marshal(patch)
+	patchJSON, err := json.Marshal(patch)
+	if err != nil {
+		return asynxmd.Event[T]{}, err
+	}
 
 	eventID := asynxutils.NewID()
 	now := time.Now().UTC()
@@ -72,7 +77,10 @@ func (w *Writer[T]) Write(
 		Patches:       json.RawMessage(patchJSON),
 	}
 
-	evtJSON, _ := json.Marshal(evt)
+	evtJSON, err := json.Marshal(evt)
+	if err != nil {
+		return asynxmd.Event[T]{}, err
+	}
 	if err := w.eventStore.Append(ctx, "events:"+aggregateID, version, evtJSON); err != nil {
 		return asynxmd.Event[T]{}, err
 	}

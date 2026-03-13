@@ -113,6 +113,10 @@ func (r *Replayer[T]) Hydrate(
 // version, and calls fn with the public Event[T] (including full state and
 // previous state). Replay is read-only and never writes auto-snapshots.
 //
+// To ensure PreviousAggregate is correct for the first event, Replay always
+// loads from version 1. When fromVersion > 1, earlier events are replayed
+// to populate initial state but fn is not called for them.
+//
 // toVersion=0 loads all events from fromVersion to the end of the stream.
 func (r *Replayer[T]) Replay(
 	ctx context.Context,
@@ -121,18 +125,8 @@ func (r *Replayer[T]) Replay(
 	toVersion int64,
 	fn func(asynxmd.Event[T]),
 ) error {
-	var (
-		eventBlobs [][]byte
-		err        error
-	)
-
-	if toVersion == 0 {
-		eventBlobs, err = r.eventStore.ReadFrom(ctx, "events:"+aggregateID, fromVersion)
-	} else {
-		count := toVersion - fromVersion + 1
-		eventBlobs, err = r.eventStore.ReadRange(ctx, "events:"+aggregateID, fromVersion, count)
-	}
-
+	// Always start from version 1 to populate previous state correctly
+	eventBlobs, err := r.eventStore.ReadFrom(ctx, "events:"+aggregateID, 1)
 	if err != nil {
 		return err
 	}
@@ -147,6 +141,8 @@ func (r *Replayer[T]) Replay(
 	}
 
 	previous := r.stateZeroValue
+	currentVersion := int64(1)
+
 	for _, blob := range eventBlobs {
 		var evt esmodels.InternalEvent
 		if err := json.Unmarshal(blob, &evt); err != nil {
@@ -168,17 +164,27 @@ func (r *Replayer[T]) Replay(
 			return err
 		}
 
-		fn(asynxmd.Event[T]{
-			ID:                upcastedEvt.ID,
-			AggregateID:       aggregateID,
-			EventName:         upcastedEvt.EventName,
-			Version:           upcastedEvt.Version,
-			SchemaVersion:     upcastedEvt.SchemaVersion,
-			OccurredAt:        upcastedEvt.OccurredAt,
-			Aggregate:         current,
-			PreviousAggregate: previous,
-		})
+		// Only invoke fn if we're within the requested range
+		if currentVersion >= fromVersion && (toVersion == 0 || currentVersion <= toVersion) {
+			fn(asynxmd.Event[T]{
+				ID:                upcastedEvt.ID,
+				AggregateID:       aggregateID,
+				EventName:         upcastedEvt.EventName,
+				Version:           upcastedEvt.Version,
+				SchemaVersion:     upcastedEvt.SchemaVersion,
+				OccurredAt:        upcastedEvt.OccurredAt,
+				Aggregate:         current,
+				PreviousAggregate: previous,
+			})
+		}
+
 		previous = current
+		currentVersion++
+
+		// Stop if we've exceeded toVersion
+		if toVersion > 0 && currentVersion > toVersion {
+			break
+		}
 	}
 
 	return nil

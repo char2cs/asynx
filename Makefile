@@ -1,7 +1,6 @@
 .PHONY: test test-coverage lint tidy
 
-test:
-	go test -race ./...
+test: test-coverage
 
 test-coverage:
 	go test -race -coverprofile=coverage.out ./...
