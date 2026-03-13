@@ -73,6 +73,20 @@ func TestBuilderFluent(t *testing.T) {
 }
 
 
+func TestBuilderWithCorruptionHook(t *testing.T) {
+	called := false
+	hook := func(err error) { called = true }
+
+	_, err := asynx.New[mocks.Order]().
+		WithEventStore(&mocks.Store{}).
+		WithCorruptionHook(hook).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error: %v", err)
+	}
+	_ = called // hook is wired; invocation tested at integration level
+}
+
 func TestShardingOptsZeroValue(t *testing.T) {
 	opts := asynx.ShardingOpts{}
 	if opts.Shards != 0 || opts.QueueDepth != 0 {

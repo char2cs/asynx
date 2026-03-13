@@ -59,6 +59,7 @@ type ChannelBus[T any] struct {
 	// Pattern compilation cache — separate lock, unrelated to subscriptions.
 	patternMu        sync.RWMutex
 	compiledPatterns map[string]*regexp.Regexp
+	patternErrors    map[string]error  // Caches compilation errors to avoid recompilation
 
 	// Optional bus-level callback overrides passed to every HandlerJob.
 	onPanic   asynxmd.PanicHandler[T]
@@ -70,6 +71,7 @@ func NewChannelBus[T any](opts ...ChannelBusOpt[T]) *ChannelBus[T] {
 	b := &ChannelBus[T]{
 		subscriptions:    make(map[string]*models.Subscription[T]),
 		compiledPatterns: make(map[string]*regexp.Regexp),
+		patternErrors:    make(map[string]error),
 	}
 	b.idx.Store(&models.PublishIndex[T]{
 		ExactSubs: make(map[string][]*models.Subscription[T]),
@@ -225,22 +227,35 @@ func (b *ChannelBus[T]) getCompiledPattern(
 ) (*regexp.Regexp, error) {
 	b.patternMu.RLock()
 
+	// Check if already compiled
 	if compiled, ok := b.compiledPatterns[pattern]; ok {
 		b.patternMu.RUnlock()
-
 		return compiled, nil
+	}
+
+	// Check if already determined to be invalid (cached error)
+	if err, cached := b.patternErrors[pattern]; cached {
+		b.patternMu.RUnlock()
+		return nil, err
 	}
 
 	b.patternMu.RUnlock()
 
+	// Try to compile outside the lock
 	compiled, err := regexp.Compile(pattern)
 	if err != nil {
+		// Cache the error to avoid recompilation
+		b.patternMu.Lock()
+		b.patternErrors[pattern] = err
+		b.patternMu.Unlock()
 		return nil, err
 	}
 
+	// Store the successful compilation
 	b.patternMu.Lock()
 	defer b.patternMu.Unlock()
 
+	// Double-check in case another goroutine compiled it
 	if existing, ok := b.compiledPatterns[pattern]; ok {
 		return existing, nil
 	}

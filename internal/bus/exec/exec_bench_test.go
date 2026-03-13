@@ -46,6 +46,9 @@ func BenchmarkExecuteHandler_WithTimeout(b *testing.B) {
 	}
 }
 
+// stderrMu guards global os.Stderr access in benchmarks.
+var stderrMu sync.Mutex
+
 // BenchmarkExecuteHandler_PanicRecovery measures the cost of the deferred
 // recover path: panic + stack unwind + OnHandlerPanic. Stderr is redirected
 // once for the whole run to avoid polluting benchmark output.
@@ -61,10 +64,18 @@ func BenchmarkExecuteHandler_PanicRecovery(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer devNull.Close()
+	defer func() { _ = devNull.Close() }()
+
+	stderrMu.Lock()
 	orig := os.Stderr
 	os.Stderr = devNull
-	defer func() { os.Stderr = orig }()
+	stderrMu.Unlock()
+
+	defer func() {
+		stderrMu.Lock()
+		os.Stderr = orig
+		stderrMu.Unlock()
+	}()
 
 	b.ReportAllocs()
 	b.ResetTimer()
