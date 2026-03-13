@@ -21,17 +21,8 @@ var storageErr = errors.New("storage failure")
 // --- Helpers ---
 
 func newTestReader(es, ss asynxmd.Store) *Reader[order] {
-	r := &replayer.Replayer[order]{
-		EventStore:           es,
-		SnapshotStore:        ss,
-		Upcasters:            make(map[int]asynxmd.Upcaster),
-		CurrentSchemaVersion: 1,
-	}
-	return &Reader[order]{
-		EventStore:    es,
-		SnapshotStore: ss,
-		Replayer:      r,
-	}
+	rep := replayer.New[order](es, make(map[int]asynxmd.Upcaster), 1, order{})
+	return New[order](es, ss, rep, 1, order{}, nil)
 }
 
 func makeEventBlob(t *testing.T, id, eventName string, version int64, schemaVersion int, patches json.RawMessage) []byte {
@@ -53,36 +44,14 @@ func makeEventBlob(t *testing.T, id, eventName string, version int64, schemaVers
 
 func makeSnapshotBlob(t *testing.T, version int64, schemaVersion int, state order) []byte {
 	t.Helper()
-	stateBytes, err := json.Marshal(state)
-	if err != nil {
-		t.Fatalf("makeSnapshotBlob marshal state: %v", err)
-	}
-	snap := esmodels.SnapshotBlob{
+	snap := esmodels.SnapshotBlob[order]{
 		Version:       version,
 		SchemaVersion: schemaVersion,
-		State:         stateBytes,
+		State:         state,
 	}
 	b, err := json.Marshal(snap)
 	if err != nil {
 		t.Fatalf("makeSnapshotBlob: %v", err)
-	}
-	return b
-}
-
-// makeRawSnapshotBlob creates a SnapshotBlob whose State field contains raw
-// arbitrary bytes. The outer SnapshotBlob marshals successfully, but
-// json.Unmarshal(snap.State, &T) will fail if rawState is not valid JSON
-// for T. Used to exercise reader.go:52–54.
-func makeRawSnapshotBlob(t *testing.T, version int64, schemaVersion int, rawState []byte) []byte {
-	t.Helper()
-	snap := esmodels.SnapshotBlob{
-		Version:       version,
-		SchemaVersion: schemaVersion,
-		State:         rawState,
-	}
-	b, err := json.Marshal(snap)
-	if err != nil {
-		t.Fatalf("makeRawSnapshotBlob: %v", err)
 	}
 	return b
 }
@@ -127,7 +96,7 @@ func TestGet_ColdPath_StorageError(t *testing.T) {
 
 func TestGet_ColdPath_DeserializeError(t *testing.T) {
 	// CorruptBlobStore returns a non-empty corrupt blob slice, so coldPath
-	// skips ErrNotFound and calls deserializeEvents which fails (reader.go:84–86).
+	// skips ErrNotFound and calls deserializeEvents which fails.
 	r := newTestReader(&mocks.CorruptBlobStore{}, store.New())
 
 	_, err := r.Get(context.Background(), "agg1")
@@ -182,6 +151,7 @@ func TestGet_WarmPath_CorruptSnapshot_FallsBackToCold(t *testing.T) {
 	ss := store.New()
 	ctx := context.Background()
 
+	// Outer blob is completely invalid JSON.
 	ss.Append(ctx, "snapshots:agg1", 1, []byte(`not-valid-json`)) //nolint:errcheck
 	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, json.RawMessage(`[{"op":"replace","path":"/Status","value":"Pending"}]`))) //nolint:errcheck
 
@@ -196,12 +166,33 @@ func TestGet_WarmPath_CorruptSnapshot_FallsBackToCold(t *testing.T) {
 	}
 }
 
+func TestGet_WarmPath_CorruptSnapshot_CallsOnCorruption(t *testing.T) {
+	es := store.New()
+	ss := store.New()
+	ctx := context.Background()
+
+	// state field is a JSON string — cannot unmarshal into order struct.
+	ss.Append(ctx, "snapshots:agg1", 1, []byte(`{"version":1,"schema_version":1,"state":"not an order object"}`)) //nolint:errcheck
+	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, json.RawMessage(`[]`)))             //nolint:errcheck
+
+	var hookErr error
+	rep := replayer.New[order](es, make(map[int]asynxmd.Upcaster), 1, order{})
+	r := New[order](es, ss, rep, 1, order{}, func(err error) { hookErr = err })
+
+	_, _ = r.Get(ctx, "agg1")
+	if hookErr == nil {
+		t.Error("expected onCorruption to be called with an error")
+	}
+}
+
 func TestGet_WarmPath_CorruptStateInSnapshot_FallsBackToCold(t *testing.T) {
 	es := store.New()
 	ss := store.New()
 	ctx := context.Background()
 
-	ss.Append(ctx, "snapshots:agg1", 1, []byte(`{"Version":1,"SchemaVersion":1,"State":"not-base64-json"}`)) //nolint:errcheck
+	// state field is a JSON string — cannot unmarshal into order struct,
+	// so the single json.Unmarshal(&SnapshotBlob[T]) call fails → cold path.
+	ss.Append(ctx, "snapshots:agg1", 1, []byte(`{"version":1,"schema_version":1,"state":"not an order object"}`)) //nolint:errcheck
 	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, json.RawMessage(`[{"op":"replace","path":"/Status","value":"Shipped"}]`))) //nolint:errcheck
 
 	r := newTestReader(es, ss)
@@ -212,25 +203,6 @@ func TestGet_WarmPath_CorruptStateInSnapshot_FallsBackToCold(t *testing.T) {
 	}
 	if got.Status != "Shipped" {
 		t.Errorf("Status = %q, want Shipped (cold path fallback)", got.Status)
-	}
-}
-
-func TestGet_WarmPath_StateUnmarshalError_FallsBackToCold(t *testing.T) {
-	es := store.New()
-	ss := store.New()
-	ctx := context.Background()
-
-	ss.Append(ctx, "snapshots:agg1", 1, makeRawSnapshotBlob(t, 1, 1, []byte("not valid json"))) //nolint:errcheck
-	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, json.RawMessage(`[{"op":"replace","path":"/Status","value":"Pending"}]`))) //nolint:errcheck
-
-	r := newTestReader(es, ss)
-
-	got, err := r.Get(ctx, "agg1")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if got.Status != "Pending" {
-		t.Errorf("Status = %q, want Pending (cold path fallback)", got.Status)
 	}
 }
 
@@ -268,6 +240,58 @@ func TestGet_SnapshotStorageError(t *testing.T) {
 	_, err := r.Get(context.Background(), "agg1")
 	if !errors.Is(err, storageErr) {
 		t.Errorf("err = %v, want storageErr", err)
+	}
+}
+
+// --- Get — auto-snapshot on upcasting (moved from replayer_test) ---
+
+func TestGet_AutoSnapshotFail_ReturnsStateAndError(t *testing.T) {
+	es := store.New()
+	ss := store.New()
+	ctx := context.Background()
+
+	upcasters := map[int]asynxmd.Upcaster{
+		1: func(_ context.Context, _ string, p []byte) ([]byte, error) { return p, nil },
+	}
+	rep := replayer.New[order](es, upcasters, 2, order{})
+	r := New[order](es, ss, rep, 2, order{}, nil)
+
+	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1,
+		json.RawMessage(`[{"op":"replace","path":"/Status","value":"Shipped"}]`))) //nolint:errcheck
+
+	// Make snapshot store fail on the auto-snapshot write.
+	ss.SetError("snapshots:agg1", storageErr)
+
+	state, err := r.Get(ctx, "agg1")
+	if err == nil {
+		t.Fatal("expected error from auto-snapshot failure")
+	}
+	if state.Status != "Shipped" {
+		t.Errorf("state.Status = %q, want Shipped (state correct despite error)", state.Status)
+	}
+}
+
+func TestGet_AutoSnapshot_WrittenAfterUpcasting(t *testing.T) {
+	es := store.New()
+	ss := store.New()
+	ctx := context.Background()
+
+	upcasters := map[int]asynxmd.Upcaster{
+		1: func(_ context.Context, _ string, p []byte) ([]byte, error) { return p, nil },
+	}
+	rep := replayer.New[order](es, upcasters, 2, order{})
+	r := New[order](es, ss, rep, 2, order{}, nil)
+
+	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, json.RawMessage(`[]`))) //nolint:errcheck
+
+	_, err := r.Get(ctx, "agg1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	snapBlobs, _ := ss.ReadFrom(ctx, "snapshots:agg1", 0)
+	if len(snapBlobs) != 1 {
+		t.Fatalf("expected 1 auto-snapshot written, got %d", len(snapBlobs))
 	}
 }
 

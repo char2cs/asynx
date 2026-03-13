@@ -61,7 +61,7 @@ func BenchmarkHydrate(b *testing.B) {
 					Patches:       patch,
 				}
 			}
-			r := newTestReplayer(store.New(), store.New(), nil, 1)
+			r := newTestReplayer(store.New(), nil, 1)
 			seed := order{}
 			ctx := context.Background()
 			b.ReportAllocs()
@@ -87,7 +87,7 @@ func BenchmarkReplay(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			es := store.New()
 			populateEvents(b, es, tc.events)
-			r := newTestReplayer(es, store.New(), nil, 1)
+			r := newTestReplayer(es, nil, 1)
 			ctx := context.Background()
 			b.ReportAllocs()
 			b.ResetTimer()

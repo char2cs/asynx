@@ -10,10 +10,10 @@ import (
 // The full aggregate state is never stored — it is reconstructed by
 // replaying patches on top of the seed state (or latest snapshot).
 type InternalEvent struct {
-	ID            string
-	EventName     string
-	Version       int64
-	SchemaVersion int
-	OccurredAt    time.Time
-	Patches       json.RawMessage
+	ID            string          `json:"id"`
+	EventName     string          `json:"event_name"`
+	Version       int64           `json:"version"`
+	SchemaVersion int             `json:"schema_version"`
+	OccurredAt    time.Time       `json:"occurred_at"`
+	Patches       json.RawMessage `json:"patches"`
 }

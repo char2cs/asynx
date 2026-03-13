@@ -20,19 +20,14 @@ var storageErr = errors.New("storage failure")
 // --- Helpers ---
 
 func newTestWriter(es, ss asynxmd.Store) *Writer[order] {
-	return &Writer[order]{
-		EventStore:           es,
-		SnapshotStore:        ss,
-		CurrentSchemaVersion: 1,
-	}
+	return New[order](es, ss, 1)
 }
 
 func makeSnapshotBlob(version int64, schemaVersion int, state order) []byte {
-	stateBytes, _ := json.Marshal(state)
-	snap := esmodels.SnapshotBlob{
+	snap := esmodels.SnapshotBlob[order]{
 		Version:       version,
 		SchemaVersion: schemaVersion,
-		State:         stateBytes,
+		State:         state,
 	}
 	b, _ := json.Marshal(snap)
 	return b
@@ -151,17 +146,12 @@ func TestWrite_WritesSnapshot_WhenRequested(t *testing.T) {
 		t.Fatal("expected snapshot to be written")
 	}
 
-	var snap esmodels.SnapshotBlob
+	var snap esmodels.SnapshotBlob[order]
 	if err := json.Unmarshal(snapBlobs[len(snapBlobs)-1], &snap); err != nil {
 		t.Fatalf("unmarshal snapshot: %v", err)
 	}
-
-	var state order
-	if err := json.Unmarshal(snap.State, &state); err != nil {
-		t.Fatalf("unmarshal snapshot state: %v", err)
-	}
-	if state.Status != "Active" {
-		t.Errorf("snapshot state.Status = %q, want Active", state.Status)
+	if snap.State.Status != "Active" {
+		t.Errorf("snapshot state.Status = %q, want Active", snap.State.Status)
 	}
 }
 
@@ -213,11 +203,7 @@ func TestWrite_SnapshotStoreError_ReturnsError(t *testing.T) {
 }
 
 func TestWrite_MarshalPreviousStateError(t *testing.T) {
-	w := &Writer[mocks.ErrMarshal]{
-		EventStore:           store.New(),
-		SnapshotStore:        store.New(),
-		CurrentSchemaVersion: 1,
-	}
+	w := New[mocks.ErrMarshal](store.New(), store.New(), 1)
 
 	_, err := w.Write(context.Background(), "agg1", "Evt", mocks.ErrMarshal{}, mocks.ErrMarshal{}, false)
 	if err == nil {
@@ -226,11 +212,7 @@ func TestWrite_MarshalPreviousStateError(t *testing.T) {
 }
 
 func TestWrite_MarshalNewStateError(t *testing.T) {
-	w := &Writer[*mocks.CountedMarshal]{
-		EventStore:           store.New(),
-		SnapshotStore:        store.New(),
-		CurrentSchemaVersion: 1,
-	}
+	w := New[*mocks.CountedMarshal](store.New(), store.New(), 1)
 
 	cm := &mocks.CountedMarshal{FailAt: 2}
 	_, err := w.Write(context.Background(), "agg1", "Evt", cm, cm, false)
@@ -241,12 +223,8 @@ func TestWrite_MarshalNewStateError(t *testing.T) {
 
 func TestWriteSnapshot_MarshalStateError(t *testing.T) {
 	// call 1+2: jsondiff.Compare marshals previousState and newState internally.
-	// call 3: json.Marshal(newState) in Write before writeSnapshotFromBytes.
-	w := &Writer[*mocks.CountedMarshal]{
-		EventStore:           store.New(),
-		SnapshotStore:        store.New(),
-		CurrentSchemaVersion: 1,
-	}
+	// call 3: json.Marshal(SnapshotBlob[T]{State: newState}) inside writeSnapshot.
+	w := New[*mocks.CountedMarshal](store.New(), store.New(), 1)
 
 	cm := &mocks.CountedMarshal{FailAt: 3}
 	_, err := w.Write(context.Background(), "agg1", "Evt", cm, cm, true)

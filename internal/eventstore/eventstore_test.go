@@ -29,7 +29,7 @@ func cmdEmpty() mocks.UpdateOrderCmd {
 // --- Write → Get round-trip ---
 
 func TestWrite_Get_RoundTrip(t *testing.T) {
-	es := New[order](store.New(), store.New(), nil, 1)
+	es := New[order](store.New(), store.New(), nil, 1, nil)
 	ctx := context.Background()
 
 	_, err := es.Write(ctx, nil, cmd(order{ID: "1", Status: "Pending", Total: 100}))
@@ -47,7 +47,7 @@ func TestWrite_Get_RoundTrip(t *testing.T) {
 }
 
 func TestWrite_MultipleEvents_GetReturnsLatest(t *testing.T) {
-	es := New[order](store.New(), store.New(), nil, 1)
+	es := New[order](store.New(), store.New(), nil, 1, nil)
 	ctx := context.Background()
 
 	evt1, err := es.Write(ctx, nil, cmd(order{Status: "Pending"}))
@@ -70,7 +70,7 @@ func TestWrite_MultipleEvents_GetReturnsLatest(t *testing.T) {
 }
 
 func TestWrite_VersionsAreConsecutive(t *testing.T) {
-	es := New[order](store.New(), store.New(), nil, 1)
+	es := New[order](store.New(), store.New(), nil, 1, nil)
 	ctx := context.Background()
 
 	for i := int64(1); i <= 5; i++ {
@@ -86,7 +86,7 @@ func TestWrite_VersionsAreConsecutive(t *testing.T) {
 
 func TestWrite_WithSnapshot_AcceleratesGet(t *testing.T) {
 	s := store.New()
-	es := New[order](s, s, nil, 1)
+	es := New[order](s, s, nil, 1, nil)
 	ctx := context.Background()
 
 	// Write with snapshot at version 1.
@@ -114,7 +114,7 @@ func TestWrite_WithSnapshot_AcceleratesGet(t *testing.T) {
 // --- Exists ---
 
 func TestExists_TrueAfterWrite(t *testing.T) {
-	es := New[order](store.New(), store.New(), nil, 1)
+	es := New[order](store.New(), store.New(), nil, 1, nil)
 	ctx := context.Background()
 
 	es.Write(ctx, nil, cmdEmpty()) //nolint:errcheck
@@ -129,7 +129,7 @@ func TestExists_TrueAfterWrite(t *testing.T) {
 }
 
 func TestExists_FalseForNewAggregate(t *testing.T) {
-	es := New[order](store.New(), store.New(), nil, 1)
+	es := New[order](store.New(), store.New(), nil, 1, nil)
 
 	ok, err := es.Exists(context.Background(), "new")
 	if err != nil {
@@ -143,7 +143,7 @@ func TestExists_FalseForNewAggregate(t *testing.T) {
 // --- Preload ---
 
 func TestPreload_NoErrorForExistingAggregate(t *testing.T) {
-	es := New[order](store.New(), store.New(), nil, 1)
+	es := New[order](store.New(), store.New(), nil, 1, nil)
 	ctx := context.Background()
 
 	es.Write(ctx, nil, cmd(order{Status: "Ready"})) //nolint:errcheck
@@ -154,7 +154,7 @@ func TestPreload_NoErrorForExistingAggregate(t *testing.T) {
 }
 
 func TestPreload_NoErrorForMissingAggregate(t *testing.T) {
-	es := New[order](store.New(), store.New(), nil, 1)
+	es := New[order](store.New(), store.New(), nil, 1, nil)
 
 	if err := es.Preload(context.Background(), "missing"); err != nil {
 		t.Errorf("Preload on missing aggregate: %v (want nil)", err)
@@ -164,7 +164,7 @@ func TestPreload_NoErrorForMissingAggregate(t *testing.T) {
 // --- Replay ---
 
 func TestReplay_VisitsAllEvents(t *testing.T) {
-	es := New[order](store.New(), store.New(), nil, 1)
+	es := New[order](store.New(), store.New(), nil, 1, nil)
 	ctx := context.Background()
 
 	es.Write(ctx, nil, cmd(order{Status: "Pending"}))                                                 //nolint:errcheck
@@ -187,7 +187,7 @@ func TestReplay_VisitsAllEvents(t *testing.T) {
 }
 
 func TestReplay_WithVersionRange(t *testing.T) {
-	es := New[order](store.New(), store.New(), nil, 1)
+	es := New[order](store.New(), store.New(), nil, 1, nil)
 	ctx := context.Background()
 
 	es.Write(ctx, nil, cmd(order{Status: "v1"}))                  //nolint:errcheck
@@ -215,11 +215,11 @@ func TestWrite_Get_WithUpcasting(t *testing.T) {
 			return p, nil
 		},
 	}
-	es := New[order](store.New(), store.New(), upcasters, 2)
+	es := New[order](store.New(), store.New(), upcasters, 2, nil)
 	ctx := context.Background()
 
 	// Write at schema v1 (bypass: write directly via a v1 eventstore).
-	esV1 := New[order](store.New(), store.New(), nil, 1)
+	esV1 := New[order](store.New(), store.New(), nil, 1, nil)
 	_, err := esV1.Write(ctx, nil, cmd(order{Status: "OldSchema"}))
 	if err != nil {
 		t.Fatalf("Write v1: %v", err)
@@ -243,7 +243,7 @@ func TestWrite_Get_WithUpcasting(t *testing.T) {
 // --- Concurrent writes ---
 
 func TestWrite_ConcurrentConflict_AtLeastOneFails(t *testing.T) {
-	es := New[order](store.New(), store.New(), nil, 1)
+	es := New[order](store.New(), store.New(), nil, 1, nil)
 	ctx := context.Background()
 
 	// Race many goroutines against version 1; all compute nextVersion before
@@ -278,7 +278,7 @@ func TestWrite_ConcurrentConflict_AtLeastOneFails(t *testing.T) {
 // --- Get: ErrNotFound ---
 
 func TestGet_ErrNotFound_ForNewAggregate(t *testing.T) {
-	es := New[order](store.New(), store.New(), nil, 1)
+	es := New[order](store.New(), store.New(), nil, 1, nil)
 
 	_, err := es.Get(context.Background(), "ghost")
 	if !errors.Is(err, asynxmd.ErrNotFound) {
@@ -294,7 +294,7 @@ func TestNew_NilUpcasters_DoesNotPanic(t *testing.T) {
 			t.Fatalf("New panicked with nil upcasters: %v", r)
 		}
 	}()
-	es := New[order](store.New(), store.New(), nil, 1)
+	es := New[order](store.New(), store.New(), nil, 1, nil)
 	_ = es
 }
 
@@ -303,7 +303,7 @@ func TestNew_NilUpcasters_DoesNotPanic(t *testing.T) {
 func TestWrite_ValidateError_DoesNotWrite(t *testing.T) {
 	s := store.New()
 	// mocks.CancelOrderCmd.Validate returns ErrValidation when current is nil.
-	es := New[order](s, store.New(), nil, 1)
+	es := New[order](s, store.New(), nil, 1, nil)
 	ctx := context.Background()
 
 	_, err := es.Write(ctx, nil, mocks.CancelOrderCmd{ID: "agg1"})
@@ -319,7 +319,7 @@ func TestWrite_ValidateError_DoesNotWrite(t *testing.T) {
 }
 
 func TestWrite_EmitEventDrivesStoredState(t *testing.T) {
-	es := New[order](store.New(), store.New(), nil, 1)
+	es := New[order](store.New(), store.New(), nil, 1, nil)
 	ctx := context.Background()
 
 	// EmitEvent returns a fixed state regardless of caller input.
@@ -349,7 +349,7 @@ func TestWrite_Get_SharedStore_WithUpcasting(t *testing.T) {
 	ctx := context.Background()
 
 	// Write at schema v1 using the shared store.
-	esV1 := New[order](s, s, nil, 1)
+	esV1 := New[order](s, s, nil, 1, nil)
 	_, err := esV1.Write(ctx, nil, cmd(order{Status: "OldSchema"}))
 	if err != nil {
 		t.Fatalf("Write v1: %v", err)
@@ -360,7 +360,7 @@ func TestWrite_Get_SharedStore_WithUpcasting(t *testing.T) {
 	upcasters := map[int]asynxmd.Upcaster{
 		1: func(_ context.Context, _ string, p []byte) ([]byte, error) { return p, nil },
 	}
-	esV2 := New[order](s, s, upcasters, 2)
+	esV2 := New[order](s, s, upcasters, 2, nil)
 
 	got, err := esV2.Get(ctx, "agg1")
 	if err != nil {
@@ -374,6 +374,34 @@ func TestWrite_Get_SharedStore_WithUpcasting(t *testing.T) {
 	snaps, _ := s.ReadFrom(ctx, "snapshots:agg1", 0)
 	if len(snaps) != 1 {
 		t.Fatalf("expected 1 auto-snapshot, got %d (upcaster path not exercised)", len(snaps))
+	}
+}
+
+// --- WithCorruptionHook ---
+
+func TestNew_WithCorruptionHook_CalledOnCorruptSnapshot(t *testing.T) {
+	es := store.New()
+	ss := store.New()
+	ctx := context.Background()
+
+	// Write a real event.
+	es.Append(ctx, "events:agg1", 1, mustMarshal(struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+		Total  int    `json:"total"`
+	}{})) //nolint:errcheck
+
+	// Write a corrupt snapshot blob.
+	ss.Append(ctx, "snapshots:agg1", 1, []byte(`not-valid-json`)) //nolint:errcheck
+
+	var hookCalled bool
+	eventstore := New[order](es, ss, nil, 1, func(err error) {
+		hookCalled = true
+	})
+
+	_, _ = eventstore.Get(ctx, "agg1")
+	if !hookCalled {
+		t.Error("WithCorruptionHook: hook was not called on corrupt snapshot")
 	}
 }
 

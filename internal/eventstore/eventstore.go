@@ -11,7 +11,6 @@ package eventstore
 
 import (
 	"context"
-	"maps"
 
 	"github.com/char2cs/asynx/internal/eventstore/reader"
 	"github.com/char2cs/asynx/internal/eventstore/replayer"
@@ -30,39 +29,20 @@ type EventStore[T any] struct {
 // New builds a fully-configured EventStore. eventStore and snapshotStore may
 // be the same Store instance. upcasters maps SchemaVersion → migration func;
 // schemaVersion is the current (target) schema version for all new events.
+// onCorruption is called when a snapshot cannot be deserialized; pass nil to
+// silently fall back to the cold replay path.
 func New[T any](
 	eventStore asynxmd.Store,
 	snapshotStore asynxmd.Store,
 	upcasters map[int]asynxmd.Upcaster,
 	schemaVersion int,
+	onCorruption func(error),
 ) *EventStore[T] {
 	var zero T
 
-	clonedUpcasters := maps.Clone(upcasters)
-	if clonedUpcasters == nil {
-		clonedUpcasters = make(map[int]asynxmd.Upcaster)
-	}
-
-	r := &replayer.Replayer[T]{
-		EventStore:           eventStore,
-		SnapshotStore:        snapshotStore,
-		Upcasters:            clonedUpcasters,
-		CurrentSchemaVersion: schemaVersion,
-		StateZeroValue:       zero,
-	}
-
-	rd := &reader.Reader[T]{
-		EventStore:     eventStore,
-		SnapshotStore:  snapshotStore,
-		Replayer:       r,
-		StateZeroValue: zero,
-	}
-
-	w := &writer.Writer[T]{
-		EventStore:           eventStore,
-		SnapshotStore:        snapshotStore,
-		CurrentSchemaVersion: schemaVersion,
-	}
+	r := replayer.New[T](eventStore, upcasters, schemaVersion, zero)
+	w := writer.New[T](eventStore, snapshotStore, schemaVersion)
+	rd := reader.New[T](eventStore, snapshotStore, r, schemaVersion, zero, onCorruption)
 
 	return &EventStore[T]{
 		reader:   rd,

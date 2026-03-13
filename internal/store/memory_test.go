@@ -256,6 +256,47 @@ func TestReadRange_CountZero_ReturnsEmpty(t *testing.T) {
 	}
 }
 
+// --- Count ---
+
+func TestCount_ReturnsNumberOfEntriesFromVersion(t *testing.T) {
+	s := New()
+	ctx := context.Background()
+
+	s.Append(ctx, "agg1", 1, []byte("v1")) //nolint:errcheck
+	s.Append(ctx, "agg1", 2, []byte("v2")) //nolint:errcheck
+	s.Append(ctx, "agg1", 3, []byte("v3")) //nolint:errcheck
+
+	n, err := s.Count(ctx, "agg1", 2)
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("Count = %d, want 2", n)
+	}
+}
+
+func TestCount_EmptyAggregate_ReturnsZero(t *testing.T) {
+	s := New()
+	n, err := s.Count(context.Background(), "ghost", 1)
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("Count = %d, want 0", n)
+	}
+}
+
+func TestCount_CancelledContext_ReturnsError(t *testing.T) {
+	s := New()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := s.Count(ctx, "agg1", 1)
+	if err == nil {
+		t.Fatal("expected error for cancelled context, got nil")
+	}
+}
+
 // --- Out-of-order appends ---
 
 func TestAppend_OutOfOrder_ReadsInVersionOrder(t *testing.T) {

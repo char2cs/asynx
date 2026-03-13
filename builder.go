@@ -14,13 +14,14 @@ type ShardingOpts struct {
 }
 
 type Builder[T any] struct {
-	eventStore    models.Store
-	snapshotStore models.Store
-	bus           models.Bus[T]
-	shardingOpts  ShardingOpts
-	schemaVersion int
-	upcasters     map[int]models.Upcaster
-	panicHandler  models.PanicHandler[T]
+	eventStore      models.Store
+	snapshotStore   models.Store
+	bus             models.Bus[T]
+	shardingOpts    ShardingOpts
+	schemaVersion   int
+	upcasters       map[int]models.Upcaster
+	panicHandler    models.PanicHandler[T]
+	corruptionHook  func(error)
 }
 
 func New[T any]() *Builder[T] {
@@ -83,6 +84,14 @@ func (b *Builder[T]) WithPanicHandler(
 	return b
 }
 
+// WithCorruptionHook registers a callback invoked when a snapshot cannot be
+// deserialized. The hook receives the deserialization error and is called
+// before falling back to the cold replay path.
+func (b *Builder[T]) WithCorruptionHook(fn func(error)) *Builder[T] {
+	b.corruptionHook = fn
+	return b
+}
+
 // Build requires WithEventStore; all other options have defaults.
 func (b *Builder[T]) Build() (Asynx[T], error) {
 	if b.eventStore == nil {
@@ -95,12 +104,13 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 	}
 
 	return &asynxImpl[T]{
-		eventStore:    b.eventStore,
-		snapshotStore: snapshotStore,
-		bus:           b.bus,
-		shardingOpts:  b.shardingOpts,
-		schemaVersion: b.schemaVersion,
-		upcasters:     maps.Clone(b.upcasters),
-		panicHandler:  b.panicHandler,
+		eventStore:     b.eventStore,
+		snapshotStore:  snapshotStore,
+		bus:            b.bus,
+		shardingOpts:   b.shardingOpts,
+		schemaVersion:  b.schemaVersion,
+		upcasters:      maps.Clone(b.upcasters),
+		panicHandler:   b.panicHandler,
+		corruptionHook: b.corruptionHook,
 	}, nil
 }

@@ -27,14 +27,10 @@ func benchEventBlob(version int64, patches json.RawMessage) []byte {
 }
 
 func benchSnapshotBlob(version int64, state order) []byte {
-	stateBytes, err := json.Marshal(state)
-	if err != nil {
-		panic(err)
-	}
-	snap := esmodels.SnapshotBlob{
+	snap := esmodels.SnapshotBlob[order]{
 		Version:       version,
 		SchemaVersion: 1,
-		State:         stateBytes,
+		State:         state,
 	}
 	b, err := json.Marshal(snap)
 	if err != nil {

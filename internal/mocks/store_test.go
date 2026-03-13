@@ -34,6 +34,14 @@ func TestStore_ReadRange_ReturnsNilNil(t *testing.T) {
 	}
 }
 
+func TestStore_Count_ReturnsZeroNil(t *testing.T) {
+	s := &Store{}
+	n, err := s.Count(context.Background(), "agg1", 1)
+	if err != nil || n != 0 {
+		t.Errorf("Count = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
 // --- ErrStore ---
 
 func TestErrStore_Append_ReturnsErr(t *testing.T) {
@@ -59,6 +67,15 @@ func TestErrStore_ReadRange_ReturnsErr(t *testing.T) {
 	_, err := es.ReadRange(context.Background(), "agg1", 1, 10)
 	if !errors.Is(err, sentinel) {
 		t.Errorf("ReadRange = %v, want sentinel", err)
+	}
+}
+
+func TestErrStore_Count_ReturnsErr(t *testing.T) {
+	sentinel := errors.New("fail")
+	es := &ErrStore{Err: sentinel}
+	_, err := es.Count(context.Background(), "agg1", 1)
+	if !errors.Is(err, sentinel) {
+		t.Errorf("Count = %v, want sentinel", err)
 	}
 }
 
@@ -97,6 +114,17 @@ func TestCorruptBlobStore_ReadRange_ReturnsCorruptBlob(t *testing.T) {
 	}
 	if len(blobs) != 1 || string(blobs[0]) != "!!!invalid" {
 		t.Errorf("blobs = %v, want [!!!invalid]", blobs)
+	}
+}
+
+func TestCorruptBlobStore_Count_ReturnsOne(t *testing.T) {
+	c := &CorruptBlobStore{}
+	n, err := c.Count(context.Background(), "agg1", 1)
+	if err != nil {
+		t.Fatalf("Count error: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("Count = %d, want 1 (presence signal)", n)
 	}
 }
 
