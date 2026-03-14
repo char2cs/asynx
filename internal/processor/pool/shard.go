@@ -31,6 +31,7 @@ type Shard[T any] struct {
 	versionMutex    sync.Mutex
 	correctionChan  chan *versionCorrection
 	workersPerShard int
+	onDispatched    func()
 }
 
 type versionCorrection struct {
@@ -45,10 +46,10 @@ func newShard[T any](
 	return &Shard[T]{
 		id:              id,
 		commandChan:     make(chan *models.CommandEnvelope[T], queueDepth),
-		jobQueue:        make(chan *models.CommandJob[T]),
+		jobQueue:        make(chan *models.CommandJob[T], max(workersPerShard, queueDepth)),
 		stopChan:        make(chan struct{}),
 		versionMap:      make(map[string]int64),
-		correctionChan:  make(chan *versionCorrection),
+		correctionChan:  make(chan *versionCorrection, 1),
 		workersPerShard: workersPerShard,
 	}
 }
@@ -81,6 +82,9 @@ func (s *Shard[T]) handleDispatch() bool {
 			return true
 		}
 		s.dispatchJob(envelope)
+		if s.onDispatched != nil {
+			s.onDispatched()
+		}
 
 	case correction := <-s.correctionChan:
 		if s.workersPerShard == 1 {
@@ -187,4 +191,11 @@ func (s *Shard[T]) signalStop() {
 		close(s.stopChan)
 		s.stopClosed = true
 	}
+}
+
+// ForTesting: SetOnDispatched sets a callback invoked each time the dispatcher
+// reads a command from commandChan (slot is now free for new senders).
+// Do not call in production code.
+func (s *Shard[T]) SetOnDispatched(fn func()) {
+	s.onDispatched = fn
 }

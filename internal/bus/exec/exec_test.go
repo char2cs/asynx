@@ -213,12 +213,14 @@ func TestExecuteWithTimeout_FinishesBeforeTimeout(t *testing.T) {
 func TestExecuteWithTimeout_HandlerTimesOut(t *testing.T) {
 	started := make(chan struct{})
 	timedOut := make(chan struct{}, 1)
+	block := make(chan struct{})
+	defer close(block)
 
 	exec.ExecuteWithTimeout(
 		context.Background(),
 		func(_ context.Context, _ models.Event[string]) {
 			close(started)
-			time.Sleep(5 * time.Second)
+			<-block
 		},
 		ev("slow-event"),
 		20*time.Millisecond,
@@ -305,10 +307,13 @@ func TestExecuteHandler_CustomPanicCallback(t *testing.T) {
 func TestExecuteHandler_CustomTimeoutCallback(t *testing.T) {
 	fired := make(chan struct{}, 1)
 	started := make(chan struct{})
+	block := make(chan struct{})
+	defer close(block)
+
 	job := &exec.HandlerJob[string]{
 		Handler: func(_ context.Context, _ models.Event[string]) {
 			close(started)
-			time.Sleep(5 * time.Second)
+			<-block
 		},
 		Timeout:   20 * time.Millisecond,
 		Event:     ev("test"),

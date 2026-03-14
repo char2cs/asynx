@@ -155,14 +155,22 @@ func TestProcessor_ContextCancelledWhileWaiting(t *testing.T) {
 
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 
+	pending := make(chan struct{}, 1)
+	p.SetOnSendPending(func() {
+		select {
+		case pending <- struct{}{}:
+		default:
+		}
+	})
+
 	// Start send in background
 	done := make(chan error, 1)
 	go func() {
 		done <- p.Send(ctx, cmd)
 	}()
 
-	// Give it time to queue
-	time.Sleep(50 * time.Millisecond)
+	// Wait until Send is waiting for result
+	<-pending
 
 	// Cancel context
 	cancel()
@@ -406,8 +414,16 @@ func TestProcessor_SendContextCancelledDuringWait(t *testing.T) {
 
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 
+	pending := make(chan struct{}, 1)
+	p.SetOnSendPending(func() {
+		select {
+		case pending <- struct{}{}:
+		default:
+		}
+	})
+
 	go func() {
-		time.Sleep(10 * time.Millisecond)
+		<-pending
 		cancel()
 	}()
 

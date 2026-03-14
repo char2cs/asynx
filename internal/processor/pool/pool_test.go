@@ -269,7 +269,15 @@ func TestPool_QueueFullBlocksSender(t *testing.T) {
 
 	// Create a command that blocks to fill the queue
 	blocked := make(chan struct{})
+	dispatched := make(chan struct{}, 1)
 	unblock := make(chan struct{})
+
+	shard.SetOnDispatched(func() {
+		select {
+		case dispatched <- struct{}{}:
+		default:
+		}
+	})
 
 	blockingCmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 
@@ -288,7 +296,8 @@ func TestPool_QueueFullBlocksSender(t *testing.T) {
 
 	// Wait for first command to be queued
 	<-blocked
-	time.Sleep(50 * time.Millisecond) // Give it time to start processing
+	// Wait until dispatcher reads it (slot is now free)
+	<-dispatched
 
 	// Send should timeout or block quickly (showing queue is full)
 	normalEnvelope := &models.CommandEnvelope[order]{

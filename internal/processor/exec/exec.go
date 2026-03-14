@@ -13,14 +13,16 @@ package exec
 
 import (
 	"context"
+	"sync"
 
 	"github.com/char2cs/asynx/internal/eventstore"
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
 type CommandExecutor[T any] struct {
-	es  *eventstore.EventStore[T]
-	bus asynxmd.Bus[T]
+	es        *eventstore.EventStore[T]
+	bus       asynxmd.Bus[T]
+	publishWg sync.WaitGroup
 }
 
 func New[T any](
@@ -91,11 +93,19 @@ func (e *CommandExecutor[T]) publishAsync(
 		return
 	}
 
+	e.publishWg.Add(1)
 	go func() {
+		defer e.publishWg.Done()
 		publishCtx := context.WithoutCancel(ctx)
 		_ = e.bus.Publish(
 			publishCtx,
 			event,
 		)
 	}()
+}
+
+// ForTesting: WaitPublish blocks until all publishAsync goroutines complete.
+// Do not call in production code.
+func (e *CommandExecutor[T]) WaitPublish() {
+	e.publishWg.Wait()
 }

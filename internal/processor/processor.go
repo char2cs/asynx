@@ -13,7 +13,7 @@ package processor
 
 import (
 	"context"
-	"sync"
+	"sync/atomic"
 
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/processor/exec"
@@ -24,12 +24,12 @@ import (
 )
 
 type Processor[T any] struct {
-	pool         *pool.ShardPool[T]
-	router       *queue.Router
-	executor     *exec.CommandExecutor[T]
-	bus          asynxmd.Bus[T]
-	shutdownMu   sync.RWMutex
-	shuttingDown bool
+	pool           *pool.ShardPool[T]
+	router         *queue.Router
+	executor       *exec.CommandExecutor[T]
+	bus            asynxmd.Bus[T]
+	shuttingDown   atomic.Bool
+	onSendPending  func()
 }
 
 type ProcessorOpt[T any] func(*processorConfig)
@@ -71,11 +71,14 @@ func New[T any](
 ) *Processor[T] {
 	cfg := &processorConfig{
 		shards:          8,
-		queueDepth:      0,
+		queueDepth:      -1,
 		workersPerShard: 8,
 	}
 	for _, opt := range opts {
 		opt(cfg)
+	}
+	if cfg.queueDepth < 0 {
+		cfg.queueDepth = cfg.workersPerShard
 	}
 
 	executor := exec.New(
@@ -127,9 +130,7 @@ func (p *Processor[T]) Send(
 }
 
 func (p *Processor[T]) isShuttingDown() bool {
-	p.shutdownMu.RLock()
-	defer p.shutdownMu.RUnlock()
-	return p.shuttingDown
+	return p.shuttingDown.Load()
 }
 
 func (p *Processor[T]) sendAndWait(
@@ -143,6 +144,10 @@ func (p *Processor[T]) sendAndWait(
 		return asynxmd.ErrContextCancelled
 	default:
 		return asynxmd.ErrQueueFull
+	}
+
+	if p.onSendPending != nil {
+		p.onSendPending()
 	}
 
 	select {
@@ -166,15 +171,7 @@ func (p *Processor[T]) Shutdown(ctx context.Context) error {
 }
 
 func (p *Processor[T]) setShuttingDown() bool {
-	p.shutdownMu.Lock()
-	defer p.shutdownMu.Unlock()
-
-	if p.shuttingDown {
-		return false
-	}
-
-	p.shuttingDown = true
-	return true
+	return p.shuttingDown.CompareAndSwap(false, true)
 }
 
 func (p *Processor[T]) closeBus(ctx context.Context) error {
@@ -182,4 +179,17 @@ func (p *Processor[T]) closeBus(ctx context.Context) error {
 		return nil
 	}
 	return p.bus.Close(ctx)
+}
+
+// ForTesting: WaitPublish blocks until all async event publishes complete.
+// Do not call in production code.
+func (p *Processor[T]) WaitPublish() {
+	p.executor.WaitPublish()
+}
+
+// ForTesting: SetOnSendPending sets a callback invoked after a command is
+// enqueued but before Send blocks waiting for its result.
+// Do not call in production code.
+func (p *Processor[T]) SetOnSendPending(fn func()) {
+	p.onSendPending = fn
 }

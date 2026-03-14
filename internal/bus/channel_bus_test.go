@@ -117,10 +117,13 @@ func TestSubscribeWithHandlerTimeout(t *testing.T) {
 	b := newBus[string]()
 
 	started := make(chan struct{})
+	block := make(chan struct{})
+	defer close(block)
+
 	_, err := b.Subscribe("test",
 		func(_ context.Context, e models.Event[string]) {
 			close(started)
-			time.Sleep(500 * time.Millisecond)
+			<-block
 		},
 		models.WithHandlerTimeout[string](30*time.Millisecond),
 	)
@@ -403,6 +406,9 @@ func TestChannelBus_WithPanicHandler(t *testing.T) {
 func TestChannelBus_WithTimeoutHandler(t *testing.T) {
 	fired := make(chan struct{}, 1)
 	started := make(chan struct{})
+	block := make(chan struct{})
+	defer close(block)
+
 	b := bus.NewChannelBus[string](
 		bus.WithTimeoutHandler[string](func(_ context.Context, _ models.Event[string], _ time.Duration) {
 			fired <- struct{}{}
@@ -412,7 +418,7 @@ func TestChannelBus_WithTimeoutHandler(t *testing.T) {
 	b.Subscribe("test",
 		func(_ context.Context, _ models.Event[string]) {
 			close(started)
-			time.Sleep(5 * time.Second)
+			<-block
 		},
 		models.WithHandlerTimeout[string](20*time.Millisecond),
 	)
@@ -584,13 +590,23 @@ func TestCloseWaitsForHandlers(t *testing.T) {
 	b := newBus[string]()
 
 	var handlerDone atomic.Bool
+	block := make(chan struct{})
+
 	b.Subscribe("test", func(_ context.Context, _ models.Event[string]) {
-		time.Sleep(50 * time.Millisecond)
+		<-block
 		handlerDone.Store(true)
 	})
 
 	b.Publish(context.Background(), ev("test"))
-	closeAndWait(t, b)
+
+	closeDone := make(chan struct{})
+	go func() {
+		closeAndWait(t, b)
+		close(closeDone)
+	}()
+
+	close(block)
+	<-closeDone
 
 	if !handlerDone.Load() {
 		t.Error("Close returned before handler finished")
@@ -600,8 +616,11 @@ func TestCloseWaitsForHandlers(t *testing.T) {
 func TestCloseDeadlineExceeded(t *testing.T) {
 	b := newBus[string]()
 
+	block := make(chan struct{})
+	defer close(block)
+
 	b.Subscribe("test", func(_ context.Context, _ models.Event[string]) {
-		time.Sleep(500 * time.Millisecond)
+		<-block
 	})
 
 	b.Publish(context.Background(), ev("test"))

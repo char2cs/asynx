@@ -2,6 +2,7 @@ package pool_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/char2cs/asynx/internal/bus"
@@ -42,7 +43,7 @@ func BenchmarkPool_Send_SingleShard(b *testing.B) {
 
 func BenchmarkPool_Send_MultiShard(b *testing.B) {
 	for _, shards := range []int{1, 4, 8, 16} {
-		b.Run("shards="+string(rune('0'+shards/10)), func(b *testing.B) {
+		b.Run(fmt.Sprintf("shards=%d", shards), func(b *testing.B) {
 			s := store.New()
 			bu := bus.NewChannelBus[order]()
 			es := eventstore.New[order](s, s, nil, 1, nil)
