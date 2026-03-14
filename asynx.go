@@ -3,6 +3,8 @@ package asynx
 import (
 	"context"
 
+	"github.com/char2cs/asynx/internal/eventstore"
+	"github.com/char2cs/asynx/internal/processor"
 	"github.com/char2cs/asynx/models"
 )
 
@@ -11,7 +13,9 @@ type Asynx[T any] interface {
 		ctx context.Context,
 		cmd models.Command[T],
 	) error
-	Shutdown(ctx context.Context) error
+	Shutdown(
+		ctx context.Context,
+	) error
 
 	Get(
 		ctx context.Context,
@@ -31,7 +35,9 @@ type Asynx[T any] interface {
 		handler models.ProjectionHandler[T],
 		opts ...models.SubscriptionOpt[T],
 	) (string, error)
-	Unsubscribe(id string) error
+	Unsubscribe(
+		id string,
+	) error
 
 	Replay(
 		ctx context.Context,
@@ -43,14 +49,20 @@ type Asynx[T any] interface {
 }
 
 type asynxImpl[T any] struct {
-	eventStore      models.Store
-	snapshotStore   models.Store
-	bus             models.Bus[T]
-	shardingOpts    ShardingOpts
-	schemaVersion   int
-	upcasters       map[int]models.Upcaster
-	panicHandler    models.PanicHandler[T]
-	corruptionHook  func(error)
+	proc *processor.Processor[T]
+	es   *eventstore.EventStore[T]
+
+	eventStore    models.Store
+	snapshotStore models.Store
+	bus           models.Bus[T]
+
+	shardingOpts ShardingOpts
+
+	schemaVersion int
+	upcasters     map[int]models.Upcaster
+
+	panicHandler   models.PanicHandler[T]
+	corruptionHook func(error)
 }
 
 func (i *asynxImpl[T]) Send(
