@@ -133,15 +133,8 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 	)
 
 	return &asynxImpl[T]{
-		proc:           proc,
-		es:             es,
-		eventStore:     b.eventStore,
-		snapshotStore:  snapshotStore,
-		bus:            activeBus,
-		shardingOpts:   b.shardingOpts,
-		schemaVersion:  b.schemaVersion,
-		upcasters:      maps.Clone(b.upcasters),
-		panicHandler:   b.panicHandler,
-		corruptionHook: b.corruptionHook,
+		proc: proc,
+		es:   es,
+		bus:  activeBus,
 	}, nil
 }

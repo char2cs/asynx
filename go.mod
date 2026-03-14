@@ -1,6 +1,6 @@
 module github.com/char2cs/asynx
 
-go 1.26
+go 1.25
 
 require (
 	github.com/evanphx/json-patch/v5 v5.9.11

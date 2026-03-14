@@ -53,18 +53,7 @@ type Asynx[T any] interface {
 type asynxImpl[T any] struct {
 	proc *processor.Processor[T]
 	es   *eventstore.EventStore[T]
-
-	eventStore    models.Store
-	snapshotStore models.Store
-	bus           models.Bus[T]
-
-	shardingOpts ShardingOpts
-
-	schemaVersion int
-	upcasters     map[int]models.Upcaster
-
-	panicHandler   models.PanicHandler[T]
-	corruptionHook func(error)
+	bus  models.Bus[T]
 }
 
 func (i *asynxImpl[T]) Send(
