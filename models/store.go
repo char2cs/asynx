@@ -26,5 +26,9 @@ type Store interface {
 	) ([][]byte, error)
 
 	// Count returns the number of entries with version >= fromVersion.
-	Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error)
+	Count(
+		ctx context.Context,
+		aggregateID string,
+		fromVersion int64,
+	) (int64, error)
 }
