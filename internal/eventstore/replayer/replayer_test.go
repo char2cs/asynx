@@ -228,7 +228,7 @@ func TestReplay_EmptyStore_ReturnsNil(t *testing.T) {
 	r := newTestReplayer(store.New(), nil, 1)
 
 	var called bool
-	err := r.Replay(context.Background(), "agg1", 1, 0, func(asynxmd.Event[order]) { called = true })
+	err := r.Replay(context.Background(), "agg1", 1, 0, func(ctx context.Context, e asynxmd.Event[order]) { called = true })
 	if err != nil {
 		t.Fatalf("Replay on empty store: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestReplay_AllEvents(t *testing.T) {
 	r := newTestReplayer(es, nil, 1)
 
 	var got []asynxmd.Event[order]
-	err := r.Replay(ctx, "agg1", 1, 0, func(e asynxmd.Event[order]) {
+	err := r.Replay(ctx, "agg1", 1, 0, func(ctx context.Context, e asynxmd.Event[order]) {
 		got = append(got, e)
 	})
 	if err != nil {
@@ -277,7 +277,7 @@ func TestReplay_WithVersionRange(t *testing.T) {
 	r := newTestReplayer(es, nil, 1)
 
 	var got []asynxmd.Event[order]
-	err := r.Replay(ctx, "agg1", 2, 2, func(e asynxmd.Event[order]) { got = append(got, e) })
+	err := r.Replay(ctx, "agg1", 2, 2, func(ctx context.Context, e asynxmd.Event[order]) { got = append(got, e) })
 	if err != nil {
 		t.Fatalf("Replay with range: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestReplay_PreviousAggregate_CorrectForMidStreamStart(t *testing.T) {
 
 	// Replay only events 3, which should have PreviousAggregate with Status="Updated" (from event 2)
 	var got []asynxmd.Event[order]
-	err := r.Replay(ctx, "agg1", 3, 3, func(e asynxmd.Event[order]) { got = append(got, e) })
+	err := r.Replay(ctx, "agg1", 3, 3, func(ctx context.Context, e asynxmd.Event[order]) { got = append(got, e) })
 	if err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestReplay_PreviousAggregate_CorrectForMidStreamStart(t *testing.T) {
 func TestReplay_StorageError(t *testing.T) {
 	r := newTestReplayer(&mocks.ErrStore{Err: storageErr}, nil, 1)
 
-	err := r.Replay(context.Background(), "agg1", 1, 0, func(asynxmd.Event[order]) {})
+	err := r.Replay(context.Background(), "agg1", 1, 0, func(ctx context.Context, e asynxmd.Event[order]) {})
 	if err == nil {
 		t.Fatal("expected storage error")
 	}
@@ -341,7 +341,7 @@ func TestReplay_StorageError(t *testing.T) {
 func TestReplay_ReadRangeError(t *testing.T) {
 	r := newTestReplayer(&mocks.ErrStore{Err: storageErr}, nil, 1)
 
-	err := r.Replay(context.Background(), "agg1", 1, 2, func(asynxmd.Event[order]) {})
+	err := r.Replay(context.Background(), "agg1", 1, 2, func(ctx context.Context, e asynxmd.Event[order]) {})
 	if !errors.Is(err, storageErr) {
 		t.Errorf("err = %v, want storageErr", err)
 	}
@@ -350,7 +350,7 @@ func TestReplay_ReadRangeError(t *testing.T) {
 func TestReplay_CorruptEventBlob(t *testing.T) {
 	r := newTestReplayer(&mocks.CorruptBlobStore{}, nil, 1)
 
-	err := r.Replay(context.Background(), "agg1", 1, 0, func(asynxmd.Event[order]) {})
+	err := r.Replay(context.Background(), "agg1", 1, 0, func(ctx context.Context, e asynxmd.Event[order]) {})
 	if err == nil {
 		t.Fatal("expected error on corrupt event blob")
 	}
@@ -365,7 +365,7 @@ func TestReplay_NoAutoSnapshot(t *testing.T) {
 
 	es.Append(context.Background(), "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, json.RawMessage(`[]`))) //nolint:errcheck
 
-	err := r.Replay(context.Background(), "agg1", 1, 0, func(asynxmd.Event[order]) {})
+	err := r.Replay(context.Background(), "agg1", 1, 0, func(ctx context.Context, e asynxmd.Event[order]) {})
 	if err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
@@ -523,7 +523,7 @@ func TestReplay_UpcasterError(t *testing.T) {
 
 	r := newTestReplayer(es, upcasters, 2)
 
-	err := r.Replay(ctx, "agg1", 1, 0, func(asynxmd.Event[order]) {})
+	err := r.Replay(ctx, "agg1", 1, 0, func(ctx context.Context, e asynxmd.Event[order]) {})
 	if !errors.Is(err, upcastErr) {
 		t.Errorf("err = %v, want upcastErr", err)
 	}
@@ -538,7 +538,7 @@ func TestReplay_PatchApplyError(t *testing.T) {
 
 	r := newTestReplayer(es, nil, 1)
 
-	err := r.Replay(ctx, "agg1", 1, 0, func(asynxmd.Event[order]) {})
+	err := r.Replay(ctx, "agg1", 1, 0, func(ctx context.Context, e asynxmd.Event[order]) {})
 	if err == nil {
 		t.Fatal("expected error from failed patch application in Replay")
 	}
@@ -553,7 +553,7 @@ func TestReplay_MarshalStateZeroValueError(t *testing.T) {
 
 	r := New[mocks.ErrMarshal](es, make(map[int]asynxmd.Upcaster), 1, mocks.ErrMarshal{})
 
-	err := r.Replay(ctx, "agg1", 1, 0, func(asynxmd.Event[mocks.ErrMarshal]) {})
+	err := r.Replay(ctx, "agg1", 1, 0, func(ctx context.Context, e asynxmd.Event[mocks.ErrMarshal]) {})
 	if err == nil {
 		t.Fatal("expected marshal error on stateZeroValue")
 	}
@@ -568,7 +568,7 @@ func TestReplay_UnmarshalCurrentError(t *testing.T) {
 
 	r := New[mocks.BadUnmarshal](es, make(map[int]asynxmd.Upcaster), 1, mocks.BadUnmarshal{})
 
-	err := r.Replay(ctx, "agg1", 1, 0, func(asynxmd.Event[mocks.BadUnmarshal]) {})
+	err := r.Replay(ctx, "agg1", 1, 0, func(ctx context.Context, e asynxmd.Event[mocks.BadUnmarshal]) {})
 	if err == nil {
 		t.Fatal("expected unmarshal error in Replay loop")
 	}

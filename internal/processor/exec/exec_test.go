@@ -274,6 +274,10 @@ func (m *trackingBusMock[T]) Close(ctx context.Context) error {
 	return nil
 }
 
+func (m *trackingBusMock[T]) WaitForHandlers() {
+	// No-op for mock bus
+}
+
 func TestExecute_ContextAlreadyCancelled(t *testing.T) {
 	s := store.New()
 	es := eventstore.New[order](s, s, nil, 1, nil)

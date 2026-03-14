@@ -30,3 +30,7 @@ func (b *Bus[T]) Unsubscribe(_ string) error {
 func (b *Bus[T]) Close(_ context.Context) error {
 	return nil
 }
+
+func (b *Bus[T]) WaitForHandlers() {
+	// No-op for mock bus
+}

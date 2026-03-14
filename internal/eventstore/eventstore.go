@@ -125,7 +125,7 @@ func (es *EventStore[T]) Replay(
 	aggregateID string,
 	fromVersion int64,
 	toVersion int64,
-	fn func(asynxmd.Event[T]),
+	fn asynxmd.ProjectionHandler[T],
 ) error {
 	return es.replayer.Replay(ctx, aggregateID, fromVersion, toVersion, fn)
 }

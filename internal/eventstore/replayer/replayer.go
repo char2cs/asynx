@@ -123,7 +123,7 @@ func (r *Replayer[T]) Replay(
 	aggregateID string,
 	fromVersion int64,
 	toVersion int64,
-	fn func(asynxmd.Event[T]),
+	fn asynxmd.ProjectionHandler[T],
 ) error {
 	// Always start from version 1 to populate previous state correctly
 	eventBlobs, err := r.eventStore.ReadFrom(ctx, "events:"+aggregateID, 1)
@@ -166,7 +166,7 @@ func (r *Replayer[T]) Replay(
 
 		// Only invoke fn if we're within the requested range
 		if currentVersion >= fromVersion && (toVersion == 0 || currentVersion <= toVersion) {
-			fn(asynxmd.Event[T]{
+			fn(ctx, asynxmd.Event[T]{
 				ID:                upcastedEvt.ID,
 				AggregateID:       aggregateID,
 				EventName:         upcastedEvt.EventName,

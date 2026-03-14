@@ -172,7 +172,7 @@ func TestReplay_VisitsAllEvents(t *testing.T) {
 	es.Write(ctx, &order{Status: "Shipped", Total: 100}, cmd(order{Status: "Delivered", Total: 100})) //nolint:errcheck
 
 	var got []asynxmd.Event[order]
-	err := es.Replay(ctx, "agg1", 1, 0, func(e asynxmd.Event[order]) {
+	err := es.Replay(ctx, "agg1", 1, 0, func(ctx context.Context, e asynxmd.Event[order]) {
 		got = append(got, e)
 	})
 	if err != nil {
@@ -195,7 +195,7 @@ func TestReplay_WithVersionRange(t *testing.T) {
 	es.Write(ctx, &order{Status: "v2"}, cmd(order{Status: "v3"})) //nolint:errcheck
 
 	var got []asynxmd.Event[order]
-	err := es.Replay(ctx, "agg1", 2, 3, func(e asynxmd.Event[order]) {
+	err := es.Replay(ctx, "agg1", 2, 3, func(ctx context.Context, e asynxmd.Event[order]) {
 		got = append(got, e)
 	})
 	if err != nil {
@@ -229,7 +229,7 @@ func TestWrite_Get_WithUpcasting(t *testing.T) {
 	// (In practice the stores are shared; simulate by using the same underlying
 	// store obtained via Replay on esV1.)
 	var rawBlobs [][]byte
-	esV1.Replay(ctx, "agg1", 1, 0, func(e asynxmd.Event[order]) { //nolint:errcheck
+	esV1.Replay(ctx, "agg1", 1, 0, func(ctx context.Context, e asynxmd.Event[order]) { //nolint:errcheck
 		_ = e // just verifying replay works
 	})
 
