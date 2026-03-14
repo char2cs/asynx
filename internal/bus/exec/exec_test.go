@@ -378,3 +378,18 @@ func TestOnHandlerTimeout_Smoke(t *testing.T) {
 		t.Errorf("expected timeout duration in output, got: %q", output)
 	}
 }
+
+// 11. Handler panics and onPanic callback itself panics — process returns cleanly, no goroutine hang.
+func TestExecuteWithTimeout_PanicCallbackPanics(t *testing.T) {
+	done := make(chan struct{})
+	exec.ExecuteWithTimeout(
+		context.Background(),
+		func(_ context.Context, _ models.Event[string]) { panic("handler panics") },
+		ev("x"),
+		5*time.Second,
+		func(_ any) { panic("callback panics") },
+		nil,
+	)
+	close(done)
+	// If we reach here without hanging or crashing, the test passes.
+}

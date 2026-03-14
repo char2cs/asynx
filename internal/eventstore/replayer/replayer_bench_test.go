@@ -92,7 +92,7 @@ func BenchmarkReplay(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				if err := r.Replay(ctx, "agg1", 1, 0, func(e asynxmd.Event[order]) {}); err != nil {
+				if err := r.Replay(ctx, "agg1", 1, 0, func(ctx context.Context, e asynxmd.Event[order]) {}); err != nil {
 					b.Fatal(err)
 				}
 			}

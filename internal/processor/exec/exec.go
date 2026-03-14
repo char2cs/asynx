@@ -13,6 +13,8 @@ package exec
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/char2cs/asynx/internal/eventstore"
@@ -40,49 +42,17 @@ func (e *CommandExecutor[T]) Execute(
 	cmd asynxmd.Command[T],
 	nextVersion int64,
 ) error {
-	state, err := e.loadState(
-		ctx,
-		cmd,
-	)
+	event, err := e.es.Write(ctx, cmd)
 	if err != nil {
-		return err
+		if errors.Is(err, asynxmd.ErrValidation) {
+			return err
+		}
+
+		return fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 	}
 
-	if err := cmd.Validate(state); err != nil {
-		return err
-	}
-
-	event, err := e.es.Write(
-		ctx,
-		state,
-		cmd,
-	)
-	if err != nil {
-		return asynxmd.ErrPipelineFailed
-	}
-
-	e.publishAsync(
-		ctx,
-		event,
-	)
+	e.publishAsync(ctx, event)
 	return nil
-}
-
-func (e *CommandExecutor[T]) loadState(
-	ctx context.Context,
-	cmd asynxmd.Command[T],
-) (*T, error) {
-	state, err := e.es.Get(
-		ctx,
-		cmd.AggregateID(),
-	)
-	if err == asynxmd.ErrNotFound {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, asynxmd.ErrPipelineFailed
-	}
-	return &state, nil
 }
 
 func (e *CommandExecutor[T]) publishAsync(

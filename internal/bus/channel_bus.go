@@ -1,3 +1,14 @@
+// ChannelBus is an in-process event bus that dispatches events to subscribers
+// via goroutines. It implements asynx.Bus[T].
+//
+// Hot path (Publish) is lock-free for index reads: it atomically loads an
+// immutable snapshot of subscriptions and iterates it without holding any mutex.
+// The only brief critical section in Publish is the closed-check + WaitGroup.Add,
+// which uses a separate RWMutex held for nanoseconds.
+//
+// Subscribe and Unsubscribe mutate the index under an exclusive mutex and store
+// a freshly-built PublishIndex atomically, so in-flight Publish calls reading
+// the old snapshot are never disturbed.
 package bus
 
 import (
@@ -32,17 +43,6 @@ func WithTimeoutHandler[T any](fn asynxmd.TimeoutHandler[T]) ChannelBusOpt[T] {
 	}
 }
 
-// ChannelBus is an in-process event bus that dispatches events to subscribers
-// via goroutines. It implements asynx.Bus[T].
-//
-// Hot path (Publish) is lock-free for index reads: it atomically loads an
-// immutable snapshot of subscriptions and iterates it without holding any mutex.
-// The only brief critical section in Publish is the closed-check + WaitGroup.Add,
-// which uses a separate RWMutex held for nanoseconds.
-//
-// Subscribe and Unsubscribe mutate the index under an exclusive mutex and store
-// a freshly-built PublishIndex atomically, so in-flight Publish calls reading
-// the old snapshot are never disturbed.
 type ChannelBus[T any] struct {
 	// Subscription management — exclusive, infrequent.
 	subMu         sync.Mutex
@@ -59,7 +59,7 @@ type ChannelBus[T any] struct {
 	// Pattern compilation cache — separate lock, unrelated to subscriptions.
 	patternMu        sync.RWMutex
 	compiledPatterns map[string]*regexp.Regexp
-	patternErrors    map[string]error  // Caches compilation errors to avoid recompilation
+	patternErrors    map[string]error // Caches compilation errors to avoid recompilation
 
 	// Optional bus-level callback overrides passed to every HandlerJob.
 	onPanic   asynxmd.PanicHandler[T]
@@ -227,13 +227,11 @@ func (b *ChannelBus[T]) getCompiledPattern(
 ) (*regexp.Regexp, error) {
 	b.patternMu.RLock()
 
-	// Check if already compiled
 	if compiled, ok := b.compiledPatterns[pattern]; ok {
 		b.patternMu.RUnlock()
 		return compiled, nil
 	}
 
-	// Check if already determined to be invalid (cached error)
 	if err, cached := b.patternErrors[pattern]; cached {
 		b.patternMu.RUnlock()
 		return nil, err
@@ -241,25 +239,27 @@ func (b *ChannelBus[T]) getCompiledPattern(
 
 	b.patternMu.RUnlock()
 
-	// Try to compile outside the lock
 	compiled, err := regexp.Compile(pattern)
 	if err != nil {
-		// Cache the error to avoid recompilation
 		b.patternMu.Lock()
 		b.patternErrors[pattern] = err
 		b.patternMu.Unlock()
 		return nil, err
 	}
 
-	// Store the successful compilation
 	b.patternMu.Lock()
 	defer b.patternMu.Unlock()
 
-	// Double-check in case another goroutine compiled it
 	if existing, ok := b.compiledPatterns[pattern]; ok {
 		return existing, nil
 	}
 
 	b.compiledPatterns[pattern] = compiled
 	return compiled, nil
+}
+
+// WaitForHandlers blocks until all in-flight handler executions complete.
+// Only for use in tests; do not call in production code.
+func (b *ChannelBus[T]) WaitForHandlers() {
+	b.inFlightWg.Wait()
 }

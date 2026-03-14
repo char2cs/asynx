@@ -3,6 +3,9 @@ package asynx
 import (
 	"maps"
 
+	"github.com/char2cs/asynx/internal/bus"
+	"github.com/char2cs/asynx/internal/eventstore"
+	"github.com/char2cs/asynx/internal/processor"
 	"github.com/char2cs/asynx/models"
 )
 
@@ -103,10 +106,38 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 		snapshotStore = b.eventStore
 	}
 
+	activeBus := b.bus
+	if activeBus == nil {
+		if b.panicHandler != nil {
+			activeBus = bus.NewChannelBus[T](
+				bus.WithPanicHandler[T](b.panicHandler),
+			)
+		} else {
+			activeBus = bus.NewChannelBus[T]()
+		}
+	}
+
+	es := eventstore.New[T](
+		b.eventStore,
+		snapshotStore,
+		maps.Clone(b.upcasters),
+		b.schemaVersion,
+		b.corruptionHook,
+	)
+
+	proc := processor.New(
+		es,
+		activeBus,
+		processor.WithShards[T](b.shardingOpts.Shards),
+		processor.WithQueueDepth[T](b.shardingOpts.QueueDepth),
+	)
+
 	return &asynxImpl[T]{
+		proc:           proc,
+		es:             es,
 		eventStore:     b.eventStore,
 		snapshotStore:  snapshotStore,
-		bus:            b.bus,
+		bus:            activeBus,
 		shardingOpts:   b.shardingOpts,
 		schemaVersion:  b.schemaVersion,
 		upcasters:      maps.Clone(b.upcasters),

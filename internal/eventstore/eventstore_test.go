@@ -32,7 +32,7 @@ func TestWrite_Get_RoundTrip(t *testing.T) {
 	es := New[order](store.New(), store.New(), nil, 1, nil)
 	ctx := context.Background()
 
-	_, err := es.Write(ctx, nil, cmd(order{ID: "1", Status: "Pending", Total: 100}))
+	_, err := es.Write(ctx, cmd(order{ID: "1", Status: "Pending", Total: 100}))
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -50,12 +50,12 @@ func TestWrite_MultipleEvents_GetReturnsLatest(t *testing.T) {
 	es := New[order](store.New(), store.New(), nil, 1, nil)
 	ctx := context.Background()
 
-	evt1, err := es.Write(ctx, nil, cmd(order{Status: "Pending"}))
+	_, err := es.Write(ctx, cmd(order{Status: "Pending"}))
 	if err != nil {
 		t.Fatalf("Write #1: %v", err)
 	}
 
-	_, err = es.Write(ctx, &evt1.Aggregate, cmd(order{Status: "Shipped", Total: 200}))
+	_, err = es.Write(ctx, cmd(order{Status: "Shipped", Total: 200}))
 	if err != nil {
 		t.Fatalf("Write #2: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestWrite_VersionsAreConsecutive(t *testing.T) {
 	ctx := context.Background()
 
 	for i := int64(1); i <= 5; i++ {
-		evt, err := es.Write(ctx, nil, cmdEmpty())
+		evt, err := es.Write(ctx, cmdEmpty())
 		if err != nil {
 			t.Fatalf("Write #%d: %v", i, err)
 		}
@@ -90,7 +90,7 @@ func TestWrite_WithSnapshot_AcceleratesGet(t *testing.T) {
 	ctx := context.Background()
 
 	// Write with snapshot at version 1.
-	_, err := es.Write(ctx, nil, cmdSnap(order{Status: "Snapped"}))
+	_, err := es.Write(ctx, cmdSnap(order{Status: "Snapped"}))
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestExists_TrueAfterWrite(t *testing.T) {
 	es := New[order](store.New(), store.New(), nil, 1, nil)
 	ctx := context.Background()
 
-	es.Write(ctx, nil, cmdEmpty()) //nolint:errcheck
+	es.Write(ctx, cmdEmpty()) //nolint:errcheck
 
 	ok, err := es.Exists(ctx, "agg1")
 	if err != nil {
@@ -146,7 +146,7 @@ func TestPreload_NoErrorForExistingAggregate(t *testing.T) {
 	es := New[order](store.New(), store.New(), nil, 1, nil)
 	ctx := context.Background()
 
-	es.Write(ctx, nil, cmd(order{Status: "Ready"})) //nolint:errcheck
+	es.Write(ctx, cmd(order{Status: "Ready"})) //nolint:errcheck
 
 	if err := es.Preload(ctx, "agg1"); err != nil {
 		t.Errorf("Preload: %v", err)
@@ -167,12 +167,12 @@ func TestReplay_VisitsAllEvents(t *testing.T) {
 	es := New[order](store.New(), store.New(), nil, 1, nil)
 	ctx := context.Background()
 
-	es.Write(ctx, nil, cmd(order{Status: "Pending"}))                                                 //nolint:errcheck
-	es.Write(ctx, &order{Status: "Pending"}, cmd(order{Status: "Shipped", Total: 100}))               //nolint:errcheck
-	es.Write(ctx, &order{Status: "Shipped", Total: 100}, cmd(order{Status: "Delivered", Total: 100})) //nolint:errcheck
+	es.Write(ctx, cmd(order{Status: "Pending"}))                                                 //nolint:errcheck
+	es.Write(ctx, cmd(order{Status: "Shipped", Total: 100}))               //nolint:errcheck
+	es.Write(ctx, cmd(order{Status: "Delivered", Total: 100})) //nolint:errcheck
 
 	var got []asynxmd.Event[order]
-	err := es.Replay(ctx, "agg1", 1, 0, func(e asynxmd.Event[order]) {
+	err := es.Replay(ctx, "agg1", 1, 0, func(ctx context.Context, e asynxmd.Event[order]) {
 		got = append(got, e)
 	})
 	if err != nil {
@@ -190,12 +190,12 @@ func TestReplay_WithVersionRange(t *testing.T) {
 	es := New[order](store.New(), store.New(), nil, 1, nil)
 	ctx := context.Background()
 
-	es.Write(ctx, nil, cmd(order{Status: "v1"}))                  //nolint:errcheck
-	es.Write(ctx, &order{Status: "v1"}, cmd(order{Status: "v2"})) //nolint:errcheck
-	es.Write(ctx, &order{Status: "v2"}, cmd(order{Status: "v3"})) //nolint:errcheck
+	es.Write(ctx, cmd(order{Status: "v1"}))                  //nolint:errcheck
+	es.Write(ctx, cmd(order{Status: "v2"})) //nolint:errcheck
+	es.Write(ctx, cmd(order{Status: "v3"})) //nolint:errcheck
 
 	var got []asynxmd.Event[order]
-	err := es.Replay(ctx, "agg1", 2, 3, func(e asynxmd.Event[order]) {
+	err := es.Replay(ctx, "agg1", 2, 3, func(ctx context.Context, e asynxmd.Event[order]) {
 		got = append(got, e)
 	})
 	if err != nil {
@@ -220,7 +220,7 @@ func TestWrite_Get_WithUpcasting(t *testing.T) {
 
 	// Write at schema v1 (bypass: write directly via a v1 eventstore).
 	esV1 := New[order](store.New(), store.New(), nil, 1, nil)
-	_, err := esV1.Write(ctx, nil, cmd(order{Status: "OldSchema"}))
+	_, err := esV1.Write(ctx, cmd(order{Status: "OldSchema"}))
 	if err != nil {
 		t.Fatalf("Write v1: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestWrite_Get_WithUpcasting(t *testing.T) {
 	// (In practice the stores are shared; simulate by using the same underlying
 	// store obtained via Replay on esV1.)
 	var rawBlobs [][]byte
-	esV1.Replay(ctx, "agg1", 1, 0, func(e asynxmd.Event[order]) { //nolint:errcheck
+	esV1.Replay(ctx, "agg1", 1, 0, func(ctx context.Context, e asynxmd.Event[order]) { //nolint:errcheck
 		_ = e // just verifying replay works
 	})
 
@@ -258,7 +258,7 @@ func TestWrite_ConcurrentConflict_AtLeastOneFails(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			_, errs[i] = es.Write(ctx, nil, cmdEmpty())
+			_, errs[i] = es.Write(ctx, cmdEmpty())
 		}(i)
 	}
 	close(start)
@@ -300,31 +300,13 @@ func TestNew_NilUpcasters_DoesNotPanic(t *testing.T) {
 
 // --- Validate / EmitEvent ---
 
-func TestWrite_ValidateError_DoesNotWrite(t *testing.T) {
-	s := store.New()
-	// mocks.CancelOrderCmd.Validate returns ErrValidation when current is nil.
-	es := New[order](s, store.New(), nil, 1, nil)
-	ctx := context.Background()
-
-	_, err := es.Write(ctx, nil, mocks.CancelOrderCmd{ID: "agg1"})
-	if !errors.Is(err, asynxmd.ErrValidation) {
-		t.Fatalf("err = %v, want ErrValidation", err)
-	}
-
-	// No event must have been written.
-	blobs, _ := s.ReadFrom(ctx, "events:agg1", 1)
-	if len(blobs) != 0 {
-		t.Errorf("expected no events written after Validate error, got %d", len(blobs))
-	}
-}
-
 func TestWrite_EmitEventDrivesStoredState(t *testing.T) {
 	es := New[order](store.New(), store.New(), nil, 1, nil)
 	ctx := context.Background()
 
 	// EmitEvent returns a fixed state regardless of caller input.
 	emitted := order{ID: "42", Status: "EmittedState", Total: 999}
-	evt, err := es.Write(ctx, nil, cmd(emitted))
+	evt, err := es.Write(ctx, cmd(emitted))
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -350,7 +332,7 @@ func TestWrite_Get_SharedStore_WithUpcasting(t *testing.T) {
 
 	// Write at schema v1 using the shared store.
 	esV1 := New[order](s, s, nil, 1, nil)
-	_, err := esV1.Write(ctx, nil, cmd(order{Status: "OldSchema"}))
+	_, err := esV1.Write(ctx, cmd(order{Status: "OldSchema"}))
 	if err != nil {
 		t.Fatalf("Write v1: %v", err)
 	}

@@ -23,4 +23,8 @@ type Bus[T any] interface {
 	Close(
 		ctx context.Context,
 	) error
+
+	// WaitForHandlers blocks until all in-flight handler executions complete.
+	// Only for use in tests; do not call in production code.
+	WaitForHandlers()
 }

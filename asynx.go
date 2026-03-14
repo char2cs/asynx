@@ -46,6 +46,8 @@ type Asynx[T any] interface {
 		toVersion int64,
 		fn models.ProjectionHandler[T],
 	) error
+
+	WaitPublish()
 }
 
 type asynxImpl[T any] struct {
@@ -69,32 +71,34 @@ func (i *asynxImpl[T]) Send(
 	ctx context.Context,
 	cmd models.Command[T],
 ) error {
-	panic("not implemented")
+	return i.proc.Send(ctx, cmd)
 }
 
-func (i *asynxImpl[T]) Shutdown(ctx context.Context) error {
-	panic("not implemented")
+func (i *asynxImpl[T]) Shutdown(
+	ctx context.Context,
+) error {
+	return i.proc.Shutdown(ctx)
 }
 
 func (i *asynxImpl[T]) Get(
 	ctx context.Context,
 	aggregateID string,
 ) (T, error) {
-	panic("not implemented")
+	return i.es.Get(ctx, aggregateID)
 }
 
 func (i *asynxImpl[T]) Exists(
 	ctx context.Context,
 	aggregateID string,
 ) (bool, error) {
-	panic("not implemented")
+	return i.es.Exists(ctx, aggregateID)
 }
 
 func (i *asynxImpl[T]) Preload(
 	ctx context.Context,
 	aggregateID string,
 ) error {
-	panic("not implemented")
+	return i.es.Preload(ctx, aggregateID)
 }
 
 func (i *asynxImpl[T]) Subscribe(
@@ -102,11 +106,11 @@ func (i *asynxImpl[T]) Subscribe(
 	handler models.ProjectionHandler[T],
 	opts ...models.SubscriptionOpt[T],
 ) (string, error) {
-	panic("not implemented")
+	return i.bus.Subscribe(pattern, handler, opts...)
 }
 
 func (i *asynxImpl[T]) Unsubscribe(id string) error {
-	panic("not implemented")
+	return i.bus.Unsubscribe(id)
 }
 
 func (i *asynxImpl[T]) Replay(
@@ -116,5 +120,12 @@ func (i *asynxImpl[T]) Replay(
 	toVersion int64,
 	fn models.ProjectionHandler[T],
 ) error {
-	panic("not implemented")
+	return i.es.Replay(ctx, aggregateID, fromVersion, toVersion, fn)
+}
+
+// WaitPublish blocks until all async event publishes complete.
+// Only for use in tests; do not call in production code.
+func (i *asynxImpl[T]) WaitPublish() {
+	i.proc.WaitPublish()
+	i.bus.WaitForHandlers()
 }
