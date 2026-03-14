@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -150,12 +151,14 @@ func TestExecute_WriteStorageError(t *testing.T) {
 
 	// Set up a storage error for the Append operation
 	// This causes Write to return an error which gets wrapped as ErrPipelineFailed
-	s.SetError("order1", asynxmd.ErrPipelineFailed)
+	// The writer prefixes aggregateID with "events:" before calling Append
+	someError := errors.New("storage error")
+	s.SetError("events:order1", someError)
 
 	err := executor.Execute(ctx, cmd, 1)
-	// The error from eventstore.Write should be wrapped/returned as ErrPipelineFailed
-	if err == nil || err != asynxmd.ErrPipelineFailed {
-		t.Logf("expected ErrPipelineFailed, got %v (may be wrapped differently)", err)
+	// The error from eventstore.Write should be wrapped as ErrPipelineFailed
+	if !errors.Is(err, asynxmd.ErrPipelineFailed) {
+		t.Errorf("expected ErrPipelineFailed, got %v", err)
 	}
 }
 

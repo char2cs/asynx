@@ -93,16 +93,18 @@ func ExecuteWithTimeout[T any](
 	done := make(chan struct{})
 
 	go func() {
+		defer close(done)
 		defer func() {
 			if r := recover(); r != nil {
 				if onPanic != nil {
-					onPanic(r)
+					func() {
+						defer func() { recover() }()
+						onPanic(r)
+					}()
 				}
-				close(done)
 			}
 		}()
 		handler(ctx, event)
-		close(done)
 	}()
 
 	// Use NewTimer so Stop() can release the timer before it fires.

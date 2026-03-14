@@ -48,10 +48,6 @@ func (s *Memory) Append(ctx context.Context, aggregateID string, version int64, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
 	if err, ok := s.errOn[aggregateID]; ok {
 		delete(s.errOn, aggregateID)
 		return err
@@ -62,7 +58,7 @@ func (s *Memory) Append(ctx context.Context, aggregateID string, version int64, 
 		return cmp.Compare(e.version, v)
 	})
 	if found {
-		return fmt.Errorf("%w: (%s, %d) already exists", models.ErrPipelineFailed, aggregateID, version)
+		return fmt.Errorf("%w: version conflict (%s, v%d)", models.ErrPipelineFailed, aggregateID, version)
 	}
 
 	s.streams[aggregateID] = slices.Insert(entries, idx, entry{version: version, data: data})
@@ -77,10 +73,6 @@ func (s *Memory) ReadFrom(ctx context.Context, aggregateID string, fromVersion i
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
 	return toBlobs(s.entriesFrom(aggregateID, fromVersion)), nil
 }
 
@@ -91,10 +83,6 @@ func (s *Memory) ReadRange(ctx context.Context, aggregateID string, fromVersion,
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 
 	entries := s.entriesFrom(aggregateID, fromVersion)
 	if int64(len(entries)) > count {

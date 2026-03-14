@@ -1,4 +1,4 @@
-.PHONY: test test-coverage lint tidy
+.PHONY: test test-coverage lint tidy example
 
 test: test-coverage
 
@@ -11,3 +11,7 @@ lint:
 
 tidy:
 	go mod tidy
+
+example:
+	@echo "Running asynx E-Commerce Order example..."
+	@cd example && go run .

@@ -78,30 +78,38 @@ func (es *EventStore[T]) Preload(
 	return es.reader.Preload(ctx, aggregateID)
 }
 
-// Write validates the command, computes the new state via cmd.EmitEvent,
-// and durably appends the event. It writes a snapshot if cmd.ShouldSnapshot()
-// returns true.
+// Write loads the aggregate state, validates the command, computes the new state
+// via cmd.EmitEvent, and durably appends the event. It writes a snapshot if
+// cmd.ShouldSnapshot() returns true.
 //
-// If cmd.Validate returns an error, Write returns it immediately without
-// touching storage.
+// Returns ErrValidation if the command fails validation against the current state.
 //
 // If a concurrent writer already appended at the same version, Store.Append
 // returns an error which Write propagates to the caller (ErrPipelineFailed
 // semantics — the caller should re-read state and retry).
 func (es *EventStore[T]) Write(
 	ctx context.Context,
-	current *T,
 	cmd asynxmd.Command[T],
 ) (asynxmd.Event[T], error) {
-	if err := cmd.Validate(current); err != nil {
+	current, err := es.Get(ctx, cmd.AggregateID())
+	if err != nil && err != asynxmd.ErrNotFound {
 		return asynxmd.Event[T]{}, err
 	}
 
-	newState := cmd.EmitEvent(current)
+	var currentPtr *T
+	if err != asynxmd.ErrNotFound {
+		currentPtr = &current
+	}
+
+	if err := cmd.Validate(currentPtr); err != nil {
+		return asynxmd.Event[T]{}, err
+	}
+
+	newState := cmd.EmitEvent(currentPtr)
 
 	var previousState T
-	if current != nil {
-		previousState = *current
+	if currentPtr != nil {
+		previousState = *currentPtr
 	}
 
 	return es.writer.Write(

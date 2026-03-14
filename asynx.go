@@ -46,6 +46,8 @@ type Asynx[T any] interface {
 		toVersion int64,
 		fn models.ProjectionHandler[T],
 	) error
+
+	WaitPublish()
 }
 
 type asynxImpl[T any] struct {

@@ -13,6 +13,7 @@
 package pool
 
 import (
+	"errors"
 	"sync"
 
 	"github.com/char2cs/asynx/internal/processor/exec"
@@ -152,7 +153,7 @@ func (s *Shard[T]) executeJob(
 		job.NextVersion,
 	)
 
-	if err == asynxmd.ErrValidation && s.workersPerShard == 1 {
+	if errors.Is(err, asynxmd.ErrValidation) && s.workersPerShard == 1 {
 		s.sendCorrection(
 			job.Envelope.Cmd.AggregateID(),
 		)
