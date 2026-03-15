@@ -1,0 +1,43 @@
+name: Branch Policy
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+jobs:
+  enforce:
+    name: Enforce branch naming & target
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate branch name and target
+        env:
+          HEAD: ${{ github.head_ref }}
+          BASE: ${{ github.base_ref }}
+        run: |
+          echo "Source: $HEAD → Target: $BASE"
+
+          # Branches that MUST target master
+          if [[ "$HEAD" == release/* || "$HEAD" == hotfix/* ]]; then
+            if [[ "$BASE" != "master" ]]; then
+              echo "::error::Branch '$HEAD' must target 'master', not '$BASE'"
+              exit 1
+            fi
+            echo "✓ $HEAD → master"
+            exit 0
+          fi
+
+          # Branches that MUST target develop
+          if [[ "$HEAD" == feature/* || "$HEAD" == fix/* || "$HEAD" == refactor/* || "$HEAD" == enhancement/* ]]; then
+            if [[ "$BASE" != "develop" ]]; then
+              echo "::error::Branch '$HEAD' must target 'develop', not '$BASE'"
+              exit 1
+            fi
+            echo "✓ $HEAD → develop"
+            exit 0
+          fi
+
+          # Unknown branch pattern
+          echo "::error::Branch '$HEAD' does not match any allowed pattern"
+          echo "::error::Allowed: release/*, hotfix/*, feature/*, fix/*, refactor/*, enhancement/*"
+          exit 1
