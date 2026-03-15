@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  test-coverage:
+    name: Tests & Coverage
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Lint
+        run: go vet ./...
+
+      - name: Run tests on PR branch
+        id: pr_cov
+        run: |
+          go test -race -coverprofile=/tmp/coverage-pr.out ./...
+          PR_COV=$(go tool cover -func=/tmp/coverage-pr.out | grep total | awk '{print $3}' | tr -d '%')
+          echo "coverage=$PR_COV" >> "$GITHUB_OUTPUT"
+          echo "PR branch coverage: ${PR_COV}%"
+
+      - name: Checkout develop
+        run: |
+          git checkout develop
+          go mod download
+
+      - name: Run tests on develop
+        id: dev_cov
+        run: |
+          go test -race -coverprofile=/tmp/coverage-develop.out ./...
+          DEV_COV=$(go tool cover -func=/tmp/coverage-develop.out | grep total | awk '{print $3}' | tr -d '%')
+          echo "coverage=$DEV_COV" >> "$GITHUB_OUTPUT"
+          echo "Develop branch coverage: ${DEV_COV}%"
+
+      - name: Compare coverage
+        env:
+          PR_COV: ${{ steps.pr_cov.outputs.coverage }}
+          DEV_COV: ${{ steps.dev_cov.outputs.coverage }}
+        run: |
+          echo "PR coverage:      ${PR_COV}%"
+          echo "Develop coverage:  ${DEV_COV}%"
+
+          if (( $(echo "$PR_COV < 95.0" | bc -l) )); then
+            echo "::error::Coverage is ${PR_COV}%, which is below the 95% minimum threshold."
+            exit 1
+          fi
+
+          echo "✓ Coverage check passed (${PR_COV}% ≥ 95%)"
