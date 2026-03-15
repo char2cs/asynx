@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g., v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    name: Validate Version
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate version format
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version format '$VERSION'. Expected vX.Y.Z"
+            exit 1
+          fi
+
+      - name: Check tag does not exist
+        run: |
+          if git rev-parse "refs/tags/${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "::error::Tag ${{ inputs.version }} already exists"
+            exit 1
+          fi
+
+  test:
+    name: Tests & Coverage
+    needs: validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Lint
+        run: go vet ./...
+
+      - name: Run tests
+        id: coverage
+        run: |
+          go test -race -coverprofile=coverage.out ./...
+          COV=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
+          echo "coverage=$COV" >> "$GITHUB_OUTPUT"
+          echo "Coverage: ${COV}%"
+
+      - name: Check coverage threshold
+        run: |
+          COV="${{ steps.coverage.outputs.coverage }}"
+          if (( $(echo "$COV < 95.0" | bc -l) )); then
+            echo "::error::Coverage is ${COV}%, which is below the 95% minimum threshold."
+            exit 1
+          fi
+          echo "✓ Coverage check passed (${COV}% ≥ 95%)"
+
+  benchmarks:
+    name: Benchmarks
+    needs: validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Run benchmarks
+        run: go test -bench=. -benchmem -count=1 -run='^$' ./...
+
+  release:
+    name: Create Release
+    needs: [test, benchmarks]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create and push tag
+        run: |
+          git tag "${{ inputs.version }}"
+          git push origin "${{ inputs.version }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ inputs.version }}" \
+            --title "${{ inputs.version }}" \
+            --generate-notes
