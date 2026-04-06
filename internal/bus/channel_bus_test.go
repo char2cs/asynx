@@ -753,14 +753,16 @@ func TestPublishSync_BlocksUntilHandlersDone(t *testing.T) {
 
 	var done atomic.Bool
 	block := make(chan struct{})
+	started := make(chan struct{})
 
 	b.Subscribe("test", func(_ context.Context, _ models.Event[string]) {
+		close(started)
 		<-block
 		done.Store(true)
 	})
 
 	go func() {
-		time.Sleep(20 * time.Millisecond)
+		<-started
 		close(block)
 	}()
 
@@ -976,8 +978,10 @@ func TestWaitForHandlers_BlocksUntilDone(t *testing.T) {
 
 	var done atomic.Bool
 	block := make(chan struct{})
+	started := make(chan struct{})
 
 	b.Subscribe("test", func(_ context.Context, _ models.Event[string]) {
+		close(started)
 		<-block
 		done.Store(true)
 	})
@@ -985,7 +989,7 @@ func TestWaitForHandlers_BlocksUntilDone(t *testing.T) {
 	b.Publish(context.Background(), ev("test"))
 
 	go func() {
-		time.Sleep(20 * time.Millisecond)
+		<-started
 		close(block)
 	}()
 

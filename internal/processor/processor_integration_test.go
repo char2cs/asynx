@@ -168,10 +168,6 @@ func TestProcessor_IntegrationShutdownGraceful(t *testing.T) {
 		}(i)
 	}
 
-	// Give goroutines time to queue before shutting down
-	// Shutdown will wait for in-flight commands to complete
-	time.Sleep(10 * time.Millisecond)
-
 	shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 

@@ -507,10 +507,9 @@ func TestPool_DrainTimeoutBothPhases(t *testing.T) {
 
 	p := pool.New(executor, 1, 0, 1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+	// Use an already-expired deadline so there is no race with the clock.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-
-	time.Sleep(5 * time.Millisecond)
 
 	err := p.Drain(ctx)
 	// Should timeout during drain
