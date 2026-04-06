@@ -10,6 +10,14 @@ type Bus[T any] interface {
 		event Event[T],
 	) error
 
+	// PublishSync fires all matching handlers synchronously — it blocks until every
+	// handler goroutine triggered by this specific event has completed. It does NOT
+	// wait for handlers from other concurrent events.
+	PublishSync(
+		ctx context.Context,
+		event Event[T],
+	) error
+
 	Subscribe(
 		pattern string,
 		handler ProjectionHandler[T],

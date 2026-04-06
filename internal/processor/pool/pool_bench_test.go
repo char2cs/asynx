@@ -33,7 +33,7 @@ func BenchmarkPool_Send_SingleShard(b *testing.B) {
 		envelope := &models.CommandEnvelope[order]{
 			Cmd:        mocks.CreateOrderCmd{ID: "order", Total: 100.0},
 			Ctx:        ctx,
-			ResultChan: make(chan error, 1),
+			ResultChan: make(chan models.CommandResult[order], 1),
 		}
 
 		shard.CommandChan() <- envelope
@@ -64,7 +64,7 @@ func BenchmarkPool_Send_MultiShard(b *testing.B) {
 				envelope := &models.CommandEnvelope[order]{
 					Cmd:        mocks.CreateOrderCmd{ID: "order", Total: 100.0},
 					Ctx:        ctx,
-					ResultChan: make(chan error, 1),
+					ResultChan: make(chan models.CommandResult[order], 1),
 				}
 
 				shard.CommandChan() <- envelope
@@ -97,7 +97,7 @@ func BenchmarkPool_Send_Parallel(b *testing.B) {
 			envelope := &models.CommandEnvelope[order]{
 				Cmd:        mocks.CreateOrderCmd{ID: "order", Total: 100.0},
 				Ctx:        ctx,
-				ResultChan: make(chan error, 1),
+				ResultChan: make(chan models.CommandResult[order], 1),
 			}
 
 			shard.CommandChan() <- envelope

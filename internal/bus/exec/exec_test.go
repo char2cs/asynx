@@ -303,6 +303,36 @@ func TestExecuteHandler_CustomPanicCallback(t *testing.T) {
 	}
 }
 
+// 9a. No OnTimeout set — default OnHandlerTimeout writes to stderr.
+func TestExecuteHandler_DefaultTimeoutCallback(t *testing.T) {
+	started := make(chan struct{})
+	block := make(chan struct{})
+	defer close(block)
+
+	job := &exec.HandlerJob[string]{
+		Handler: func(_ context.Context, _ models.Event[string]) {
+			close(started)
+			<-block
+		},
+		Timeout: 20 * time.Millisecond,
+		Event:   ev("SlowEvent"),
+		Ctx:     context.Background(),
+		// OnTimeout intentionally nil — default OnHandlerTimeout should fire.
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	output := captureStderr(t, func() {
+		go exec.ExecuteHandler(&wg, job)
+		<-started
+		wg.Wait()
+	})
+
+	if !strings.Contains(output, "timed out") {
+		t.Errorf("expected default timeout message in stderr, got: %q", output)
+	}
+}
+
 // 9b. Custom OnTimeout callback used instead of stderr.
 func TestExecuteHandler_CustomTimeoutCallback(t *testing.T) {
 	fired := make(chan struct{}, 1)

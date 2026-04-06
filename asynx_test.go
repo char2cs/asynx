@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+
 	"testing"
 	"time"
 
@@ -42,7 +43,7 @@ func newInstance(t *testing.T) asynx.Asynx[mocks.Order] {
 func TestSend_Success(t *testing.T) {
 	instance := newInstance(t)
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
-	err := instance.Send(context.Background(), cmd)
+	_, err := instance.Send(context.Background(), cmd)
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
@@ -51,7 +52,7 @@ func TestSend_Success(t *testing.T) {
 func TestSend_ValidationFails(t *testing.T) {
 	instance := newInstance(t)
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: -5.0} // Invalid total
-	err := instance.Send(context.Background(), cmd)
+	_, err := instance.Send(context.Background(), cmd)
 	if err == nil {
 		t.Fatal("expected validation error, got nil")
 	}
@@ -65,7 +66,7 @@ func TestSend_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
-	err := instance.Send(ctx, cmd)
+	_, err := instance.Send(ctx, cmd)
 	if err == nil {
 		t.Fatal("expected context cancelled error, got nil")
 	}
@@ -78,7 +79,7 @@ func TestSend_AfterShutdown(t *testing.T) {
 	instance := newInstance(t)
 	instance.Shutdown(context.Background())
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
-	err := instance.Send(context.Background(), cmd)
+	_, err := instance.Send(context.Background(), cmd)
 	if err == nil {
 		t.Fatal("expected shutdown error, got nil")
 	}
@@ -284,7 +285,7 @@ func TestShardingOpts_CustomShards(t *testing.T) {
 	defer instance.Shutdown(context.Background())
 
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
-	err = instance.Send(context.Background(), cmd)
+	_, err = instance.Send(context.Background(), cmd)
 	if err != nil {
 		t.Fatalf("Send with custom shards failed: %v", err)
 	}
@@ -307,7 +308,7 @@ func TestIntegration_FullCommandCycle(t *testing.T) {
 	defer instance.Unsubscribe(subID)
 
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
-	err = instance.Send(context.Background(), cmd)
+	_, err = instance.Send(context.Background(), cmd)
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
@@ -336,12 +337,12 @@ func TestIntegration_SerialOrderingForSameAggregate(t *testing.T) {
 	instance.Send(context.Background(), cmd1)
 
 	for i := 0; i < 5; i++ {
-		newTotal := float64((i+2)*100.0)
+		newTotal := float64((i + 2) * 100.0)
 		cmd := mocks.UpdateOrderCmd{
-			ID: orderID,
+			ID:       orderID,
 			NewState: mocks.Order{ID: orderID, Total: newTotal, Status: "Pending"},
 		}
-		err := instance.Send(context.Background(), cmd)
+		_, err := instance.Send(context.Background(), cmd)
 		if err != nil {
 			t.Fatalf("Send update %d failed: %v", i, err)
 		}
@@ -370,7 +371,8 @@ func TestIntegration_ConcurrentCommandsDifferentAggregates(t *testing.T) {
 			defer wg.Done()
 			orderID := fmt.Sprintf("order-%d", idx)
 			cmd := mocks.CreateOrderCmd{ID: orderID, Total: float64((idx + 1) * 100.0)}
-			errChan <- instance.Send(context.Background(), cmd)
+			_, err := instance.Send(context.Background(), cmd)
+			errChan <- err
 		}(i)
 	}
 
@@ -430,7 +432,7 @@ func TestIntegration_MultipleProjections(t *testing.T) {
 	}()
 
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
-	err := instance.Send(context.Background(), cmd)
+	_, err := instance.Send(context.Background(), cmd)
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
@@ -448,7 +450,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	instance := newInstance(t)
 
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
-	err := instance.Send(context.Background(), cmd)
+	_, err := instance.Send(context.Background(), cmd)
 	if err != nil {
 		t.Fatalf("Send before shutdown failed: %v", err)
 	}
@@ -461,11 +463,154 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	}
 
 	cmd2 := mocks.CreateOrderCmd{ID: "order-2", Total: 200.0}
-	err = instance.Send(context.Background(), cmd2)
+	_, err = instance.Send(context.Background(), cmd2)
 	if err == nil {
 		t.Fatal("expected error after shutdown, got nil")
 	}
 	if err != models.ErrShuttingDown {
 		t.Fatalf("expected ErrShuttingDown, got %v", err)
+	}
+}
+
+func TestSendWait_Success(t *testing.T) {
+	instance := newInstance(t)
+	cmd := mocks.CreateOrderCmd{ID: "ew-order", Total: 55.0}
+
+	event, err := instance.SendWait(context.Background(), cmd)
+	if err != nil {
+		t.Fatalf("SendWait failed: %v", err)
+	}
+	if event.AggregateID != "ew-order" {
+		t.Errorf("expected AggregateID ew-order, got %q", event.AggregateID)
+	}
+	if event.EventName == "" {
+		t.Error("expected non-empty EventName")
+	}
+	if event.Version == 0 {
+		t.Error("expected non-zero Version")
+	}
+}
+
+func TestSendWait_ReturnsNewAndPreviousAggregate(t *testing.T) {
+	instance := newInstance(t)
+
+	// Create first
+	cmd1 := mocks.CreateOrderCmd{ID: "ew-agg", Total: 100.0}
+	_, err := instance.SendWait(context.Background(), cmd1)
+	if err != nil {
+		t.Fatalf("first SendWait failed: %v", err)
+	}
+
+	// Update — event should carry both old and new aggregate
+	cmd2 := mocks.UpdateOrderCmd{
+		ID:       "ew-agg",
+		NewState: mocks.Order{ID: "ew-agg", Total: 200.0, Status: "Updated"},
+	}
+	event, err := instance.SendWait(context.Background(), cmd2)
+	if err != nil {
+		t.Fatalf("second SendWait failed: %v", err)
+	}
+
+	if event.Aggregate.Total != 200.0 {
+		t.Errorf("expected new aggregate Total 200.0, got %f", event.Aggregate.Total)
+	}
+	if event.PreviousAggregate.Total != 100.0 {
+		t.Errorf("expected previous aggregate Total 100.0, got %f", event.PreviousAggregate.Total)
+	}
+}
+
+func TestSendWait_HandlersCompleteBeforeReturn(t *testing.T) {
+	instance := newInstance(t)
+
+	var handlerDone atomic.Int32
+	instance.Subscribe("OrderCreated", func(_ context.Context, _ models.Event[mocks.Order]) {
+		handlerDone.Add(1)
+	})
+
+	cmd := mocks.CreateOrderCmd{ID: "ew-handler", Total: 10.0}
+	_, err := instance.SendWait(context.Background(), cmd)
+	if err != nil {
+		t.Fatalf("SendWait failed: %v", err)
+	}
+
+	// No waitPublish needed — handlers must be done when SendWait returns.
+	if handlerDone.Load() == 0 {
+		t.Error("handler not complete when SendWait returned")
+	}
+}
+
+func TestSendWait_MultipleHandlersAllComplete(t *testing.T) {
+	instance := newInstance(t)
+
+	var count atomic.Int32
+	for range 3 {
+		instance.Subscribe("OrderCreated", func(_ context.Context, _ models.Event[mocks.Order]) {
+			count.Add(1)
+		})
+	}
+
+	cmd := mocks.CreateOrderCmd{ID: "ew-multi", Total: 10.0}
+	_, err := instance.SendWait(context.Background(), cmd)
+	if err != nil {
+		t.Fatalf("SendWait failed: %v", err)
+	}
+
+	if count.Load() != 3 {
+		t.Errorf("expected 3 handler calls, got %d", count.Load())
+	}
+}
+
+func TestSendWait_ValidationFails(t *testing.T) {
+	instance := newInstance(t)
+	cmd := mocks.CreateOrderCmd{ID: "ew-bad", Total: -1.0}
+
+	_, err := instance.SendWait(context.Background(), cmd)
+	if err != models.ErrValidation {
+		t.Fatalf("expected ErrValidation, got %v", err)
+	}
+}
+
+func TestSendWait_ContextCancelled(t *testing.T) {
+	instance := newInstance(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cmd := mocks.CreateOrderCmd{ID: "ew-ctx", Total: 10.0}
+	_, err := instance.SendWait(ctx, cmd)
+	if err != models.ErrContextCancelled {
+		t.Fatalf("expected ErrContextCancelled, got %v", err)
+	}
+}
+
+func TestSendWait_AfterShutdown(t *testing.T) {
+	instance := newInstance(t)
+	instance.Shutdown(context.Background())
+
+	cmd := mocks.CreateOrderCmd{ID: "ew-shutdown", Total: 10.0}
+	_, err := instance.SendWait(context.Background(), cmd)
+	if err != models.ErrShuttingDown {
+		t.Fatalf("expected ErrShuttingDown, got %v", err)
+	}
+}
+
+func TestIntegration_SendWaitThenGet(t *testing.T) {
+	instance := newInstance(t)
+
+	cmd := mocks.CreateOrderCmd{ID: "ew-get", Total: 77.0}
+	event, err := instance.SendWait(context.Background(), cmd)
+	if err != nil {
+		t.Fatalf("SendWait failed: %v", err)
+	}
+
+	// State is immediately consistent — no WaitPublish needed.
+	state, err := instance.Get(context.Background(), "ew-get")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if state.Total != 77.0 {
+		t.Errorf("expected Total 77.0, got %f", state.Total)
+	}
+	if event.Aggregate.Total != state.Total {
+		t.Errorf("event aggregate (%f) does not match store (%f)", event.Aggregate.Total, state.Total)
 	}
 }

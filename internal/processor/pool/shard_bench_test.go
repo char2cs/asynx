@@ -32,7 +32,7 @@ func BenchmarkShard_SingleWorker(b *testing.B) {
 		envelope := &models.CommandEnvelope[order]{
 			Cmd:        mocks.CreateOrderCmd{ID: "order", Total: 100.0},
 			Ctx:        ctx,
-			ResultChan: make(chan error, 1),
+			ResultChan: make(chan models.CommandResult[order], 1),
 		}
 
 		shard.CommandChan() <- envelope
@@ -61,7 +61,7 @@ func BenchmarkShard_MultipleWorkers(b *testing.B) {
 				envelope := &models.CommandEnvelope[order]{
 					Cmd:        mocks.CreateOrderCmd{ID: "order", Total: 100.0},
 					Ctx:        ctx,
-					ResultChan: make(chan error, 1),
+					ResultChan: make(chan models.CommandResult[order], 1),
 				}
 
 				shard.CommandChan() <- envelope

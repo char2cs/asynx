@@ -4,11 +4,12 @@
 //   - Load    — Fetch current aggregate state from EventStore; nil if not found
 //   - Validate — Call Command.Validate(state); return raw error if rejected
 //   - Write   — Call EventStore.Write; wrap storage errors as ErrPipelineFailed
-//   - Publish — Call Bus.Publish asynchronously with detached context
+//   - Publish — Call Bus.Publish asynchronously (waitHandlers=false) or
+//               Bus.PublishSync (waitHandlers=true) with detached context
 //
 // Validation errors short-circuit at phase 2; no event is written. Storage errors
-// at phase 3 wrap to ErrPipelineFailed. Event publishing is always async and
-// always uses context.WithoutCancel to survive caller's deadline.
+// at phase 3 wrap to ErrPipelineFailed. Event publishing always uses
+// context.WithoutCancel to survive caller's deadline.
 package exec
 
 import (
@@ -40,19 +41,25 @@ func New[T any](
 func (e *CommandExecutor[T]) Execute(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
-	nextVersion int64,
-) error {
+	nextVersion int64, // reserved for future optimistic-locking enforcement
+	waitHandlers bool,
+) (asynxmd.Event[T], error) {
 	event, err := e.es.Write(ctx, cmd)
 	if err != nil {
 		if errors.Is(err, asynxmd.ErrValidation) {
-			return err
+			return asynxmd.Event[T]{}, err
 		}
 
-		return fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
+		return asynxmd.Event[T]{}, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 	}
 
-	e.publishAsync(ctx, event)
-	return nil
+	if waitHandlers {
+		e.publishSync(ctx, event)
+	} else {
+		e.publishAsync(ctx, event)
+	}
+
+	return event, nil
 }
 
 func (e *CommandExecutor[T]) publishAsync(
@@ -72,6 +79,21 @@ func (e *CommandExecutor[T]) publishAsync(
 			event,
 		)
 	}()
+}
+
+func (e *CommandExecutor[T]) publishSync(
+	ctx context.Context,
+	event asynxmd.Event[T],
+) {
+	if e.bus == nil {
+		return
+	}
+
+	publishCtx := context.WithoutCancel(ctx)
+	// PublishSync uses a WithoutCancel context so ctx.Err() errors are impossible.
+	// ErrBusClosed means Shutdown raced with this command; the event is already
+	// durably written so we proceed.
+	_ = e.bus.PublishSync(publishCtx, event)
 }
 
 // ForTesting: WaitPublish blocks until all publishAsync goroutines complete.
