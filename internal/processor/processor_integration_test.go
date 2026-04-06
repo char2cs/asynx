@@ -149,7 +149,11 @@ func TestProcessor_IntegrationShutdownGraceful(t *testing.T) {
 		processor.WithQueueDepth[order](10),
 	)
 
-	ctx := context.Background()
+	// Use a cancellable context so goroutines blocked in sendAndWait's result-wait
+	// select can unblock when we cancel after Shutdown drains the workers.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	commandCount := 50
 	var successCount int32
 
@@ -168,14 +172,16 @@ func TestProcessor_IntegrationShutdownGraceful(t *testing.T) {
 		}(i)
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
 
 	err := p.Shutdown(shutdownCtx)
 	if err != nil && err != context.DeadlineExceeded {
 		t.Logf("Shutdown returned: %v", err)
 	}
 
+	// Cancel goroutines still waiting for results from the drained workers.
+	cancel()
 	wg.Wait()
 
 	successVal := atomic.LoadInt32(&successCount)
