@@ -735,3 +735,267 @@ func TestConcurrentUnsubscribeAndPublish(t *testing.T) {
 
 	closeAndWait(t, b)
 }
+
+// --- PublishSync ---
+
+func TestPublishSync_NoSubscribers(t *testing.T) {
+	b := newBus[string]()
+	defer closeAndWait(t, b)
+
+	if err := b.PublishSync(context.Background(), ev("test")); err != nil {
+		t.Errorf("expected nil, got %v", err)
+	}
+}
+
+func TestPublishSync_BlocksUntilHandlersDone(t *testing.T) {
+	b := newBus[string]()
+	defer closeAndWait(t, b)
+
+	var done atomic.Bool
+	block := make(chan struct{})
+	started := make(chan struct{})
+
+	b.Subscribe("test", func(_ context.Context, _ models.Event[string]) {
+		close(started)
+		<-block
+		done.Store(true)
+	})
+
+	go func() {
+		<-started
+		close(block)
+	}()
+
+	if err := b.PublishSync(context.Background(), ev("test")); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	if !done.Load() {
+		t.Error("PublishSync returned before handler finished")
+	}
+}
+
+func TestPublishSync_ExactMatch(t *testing.T) {
+	b := newBus[string]()
+	defer closeAndWait(t, b)
+
+	called := make(chan struct{}, 1)
+	b.Subscribe("OrderPlaced", func(_ context.Context, _ models.Event[string]) {
+		called <- struct{}{}
+	})
+
+	b.PublishSync(context.Background(), ev("OrderPlaced"))
+
+	select {
+	case <-called:
+	default:
+		t.Error("handler not called for exact match")
+	}
+}
+
+func TestPublishSync_RegexMatch(t *testing.T) {
+	b := newBus[string]()
+	defer closeAndWait(t, b)
+
+	var count atomic.Int32
+	b.Subscribe("^Order.*", func(_ context.Context, _ models.Event[string]) {
+		count.Add(1)
+	})
+
+	b.PublishSync(context.Background(), ev("OrderPlaced"))
+	b.PublishSync(context.Background(), ev("OrderCancelled"))
+	b.PublishSync(context.Background(), ev("PaymentReceived"))
+
+	if count.Load() != 2 {
+		t.Errorf("expected 2 calls, got %d", count.Load())
+	}
+}
+
+func TestPublishSync_MultipleHandlers(t *testing.T) {
+	b := newBus[string]()
+	defer closeAndWait(t, b)
+
+	var count atomic.Int32
+	for range 3 {
+		b.Subscribe("test", func(_ context.Context, _ models.Event[string]) {
+			count.Add(1)
+		})
+	}
+
+	b.PublishSync(context.Background(), ev("test"))
+
+	if count.Load() != 3 {
+		t.Errorf("expected 3 calls, got %d", count.Load())
+	}
+}
+
+func TestPublishSync_OnClosedBus(t *testing.T) {
+	b := newBus[string]()
+	b.Close(context.Background())
+
+	err := b.PublishSync(context.Background(), ev("test"))
+	if err != models.ErrBusClosed {
+		t.Errorf("expected ErrBusClosed, got %v", err)
+	}
+}
+
+func TestPublishSync_CancelledContext(t *testing.T) {
+	b := newBus[string]()
+	defer closeAndWait(t, b)
+
+	b.Subscribe("test", func(_ context.Context, _ models.Event[string]) {})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := b.PublishSync(ctx, ev("test"))
+	if err != context.Canceled {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestPublishSync_DeadlineExceeded(t *testing.T) {
+	b := newBus[string]()
+	defer closeAndWait(t, b)
+
+	b.Subscribe("test", func(_ context.Context, _ models.Event[string]) {})
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	err := b.PublishSync(ctx, ev("test"))
+	if err != context.DeadlineExceeded {
+		t.Errorf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestPublishSync_PanicHandledDoesNotBlock(t *testing.T) {
+	var panicCaught atomic.Bool
+	b := bus.NewChannelBus[string](
+		bus.WithPanicHandler[string](func(_ context.Context, _ models.Event[string], _ any) {
+			panicCaught.Store(true)
+		}),
+	)
+	defer closeAndWait(t, b)
+
+	b.Subscribe("test", func(_ context.Context, _ models.Event[string]) {
+		panic("boom")
+	})
+
+	b.PublishSync(context.Background(), ev("test"))
+
+	if !panicCaught.Load() {
+		t.Error("panic handler not called")
+	}
+}
+
+func TestPublishSync_EventDataPropagated(t *testing.T) {
+	b := newBus[string]()
+	defer closeAndWait(t, b)
+
+	received := make(chan models.Event[string], 1)
+	b.Subscribe("test", func(_ context.Context, e models.Event[string]) {
+		received <- e
+	})
+
+	want := models.Event[string]{EventName: "test", AggregateID: "agg-sync-42"}
+	b.PublishSync(context.Background(), want)
+
+	select {
+	case got := <-received:
+		if got.AggregateID != want.AggregateID {
+			t.Errorf("AggregateID: got %s, want %s", got.AggregateID, want.AggregateID)
+		}
+	default:
+		t.Error("handler not called")
+	}
+}
+
+func TestPublishSync_ConcurrentCalls(t *testing.T) {
+	b := newBus[string]()
+	defer closeAndWait(t, b)
+
+	var count atomic.Int32
+	b.Subscribe("test", func(_ context.Context, _ models.Event[string]) {
+		count.Add(1)
+	})
+
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			b.PublishSync(context.Background(), ev("test"))
+		}()
+	}
+	wg.Wait()
+
+	if count.Load() != 50 {
+		t.Errorf("expected 50 handler calls, got %d", count.Load())
+	}
+}
+
+// TestGetCompiledPattern_ConcurrentSamePattern exercises the double-checked
+// locking in getCompiledPattern: many goroutines race to compile the same
+// pattern, so after the write-lock is acquired one of them may find the pattern
+// already stored by another goroutine (the "existing, ok" fast-path).
+func TestGetCompiledPattern_ConcurrentSamePattern(t *testing.T) {
+	b := newBus[string]()
+	defer closeAndWait(t, b)
+
+	const pattern = "order\\..*"
+	const goroutines = 100
+
+	// Subscribe a handler using the regex pattern so RegexSubs is populated.
+	// All concurrent publishes will race to compile the same pattern for the
+	// first time, triggering the double-checked-lock fast-path in at least
+	// one goroutine.
+	b.Subscribe(pattern, func(_ context.Context, _ models.Event[string]) {})
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	// Use a ready channel to make all goroutines start as close together as
+	// possible, maximising the chance that multiple reach regexp.Compile()
+	// before any one of them acquires the write-lock.
+	ready := make(chan struct{})
+	for i := range goroutines {
+		go func(i int) {
+			defer wg.Done()
+			<-ready
+			// Publish triggers matchedSubs → matchesRegex → getCompiledPattern.
+			b.Publish(context.Background(), ev("order.created"))
+		}(i)
+	}
+	close(ready)
+	wg.Wait()
+}
+
+// --- WaitForHandlers ---
+
+func TestWaitForHandlers_BlocksUntilDone(t *testing.T) {
+	b := newBus[string]()
+	defer closeAndWait(t, b)
+
+	var done atomic.Bool
+	block := make(chan struct{})
+	started := make(chan struct{})
+
+	b.Subscribe("test", func(_ context.Context, _ models.Event[string]) {
+		close(started)
+		<-block
+		done.Store(true)
+	})
+
+	b.Publish(context.Background(), ev("test"))
+
+	go func() {
+		<-started
+		close(block)
+	}()
+
+	b.WaitForHandlers()
+
+	if !done.Load() {
+		t.Error("WaitForHandlers returned before handler finished")
+	}
+}

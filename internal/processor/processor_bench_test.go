@@ -30,7 +30,7 @@ func BenchmarkSend_MultiShard(b *testing.B) {
 
 			for b.Loop() {
 				cmd := mocks.CreateOrderCmd{ID: "order", Total: 100.0}
-				_ = p.Send(ctx, cmd)
+				p.Send(ctx, cmd)
 			}
 		})
 	}
@@ -52,7 +52,7 @@ func BenchmarkSend_Parallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			cmd := mocks.CreateOrderCmd{ID: "order", Total: 100.0}
-			_ = p.Send(ctx, cmd)
+			p.Send(ctx, cmd)
 		}
 	})
 }
@@ -79,6 +79,6 @@ func BenchmarkSend_WithBusFanout(b *testing.B) {
 
 	for b.Loop() {
 		cmd := mocks.CreateOrderCmd{ID: "order", Total: 100.0}
-		_ = p.Send(ctx, cmd)
+		p.Send(ctx, cmd)
 	}
 }

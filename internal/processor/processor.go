@@ -1,14 +1,14 @@
 // Package processor coordinates command routing and execution lifecycle for Asynx.
 //
 // Processor[T] routes incoming commands to shards via consistent hashing,
-// manages graceful shutdown, and exposes Send/Shutdown interfaces.
+// manages graceful shutdown, and exposes Send/SendWait/Shutdown interfaces.
 //   - router     — FNV-1a hash-based consistent shard selection
 //   - pool       — Shard-based worker pool for concurrent command execution
-//   - executor   — Passed to pool; executes Load→Validate→Write→PublishAsync pipeline
+//   - executor   — Passed to pool; executes Load→Validate→Write→Publish pipeline
 //
-// All command execution is non-blocking via channels. Send blocks until either
-// the command completes, context cancels, or the queue is full. Shutdown
-// drains in-flight work before closing the bus.
+// All command execution is non-blocking via channels. Send and SendWait block until either
+// the command completes, context cancels, or the queue is full. Send publishes events
+// asynchronously; SendWait publishes synchronously. Shutdown drains in-flight work before closing the bus.
 package processor
 
 import (
@@ -24,12 +24,12 @@ import (
 )
 
 type Processor[T any] struct {
-	pool           *pool.ShardPool[T]
-	router         *queue.Router
-	executor       *exec.CommandExecutor[T]
-	bus            asynxmd.Bus[T]
-	shuttingDown   atomic.Bool
-	onSendPending  func()
+	pool          *pool.ShardPool[T]
+	router        *queue.Router
+	executor      *exec.CommandExecutor[T]
+	bus           asynxmd.Bus[T]
+	shuttingDown  atomic.Bool
+	onSendPending func()
 }
 
 type ProcessorOpt[T any] func(*processorConfig)
@@ -103,13 +103,13 @@ func New[T any](
 func (p *Processor[T]) Send(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
-) error {
+) (asynxmd.Event[T], error) {
 	if p.isShuttingDown() {
-		return asynxmd.ErrShuttingDown
+		return asynxmd.Event[T]{}, asynxmd.ErrShuttingDown
 	}
 
 	if err := ctx.Err(); err != nil {
-		return asynxmd.ErrContextCancelled
+		return asynxmd.Event[T]{}, asynxmd.ErrContextCancelled
 	}
 
 	shardIndex := p.router.Route(
@@ -119,14 +119,36 @@ func (p *Processor[T]) Send(
 	envelope := &models.CommandEnvelope[T]{
 		Cmd:        cmd,
 		Ctx:        ctx,
-		ResultChan: make(chan error, 1),
+		ResultChan: make(chan models.CommandResult[T], 1),
 	}
 
-	return p.sendAndWait(
-		ctx,
-		shard,
-		envelope,
+	return p.sendAndWait(ctx, shard, envelope)
+}
+
+func (p *Processor[T]) SendWait(
+	ctx context.Context,
+	cmd asynxmd.Command[T],
+) (asynxmd.Event[T], error) {
+	if p.isShuttingDown() {
+		return asynxmd.Event[T]{}, asynxmd.ErrShuttingDown
+	}
+
+	if err := ctx.Err(); err != nil {
+		return asynxmd.Event[T]{}, asynxmd.ErrContextCancelled
+	}
+
+	shardIndex := p.router.Route(
+		cmd.AggregateID(),
 	)
+	shard := p.pool.Shards()[shardIndex]
+	envelope := &models.CommandEnvelope[T]{
+		Cmd:          cmd,
+		Ctx:          ctx,
+		ResultChan:   make(chan models.CommandResult[T], 1),
+		WaitHandlers: true,
+	}
+
+	return p.sendAndWait(ctx, shard, envelope)
 }
 
 func (p *Processor[T]) isShuttingDown() bool {
@@ -137,13 +159,13 @@ func (p *Processor[T]) sendAndWait(
 	ctx context.Context,
 	shard *pool.Shard[T],
 	envelope *models.CommandEnvelope[T],
-) error {
+) (asynxmd.Event[T], error) {
 	select {
 	case shard.CommandChan() <- envelope:
 	case <-ctx.Done():
-		return asynxmd.ErrContextCancelled
+		return asynxmd.Event[T]{}, asynxmd.ErrContextCancelled
 	default:
-		return asynxmd.ErrQueueFull
+		return asynxmd.Event[T]{}, asynxmd.ErrQueueFull
 	}
 
 	if p.onSendPending != nil {
@@ -151,10 +173,10 @@ func (p *Processor[T]) sendAndWait(
 	}
 
 	select {
-	case err := <-envelope.ResultChan:
-		return err
+	case result := <-envelope.ResultChan:
+		return result.Event, result.Err
 	case <-ctx.Done():
-		return asynxmd.ErrContextCancelled
+		return asynxmd.Event[T]{}, asynxmd.ErrContextCancelled
 	}
 }
 
@@ -188,7 +210,7 @@ func (p *Processor[T]) WaitPublish() {
 }
 
 // ForTesting: SetOnSendPending sets a callback invoked after a command is
-// enqueued but before Send blocks waiting for its result.
+// enqueued but before Send or SendWait blocks waiting for its result.
 // Do not call in production code.
 func (p *Processor[T]) SetOnSendPending(fn func()) {
 	p.onSendPending = fn

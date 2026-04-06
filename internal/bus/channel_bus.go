@@ -188,6 +188,53 @@ func (b *ChannelBus[T]) Publish(
 	return nil
 }
 
+// PublishSync fires all matching handlers and blocks until every handler
+// goroutine triggered by this event has completed. Handler panics and timeouts
+// are still handled by PanicHandler/TimeoutHandler — they do not affect the
+// returned error.
+func (b *ChannelBus[T]) PublishSync(
+	ctx context.Context,
+	event asynxmd.Event[T],
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	idx := b.idx.Load()
+
+	exactMatches := idx.ExactSubs[event.EventName]
+
+	var regexMatches []*models.Subscription[T]
+	for _, sub := range idx.RegexSubs {
+		if b.matchesRegex(event.EventName, sub.Pattern) {
+			regexMatches = append(regexMatches, sub)
+		}
+	}
+
+	total := len(exactMatches) + len(regexMatches)
+
+	b.publishMu.RLock()
+	if b.closed {
+		b.publishMu.RUnlock()
+		return asynxmd.ErrBusClosed
+	}
+	var localWg sync.WaitGroup
+	if total > 0 {
+		localWg.Add(total)
+	}
+	b.publishMu.RUnlock()
+
+	for _, sub := range exactMatches {
+		go exec.ExecuteHandler(&localWg, utils.MakeJob(sub, event, ctx, b.onPanic, b.onTimeout))
+	}
+	for _, sub := range regexMatches {
+		go exec.ExecuteHandler(&localWg, utils.MakeJob(sub, event, ctx, b.onPanic, b.onTimeout))
+	}
+
+	localWg.Wait()
+	return nil
+}
+
 func (b *ChannelBus[T]) Close(
 	ctx context.Context,
 ) error {

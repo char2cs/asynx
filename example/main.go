@@ -62,7 +62,7 @@ func run(ctx context.Context) error {
 			ShipTo: "123 Main St",
 		}
 
-		if err := ax.Send(ctx, cmd); err != nil {
+		if _, err := ax.Send(ctx, cmd); err != nil {
 			fmt.Printf("❌ Failed to create order %s: %v\n", orderID, err)
 			continue
 		}
@@ -74,7 +74,7 @@ func run(ctx context.Context) error {
 	// Confirm orders
 	for _, orderID := range orders {
 		cmd := commands.ConfirmOrderCmd{ID: orderID}
-		if err := ax.Send(ctx, cmd); err != nil {
+		if _, err := ax.Send(ctx, cmd); err != nil {
 			fmt.Printf("❌ Failed to confirm order %s: %v\n", orderID, err)
 			continue
 		}
@@ -86,7 +86,7 @@ func run(ctx context.Context) error {
 	// Ship orders
 	for _, orderID := range orders {
 		cmd := commands.ShipOrderCmd{ID: orderID}
-		if err := ax.Send(ctx, cmd); err != nil {
+		if _, err := ax.Send(ctx, cmd); err != nil {
 			fmt.Printf("❌ Failed to ship order %s: %v\n", orderID, err)
 			continue
 		}

@@ -40,7 +40,7 @@ func TestProcessor_IntegrationHighThroughput(t *testing.T) {
 			ID:    "order" + string(rune(i%26+'a')),
 			Total: 100.0,
 		}
-		if err := p.Send(ctx, cmd); err == nil {
+		if _, err := p.Send(ctx, cmd); err == nil {
 			successCount++
 		}
 	}
@@ -85,7 +85,7 @@ func TestProcessor_IntegrationOrderPreservation(t *testing.T) {
 				Status: "Pending",
 			},
 		}
-		if err := p.Send(ctx, cmd); err != nil {
+		if _, err := p.Send(ctx, cmd); err != nil {
 			t.Fatalf("Send failed at iteration %d: %v", i, err)
 		}
 	}
@@ -119,7 +119,7 @@ func TestProcessor_IntegrationCancelDuringBurst(t *testing.T) {
 	cancel()  // Cancel immediately
 
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
-	err := p.Send(ctx, cmd)
+	_, err := p.Send(ctx, cmd)
 	if err != asynxmd.ErrContextCancelled {
 		t.Fatalf("expected ErrContextCancelled, got %v", err)
 	}
@@ -127,7 +127,7 @@ func TestProcessor_IntegrationCancelDuringBurst(t *testing.T) {
 	// Test 2: Send with active context (should work)
 	ctx2 := context.Background()
 	cmd2 := mocks.CreateOrderCmd{ID: "order2", Total: 100.0}
-	err2 := p.Send(ctx2, cmd2)
+	_, err2 := p.Send(ctx2, cmd2)
 	if err2 != nil {
 		t.Fatalf("expected success, got %v", err2)
 	}
@@ -149,7 +149,11 @@ func TestProcessor_IntegrationShutdownGraceful(t *testing.T) {
 		processor.WithQueueDepth[order](10),
 	)
 
-	ctx := context.Background()
+	// Use a cancellable context so goroutines blocked in sendAndWait's result-wait
+	// select can unblock when we cancel after Shutdown drains the workers.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	commandCount := 50
 	var successCount int32
 
@@ -162,24 +166,22 @@ func TestProcessor_IntegrationShutdownGraceful(t *testing.T) {
 				ID:    "order" + string(rune(idx%4)),
 				Total: 100.0,
 			}
-			if err := p.Send(ctx, cmd); err == nil {
+			if _, err := p.Send(ctx, cmd); err == nil {
 				atomic.AddInt32(&successCount, 1)
 			}
 		}(i)
 	}
 
-	// Give goroutines time to queue before shutting down
-	// Shutdown will wait for in-flight commands to complete
-	time.Sleep(10 * time.Millisecond)
-
-	shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
 
 	err := p.Shutdown(shutdownCtx)
 	if err != nil && err != context.DeadlineExceeded {
 		t.Logf("Shutdown returned: %v", err)
 	}
 
+	// Cancel goroutines still waiting for results from the drained workers.
+	cancel()
 	wg.Wait()
 
 	successVal := atomic.LoadInt32(&successCount)
@@ -228,7 +230,7 @@ func TestProcessor_IntegrationWithValidationErrors(t *testing.T) {
 				}
 			}
 
-			err := p.Send(ctx, cmd)
+			_, err := p.Send(ctx, cmd)
 			if err == asynxmd.ErrValidation {
 				atomic.AddInt32(&invalidCount, 1)
 			} else if err == nil {
@@ -282,7 +284,7 @@ func TestProcessor_IntegrationMemoryStability(t *testing.T) {
 					ID:    "order" + string(rune((idx+batch*100)%26 + 'a')),
 					Total: 100.0,
 				}
-				_ = p.Send(ctx, cmd)
+				p.Send(ctx, cmd)
 			}(i)
 		}
 		wg.Wait()
@@ -322,7 +324,7 @@ func TestProcessor_IntegrationEventPublishingReliability(t *testing.T) {
 			ID:    "order" + string(rune('a'+i%26)),
 			Total: 100.0,
 		}
-		if err := p.Send(ctx, cmd); err != nil {
+		if _, err := p.Send(ctx, cmd); err != nil {
 			t.Logf("Send failed: %v", err)
 		}
 	}
@@ -383,7 +385,7 @@ func TestProcessor_IntegrationDefaultQueueDepthScaling(t *testing.T) {
 					ID:    "order" + string(rune(i%8)),
 					Total: 100.0,
 				}
-				if err := p.Send(ctx, cmd); err == nil {
+				if _, err := p.Send(ctx, cmd); err == nil {
 					successCount++
 				}
 			}

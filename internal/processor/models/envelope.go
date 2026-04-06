@@ -14,10 +14,16 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
+type CommandResult[T any] struct {
+	Event asynxmd.Event[T]
+	Err   error
+}
+
 type CommandEnvelope[T any] struct {
-	Cmd        asynxmd.Command[T]
-	Ctx        context.Context
-	ResultChan chan error
+	Cmd          asynxmd.Command[T]
+	Ctx          context.Context
+	ResultChan   chan CommandResult[T]
+	WaitHandlers bool
 }
 
 type CommandJob[T any] struct {
