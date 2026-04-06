@@ -12,7 +12,7 @@ type Asynx[T any] interface {
 	Send(
 		ctx context.Context,
 		cmd models.Command[T],
-	) error
+	) (models.Event[T], error)
 	SendWait(
 		ctx context.Context,
 		cmd models.Command[T],
@@ -64,7 +64,7 @@ type asynxImpl[T any] struct {
 func (i *asynxImpl[T]) Send(
 	ctx context.Context,
 	cmd models.Command[T],
-) error {
+) (models.Event[T], error) {
 	return i.proc.Send(ctx, cmd)
 }
 

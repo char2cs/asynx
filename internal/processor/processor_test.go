@@ -38,7 +38,7 @@ func TestProcessor_SendSuccess(t *testing.T) {
 	ctx := context.Background()
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 
-	err := p.Send(ctx, cmd)
+	_, err := p.Send(ctx, cmd)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -50,7 +50,7 @@ func TestProcessor_ValidationError(t *testing.T) {
 	ctx := context.Background()
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: -100.0} // Invalid
 
-	err := p.Send(ctx, cmd)
+	_, err := p.Send(ctx, cmd)
 	if err != asynxmd.ErrValidation {
 		t.Fatalf("expected ErrValidation, got %v", err)
 	}
@@ -68,7 +68,7 @@ func TestProcessor_ValidationNoWrite(t *testing.T) {
 	// Try to cancel a non-existent order (validation failure)
 	cmd2 := mocks.CancelOrderCmd{ID: "order2"} // order2 doesn't exist
 
-	err := p.Send(ctx, cmd2)
+	_, err := p.Send(ctx, cmd2)
 	if err != asynxmd.ErrValidation {
 		t.Fatalf("expected ErrValidation, got %v", err)
 	}
@@ -85,7 +85,7 @@ func TestProcessor_SerialOrdering10Increments(t *testing.T) {
 			ID:       "order1",
 			NewState: order{ID: "order1", Total: float64(i * 10), Status: "Pending"},
 		}
-		err := p.Send(ctx, cmd)
+		_, err := p.Send(ctx, cmd)
 		if err != nil {
 			t.Fatalf("Send failed at iteration %d: %v", i, err)
 		}
@@ -105,7 +105,7 @@ func TestProcessor_ParallelAggregates8Goroutines(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			cmd := mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0}
-			errs <- p.Send(ctx, cmd)
+			_, _err := p.Send(ctx, cmd); errs <- _err
 		}(i)
 	}
 
@@ -130,7 +130,7 @@ func TestProcessor_ShuttingDown(t *testing.T) {
 
 	// Try to send after shutdown
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
-	err = p.Send(ctx, cmd)
+	_, err = p.Send(ctx, cmd)
 	if err != asynxmd.ErrShuttingDown {
 		t.Fatalf("expected ErrShuttingDown, got %v", err)
 	}
@@ -143,7 +143,7 @@ func TestProcessor_ContextCancelledBeforeQueue(t *testing.T) {
 	cancel() // Cancel immediately
 
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
-	err := p.Send(ctx, cmd)
+	_, err := p.Send(ctx, cmd)
 	if err != asynxmd.ErrContextCancelled {
 		t.Fatalf("expected ErrContextCancelled, got %v", err)
 	}
@@ -167,7 +167,7 @@ func TestProcessor_ContextCancelledWhileWaiting(t *testing.T) {
 	// Start send in background
 	done := make(chan error, 1)
 	go func() {
-		done <- p.Send(ctx, cmd)
+		_, _err := p.Send(ctx, cmd); done <- _err
 	}()
 
 	// Wait until Send is waiting for result
@@ -193,14 +193,14 @@ func TestProcessor_QueueFull(t *testing.T) {
 	// Since we can't easily control execution time, we'll test that
 	// the queueing behavior is correct
 	cmd1 := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
-	err := p.Send(ctx, cmd1)
+	_, err := p.Send(ctx, cmd1)
 	if err != nil {
 		t.Fatalf("first send failed: %v", err)
 	}
 
 	// Second send should succeed (depth=1 means 1 in queue)
 	cmd2 := mocks.CreateOrderCmd{ID: "order2", Total: 100.0}
-	err = p.Send(ctx, cmd2)
+	_, err = p.Send(ctx, cmd2)
 	if err != nil {
 		t.Logf("second send result: %v (may be acceptable)", err)
 	}
@@ -219,7 +219,7 @@ func TestProcessor_ShutdownDrains(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			cmd := mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0}
-			errs <- p.Send(ctx, cmd)
+			_, _err := p.Send(ctx, cmd); errs <- _err
 		}(i)
 	}
 
@@ -288,7 +288,7 @@ func TestProcessor_EventPublishedToRealBus(t *testing.T) {
 	})
 
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
-	err := p.Send(ctx, cmd)
+	_, err := p.Send(ctx, cmd)
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestProcessor_PublishUsesDetachedContext(t *testing.T) {
 	})
 
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
-	err := p.Send(ctx, cmd)
+	_, err := p.Send(ctx, cmd)
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestProcessor_WithWorkersPerShard(t *testing.T) {
 	ctx := context.Background()
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 
-	err := p.Send(ctx, cmd)
+	_, err := p.Send(ctx, cmd)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -375,7 +375,7 @@ func TestProcessor_WithQueueDepth(t *testing.T) {
 	ctx := context.Background()
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 
-	err := p.Send(ctx, cmd)
+	_, err := p.Send(ctx, cmd)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -399,7 +399,7 @@ func TestProcessor_NegativeOptionsIgnored(t *testing.T) {
 	ctx := context.Background()
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 
-	err := p.Send(ctx, cmd)
+	_, err := p.Send(ctx, cmd)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -425,7 +425,7 @@ func TestProcessor_SendContextCancelledDuringWait(t *testing.T) {
 		cancel()
 	}()
 
-	err := p.Send(ctx, cmd)
+	_, err := p.Send(ctx, cmd)
 	// Should get either context cancelled or success (timing dependent)
 	if err != nil && err != asynxmd.ErrContextCancelled {
 		t.Logf("Send returned: %v", err)
@@ -443,7 +443,7 @@ func TestProcessor_ShutdownWithBus(t *testing.T) {
 
 	// Send a command
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
-	err := p.Send(ctx, cmd)
+	_, err := p.Send(ctx, cmd)
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
@@ -463,7 +463,7 @@ func TestProcessor_SendToMultipleShards(t *testing.T) {
 	// Send to different shards
 	for i := 0; i < 12; i++ {
 		cmd := mocks.CreateOrderCmd{ID: "order" + string(rune('0'+i)), Total: 100.0}
-		err := p.Send(ctx, cmd)
+		_, err := p.Send(ctx, cmd)
 		if err != nil {
 			t.Fatalf("Send %d failed: %v", i, err)
 		}
@@ -480,7 +480,7 @@ func TestProcessor_ShutdownWithoutBus(t *testing.T) {
 
 	// Send a command
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
-	err := p.Send(ctx, cmd)
+	_, err := p.Send(ctx, cmd)
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
@@ -500,7 +500,7 @@ func TestProcessor_ContextCancelledEarlyCheck(t *testing.T) {
 
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 
-	err := p.Send(ctx, cmd)
+	_, err := p.Send(ctx, cmd)
 	if err != asynxmd.ErrContextCancelled {
 		t.Fatalf("expected ErrContextCancelled, got %v", err)
 	}
@@ -518,7 +518,7 @@ func TestProcessor_AllSendBranches(t *testing.T) {
 
 	// Test normal path
 	cmd1 := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
-	err := p.Send(ctx, cmd1)
+	_, err := p.Send(ctx, cmd1)
 	if err != nil {
 		t.Fatalf("normal send failed: %v", err)
 	}
@@ -527,14 +527,14 @@ func TestProcessor_AllSendBranches(t *testing.T) {
 	ctx2, cancel := context.WithCancel(context.Background())
 	cancel()
 	cmd2 := mocks.CreateOrderCmd{ID: "order2", Total: 100.0}
-	err = p.Send(ctx2, cmd2)
+	_, err = p.Send(ctx2, cmd2)
 	if err != asynxmd.ErrContextCancelled {
 		t.Fatalf("cancelled early should return ErrContextCancelled, got %v", err)
 	}
 
 	// Test validation error
 	cmd3 := mocks.CreateOrderCmd{ID: "order3", Total: -100.0}
-	err = p.Send(ctx, cmd3)
+	_, err = p.Send(ctx, cmd3)
 	if err != asynxmd.ErrValidation {
 		t.Fatalf("validation error should propagate, got %v", err)
 	}
@@ -542,7 +542,7 @@ func TestProcessor_AllSendBranches(t *testing.T) {
 	// Test successful multiple operations
 	for i := 0; i < 5; i++ {
 		cmd := mocks.CreateOrderCmd{ID: "order" + string(rune('A'+i)), Total: 100.0}
-		err := p.Send(ctx, cmd)
+		_, err := p.Send(ctx, cmd)
 		if err != nil {
 			t.Fatalf("send %d failed: %v", i, err)
 		}
@@ -560,7 +560,7 @@ func TestProcessor_ShutdownClosesPool(t *testing.T) {
 
 	// Verify we can send before shutdown
 	cmd1 := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
-	err := p.Send(ctx, cmd1)
+	_, err := p.Send(ctx, cmd1)
 	if err != nil {
 		t.Fatalf("send before shutdown failed: %v", err)
 	}
@@ -573,7 +573,7 @@ func TestProcessor_ShutdownClosesPool(t *testing.T) {
 
 	// Verify sends are blocked after shutdown
 	cmd2 := mocks.CreateOrderCmd{ID: "order2", Total: 100.0}
-	err = p.Send(ctx, cmd2)
+	_, err = p.Send(ctx, cmd2)
 	if err != asynxmd.ErrShuttingDown {
 		t.Fatalf("send after shutdown should return ErrShuttingDown, got %v", err)
 	}

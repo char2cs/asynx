@@ -103,13 +103,13 @@ func New[T any](
 func (p *Processor[T]) Send(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
-) error {
+) (asynxmd.Event[T], error) {
 	if p.isShuttingDown() {
-		return asynxmd.ErrShuttingDown
+		return asynxmd.Event[T]{}, asynxmd.ErrShuttingDown
 	}
 
 	if err := ctx.Err(); err != nil {
-		return asynxmd.ErrContextCancelled
+		return asynxmd.Event[T]{}, asynxmd.ErrContextCancelled
 	}
 
 	shardIndex := p.router.Route(
@@ -122,8 +122,7 @@ func (p *Processor[T]) Send(
 		ResultChan: make(chan models.CommandResult[T], 1),
 	}
 
-	_, err := p.sendAndWait(ctx, shard, envelope)
-	return err
+	return p.sendAndWait(ctx, shard, envelope)
 }
 
 func (p *Processor[T]) SendWait(

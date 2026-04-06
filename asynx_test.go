@@ -43,7 +43,7 @@ func newInstance(t *testing.T) asynx.Asynx[mocks.Order] {
 func TestSend_Success(t *testing.T) {
 	instance := newInstance(t)
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
-	err := instance.Send(context.Background(), cmd)
+	_, err := instance.Send(context.Background(), cmd)
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestSend_Success(t *testing.T) {
 func TestSend_ValidationFails(t *testing.T) {
 	instance := newInstance(t)
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: -5.0} // Invalid total
-	err := instance.Send(context.Background(), cmd)
+	_, err := instance.Send(context.Background(), cmd)
 	if err == nil {
 		t.Fatal("expected validation error, got nil")
 	}
@@ -66,7 +66,7 @@ func TestSend_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
-	err := instance.Send(ctx, cmd)
+	_, err := instance.Send(ctx, cmd)
 	if err == nil {
 		t.Fatal("expected context cancelled error, got nil")
 	}
@@ -79,7 +79,7 @@ func TestSend_AfterShutdown(t *testing.T) {
 	instance := newInstance(t)
 	instance.Shutdown(context.Background())
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
-	err := instance.Send(context.Background(), cmd)
+	_, err := instance.Send(context.Background(), cmd)
 	if err == nil {
 		t.Fatal("expected shutdown error, got nil")
 	}
@@ -285,7 +285,7 @@ func TestShardingOpts_CustomShards(t *testing.T) {
 	defer instance.Shutdown(context.Background())
 
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
-	err = instance.Send(context.Background(), cmd)
+	_, err = instance.Send(context.Background(), cmd)
 	if err != nil {
 		t.Fatalf("Send with custom shards failed: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestIntegration_FullCommandCycle(t *testing.T) {
 	defer instance.Unsubscribe(subID)
 
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
-	err = instance.Send(context.Background(), cmd)
+	_, err = instance.Send(context.Background(), cmd)
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestIntegration_SerialOrderingForSameAggregate(t *testing.T) {
 			ID:       orderID,
 			NewState: mocks.Order{ID: orderID, Total: newTotal, Status: "Pending"},
 		}
-		err := instance.Send(context.Background(), cmd)
+		_, err := instance.Send(context.Background(), cmd)
 		if err != nil {
 			t.Fatalf("Send update %d failed: %v", i, err)
 		}
@@ -371,7 +371,8 @@ func TestIntegration_ConcurrentCommandsDifferentAggregates(t *testing.T) {
 			defer wg.Done()
 			orderID := fmt.Sprintf("order-%d", idx)
 			cmd := mocks.CreateOrderCmd{ID: orderID, Total: float64((idx + 1) * 100.0)}
-			errChan <- instance.Send(context.Background(), cmd)
+			_, err := instance.Send(context.Background(), cmd)
+			errChan <- err
 		}(i)
 	}
 
@@ -431,7 +432,7 @@ func TestIntegration_MultipleProjections(t *testing.T) {
 	}()
 
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
-	err := instance.Send(context.Background(), cmd)
+	_, err := instance.Send(context.Background(), cmd)
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
@@ -449,7 +450,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	instance := newInstance(t)
 
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
-	err := instance.Send(context.Background(), cmd)
+	_, err := instance.Send(context.Background(), cmd)
 	if err != nil {
 		t.Fatalf("Send before shutdown failed: %v", err)
 	}
@@ -462,7 +463,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	}
 
 	cmd2 := mocks.CreateOrderCmd{ID: "order-2", Total: 200.0}
-	err = instance.Send(context.Background(), cmd2)
+	_, err = instance.Send(context.Background(), cmd2)
 	if err == nil {
 		t.Fatal("expected error after shutdown, got nil")
 	}
