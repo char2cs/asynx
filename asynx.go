@@ -9,10 +9,19 @@ import (
 )
 
 type Asynx[T any] interface {
+	// Send validates and persists the command, then returns the resulting Event[T]
+	// once it is durably written. Projection handlers are fired asynchronously —
+	// when Send returns, handlers may not have run yet.
+	// Use SendWait when the caller needs projections to be up to date before proceeding.
 	Send(
 		ctx context.Context,
 		cmd models.Command[T],
 	) (models.Event[T], error)
+
+	// SendWait behaves like Send but additionally blocks until all matching
+	// projection handlers have completed. When SendWait returns without error,
+	// the event is persisted and every projection subscribed to it has finished.
+	// Use Send when projection consistency is not required at the call site.
 	SendWait(
 		ctx context.Context,
 		cmd models.Command[T],
