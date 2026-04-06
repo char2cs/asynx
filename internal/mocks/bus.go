@@ -15,6 +15,13 @@ func (b *Bus[T]) Publish(
 	return nil
 }
 
+func (b *Bus[T]) PublishSync(
+	_ context.Context,
+	_ models.Event[T],
+) error {
+	return nil
+}
+
 func (b *Bus[T]) Subscribe(
 	_ string,
 	_ models.ProjectionHandler[T],

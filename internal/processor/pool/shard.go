@@ -147,10 +147,11 @@ func (s *Shard[T]) executeJob(
 	executor *exec.CommandExecutor[T],
 	job *models.CommandJob[T],
 ) {
-	err := executor.Execute(
+	event, err := executor.Execute(
 		job.Envelope.Ctx,
 		job.Envelope.Cmd,
 		job.NextVersion,
+		job.Envelope.WaitHandlers,
 	)
 
 	if errors.Is(err, asynxmd.ErrValidation) && s.workersPerShard == 1 {
@@ -161,7 +162,7 @@ func (s *Shard[T]) executeJob(
 
 	s.sendResult(
 		job.Envelope.ResultChan,
-		err,
+		models.CommandResult[T]{Event: event, Err: err},
 	)
 }
 
@@ -175,11 +176,11 @@ func (s *Shard[T]) sendCorrection(
 }
 
 func (s *Shard[T]) sendResult(
-	resultChan chan error,
-	err error,
+	resultChan chan models.CommandResult[T],
+	result models.CommandResult[T],
 ) {
 	select {
-	case resultChan <- err:
+	case resultChan <- result:
 	default:
 	}
 }

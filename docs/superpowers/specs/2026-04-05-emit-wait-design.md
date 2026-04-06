@@ -1,4 +1,4 @@
-# EmitWait Design
+# SendWait Design
 
 **Date:** 2026-04-05
 **Status:** Approved
@@ -12,7 +12,7 @@ The workaround today (`WaitPublish` + `WaitForHandlers`) is test-only, drains *a
 
 ## Goal
 
-Add `EmitWait` — a first-class production API that:
+Add `SendWait` — a first-class production API that:
 1. Sends a command and blocks until the event is written **and** all projection handlers for that event have completed.
 2. Returns the resulting `Event[T]` (same value projection handlers receive).
 3. Does not affect `Send` behavior in any way.
@@ -23,11 +23,11 @@ Add `EmitWait` — a first-class production API that:
 type Asynx[T any] interface {
     // ... existing methods unchanged ...
 
-    // EmitWait sends cmd, blocks until the event is durably written and all
+    // SendWait sends cmd, blocks until the event is durably written and all
     // matching projection handlers have finished, then returns the event.
     // Handler panics and timeouts are still handled by PanicHandler/TimeoutHandler;
     // they do not affect the returned error.
-    EmitWait(ctx context.Context, cmd models.Command[T]) (models.Event[T], error)
+    SendWait(ctx context.Context, cmd models.Command[T]) (models.Event[T], error)
 }
 ```
 
@@ -69,11 +69,11 @@ Six mechanical changes that thread `Event[T]` back through the pipeline and intr
 ### `internal/processor/processor.go`
 - `sendAndWait` returns `(Event[T], error)` — reads `CommandResult[T]` from the result channel
 - `Send` calls `sendAndWait`, discards the event, returns only `error` — no behavioral change
-- New `EmitWait` method: creates envelope with `WaitHandlers=true`, calls `sendAndWait`, returns `(Event[T], error)`
+- New `SendWait` method: creates envelope with `WaitHandlers=true`, calls `sendAndWait`, returns `(Event[T], error)`
 
 ### `asynx.go`
-- Add `EmitWait` to the `Asynx[T]` interface
-- Implement on `asynxImpl` by delegating to `proc.EmitWait`
+- Add `SendWait` to the `Asynx[T]` interface
+- Implement on `asynxImpl` by delegating to `proc.SendWait`
 
 ### `internal/mocks/bus.go`
 - Add `PublishSync` to the mock bus to satisfy the updated `Bus[T]` interface
@@ -81,9 +81,9 @@ Six mechanical changes that thread `Event[T]` back through the pipeline and intr
 ## Testing
 
 - All existing `Send` tests pass unchanged — `Send` behavior is identical.
-- New tests for `EmitWait`:
+- New tests for `SendWait`:
   - Returns the correct `Event[T]` (aggregate, previous aggregate, event name, version).
-  - Handlers are guaranteed complete when `EmitWait` returns (assert side effects without `WaitPublish`).
+  - Handlers are guaranteed complete when `SendWait` returns (assert side effects without `WaitPublish`).
   - Context cancellation while waiting returns `ErrContextCancelled`.
   - Validation failure returns `ErrValidation`, no event published.
 

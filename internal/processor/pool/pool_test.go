@@ -16,6 +16,23 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
+// blockingBus is a test bus whose PublishSync blocks until unblockCh is closed.
+type blockingBus[T any] struct {
+	unblockCh chan struct{}
+}
+
+func (b *blockingBus[T]) Publish(_ context.Context, _ asynxmd.Event[T]) error { return nil }
+func (b *blockingBus[T]) PublishSync(_ context.Context, _ asynxmd.Event[T]) error {
+	<-b.unblockCh
+	return nil
+}
+func (b *blockingBus[T]) Subscribe(_ string, _ asynxmd.ProjectionHandler[T], _ ...asynxmd.SubscriptionOpt[T]) (string, error) {
+	return "", nil
+}
+func (b *blockingBus[T]) Unsubscribe(_ string) error    { return nil }
+func (b *blockingBus[T]) Close(_ context.Context) error { return nil }
+func (b *blockingBus[T]) WaitForHandlers()               {}
+
 type order = mocks.Order
 
 func TestPool_SingleCommandSuccess(t *testing.T) {
@@ -33,14 +50,14 @@ func TestPool_SingleCommandSuccess(t *testing.T) {
 	envelope := &models.CommandEnvelope[order]{
 		Cmd:        mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
 		Ctx:        ctx,
-		ResultChan: make(chan error, 1),
+		ResultChan: make(chan models.CommandResult[order], 1),
 	}
 
 	shard.CommandChan() <- envelope
 
-	err := <-envelope.ResultChan
-	if err != nil {
-		t.Fatalf("expected nil, got %v", err)
+	result := <-envelope.ResultChan
+	if result.Err != nil {
+		t.Fatalf("expected nil, got %v", result.Err)
 	}
 
 	// Verify aggregate was written
@@ -74,14 +91,14 @@ func TestPool_SerialOrderingSameAggregate(t *testing.T) {
 				NewState: order{ID: "order1", Total: float64(i * 10), Status: "Pending"},
 			},
 			Ctx:        ctx,
-			ResultChan: make(chan error, 1),
+			ResultChan: make(chan models.CommandResult[order], 1),
 		}
 
 		shard.CommandChan() <- envelope
 
-		err := <-envelope.ResultChan
-		if err != nil {
-			t.Fatalf("Send failed at iteration %d: %v", i, err)
+		result := <-envelope.ResultChan
+		if result.Err != nil {
+			t.Fatalf("Send failed at iteration %d: %v", i, result.Err)
 		}
 	}
 
@@ -117,11 +134,12 @@ func TestPool_ParallelDifferentAggregates(t *testing.T) {
 			envelope := &models.CommandEnvelope[order]{
 				Cmd:        mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0},
 				Ctx:        ctx,
-				ResultChan: make(chan error, 1),
+				ResultChan: make(chan models.CommandResult[order], 1),
 			}
 
 			shard.CommandChan() <- envelope
-			errs <- <-envelope.ResultChan
+			result := <-envelope.ResultChan
+			errs <- result.Err
 		}(i)
 	}
 
@@ -164,18 +182,18 @@ func TestPool_ValidationFailureNoWrite(t *testing.T) {
 	envelope := &models.CommandEnvelope[order]{
 		Cmd:        mocks.CancelOrderCmd{ID: "order1"},
 		Ctx:        ctx,
-		ResultChan: make(chan error, 1),
+		ResultChan: make(chan models.CommandResult[order], 1),
 	}
 
 	shard.CommandChan() <- envelope
 
-	err := <-envelope.ResultChan
-	if err != asynxmd.ErrValidation {
-		t.Fatalf("expected ErrValidation, got %v", err)
+	result := <-envelope.ResultChan
+	if result.Err != asynxmd.ErrValidation {
+		t.Fatalf("expected ErrValidation, got %v", result.Err)
 	}
 
 	// Verify aggregate was NOT written
-	_, err = es.Get(ctx, "order1")
+	_, err := es.Get(ctx, "order1")
 	if err != asynxmd.ErrNotFound {
 		t.Errorf("expected ErrNotFound, but aggregate was written")
 	}
@@ -202,11 +220,12 @@ func TestPool_DrainWaitsForInflight(t *testing.T) {
 			envelope := &models.CommandEnvelope[order]{
 				Cmd:        mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0},
 				Ctx:        ctx,
-				ResultChan: make(chan error, 1),
+				ResultChan: make(chan models.CommandResult[order], 1),
 			}
 
 			shard.CommandChan() <- envelope
-			errs <- <-envelope.ResultChan
+			result := <-envelope.ResultChan
+			errs <- result.Err
 		}(i)
 	}
 
@@ -287,11 +306,12 @@ func TestPool_QueueFullBlocksSender(t *testing.T) {
 		envelope := &models.CommandEnvelope[order]{
 			Cmd:        blockingCmd,
 			Ctx:        ctx,
-			ResultChan: make(chan error, 1),
+			ResultChan: make(chan models.CommandResult[order], 1),
 		}
 		shard.CommandChan() <- envelope
 		close(blocked)
-		done1 <- <-envelope.ResultChan
+		result := <-envelope.ResultChan
+		done1 <- result.Err
 	}()
 
 	// Wait for first command to be queued
@@ -303,7 +323,7 @@ func TestPool_QueueFullBlocksSender(t *testing.T) {
 	normalEnvelope := &models.CommandEnvelope[order]{
 		Cmd:        mocks.CreateOrderCmd{ID: "order2", Total: 100.0},
 		Ctx:        ctx,
-		ResultChan: make(chan error, 1),
+		ResultChan: make(chan models.CommandResult[order], 1),
 	}
 
 	// Use a timeout to detect if send would block
@@ -351,11 +371,12 @@ func TestPool_MultipleWorkers(t *testing.T) {
 			envelope := &models.CommandEnvelope[order]{
 				Cmd:        mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0},
 				Ctx:        ctx,
-				ResultChan: make(chan error, 1),
+				ResultChan: make(chan models.CommandResult[order], 1),
 			}
 
 			shard.CommandChan() <- envelope
-			errs <- <-envelope.ResultChan
+			result := <-envelope.ResultChan
+			errs <- result.Err
 		}(i)
 	}
 
@@ -386,48 +407,48 @@ func TestPool_ValidationErrorDecrementVersionSingleWorker(t *testing.T) {
 	envelope1 := &models.CommandEnvelope[order]{
 		Cmd:        mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
 		Ctx:        ctx,
-		ResultChan: make(chan error, 1),
+		ResultChan: make(chan models.CommandResult[order], 1),
 	}
 	shard.CommandChan() <- envelope1
-	err := <-envelope1.ResultChan
-	if err != nil {
-		t.Fatalf("create failed: %v", err)
+	result1 := <-envelope1.ResultChan
+	if result1.Err != nil {
+		t.Fatalf("create failed: %v", result1.Err)
 	}
 
 	// Now try to cancel it (validation succeeds)
 	envelope2 := &models.CommandEnvelope[order]{
 		Cmd:        mocks.CancelOrderCmd{ID: "order1"},
 		Ctx:        ctx,
-		ResultChan: make(chan error, 1),
+		ResultChan: make(chan models.CommandResult[order], 1),
 	}
 	shard.CommandChan() <- envelope2
-	err = <-envelope2.ResultChan
-	if err != nil {
-		t.Fatalf("cancel failed: %v", err)
+	result2 := <-envelope2.ResultChan
+	if result2.Err != nil {
+		t.Fatalf("cancel failed: %v", result2.Err)
 	}
 
 	// Try to cancel a non-existent order (validation error)
 	envelope3 := &models.CommandEnvelope[order]{
 		Cmd:        mocks.CancelOrderCmd{ID: "order2"},
 		Ctx:        ctx,
-		ResultChan: make(chan error, 1),
+		ResultChan: make(chan models.CommandResult[order], 1),
 	}
 	shard.CommandChan() <- envelope3
-	err = <-envelope3.ResultChan
-	if err != asynxmd.ErrValidation {
-		t.Fatalf("expected ErrValidation for cancel non-existent, got %v", err)
+	result3 := <-envelope3.ResultChan
+	if result3.Err != asynxmd.ErrValidation {
+		t.Fatalf("expected ErrValidation for cancel non-existent, got %v", result3.Err)
 	}
 
 	// Send another valid command to ensure version was corrected
 	envelope4 := &models.CommandEnvelope[order]{
 		Cmd:        mocks.CreateOrderCmd{ID: "order3", Total: 200.0},
 		Ctx:        ctx,
-		ResultChan: make(chan error, 1),
+		ResultChan: make(chan models.CommandResult[order], 1),
 	}
 	shard.CommandChan() <- envelope4
-	err = <-envelope4.ResultChan
-	if err != nil {
-		t.Fatalf("create after validation error failed: %v", err)
+	result4 := <-envelope4.ResultChan
+	if result4.Err != nil {
+		t.Fatalf("create after validation error failed: %v", result4.Err)
 	}
 }
 
@@ -446,7 +467,7 @@ func TestPool_ContextCancelledDuringExecution(t *testing.T) {
 	envelope := &models.CommandEnvelope[order]{
 		Cmd:        mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
 		Ctx:        ctx,
-		ResultChan: make(chan error, 1),
+		ResultChan: make(chan models.CommandResult[order], 1),
 	}
 
 	shard.CommandChan() <- envelope
@@ -456,8 +477,8 @@ func TestPool_ContextCancelledDuringExecution(t *testing.T) {
 
 	// Result channel should still receive (either success or context cancelled)
 	select {
-	case err := <-envelope.ResultChan:
-		_ = err // OK either way
+	case <-envelope.ResultChan:
+		// OK either way
 	case <-time.After(2 * time.Second):
 		t.Fatalf("result not received within timeout")
 	}
@@ -515,7 +536,7 @@ func TestPool_DispatcherMultipleCorrections(t *testing.T) {
 	envelope1 := &models.CommandEnvelope[order]{
 		Cmd:        mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
 		Ctx:        ctx,
-		ResultChan: make(chan error, 1),
+		ResultChan: make(chan models.CommandResult[order], 1),
 	}
 	shard.CommandChan() <- envelope1
 	<-envelope1.ResultChan
@@ -524,23 +545,67 @@ func TestPool_DispatcherMultipleCorrections(t *testing.T) {
 	envelope2 := &models.CommandEnvelope[order]{
 		Cmd:        mocks.CancelOrderCmd{ID: "order2"},
 		Ctx:        ctx,
-		ResultChan: make(chan error, 1),
+		ResultChan: make(chan models.CommandResult[order], 1),
 	}
 	shard.CommandChan() <- envelope2
-	err := <-envelope2.ResultChan
-	if err != asynxmd.ErrValidation {
-		t.Fatalf("expected ErrValidation, got %v", err)
+	result2 := <-envelope2.ResultChan
+	if result2.Err != asynxmd.ErrValidation {
+		t.Fatalf("expected ErrValidation, got %v", result2.Err)
 	}
 
 	// Next command should work (no version gap since no correction sent)
 	envelope3 := &models.CommandEnvelope[order]{
 		Cmd:        mocks.CreateOrderCmd{ID: "order3", Total: 100.0},
 		Ctx:        ctx,
-		ResultChan: make(chan error, 1),
+		ResultChan: make(chan models.CommandResult[order], 1),
 	}
 	shard.CommandChan() <- envelope3
-	err = <-envelope3.ResultChan
-	if err != nil {
-		t.Fatalf("create after failed validation (multi-worker) failed: %v", err)
+	result3 := <-envelope3.ResultChan
+	if result3.Err != nil {
+		t.Fatalf("create after failed validation (multi-worker) failed: %v", result3.Err)
 	}
+}
+
+// TestPool_WaitWorkers_ContextCancelledAfterDispatch verifies the ctx.Done branch
+// in waitWorkers: context expires while workers are still executing a long-running job.
+func TestPool_WaitWorkers_ContextCancelledAfterDispatch(t *testing.T) {
+	s := store.New()
+	// Use a blocking bus so the worker blocks during PublishSync (WaitHandlers=true).
+	unblockCh := make(chan struct{})
+	bb := &blockingBus[order]{unblockCh: unblockCh}
+	es := eventstore.New[order](s, s, nil, 1, nil)
+	executor := exec.New(es, bb)
+
+	p := pool.New(executor, 1, 0, 1)
+
+	ctx := context.Background()
+	shard := p.Shards()[0]
+
+	// Send a command with WaitHandlers=true so the worker blocks in PublishSync.
+	envelope := &models.CommandEnvelope[order]{
+		Cmd:          mocks.CreateOrderCmd{ID: "blocking-order", Total: 10.0},
+		Ctx:          ctx,
+		ResultChan:   make(chan models.CommandResult[order], 1),
+		WaitHandlers: true,
+	}
+	shard.CommandChan() <- envelope
+
+	// Signal stop so the dispatcher exits (waitDispatchers phase will complete).
+	// Use a short-lived context for Drain to expire during waitWorkers.
+	drainCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	err := p.Drain(drainCtx)
+	if err == nil {
+		// Unblock the bus so the test doesn't leak goroutines.
+		close(unblockCh)
+		t.Skip("Drain completed before timeout — worker was too fast; skipping")
+	}
+	if err != context.DeadlineExceeded {
+		close(unblockCh)
+		t.Fatalf("expected DeadlineExceeded from waitWorkers, got %v", err)
+	}
+
+	// Unblock the worker so it can exit cleanly and avoid goroutine leak.
+	close(unblockCh)
 }

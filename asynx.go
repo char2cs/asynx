@@ -13,6 +13,11 @@ type Asynx[T any] interface {
 		ctx context.Context,
 		cmd models.Command[T],
 	) error
+	SendWait(
+		ctx context.Context,
+		cmd models.Command[T],
+	) (models.Event[T], error)
+
 	Shutdown(
 		ctx context.Context,
 	) error
@@ -61,6 +66,13 @@ func (i *asynxImpl[T]) Send(
 	cmd models.Command[T],
 ) error {
 	return i.proc.Send(ctx, cmd)
+}
+
+func (i *asynxImpl[T]) SendWait(
+	ctx context.Context,
+	cmd models.Command[T],
+) (models.Event[T], error) {
+	return i.proc.SendWait(ctx, cmd)
 }
 
 func (i *asynxImpl[T]) Shutdown(

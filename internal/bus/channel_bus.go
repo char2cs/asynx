@@ -141,31 +141,32 @@ func (b *ChannelBus[T]) Unsubscribe(
 	return nil
 }
 
+// matchedSubs returns all subscriptions that match eventName, split into exact
+// and regex buckets. Lock-free: reads from the immutable atomic snapshot.
+func (b *ChannelBus[T]) matchedSubs(
+	eventName string,
+) (exact, regex []*models.Subscription[T]) {
+	idx := b.idx.Load()
+	exact = idx.ExactSubs[eventName]
+	for _, sub := range idx.RegexSubs {
+		if b.matchesRegex(eventName, sub.Pattern) {
+			regex = append(regex, sub)
+		}
+	}
+	return exact, regex
+}
+
 func (b *ChannelBus[T]) Publish(
 	ctx context.Context,
 	event asynxmd.Event[T],
 ) error {
-	// Early cancellation check — return immediately if ctx is already done.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	// Step 1 — lock-free: load immutable snapshot, find matching subscriptions.
-	idx := b.idx.Load()
-
-	exactMatches := idx.ExactSubs[event.EventName]
-
-	var regexMatches []*models.Subscription[T]
-	for _, sub := range idx.RegexSubs {
-		if b.matchesRegex(event.EventName, sub.Pattern) {
-			regexMatches = append(regexMatches, sub)
-		}
-	}
-
+	exactMatches, regexMatches := b.matchedSubs(event.EventName)
 	total := len(exactMatches) + len(regexMatches)
 
-	// Step 2 — brief critical section: closed-check + WaitGroup.Add must be
-	// atomic with respect to Close, so that Add is never called after Wait returns.
 	b.publishMu.RLock()
 	if b.closed {
 		b.publishMu.RUnlock()
@@ -176,15 +177,86 @@ func (b *ChannelBus[T]) Publish(
 	}
 	b.publishMu.RUnlock()
 
-	// Step 3 — lock-free: spawn one goroutine per matching handler.
 	for _, sub := range exactMatches {
-		go exec.ExecuteHandler(&b.inFlightWg, utils.MakeJob(sub, event, ctx, b.onPanic, b.onTimeout))
+		go exec.ExecuteHandler(&b.inFlightWg, utils.MakeJob(
+			sub,
+			event,
+			ctx,
+			b.onPanic,
+			b.onTimeout,
+		))
 	}
 
 	for _, sub := range regexMatches {
-		go exec.ExecuteHandler(&b.inFlightWg, utils.MakeJob(sub, event, ctx, b.onPanic, b.onTimeout))
+		go exec.ExecuteHandler(&b.inFlightWg, utils.MakeJob(
+			sub,
+			event,
+			ctx,
+			b.onPanic,
+			b.onTimeout,
+		))
 	}
 
+	return nil
+}
+
+// PublishSync fires all matching handlers and blocks until every handler
+// goroutine triggered by this event has completed. Handler panics and timeouts
+// are still handled by PanicHandler/TimeoutHandler — they do not affect the
+// returned error.
+// Subscription matching uses an immutable atomic snapshot taken before the lock
+// acquisition; a concurrent Subscribe that arrives between the snapshot and the
+// lock may not have its handler invoked for this event, which is consistent with
+// Publish's behavior.
+func (b *ChannelBus[T]) PublishSync(
+	ctx context.Context,
+	event asynxmd.Event[T],
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	exactMatches, regexMatches := b.matchedSubs(event.EventName)
+	total := len(exactMatches) + len(regexMatches)
+
+	b.publishMu.RLock()
+	if b.closed {
+		b.publishMu.RUnlock()
+		return asynxmd.ErrBusClosed
+	}
+	var localWg sync.WaitGroup
+	if total > 0 {
+		b.inFlightWg.Add(total)
+		localWg.Add(total)
+	}
+	b.publishMu.RUnlock()
+
+	for _, sub := range exactMatches {
+		go func(s *models.Subscription[T]) {
+			defer localWg.Done()
+			exec.ExecuteHandler(&b.inFlightWg, utils.MakeJob(
+				s,
+				event,
+				ctx,
+				b.onPanic,
+				b.onTimeout,
+			))
+		}(sub)
+	}
+	for _, sub := range regexMatches {
+		go func(s *models.Subscription[T]) {
+			defer localWg.Done()
+			exec.ExecuteHandler(&b.inFlightWg, utils.MakeJob(
+				s,
+				event,
+				ctx,
+				b.onPanic,
+				b.onTimeout,
+			))
+		}(sub)
+	}
+
+	localWg.Wait()
 	return nil
 }
 
