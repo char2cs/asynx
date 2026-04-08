@@ -23,19 +23,43 @@ import (
 )
 
 type CommandExecutor[T any] struct {
-	es        *eventstore.EventStore[T]
-	bus       asynxmd.Bus[T]
-	publishWg sync.WaitGroup
+	es  *eventstore.EventStore[T]
+	bus asynxmd.Bus[T]
+
+	// publishMu serialises access to pending and wakes WaitPublish callers.
+	// We cannot use sync.WaitGroup here: its docs prohibit a new Add when the
+	// counter is zero and a concurrent Wait is returning, which is exactly what
+	// happens when a projection handler fires a new command from inside
+	// bus.Publish (i.e. the Quiver pattern).
+	publishMu       sync.Mutex
+	pending         int
+	publishCv       *sync.Cond
+	onPublishError  asynxmd.PublishErrorHandler[T]
+}
+
+// CommandExecutorOpt is a functional option for New.
+type CommandExecutorOpt[T any] func(*CommandExecutor[T])
+
+// WithPublishErrorHandler sets a callback invoked when Bus.Publish returns a
+// non-nil error inside an async publish goroutine. When not set, publish
+// errors are silently dropped.
+func WithPublishErrorHandler[T any](fn asynxmd.PublishErrorHandler[T]) CommandExecutorOpt[T] {
+	return func(e *CommandExecutor[T]) {
+		e.onPublishError = fn
+	}
 }
 
 func New[T any](
 	es *eventstore.EventStore[T],
 	bus asynxmd.Bus[T],
+	opts ...CommandExecutorOpt[T],
 ) *CommandExecutor[T] {
-	return &CommandExecutor[T]{
-		es:  es,
-		bus: bus,
+	e := &CommandExecutor[T]{es: es, bus: bus}
+	e.publishCv = sync.NewCond(&e.publishMu)
+	for _, opt := range opts {
+		opt(e)
 	}
+	return e
 }
 
 func (e *CommandExecutor[T]) Execute(
@@ -70,14 +94,25 @@ func (e *CommandExecutor[T]) publishAsync(
 		return
 	}
 
-	e.publishWg.Add(1)
+	// Increment before spawning: WaitPublish must never see pending==0 while
+	// the goroutine is still in flight.
+	e.publishMu.Lock()
+	e.pending++
+	e.publishMu.Unlock()
+
 	go func() {
-		defer e.publishWg.Done()
+		defer func() {
+			e.publishMu.Lock()
+			e.pending--
+			if e.pending == 0 {
+				e.publishCv.Broadcast()
+			}
+			e.publishMu.Unlock()
+		}()
 		publishCtx := context.WithoutCancel(ctx)
-		_ = e.bus.Publish(
-			publishCtx,
-			event,
-		)
+		if err := e.bus.Publish(publishCtx, event); err != nil && e.onPublishError != nil {
+			e.onPublishError(publishCtx, event, err)
+		}
 	}()
 }
 
@@ -99,5 +134,9 @@ func (e *CommandExecutor[T]) publishSync(
 // ForTesting: WaitPublish blocks until all publishAsync goroutines complete.
 // Do not call in production code.
 func (e *CommandExecutor[T]) WaitPublish() {
-	e.publishWg.Wait()
+	e.publishMu.Lock()
+	defer e.publishMu.Unlock()
+	for e.pending > 0 {
+		e.publishCv.Wait()
+	}
 }
