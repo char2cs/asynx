@@ -17,14 +17,15 @@ type ShardingOpts struct {
 }
 
 type Builder[T any] struct {
-	eventStore      models.Store
-	snapshotStore   models.Store
-	bus             models.Bus[T]
-	shardingOpts    ShardingOpts
-	schemaVersion   int
-	upcasters       map[int]models.Upcaster
-	panicHandler    models.PanicHandler[T]
-	corruptionHook  func(error)
+	eventStore          models.Store
+	snapshotStore       models.Store
+	bus                 models.Bus[T]
+	shardingOpts        ShardingOpts
+	schemaVersion       int
+	upcasters           map[int]models.Upcaster
+	panicHandler        models.PanicHandler[T]
+	corruptionHook      func(error)
+	publishErrorHandler models.PublishErrorHandler[T]
 }
 
 func New[T any]() *Builder[T] {
@@ -95,6 +96,15 @@ func (b *Builder[T]) WithCorruptionHook(fn func(error)) *Builder[T] {
 	return b
 }
 
+// WithPublishErrorHandler sets a callback invoked when Bus.Publish returns a
+// non-nil error inside an async publish goroutine. The event has already been
+// durably written to the event store; this callback is for observability only.
+// When not set, publish errors are silently dropped.
+func (b *Builder[T]) WithPublishErrorHandler(fn models.PublishErrorHandler[T]) *Builder[T] {
+	b.publishErrorHandler = fn
+	return b
+}
+
 // Build requires WithEventStore; all other options have defaults.
 func (b *Builder[T]) Build() (Asynx[T], error) {
 	if b.eventStore == nil {
@@ -125,12 +135,14 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 		b.corruptionHook,
 	)
 
-	proc := processor.New(
-		es,
-		activeBus,
+	procOpts := []processor.ProcessorOpt[T]{
 		processor.WithShards[T](b.shardingOpts.Shards),
 		processor.WithQueueDepth[T](b.shardingOpts.QueueDepth),
-	)
+	}
+	if b.publishErrorHandler != nil {
+		procOpts = append(procOpts, processor.WithPublishErrorHandler[T](b.publishErrorHandler))
+	}
+	proc := processor.New(es, activeBus, procOpts...)
 
 	return &asynxImpl[T]{
 		proc: proc,

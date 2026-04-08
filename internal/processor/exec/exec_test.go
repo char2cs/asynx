@@ -361,6 +361,61 @@ func TestExecute_WaitHandlers_NilBusNoPanic(t *testing.T) {
 	}
 }
 
+func TestWaitPublish_NoRaceWhenHandlerTriggersNewPublishAsync(t *testing.T) {
+	// Regression test for the data race in sync.WaitGroup reuse.
+	//
+	// Scenario: bus.Publish spawns a goroutine that calls executor.Execute,
+	// simulating a projection handler that fires a new command (e.g. Quiver's
+	// runner calling Send(EndExecution) from inside handleExecution).
+	//
+	// Race window with sync.WaitGroup:
+	//   G1 (outer publish goroutine): defer wg.Done() → counter hits 0
+	//     → wg.Wait() begins returning (writes internal WaitGroup state)
+	//   G2 (inner Execute goroutine): publishAsync → wg.Add(1)
+	//     → reads internal WaitGroup state
+	//                                                         DATA RACE ❌
+	//
+	// With the fix (mutex + sync.Cond), pending++ and the WaitPublish check
+	// are serialised under the same mutex so the window is closed.
+	s := store.New()
+	es := eventstore.New[order](s, s, nil, 1, nil)
+
+	var executor *CommandExecutor[order]
+	var once sync.Once
+
+	raceBus := &callbackPublishBus[order]{
+		publishFn: func(ctx context.Context, event asynxmd.Event[order]) error {
+			once.Do(func() {
+				// Spawn a goroutine that triggers a second publishAsync.
+				// It runs concurrently with the outer goroutine's deferred
+				// wg.Done(), creating the Add/Wait-returning race window.
+				go func() {
+					cmd := mocks.UpdateOrderCmd{
+						ID:       event.AggregateID,
+						NewState: order{ID: event.AggregateID, Total: 1.0},
+					}
+					executor.Execute(ctx, cmd, 2, false) //nolint:errcheck
+				}()
+			})
+			return nil
+		},
+	}
+	executor = New(es, raceBus)
+
+	ctx := context.Background()
+	_, err := executor.Execute(ctx, mocks.CreateOrderCmd{ID: "race-order", Total: 1.0}, 1, false)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	// First WaitPublish: waits for the initial publishAsync goroutine (G1).
+	// While G1 is active, G2 may call publishAsync → Add(1) concurrently
+	// with G1's Done() hitting zero — triggering the race on buggy code.
+	executor.WaitPublish()
+	// Second WaitPublish: waits for any second-hop publishAsync (G2).
+	executor.WaitPublish()
+}
+
 // trackingBusMock is a mock bus that tracks calls for testing
 type trackingBusMock[T any] struct {
 	publishChan   chan struct{}
@@ -409,6 +464,125 @@ func (m *trackingBusMock[T]) Close(ctx context.Context) error {
 }
 
 func (m *trackingBusMock[T]) WaitForHandlers() {}
+
+// callbackPublishBus invokes a custom function on Publish, used to inject
+// concurrent behaviour in race-condition tests.
+type callbackPublishBus[T any] struct {
+	publishFn func(ctx context.Context, event asynxmd.Event[T]) error
+}
+
+func (b *callbackPublishBus[T]) Publish(ctx context.Context, event asynxmd.Event[T]) error {
+	if b.publishFn != nil {
+		return b.publishFn(ctx, event)
+	}
+	return nil
+}
+
+func (b *callbackPublishBus[T]) PublishSync(_ context.Context, _ asynxmd.Event[T]) error {
+	return nil
+}
+
+func (b *callbackPublishBus[T]) Subscribe(_ string, _ asynxmd.ProjectionHandler[T], _ ...asynxmd.SubscriptionOpt[T]) (string, error) {
+	return "", nil
+}
+
+func (b *callbackPublishBus[T]) Unsubscribe(_ string) error { return nil }
+
+func (b *callbackPublishBus[T]) Close(_ context.Context) error { return nil }
+
+func (b *callbackPublishBus[T]) WaitForHandlers() {}
+
+func TestPublishErrorHandler_CalledOnPublishError(t *testing.T) {
+	s := store.New()
+	es := eventstore.New[order](s, s, nil, 1, nil)
+
+	publishErr := errors.New("bus error")
+	errBus := &callbackPublishBus[order]{
+		publishFn: func(_ context.Context, _ asynxmd.Event[order]) error {
+			return publishErr
+		},
+	}
+
+	var mu sync.Mutex
+	var gotEvent asynxmd.Event[order]
+	var gotErr error
+	called := false
+
+	executor := New(es, errBus, WithPublishErrorHandler[order](func(_ context.Context, event asynxmd.Event[order], err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		gotEvent = event
+		gotErr = err
+		called = true
+	}))
+
+	ctx := context.Background()
+	_, err := executor.Execute(ctx, mocks.CreateOrderCmd{ID: "err-order", Total: 1.0}, 1, false)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	executor.WaitPublish()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !called {
+		t.Fatal("PublishErrorHandler was not called")
+	}
+	if gotErr != publishErr {
+		t.Errorf("expected err %v, got %v", publishErr, gotErr)
+	}
+	if gotEvent.AggregateID != "err-order" {
+		t.Errorf("expected AggregateID err-order, got %q", gotEvent.AggregateID)
+	}
+}
+
+func TestPublishErrorHandler_NotCalledOnSuccess(t *testing.T) {
+	s := store.New()
+	es := eventstore.New[order](s, s, nil, 1, nil)
+
+	successBus := &callbackPublishBus[order]{
+		publishFn: func(_ context.Context, _ asynxmd.Event[order]) error { return nil },
+	}
+
+	called := false
+	executor := New(es, successBus, WithPublishErrorHandler[order](func(_ context.Context, _ asynxmd.Event[order], _ error) {
+		called = true
+	}))
+
+	ctx := context.Background()
+	_, err := executor.Execute(ctx, mocks.CreateOrderCmd{ID: "ok-order", Total: 1.0}, 1, false)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	executor.WaitPublish()
+
+	if called {
+		t.Error("PublishErrorHandler must not be called on success")
+	}
+}
+
+func TestPublishErrorHandler_NilHandlerDoesNotPanic(t *testing.T) {
+	s := store.New()
+	es := eventstore.New[order](s, s, nil, 1, nil)
+
+	errBus := &callbackPublishBus[order]{
+		publishFn: func(_ context.Context, _ asynxmd.Event[order]) error {
+			return errors.New("bus error")
+		},
+	}
+
+	executor := New(es, errBus) // no handler option — default nil, must not panic
+
+	ctx := context.Background()
+	_, err := executor.Execute(ctx, mocks.CreateOrderCmd{ID: "nil-handler-order", Total: 1.0}, 1, false)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	executor.WaitPublish()
+}
 
 func TestWaitPublish_BlocksUntilAsyncPublishDone(t *testing.T) {
 	s := store.New()

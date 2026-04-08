@@ -87,6 +87,20 @@ func TestBuilderWithCorruptionHook(t *testing.T) {
 	_ = called // hook is wired; invocation tested at integration level
 }
 
+func TestBuilderWithPublishErrorHandler(t *testing.T) {
+	called := false
+	handler := func(_ context.Context, _ models.Event[mocks.Order], _ error) { called = true }
+
+	_, err := asynx.New[mocks.Order]().
+		WithEventStore(&mocks.Store{}).
+		WithPublishErrorHandler(handler).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error: %v", err)
+	}
+	_ = called // handler is wired; invocation tested at the exec layer
+}
+
 func TestShardingOptsZeroValue(t *testing.T) {
 	opts := asynx.ShardingOpts{}
 	if opts.Shards != 0 || opts.QueueDepth != 0 {
