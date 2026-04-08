@@ -32,16 +32,17 @@ type Processor[T any] struct {
 	onSendPending func()
 }
 
-type ProcessorOpt[T any] func(*processorConfig)
+type ProcessorOpt[T any] func(*processorConfig[T])
 
-type processorConfig struct {
-	shards          int
-	queueDepth      int
-	workersPerShard int
+type processorConfig[T any] struct {
+	shards              int
+	queueDepth          int
+	workersPerShard     int
+	publishErrorHandler asynxmd.PublishErrorHandler[T]
 }
 
 func WithShards[T any](count int) ProcessorOpt[T] {
-	return func(cfg *processorConfig) {
+	return func(cfg *processorConfig[T]) {
 		if count > 0 {
 			cfg.shards = count
 		}
@@ -49,7 +50,7 @@ func WithShards[T any](count int) ProcessorOpt[T] {
 }
 
 func WithQueueDepth[T any](depth int) ProcessorOpt[T] {
-	return func(cfg *processorConfig) {
+	return func(cfg *processorConfig[T]) {
 		if depth >= 0 {
 			cfg.queueDepth = depth
 		}
@@ -57,10 +58,19 @@ func WithQueueDepth[T any](depth int) ProcessorOpt[T] {
 }
 
 func WithWorkersPerShard[T any](count int) ProcessorOpt[T] {
-	return func(cfg *processorConfig) {
+	return func(cfg *processorConfig[T]) {
 		if count > 0 {
 			cfg.workersPerShard = count
 		}
+	}
+}
+
+// WithPublishErrorHandler sets a callback invoked when Bus.Publish returns a
+// non-nil error inside an async publish goroutine. When not set, publish
+// errors are silently dropped.
+func WithPublishErrorHandler[T any](fn asynxmd.PublishErrorHandler[T]) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.publishErrorHandler = fn
 	}
 }
 
@@ -69,7 +79,7 @@ func New[T any](
 	bus asynxmd.Bus[T],
 	opts ...ProcessorOpt[T],
 ) *Processor[T] {
-	cfg := &processorConfig{
+	cfg := &processorConfig[T]{
 		shards:          8,
 		queueDepth:      -1,
 		workersPerShard: 8,
@@ -81,10 +91,11 @@ func New[T any](
 		cfg.queueDepth = cfg.workersPerShard
 	}
 
-	executor := exec.New(
-		es,
-		bus,
-	)
+	execOpts := []exec.CommandExecutorOpt[T]{}
+	if cfg.publishErrorHandler != nil {
+		execOpts = append(execOpts, exec.WithPublishErrorHandler[T](cfg.publishErrorHandler))
+	}
+	executor := exec.New(es, bus, execOpts...)
 	return &Processor[T]{
 		pool: pool.New(
 			executor,
