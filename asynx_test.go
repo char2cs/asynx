@@ -2,6 +2,7 @@ package asynx_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -612,5 +613,131 @@ func TestIntegration_SendWaitThenGet(t *testing.T) {
 	}
 	if event.Aggregate.Total != state.Total {
 		t.Errorf("event aggregate (%f) does not match store (%f)", event.Aggregate.Total, state.Total)
+	}
+}
+
+// --- Forget ---
+
+func TestForget_AggregateDoesNotExist_ReturnsErrValidation(t *testing.T) {
+	instance := newInstance(t)
+	err := instance.Forget(context.Background(), "order-missing")
+	if !errors.Is(err, models.ErrValidation) {
+		t.Fatalf("expected ErrValidation, got %v", err)
+	}
+}
+
+func TestForget_ErasesAggregate(t *testing.T) {
+	instance := newInstance(t)
+	ctx := context.Background()
+
+	if _, err := instance.Send(ctx, mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if err := instance.Forget(ctx, "order-1"); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+
+	_, err := instance.Get(ctx, "order-1")
+	if !errors.Is(err, models.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound after Forget, got %v", err)
+	}
+}
+
+func TestForget_CallsOnForgetHandler_WithLastState(t *testing.T) {
+	instance := newInstance(t)
+	ctx := context.Background()
+
+	if _, err := instance.Send(ctx, mocks.CreateOrderCmd{ID: "order-1", Total: 99.0}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	var gotEvent models.Event[mocks.Order]
+	if _, err := instance.OnForget(func(_ context.Context, e models.Event[mocks.Order]) {
+		gotEvent = e
+	}); err != nil {
+		t.Fatalf("OnForget: %v", err)
+	}
+
+	if err := instance.Forget(ctx, "order-1"); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+
+	if gotEvent.AggregateID != "order-1" {
+		t.Errorf("AggregateID = %q, want order-1", gotEvent.AggregateID)
+	}
+	if gotEvent.EventName != "asynx.aggregate.forget" {
+		t.Errorf("EventName = %q, want asynx.aggregate.forget", gotEvent.EventName)
+	}
+	if gotEvent.Aggregate.Total != 99.0 {
+		t.Errorf("Aggregate.Total = %v, want 99.0", gotEvent.Aggregate.Total)
+	}
+}
+
+func TestForget_AfterShutdown_ReturnsErrShuttingDown(t *testing.T) {
+	s := store.New()
+	instance, err := asynx.New[mocks.Order]().WithEventStore(s).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance.Shutdown(context.Background())
+
+	if err := instance.Forget(context.Background(), "order-1"); !errors.Is(err, models.ErrShuttingDown) {
+		t.Fatalf("expected ErrShuttingDown, got %v", err)
+	}
+}
+
+func TestForget_SerializedAfterSend(t *testing.T) {
+	instance := newInstance(t)
+	ctx := context.Background()
+
+	if _, err := instance.Send(ctx, mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}); err != nil {
+		t.Fatalf("initial Send: %v", err)
+	}
+
+	// Enqueue an update and a Forget — Forget must see the updated state.
+	updated := mocks.Order{ID: "order-1", Total: 200.0, Status: "Updated"}
+	instance.Send(ctx, mocks.UpdateOrderCmd{ID: "order-1", NewState: updated}) //nolint:errcheck
+
+	var gotTotal float64
+	instance.OnForget(func(_ context.Context, e models.Event[mocks.Order]) { //nolint:errcheck
+		gotTotal = e.Aggregate.Total
+	})
+
+	if err := instance.Forget(ctx, "order-1"); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+
+	if gotTotal != 200.0 {
+		t.Errorf("Forget saw Total=%v, want 200.0 (Send should have completed first)", gotTotal)
+	}
+}
+
+func TestOnForget_Unsubscribe_StopsHandler(t *testing.T) {
+	instance := newInstance(t)
+	ctx := context.Background()
+
+	if _, err := instance.Send(ctx, mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	var called int
+	subID, err := instance.OnForget(func(_ context.Context, _ models.Event[mocks.Order]) {
+		called++
+	})
+	if err != nil {
+		t.Fatalf("OnForget: %v", err)
+	}
+
+	if err := instance.Unsubscribe(subID); err != nil {
+		t.Fatalf("Unsubscribe: %v", err)
+	}
+
+	if err := instance.Forget(ctx, "order-1"); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+
+	if called != 0 {
+		t.Errorf("handler called %d times after Unsubscribe, want 0", called)
 	}
 }

@@ -27,6 +27,21 @@ type Asynx[T any] interface {
 		cmd models.Command[T],
 	) (models.Event[T], error)
 
+	// Forget writes a tombstone event for the aggregate, notifies all ForgetHandlers
+	// synchronously, then erases all events, snapshots, and cached state.
+	// Returns ErrValidation if the aggregate does not exist.
+	Forget(
+		ctx context.Context,
+		aggregateID string,
+	) error
+
+	// OnForget registers a handler invoked when any aggregate is forgotten.
+	// The handler receives the tombstone event; Event.Aggregate holds the last known state.
+	// Returns a subscription ID that can be passed to Unsubscribe.
+	OnForget(
+		fn models.ForgetHandler[T],
+	) (string, error)
+
 	Shutdown(
 		ctx context.Context,
 	) error
