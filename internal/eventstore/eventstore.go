@@ -122,6 +122,18 @@ func (es *EventStore[T]) Write(
 	)
 }
 
+// Delete removes all events and snapshots for the aggregate from the backing stores.
+// Idempotent — deleting a non-existent aggregate is not an error.
+func (es *EventStore[T]) Delete(
+	ctx context.Context,
+	aggregateID string,
+) error {
+	if err := es.writer.EventStore().Delete(ctx, "events:"+aggregateID); err != nil {
+		return err
+	}
+	return es.writer.SnapshotStore().Delete(ctx, "snapshots:"+aggregateID)
+}
+
 // Replay iterates events in version order, upcasting each to the current
 // schema version, and calls fn with the public Event[T] containing both the
 // new and previous aggregate states. Replay is read-only and never writes

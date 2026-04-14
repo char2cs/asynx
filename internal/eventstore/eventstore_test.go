@@ -398,3 +398,50 @@ func mustMarshal(v any) []byte {
 }
 
 var _ = mustMarshal // suppress unused warning
+
+// --- Delete ---
+
+func TestDelete_AfterWrite_GetReturnsErrNotFound(t *testing.T) {
+	s := store.New()
+	es := New[order](s, s, nil, 1, nil)
+	ctx := context.Background()
+
+	if _, err := es.Write(ctx, cmd(order{ID: "1", Status: "Pending", Total: 100})); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	if err := es.Delete(ctx, "agg1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	_, err := es.Get(ctx, "agg1")
+	if !errors.Is(err, asynxmd.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound after Delete, got %v", err)
+	}
+}
+
+func TestDelete_RemovesSnapshot(t *testing.T) {
+	s := store.New()
+	es := New[order](s, s, nil, 1, nil)
+	ctx := context.Background()
+
+	if _, err := es.Write(ctx, cmdSnap(order{ID: "1", Status: "Snapped", Total: 50})); err != nil {
+		t.Fatalf("Write with snapshot: %v", err)
+	}
+
+	if err := es.Delete(ctx, "agg1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	_, err := es.Get(ctx, "agg1")
+	if !errors.Is(err, asynxmd.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound after Delete (snapshot path), got %v", err)
+	}
+}
+
+func TestDelete_NonExistentAggregate_NoError(t *testing.T) {
+	es := New[order](store.New(), store.New(), nil, 1, nil)
+	if err := es.Delete(context.Background(), "ghost"); err != nil {
+		t.Errorf("Delete on non-existent aggregate: %v (want nil)", err)
+	}
+}
