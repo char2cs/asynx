@@ -14,4 +14,5 @@ var (
 	ErrNilHandler          = errors.New("asynx: handler is nil")
 	ErrEmptyPattern        = errors.New("asynx: pattern is empty")
 	ErrMissingEventStore   = errors.New("asynx: event store is required")
+	ErrForgetFailed        = errors.New("asynx: forget failed")
 )
