@@ -112,6 +112,18 @@ func (s *Memory) Count(ctx context.Context, aggregateID string, fromVersion int6
 	return int64(len(s.entriesFrom(aggregateID, fromVersion))), nil
 }
 
+func (s *Memory) Delete(ctx context.Context, aggregateID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.streams, aggregateID)
+	return nil
+}
+
 func toBlobs(entries []entry) [][]byte {
 	result := make([][]byte, len(entries))
 	for i, e := range entries {
