@@ -696,6 +696,8 @@ func TestForget_SerializedAfterSend(t *testing.T) {
 	}
 
 	// Enqueue an update and a Forget — Forget must see the updated state.
+	// The Send here is best-effort; it relies on QueueDepth: 1000 in newInstance
+	// to avoid ErrQueueFull. If the update were lost, gotTotal would be 100.0, not 200.0.
 	updated := mocks.Order{ID: "order-1", Total: 200.0, Status: "Updated"}
 	instance.Send(ctx, mocks.UpdateOrderCmd{ID: "order-1", NewState: updated}) //nolint:errcheck
 
