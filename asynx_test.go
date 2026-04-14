@@ -795,6 +795,7 @@ func TestForget_ConcurrentForget_SecondReturnsErrValidation(t *testing.T) {
 	}
 }
 
+
 func TestOnForget_Unsubscribe_StopsHandler(t *testing.T) {
 	instance := newInstance(t)
 	ctx := context.Background()
