@@ -2,7 +2,9 @@ package asynx
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/char2cs/asynx/internal/commands"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/processor"
 	"github.com/char2cs/asynx/models"
@@ -153,4 +155,21 @@ func (i *asynxImpl[T]) Replay(
 func (i *asynxImpl[T]) WaitPublish() {
 	i.proc.WaitPublish()
 	i.bus.WaitForHandlers()
+}
+
+func (i *asynxImpl[T]) Forget(ctx context.Context, aggregateID string) error {
+	_, err := i.proc.SendWait(ctx, commands.NewForgetCommand[T](aggregateID))
+	if err != nil {
+		return err
+	}
+	deleteCtx := context.WithoutCancel(ctx)
+	if err := i.es.Delete(deleteCtx, aggregateID); err != nil {
+		return fmt.Errorf("%w: %w", models.ErrForgetFailed, err)
+	}
+	return nil
+}
+
+func (i *asynxImpl[T]) OnForget(fn models.ForgetHandler[T]) (string, error) {
+	// Escape dots so the bus treats this as a literal pattern, not a wildcard.
+	return i.bus.Subscribe("asynx\\.aggregate\\.forget", models.ProjectionHandler[T](fn))
 }
