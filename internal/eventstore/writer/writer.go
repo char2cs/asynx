@@ -137,6 +137,16 @@ func (w *Writer[T]) nextVersion(ctx context.Context, aggregateID string) (int64,
 	return snapVersion + count + 1, nil
 }
 
+// EventStore returns the backing event store.
+func (w *Writer[T]) EventStore() asynxmd.Store {
+	return w.eventStore
+}
+
+// SnapshotStore returns the backing snapshot store.
+func (w *Writer[T]) SnapshotStore() asynxmd.Store {
+	return w.snapshotStore
+}
+
 func (w *Writer[T]) writeSnapshot(ctx context.Context, aggregateID string, version int64, state T) error {
 	snap := esmodels.SnapshotBlob[T]{
 		Version:       version,

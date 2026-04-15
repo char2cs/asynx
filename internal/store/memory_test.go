@@ -407,3 +407,60 @@ func TestConcurrentAppend_SameVersion_ExactlyOneSucceeds(t *testing.T) {
 		t.Errorf("expected exactly 1 success, got %d", success)
 	}
 }
+
+// --- Delete ---
+
+func TestDelete_RemovesAllEntries(t *testing.T) {
+	s := New()
+	ctx := context.Background()
+
+	s.Append(ctx, "agg1", 1, []byte("v1")) //nolint:errcheck
+	s.Append(ctx, "agg1", 2, []byte("v2")) //nolint:errcheck
+
+	if err := s.Delete(ctx, "agg1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	blobs, err := s.ReadFrom(ctx, "agg1", 1)
+	if err != nil {
+		t.Fatalf("ReadFrom after Delete: %v", err)
+	}
+	if len(blobs) != 0 {
+		t.Errorf("expected 0 blobs after Delete, got %d", len(blobs))
+	}
+}
+
+func TestDelete_NonExistentAggregate_NoError(t *testing.T) {
+	s := New()
+	if err := s.Delete(context.Background(), "ghost"); err != nil {
+		t.Errorf("Delete on non-existent aggregate: %v (want nil)", err)
+	}
+}
+
+func TestDelete_DoesNotAffectOtherAggregates(t *testing.T) {
+	s := New()
+	ctx := context.Background()
+
+	s.Append(ctx, "agg1", 1, []byte("v1")) //nolint:errcheck
+	s.Append(ctx, "agg2", 1, []byte("v2")) //nolint:errcheck
+
+	s.Delete(ctx, "agg1") //nolint:errcheck
+
+	blobs, err := s.ReadFrom(ctx, "agg2", 1)
+	if err != nil {
+		t.Fatalf("ReadFrom agg2: %v", err)
+	}
+	if len(blobs) != 1 {
+		t.Errorf("expected 1 blob for agg2, got %d", len(blobs))
+	}
+}
+
+func TestDelete_CancelledContext_ReturnsError(t *testing.T) {
+	s := New()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := s.Delete(ctx, "agg1"); err == nil {
+		t.Error("expected error for cancelled context, got nil")
+	}
+}
