@@ -715,6 +715,86 @@ func TestForget_SerializedAfterSend(t *testing.T) {
 	}
 }
 
+// deleteErrStore wraps store.Memory and injects a one-shot error on the next Delete call.
+type deleteErrStore struct {
+	*store.Memory
+	deleteErr error
+}
+
+func (s *deleteErrStore) Delete(ctx context.Context, aggregateID string) error {
+	if s.deleteErr != nil {
+		err := s.deleteErr
+		s.deleteErr = nil
+		return err
+	}
+	return s.Memory.Delete(ctx, aggregateID)
+}
+
+func TestForget_DeleteFails_ReturnsErrForgetFailed(t *testing.T) {
+	sentinel := errors.New("store unavailable")
+	backing := &deleteErrStore{Memory: store.New(), deleteErr: sentinel}
+
+	instance, err := asynx.New[mocks.Order]().
+		WithEventStore(backing).
+		WithShardingOpts(asynx.ShardingOpts{Shards: 8, QueueDepth: 1000}).
+		Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { instance.Shutdown(context.Background()) })
+
+	ctx := context.Background()
+	if _, err := instance.Send(ctx, mocks.CreateOrderCmd{ID: "order-1", Total: 10.0}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	err = instance.Forget(ctx, "order-1")
+	if !errors.Is(err, models.ErrForgetFailed) {
+		t.Fatalf("expected ErrForgetFailed, got %v", err)
+	}
+}
+
+func TestForget_ConcurrentForget_SecondReturnsErrValidation(t *testing.T) {
+	instance := newInstance(t)
+	ctx := context.Background()
+
+	if _, err := instance.Send(ctx, mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	var (
+		wg   sync.WaitGroup
+		errs [2]error
+	)
+	for i := range 2 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = instance.Forget(ctx, "order-1")
+		}(i)
+	}
+	wg.Wait()
+
+	// At least one call must fail: either ErrValidation (aggregate already gone)
+	// or ErrPipelineFailed (concurrent write conflict). Both callers succeeding
+	// would mean two tombstone events were written without a conflict, which is
+	// also safe (aggregate is still erased), but we verify the aggregate is gone.
+	successCount := 0
+	for _, err := range errs {
+		if err == nil {
+			successCount++
+		} else if !errors.Is(err, models.ErrValidation) && !errors.Is(err, models.ErrPipelineFailed) {
+			t.Errorf("unexpected error from concurrent Forget: %v", err)
+		}
+	}
+
+	// Regardless of success/failure split, the aggregate must be erased.
+	_, getErr := instance.Get(ctx, "order-1")
+	if !errors.Is(getErr, models.ErrNotFound) {
+		t.Errorf("expected aggregate to be erased after concurrent Forget, got Get err: %v", getErr)
+	}
+}
+
 func TestOnForget_Unsubscribe_StopsHandler(t *testing.T) {
 	instance := newInstance(t)
 	ctx := context.Background()

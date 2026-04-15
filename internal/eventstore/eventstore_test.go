@@ -445,3 +445,16 @@ func TestDelete_NonExistentAggregate_NoError(t *testing.T) {
 		t.Errorf("Delete on non-existent aggregate: %v (want nil)", err)
 	}
 }
+
+func TestDelete_StoreError_ReturnsError(t *testing.T) {
+	sentinel := errors.New("store error")
+	es := New[order](
+		&mocks.ErrStore{Err: sentinel},
+		store.New(),
+		nil, 1, nil,
+	)
+	err := es.Delete(context.Background(), "agg1")
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel error, got %v", err)
+	}
+}

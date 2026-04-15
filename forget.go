@@ -48,5 +48,6 @@ func (i *asynxImpl[T]) Forget(ctx context.Context, aggregateID string) error {
 }
 
 func (i *asynxImpl[T]) OnForget(fn models.ForgetHandler[T]) (string, error) {
-	return i.bus.Subscribe("asynx.aggregate.forget", models.ProjectionHandler[T](fn))
+	// Escape dots so the bus treats this as a literal pattern, not a wildcard.
+	return i.bus.Subscribe("asynx\\.aggregate\\.forget", models.ProjectionHandler[T](fn))
 }

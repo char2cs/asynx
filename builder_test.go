@@ -114,6 +114,7 @@ func TestWithForgetHandler_IsCalledOnForget(t *testing.T) {
 
 	instance, err := asynx.New[mocks.Order]().
 		WithEventStore(store.New()).
+		WithShardingOpts(asynx.ShardingOpts{Shards: 8, QueueDepth: 1000}).
 		WithForgetHandler(func(_ context.Context, e models.Event[mocks.Order]) {
 			gotTotal = e.Aggregate.Total
 		}).
