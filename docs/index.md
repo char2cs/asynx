@@ -15,6 +15,10 @@ Asynx makes no consistency guarantees beyond what your Store implementation prov
 - **[Full Specification](spec/overview.md)** - Complete architecture and module documentation
 - **GitHub** - [char2cs/asynx](https://github.com/char2cs/asynx)
 
+## Guides
+
+- **[Forget as a Service](forget-as-a-service.md)** - Erase an aggregate and all its history
+
 ## Key Concepts
 
 - **Commands** - Pure functions that express intent. Developers implement validation and state transition logic.

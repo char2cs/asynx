@@ -433,3 +433,23 @@ func TestGet_ColdPath_AutoSnapshotError_ReturnsStateNotError(t *testing.T) {
 		t.Errorf("Status = %q, want Pending (correct state from events)", state.Status)
 	}
 }
+
+func TestGet_ColdPath_HydrateError_ReturnsError(t *testing.T) {
+	es := store.New()
+	ss := store.New()
+	ctx := context.Background()
+
+	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, json.RawMessage(`[{"op":"replace","path":"/Status","value":"Pending"}]`))) //nolint:errcheck
+
+	sentinel := errors.New("upcaster failed")
+	upcasters := map[int]asynxmd.Upcaster{
+		1: func(_ context.Context, _ string, _ []byte) ([]byte, error) { return nil, sentinel },
+	}
+	rep := replayer.New[order](es, upcasters, 2, order{})
+	r := New[order](es, ss, rep, 2, order{}, nil)
+
+	_, err := r.Get(ctx, "agg1")
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel upcaster error, got %v", err)
+	}
+}
