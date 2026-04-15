@@ -664,6 +664,43 @@ func TestProcessor_SendWait_AfterShutdown(t *testing.T) {
 	}
 }
 
+func TestWithPublishErrorHandler_IsInvokedOnPublishError(t *testing.T) {
+	// Use a bus that always errors on Publish to trigger the handler.
+	var got struct {
+		sync.Mutex
+		called bool
+	}
+
+	s := store.New()
+	handler := func(_ context.Context, _ asynxmd.Event[mocks.Order], _ error) {
+		got.Lock()
+		got.called = true
+		got.Unlock()
+	}
+
+	proc := processor.New(
+		eventstore.New[mocks.Order](s, s, nil, 1, nil),
+		&mocks.ErrBus[mocks.Order]{Err: errors.New("bus down")},
+		processor.WithPublishErrorHandler[mocks.Order](handler),
+	)
+
+	_, err := proc.Send(context.Background(), mocks.CreateOrderCmd{ID: "order-1", Total: 10})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	// Wait for the async publish goroutine to fire.
+	proc.WaitPublish()
+
+	got.Lock()
+	called := got.called
+	got.Unlock()
+
+	if !called {
+		t.Error("PublishErrorHandler was not called after bus error")
+	}
+}
+
 // blockingTestBus is a bus whose PublishSync blocks until unblockCh is closed.
 // Used to hold the worker goroutine inside executeJob so we can control timing.
 type blockingTestBus[T any] struct {

@@ -300,3 +300,21 @@ func TestNextVersion_EventStoreError(t *testing.T) {
 		t.Errorf("err = %v, want storageErr", err)
 	}
 }
+
+func TestWriter_EventStore_ReturnsBacking(t *testing.T) {
+	es := store.New()
+	ss := store.New()
+	w := New[order](es, ss, 1)
+	if w.EventStore() != es {
+		t.Error("EventStore() did not return the event store passed to New")
+	}
+}
+
+func TestWriter_SnapshotStore_ReturnsBacking(t *testing.T) {
+	es := store.New()
+	ss := store.New()
+	w := New[order](es, ss, 1)
+	if w.SnapshotStore() != ss {
+		t.Error("SnapshotStore() did not return the snapshot store passed to New")
+	}
+}
