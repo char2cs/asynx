@@ -6,6 +6,7 @@ import (
 
 	"github.com/char2cs/asynx"
 	"github.com/char2cs/asynx/internal/mocks"
+	"github.com/char2cs/asynx/internal/store"
 	"github.com/char2cs/asynx/models"
 )
 
@@ -105,5 +106,33 @@ func TestShardingOptsZeroValue(t *testing.T) {
 	opts := asynx.ShardingOpts{}
 	if opts.Shards != 0 || opts.QueueDepth != 0 {
 		t.Errorf("unexpected zero ShardingOpts: %+v", opts)
+	}
+}
+
+func TestWithForgetHandler_IsCalledOnForget(t *testing.T) {
+	var gotTotal float64
+
+	instance, err := asynx.New[mocks.Order]().
+		WithEventStore(store.New()).
+		WithShardingOpts(asynx.ShardingOpts{Shards: 8, QueueDepth: 1000}).
+		WithForgetHandler(func(_ context.Context, e models.Event[mocks.Order]) {
+			gotTotal = e.Aggregate.Total
+		}).
+		Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { instance.Shutdown(context.Background()) })
+
+	ctx := context.Background()
+	if _, err := instance.Send(ctx, mocks.CreateOrderCmd{ID: "order-1", Total: 77.0}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := instance.Forget(ctx, "order-1"); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+
+	if gotTotal != 77.0 {
+		t.Errorf("ForgetHandler got Total=%v, want 77.0", gotTotal)
 	}
 }

@@ -37,6 +37,10 @@ func (s *Store) Count(_ context.Context, _ string, _ int64) (int64, error) {
 	return 0, nil
 }
 
+func (s *Store) Delete(_ context.Context, _ string) error {
+	return nil
+}
+
 // ErrStore is a Store implementation that returns Err for every operation.
 type ErrStore struct{ Err error }
 
@@ -54,6 +58,10 @@ func (e *ErrStore) ReadRange(_ context.Context, _ string, _ int64, _ int64) ([][
 
 func (e *ErrStore) Count(_ context.Context, _ string, _ int64) (int64, error) {
 	return 0, e.Err
+}
+
+func (e *ErrStore) Delete(_ context.Context, _ string) error {
+	return e.Err
 }
 
 // CorruptBlobStore is a Store implementation that returns a single
@@ -75,4 +83,8 @@ func (c *CorruptBlobStore) ReadRange(_ context.Context, _ string, _ int64, _ int
 
 func (c *CorruptBlobStore) Count(_ context.Context, _ string, _ int64) (int64, error) {
 	return 1, nil
+}
+
+func (c *CorruptBlobStore) Delete(_ context.Context, _ string) error {
+	return nil
 }

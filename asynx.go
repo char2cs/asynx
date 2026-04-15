@@ -2,7 +2,9 @@ package asynx
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/char2cs/asynx/internal/commands"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/processor"
 	"github.com/char2cs/asynx/models"
@@ -26,6 +28,21 @@ type Asynx[T any] interface {
 		ctx context.Context,
 		cmd models.Command[T],
 	) (models.Event[T], error)
+
+	// Forget writes a tombstone event for the aggregate, notifies all ForgetHandlers
+	// synchronously, then erases all events, snapshots, and cached state.
+	// Returns ErrValidation if the aggregate does not exist.
+	Forget(
+		ctx context.Context,
+		aggregateID string,
+	) error
+
+	// OnForget registers a handler invoked when any aggregate is forgotten.
+	// The handler receives the tombstone event; Event.Aggregate holds the last known state.
+	// Returns a subscription ID that can be passed to Unsubscribe.
+	OnForget(
+		fn models.ForgetHandler[T],
+	) (string, error)
 
 	Shutdown(
 		ctx context.Context,
@@ -138,4 +155,21 @@ func (i *asynxImpl[T]) Replay(
 func (i *asynxImpl[T]) WaitPublish() {
 	i.proc.WaitPublish()
 	i.bus.WaitForHandlers()
+}
+
+func (i *asynxImpl[T]) Forget(ctx context.Context, aggregateID string) error {
+	_, err := i.proc.SendWait(ctx, commands.NewForgetCommand[T](aggregateID))
+	if err != nil {
+		return err
+	}
+	deleteCtx := context.WithoutCancel(ctx)
+	if err := i.es.Delete(deleteCtx, aggregateID); err != nil {
+		return fmt.Errorf("%w: %w", models.ErrForgetFailed, err)
+	}
+	return nil
+}
+
+func (i *asynxImpl[T]) OnForget(fn models.ForgetHandler[T]) (string, error) {
+	// Escape dots so the bus treats this as a literal pattern, not a wildcard.
+	return i.bus.Subscribe("asynx\\.aggregate\\.forget", models.ProjectionHandler[T](fn))
 }

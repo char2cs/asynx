@@ -26,6 +26,7 @@ type Builder[T any] struct {
 	panicHandler        models.PanicHandler[T]
 	corruptionHook      func(error)
 	publishErrorHandler models.PublishErrorHandler[T]
+	forgetHandlers      []models.ForgetHandler[T]
 }
 
 func New[T any]() *Builder[T] {
@@ -105,6 +106,13 @@ func (b *Builder[T]) WithPublishErrorHandler(fn models.PublishErrorHandler[T]) *
 	return b
 }
 
+// WithForgetHandler registers a ForgetHandler at build time.
+// Equivalent to calling OnForget after Build. Multiple calls register multiple handlers.
+func (b *Builder[T]) WithForgetHandler(fn models.ForgetHandler[T]) *Builder[T] {
+	b.forgetHandlers = append(b.forgetHandlers, fn)
+	return b
+}
+
 // Build requires WithEventStore; all other options have defaults.
 func (b *Builder[T]) Build() (Asynx[T], error) {
 	if b.eventStore == nil {
@@ -144,9 +152,17 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 	}
 	proc := processor.New(es, activeBus, procOpts...)
 
-	return &asynxImpl[T]{
+	instance := &asynxImpl[T]{
 		proc: proc,
 		es:   es,
 		bus:  activeBus,
-	}, nil
+	}
+
+	for _, fn := range b.forgetHandlers {
+		if _, err := instance.OnForget(fn); err != nil {
+			return nil, err
+		}
+	}
+
+	return instance, nil
 }
