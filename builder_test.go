@@ -109,6 +109,16 @@ func TestShardingOptsZeroValue(t *testing.T) {
 	}
 }
 
+func TestBuild_NilForgetHandler_ReturnsError(t *testing.T) {
+	_, err := asynx.New[mocks.Order]().
+		WithEventStore(&mocks.Store{}).
+		WithForgetHandler(nil).
+		Build()
+	if err == nil {
+		t.Fatal("expected error for nil ForgetHandler, got nil")
+	}
+}
+
 func TestWithForgetHandler_IsCalledOnForget(t *testing.T) {
 	var gotTotal float64
 

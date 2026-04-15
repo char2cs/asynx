@@ -458,3 +458,14 @@ func TestDelete_StoreError_ReturnsError(t *testing.T) {
 		t.Fatalf("expected sentinel error, got %v", err)
 	}
 }
+
+func TestWrite_GetStorageError_ReturnsError(t *testing.T) {
+	sentinel := errors.New("storage error")
+	es := New[order](&mocks.ErrStore{Err: sentinel}, store.New(), nil, 1, nil)
+	ctx := context.Background()
+
+	_, err := es.Write(ctx, cmd(order{ID: "1", Status: "Pending", Total: 100}))
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel error from Get, got %v", err)
+	}
+}
