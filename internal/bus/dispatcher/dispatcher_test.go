@@ -194,8 +194,8 @@ func TestDispatch_IdleCleanup(t *testing.T) {
 
 	_ = d.Dispatch(ctx, makeEvent("agg-1", 1), true)
 
-	// Wait for idle timeout to fire.
-	time.Sleep(50 * time.Millisecond)
+	// WaitIdle blocks until the worker exits (after idle timeout).
+	d.WaitIdle()
 
 	d.mu.Lock()
 	_, exists := d.queues["agg-1"]
@@ -343,20 +343,21 @@ func TestDispatch_MultipleAggregatesOrdered(t *testing.T) {
 }
 
 func TestClose_ContextTimeout(t *testing.T) {
-	// Bus blocks forever on PublishSync.
+	// Bus blocks forever on PublishSync, signalling when it starts.
+	started := make(chan struct{})
 	bus := &callbackBus{fn: func(ctx context.Context, _ asynxmd.Event[int]) error {
-		<-ctx.Done()
-		return ctx.Err()
+		close(started)
+		select {} // block forever
+		return nil
 	}}
 
 	d := New[int](bus)
 	ctx := context.Background()
 
-	// Dispatch with a context that won't cancel (event ctx uses WithoutCancel).
 	_ = d.Dispatch(ctx, makeEvent("agg-1", 1), false)
 
-	// Give worker time to pick up the job.
-	time.Sleep(5 * time.Millisecond)
+	// Wait until worker is actually inside PublishSync.
+	<-started
 
 	closeCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -407,7 +408,8 @@ func TestDispatch_WithIdleTimeoutOption(t *testing.T) {
 
 	_ = d.Dispatch(ctx, makeEvent("agg-1", 1), true)
 
-	time.Sleep(50 * time.Millisecond)
+	// WaitIdle blocks until the worker exits (after idle timeout).
+	d.WaitIdle()
 
 	d.mu.Lock()
 	qLen := len(d.queues)
