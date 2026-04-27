@@ -244,6 +244,20 @@ func TestClose_DrainsAllEvents(t *testing.T) {
 	}
 }
 
+func TestClose_Idempotent(t *testing.T) {
+	bus := &recordingBus{}
+	d := New[int](bus)
+	ctx := context.Background()
+
+	if err := d.Close(ctx); err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+	// Second close must not panic (double close of channels).
+	if err := d.Close(ctx); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+}
+
 func TestDispatch_AfterClose(t *testing.T) {
 	bus := &recordingBus{}
 	d := New[int](bus)

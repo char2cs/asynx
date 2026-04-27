@@ -49,7 +49,9 @@ func (e *CommandExecutor[T]) Execute(
 	}
 
 	if e.dispatcher != nil {
-		e.dispatcher.Dispatch(ctx, event, waitHandlers)
+		if err := e.dispatcher.Dispatch(ctx, event, waitHandlers); err != nil {
+			return event, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
+		}
 	}
 
 	return event, nil

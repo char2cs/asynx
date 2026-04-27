@@ -41,6 +41,7 @@ type Dispatcher[T any] struct {
 	mu             sync.Mutex
 	queues         map[string]*aggregateQueue[T]
 	closed         bool
+	stopCh         chan struct{} // closed on Close to signal workers to drain and exit
 	wg             sync.WaitGroup // tracks goroutine lifetime (for Close)
 	jobsWg         sync.WaitGroup // tracks in-flight jobs (for WaitIdle)
 	onPublishError asynxmd.PublishErrorHandler[T]
@@ -62,6 +63,7 @@ func New[T any](bus asynxmd.Bus[T], opts ...Opt[T]) *Dispatcher[T] {
 	d := &Dispatcher[T]{
 		bus:         bus,
 		queues:      make(map[string]*aggregateQueue[T]),
+		stopCh:      make(chan struct{}),
 		idleTimeout: defaultIdleTimeout,
 	}
 	for _, opt := range opts {
@@ -95,8 +97,9 @@ func (d *Dispatcher[T]) Dispatch(ctx context.Context, event asynxmd.Event[T], wa
 	}
 
 	d.jobsWg.Add(1)
-	q.ch <- job
 	d.mu.Unlock()
+
+	q.ch <- job
 
 	if waitHandlers {
 		<-job.done
@@ -109,10 +112,12 @@ func (d *Dispatcher[T]) Dispatch(ctx context.Context, event asynxmd.Event[T], wa
 // finish, the context error is returned.
 func (d *Dispatcher[T]) Close(ctx context.Context) error {
 	d.mu.Lock()
-	d.closed = true
-	for _, q := range d.queues {
-		close(q.ch)
+	if d.closed {
+		d.mu.Unlock()
+		return nil
 	}
+	d.closed = true
+	close(d.stopCh) // signal all workers to drain and exit
 	d.mu.Unlock()
 
 	done := make(chan struct{})
@@ -139,11 +144,18 @@ func (d *Dispatcher[T]) worker(aggregateID string, q *aggregateQueue[T]) {
 	defer d.wg.Done()
 	for {
 		select {
-		case job, ok := <-q.ch:
-			if !ok {
-				return
-			}
+		case job := <-q.ch:
 			d.handle(job)
+		case <-d.stopCh:
+			// Drain remaining jobs before exiting.
+			for {
+				select {
+				case job := <-q.ch:
+					d.handle(job)
+				default:
+					return
+				}
+			}
 		case <-time.After(d.idleTimeout):
 			d.mu.Lock()
 			if len(q.ch) > 0 {
