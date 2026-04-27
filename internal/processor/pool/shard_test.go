@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/char2cs/asynx/internal/bus"
+	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor/exec"
@@ -19,7 +20,9 @@ func TestShard_SingleCommandSuccess(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 1, 0, 1)
 	defer p.Drain(context.Background())
@@ -45,7 +48,9 @@ func TestShard_ValidationErrorDecrementVersionSingleWorker(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 1, 0, 1)
 	defer p.Drain(context.Background())
@@ -96,7 +101,9 @@ func TestShard_ContextCancelledDuringExecution(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 1, 0, 1)
 	defer p.Drain(context.Background())
@@ -124,7 +131,9 @@ func TestShard_MultipleWorkersNoCorrection(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 1, 0, 2)
 	defer p.Drain(context.Background())
@@ -167,7 +176,9 @@ func TestShard_ResultCarriesEvent(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 1, 0, 1)
 	defer p.Drain(context.Background())
@@ -198,7 +209,9 @@ func TestShard_ResultUsesCommandResult(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 1, 0, 1)
 	defer p.Drain(context.Background())
@@ -226,7 +239,9 @@ func TestShard_NilEnvelopeClosesJobQueue(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 1, 0, 1)
 

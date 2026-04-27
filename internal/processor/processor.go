@@ -4,17 +4,19 @@
 // manages graceful shutdown, and exposes Send/SendWait/Shutdown interfaces.
 //   - router     — FNV-1a hash-based consistent shard selection
 //   - pool       — Shard-based worker pool for concurrent command execution
-//   - executor   — Passed to pool; executes Load→Validate→Write→Publish pipeline
+//   - executor   — Passed to pool; executes Load->Validate->Write->Dispatch pipeline
 //
 // All command execution is non-blocking via channels. Send and SendWait block until either
-// the command completes, context cancels, or the queue is full. Send publishes events
-// asynchronously; SendWait publishes synchronously. Shutdown drains in-flight work before closing the bus.
+// the command completes, context cancels, or the queue is full. Send dispatches events
+// asynchronously; SendWait dispatches synchronously. Shutdown drains in-flight work,
+// closes the dispatcher, then closes the bus.
 package processor
 
 import (
 	"context"
 	"sync/atomic"
 
+	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/processor/exec"
 	"github.com/char2cs/asynx/internal/processor/models"
@@ -24,11 +26,12 @@ import (
 )
 
 type Processor[T any] struct {
-	pool          *pool.ShardPool[T]
-	router        *queue.Router
-	executor      *exec.CommandExecutor[T]
-	bus           asynxmd.Bus[T]
-	shuttingDown  atomic.Bool
+	pool         *pool.ShardPool[T]
+	router       *queue.Router
+	executor     *exec.CommandExecutor[T]
+	dispatcher   *dispatcher.Dispatcher[T]
+	bus          asynxmd.Bus[T]
+	shuttingDown atomic.Bool
 	onSendPending func()
 }
 
@@ -51,7 +54,7 @@ func WithShards[T any](count int) ProcessorOpt[T] {
 
 func WithQueueDepth[T any](depth int) ProcessorOpt[T] {
 	return func(cfg *processorConfig[T]) {
-		if depth >= 0 {
+		if depth > 0 {
 			cfg.queueDepth = depth
 		}
 	}
@@ -65,9 +68,9 @@ func WithWorkersPerShard[T any](count int) ProcessorOpt[T] {
 	}
 }
 
-// WithPublishErrorHandler sets a callback invoked when Bus.Publish returns a
-// non-nil error inside an async publish goroutine. When not set, publish
-// errors are silently dropped.
+// WithPublishErrorHandler sets a callback invoked when Bus.PublishSync returns a
+// non-nil error inside the dispatcher. When not set, publish errors are silently
+// dropped.
 func WithPublishErrorHandler[T any](fn asynxmd.PublishErrorHandler[T]) ProcessorOpt[T] {
 	return func(cfg *processorConfig[T]) {
 		cfg.publishErrorHandler = fn
@@ -87,15 +90,21 @@ func New[T any](
 	for _, opt := range opts {
 		opt(cfg)
 	}
-	if cfg.queueDepth < 0 {
+	if cfg.queueDepth <= 0 {
 		cfg.queueDepth = cfg.workersPerShard
 	}
 
-	execOpts := []exec.CommandExecutorOpt[T]{}
+	var dispatcherOpts []dispatcher.Opt[T]
 	if cfg.publishErrorHandler != nil {
-		execOpts = append(execOpts, exec.WithPublishErrorHandler[T](cfg.publishErrorHandler))
+		dispatcherOpts = append(dispatcherOpts, dispatcher.WithPublishErrorHandler[T](cfg.publishErrorHandler))
 	}
-	executor := exec.New(es, bus, execOpts...)
+
+	var d *dispatcher.Dispatcher[T]
+	if bus != nil {
+		d = dispatcher.New(bus, dispatcherOpts...)
+	}
+
+	executor := exec.New(es, d)
 	return &Processor[T]{
 		pool: pool.New(
 			executor,
@@ -106,8 +115,9 @@ func New[T any](
 		router: queue.New(
 			cfg.shards,
 		),
-		executor: executor,
-		bus:      bus,
+		executor:   executor,
+		dispatcher: d,
+		bus:        bus,
 	}
 }
 
@@ -200,11 +210,22 @@ func (p *Processor[T]) Shutdown(ctx context.Context) error {
 		return err
 	}
 
+	if err := p.closeDispatcher(ctx); err != nil {
+		return err
+	}
+
 	return p.closeBus(ctx)
 }
 
 func (p *Processor[T]) setShuttingDown() bool {
 	return p.shuttingDown.CompareAndSwap(false, true)
+}
+
+func (p *Processor[T]) closeDispatcher(ctx context.Context) error {
+	if p.dispatcher == nil {
+		return nil
+	}
+	return p.dispatcher.Close(ctx)
 }
 
 func (p *Processor[T]) closeBus(ctx context.Context) error {
@@ -214,10 +235,12 @@ func (p *Processor[T]) closeBus(ctx context.Context) error {
 	return p.bus.Close(ctx)
 }
 
-// ForTesting: WaitPublish blocks until all async event publishes complete.
+// ForTesting: WaitPublish blocks until all dispatched events have been delivered.
 // Do not call in production code.
 func (p *Processor[T]) WaitPublish() {
-	p.executor.WaitPublish()
+	if p.dispatcher != nil {
+		p.dispatcher.WaitIdle()
+	}
 }
 
 // ForTesting: SetOnSendPending sets a callback invoked after a command is

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/char2cs/asynx/internal/bus"
+	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor/exec"
@@ -39,7 +40,9 @@ func TestPool_SingleCommandSuccess(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 1, 0, 1)
 	defer p.Drain(context.Background())
@@ -74,7 +77,9 @@ func TestPool_SerialOrderingSameAggregate(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	// Single shard to force serialization
 	p := pool.New(executor, 1, 0, 1)
@@ -116,7 +121,9 @@ func TestPool_ParallelDifferentAggregates(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 8, 0, 1)
 	defer p.Drain(context.Background())
@@ -170,7 +177,9 @@ func TestPool_ValidationFailureNoWrite(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 1, 0, 1)
 	defer p.Drain(context.Background())
@@ -203,7 +212,9 @@ func TestPool_DrainWaitsForInflight(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 1, 0, 1)
 
@@ -259,7 +270,9 @@ func TestPool_DrainTimeout(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 1, 0, 1)
 
@@ -277,7 +290,9 @@ func TestPool_QueueFullBlocksSender(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	// Single shard with queue depth 1
 	p := pool.New(executor, 1, 1, 1)
@@ -350,7 +365,9 @@ func TestPool_MultipleWorkers(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 4, 0, 4) // 4 workers per shard
 	defer p.Drain(context.Background())
@@ -394,7 +411,9 @@ func TestPool_ValidationErrorDecrementVersionSingleWorker(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	// Single worker per shard (workersPerShard=1) enables correction
 	p := pool.New(executor, 1, 0, 1)
@@ -456,7 +475,9 @@ func TestPool_ContextCancelledDuringExecution(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 1, 0, 1)
 	defer p.Drain(context.Background())
@@ -488,7 +509,9 @@ func TestPool_DrainWithNoCommands(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 2, 0, 2)
 
@@ -503,7 +526,9 @@ func TestPool_DrainTimeoutBothPhases(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 1, 0, 1)
 
@@ -522,7 +547,9 @@ func TestPool_DispatcherMultipleCorrections(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, b)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	// Multiple workers - corrections not sent
 	p := pool.New(executor, 1, 0, 2)
@@ -573,7 +600,9 @@ func TestPool_WaitWorkers_ContextCancelledAfterDispatch(t *testing.T) {
 	unblockCh := make(chan struct{})
 	bb := &blockingBus[order]{unblockCh: unblockCh}
 	es := eventstore.New[order](s, s, nil, 1, nil)
-	executor := exec.New(es, bb)
+	d := dispatcher.New[order](bb)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
 
 	p := pool.New(executor, 1, 0, 1)
 
