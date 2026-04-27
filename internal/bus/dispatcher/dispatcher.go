@@ -41,7 +41,8 @@ type Dispatcher[T any] struct {
 	mu             sync.Mutex
 	queues         map[string]*aggregateQueue[T]
 	closed         bool
-	wg             sync.WaitGroup
+	wg             sync.WaitGroup // tracks goroutine lifetime (for Close)
+	jobsWg         sync.WaitGroup // tracks in-flight jobs (for WaitIdle)
 	onPublishError asynxmd.PublishErrorHandler[T]
 	idleTimeout    time.Duration
 }
@@ -93,6 +94,7 @@ func (d *Dispatcher[T]) Dispatch(ctx context.Context, event asynxmd.Event[T], wa
 		go d.worker(event.AggregateID, q)
 	}
 
+	d.jobsWg.Add(1)
 	q.ch <- job
 	d.mu.Unlock()
 
@@ -124,9 +126,14 @@ func (d *Dispatcher[T]) Close(ctx context.Context) error {
 	}
 }
 
-// WaitIdle blocks until all worker goroutines have exited (either drained or
-// timed out). Useful in tests.
-func (d *Dispatcher[T]) WaitIdle() { d.wg.Wait() }
+// WaitIdle blocks until all in-flight jobs have been handled. The per-aggregate
+// worker goroutines may still be alive (waiting for their idle timeout), but
+// every dispatched event has been delivered to the bus.
+func (d *Dispatcher[T]) WaitIdle() { d.jobsWg.Wait() }
+
+// waitWorkers blocks until all per-aggregate worker goroutines have exited
+// (i.e. after their idle timeout elapses). Only for use in tests.
+func (d *Dispatcher[T]) waitWorkers() { d.wg.Wait() }
 
 func (d *Dispatcher[T]) worker(aggregateID string, q *aggregateQueue[T]) {
 	defer d.wg.Done()
@@ -154,6 +161,7 @@ func (d *Dispatcher[T]) worker(aggregateID string, q *aggregateQueue[T]) {
 // handler will not crash the worker goroutine — subsequent events continue to
 // be delivered.
 func (d *Dispatcher[T]) handle(job *dispatchJob[T]) {
+	defer d.jobsWg.Done()
 	defer close(job.done)
 	defer func() {
 		if r := recover(); r != nil {

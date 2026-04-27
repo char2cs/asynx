@@ -194,8 +194,10 @@ func TestDispatch_IdleCleanup(t *testing.T) {
 
 	_ = d.Dispatch(ctx, makeEvent("agg-1", 1), true)
 
-	// WaitIdle blocks until the worker exits (after idle timeout).
+	// WaitIdle returns once the job is handled; waitWorkers waits for the
+	// goroutine to exit after its idle timeout.
 	d.WaitIdle()
+	d.waitWorkers()
 
 	d.mu.Lock()
 	_, exists := d.queues["agg-1"]
@@ -407,8 +409,10 @@ func TestDispatch_WithIdleTimeoutOption(t *testing.T) {
 
 	_ = d.Dispatch(ctx, makeEvent("agg-1", 1), true)
 
-	// WaitIdle blocks until the worker exits (after idle timeout).
+	// WaitIdle returns once the job is handled; waitWorkers waits for the
+	// goroutine to exit after its idle timeout.
 	d.WaitIdle()
+	d.waitWorkers()
 
 	d.mu.Lock()
 	qLen := len(d.queues)

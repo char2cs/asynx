@@ -54,7 +54,7 @@ func WithShards[T any](count int) ProcessorOpt[T] {
 
 func WithQueueDepth[T any](depth int) ProcessorOpt[T] {
 	return func(cfg *processorConfig[T]) {
-		if depth >= 0 {
+		if depth > 0 {
 			cfg.queueDepth = depth
 		}
 	}
@@ -90,7 +90,7 @@ func New[T any](
 	for _, opt := range opts {
 		opt(cfg)
 	}
-	if cfg.queueDepth < 0 {
+	if cfg.queueDepth <= 0 {
 		cfg.queueDepth = cfg.workersPerShard
 	}
 
