@@ -345,10 +345,9 @@ func TestDispatch_MultipleAggregatesOrdered(t *testing.T) {
 func TestClose_ContextTimeout(t *testing.T) {
 	// Bus blocks forever on PublishSync, signalling when it starts.
 	started := make(chan struct{})
-	bus := &callbackBus{fn: func(ctx context.Context, _ asynxmd.Event[int]) error {
+	bus := &callbackBus{fn: func(_ context.Context, _ asynxmd.Event[int]) error {
 		close(started)
 		select {} // block forever
-		return nil
 	}}
 
 	d := New[int](bus)
