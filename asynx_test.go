@@ -823,3 +823,737 @@ func TestOnForget_Unsubscribe_StopsHandler(t *testing.T) {
 		t.Errorf("handler called %d times after Unsubscribe, want 0", called)
 	}
 }
+
+// --- Listen ---
+
+func TestListen_EmptyPattern(t *testing.T) {
+	instance := newInstance(t)
+	_, _, err := instance.Listen("", 1)
+	if err != models.ErrEmptyPattern {
+		t.Fatalf("expected ErrEmptyPattern, got %v", err)
+	}
+}
+
+func TestListen_EventArrivesBeforeDeadline(t *testing.T) {
+	instance := newInstance(t)
+
+	ch, unsub, err := instance.Listen("OrderCreated", 1)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer unsub()
+
+	cmd := mocks.CreateOrderCmd{ID: "listen-1", Total: 50.0}
+	if _, err := instance.SendWait(context.Background(), cmd); err != nil {
+		t.Fatalf("SendWait: %v", err)
+	}
+
+	select {
+	case evt := <-ch:
+		if evt.AggregateID != "listen-1" {
+			t.Fatalf("expected AggregateID listen-1, got %q", evt.AggregateID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for event")
+	}
+}
+
+func TestListen_UnsubscribeCleansUp(t *testing.T) {
+	instance := newInstance(t)
+
+	ch, unsub, err := instance.Listen("OrderCreated", 0)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	unsub()
+
+	cmd := mocks.CreateOrderCmd{ID: "listen-unsub", Total: 50.0}
+	if _, err := instance.SendWait(context.Background(), cmd); err != nil {
+		t.Fatalf("SendWait: %v", err)
+	}
+
+	select {
+	case evt, ok := <-ch:
+		if ok {
+			t.Fatalf("expected no event after unsub, got %v", evt)
+		}
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestListen_UnsubIsIdempotent(t *testing.T) {
+	instance := newInstance(t)
+
+	_, unsub, err := instance.Listen("OrderCreated", 0)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	unsub()
+	unsub() // should not panic, should not error
+}
+
+func TestListen_CountAutoCloses(t *testing.T) {
+	instance := newInstance(t)
+
+	ch, unsub, err := instance.Listen("OrderCreated", 1)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer unsub()
+
+	cmd := mocks.CreateOrderCmd{ID: "listen-auto", Total: 50.0}
+	if _, err := instance.SendWait(context.Background(), cmd); err != nil {
+		t.Fatalf("SendWait: %v", err)
+	}
+
+	select {
+	case _, ok := <-ch:
+		if !ok {
+			t.Fatal("channel closed before delivering event")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for event")
+	}
+
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("expected channel to be closed after count events")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for channel close")
+	}
+}
+
+func TestListen_BufferedChannelPreservesEvent(t *testing.T) {
+	instance := newInstance(t)
+
+	ch, unsub, err := instance.Listen("OrderCreated", 1)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer unsub()
+
+	cmd := mocks.CreateOrderCmd{ID: "listen-buf", Total: 75.0}
+	if _, err := instance.SendWait(context.Background(), cmd); err != nil {
+		t.Fatalf("SendWait: %v", err)
+	}
+
+	select {
+	case evt := <-ch:
+		if evt.Aggregate.Total != 75.0 {
+			t.Fatalf("expected Total 75.0, got %f", evt.Aggregate.Total)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("event was lost — not in buffer")
+	}
+}
+
+func TestListen_Unbounded_ReceivesMultipleEvents(t *testing.T) {
+	instance := newInstance(t)
+
+	ch, unsub, err := instance.Listen("OrderCreated", 0)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer unsub()
+
+	for i := range 3 {
+		cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf("listen-ub-%d", i), Total: float64(i + 1)}
+		if _, err := instance.SendWait(context.Background(), cmd); err != nil {
+			t.Fatalf("SendWait: %v", err)
+		}
+	}
+
+	for i := range 3 {
+		select {
+		case evt := <-ch:
+			expected := fmt.Sprintf("listen-ub-%d", i)
+			if evt.AggregateID != expected {
+				t.Fatalf("expected %s, got %s", expected, evt.AggregateID)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for event %d", i)
+		}
+	}
+}
+
+func TestListen_UsesTopicPattern(t *testing.T) {
+	// "Order.*" uses Topic()-style dot-segment wildcards.
+	// Topic("Order.*") → ^Order\..*$ which matches "OrderCreated" (no leading dot needed).
+	// A bare Subscribe("Order.*") would use it as a regex directly (matching the same),
+	// but what matters is that Listen internally calls Topic() to translate the pattern.
+	// We use "*" here: Topic("*") → ^.*$ which matches any event name — verifying
+	// that Listen uses Topic() because "*" alone is not valid regex (it would panic).
+	instance := newInstance(t)
+
+	ch, unsub, err := instance.Listen("*", 1)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer unsub()
+
+	cmd := mocks.CreateOrderCmd{ID: "listen-topic", Total: 10.0}
+	if _, err := instance.SendWait(context.Background(), cmd); err != nil {
+		t.Fatalf("SendWait: %v", err)
+	}
+
+	select {
+	case evt := <-ch:
+		if evt.AggregateID != "listen-topic" {
+			t.Fatalf("expected listen-topic, got %q", evt.AggregateID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("topic pattern did not match — Listen should use Topic() internally")
+	}
+}
+
+func TestListen_CountOverflow_DoesNotBlock(t *testing.T) {
+	// When count=1 and multiple events are published, only the first is sent.
+	// The second event must not block the publisher (handler returns early).
+	instance := newInstance(t)
+
+	ch, unsub, err := instance.Listen("OrderCreated", 1)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer unsub()
+
+	// First event — fills the channel and triggers auto-close.
+	if _, err := instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: "ovf-1", Total: 1.0}); err != nil {
+		t.Fatalf("SendWait 1: %v", err)
+	}
+	// Second event — handler must not push to closed channel.
+	if _, err := instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: "ovf-2", Total: 2.0}); err != nil {
+		t.Fatalf("SendWait 2: %v", err)
+	}
+
+	// Drain
+	<-ch
+	if _, ok := <-ch; ok {
+		t.Fatal("expected channel closed")
+	}
+}
+
+func TestListen_CountOverflowConcurrent_GuardsEnforced(t *testing.T) {
+	// Exercises the concurrent-overflow branches: count=1 with many concurrent
+	// publishers. Because handlers for different aggregates run in separate
+	// goroutines (the bus spawns one goroutine per subscription per event), two
+	// handlers can overlap: both load received=0 (< count=1) and pass the first
+	// guard, but only n=1 is ≤ count; goroutines where n>1 hit the second guard.
+	// Repeating across iterations makes it highly likely to hit both guards.
+	for iter := range 10 {
+		func() {
+			instance := newInstance(t)
+
+			const count = 1
+			ch, unsub, err := instance.Listen("OrderCreated", count)
+			if err != nil {
+				t.Fatalf("iter %d: Listen: %v", iter, err)
+			}
+			defer unsub()
+
+			// Fire many events concurrently before auto-unsubscribe can remove the sub.
+			const total = 16
+			var wg sync.WaitGroup
+			for i := range total {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					instance.Send(context.Background(), mocks.CreateOrderCmd{ //nolint:errcheck
+						ID:    fmt.Sprintf("ovfc-%d-%d", iter, idx),
+						Total: float64(idx + 1),
+					})
+				}(i)
+			}
+			wg.Wait()
+			waitPublish(t, instance)
+
+			// Channel must yield exactly 1 event, then close.
+			got := 0
+			deadline := time.After(2 * time.Second)
+			for {
+				select {
+				case _, ok := <-ch:
+					if !ok {
+						if got != count {
+							t.Fatalf("iter %d: expected %d events before close, got %d", iter, count, got)
+						}
+						return
+					}
+					got++
+				case <-deadline:
+					t.Fatalf("iter %d: timed out: got %d events, channel not closed", iter, got)
+				}
+			}
+		}()
+	}
+}
+
+func TestListen_SubscribeError_ReturnsError(t *testing.T) {
+	// If the bus is closed (after Shutdown), Subscribe returns ErrBusClosed.
+	// Listen must propagate that error and return nil channel.
+	s := store.New()
+	instance, err := asynx.New[mocks.Order]().WithEventStore(s).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance.Shutdown(context.Background())
+
+	ch, unsub, err := instance.Listen("OrderCreated", 1)
+	if err == nil {
+		t.Fatal("expected error when bus is closed, got nil")
+	}
+	if ch != nil {
+		t.Fatalf("expected nil channel on error, got non-nil")
+	}
+	if unsub != nil {
+		t.Fatalf("expected nil unsub on error, got non-nil")
+	}
+}
+
+func TestListen_NegativeCount_TreatedAsZero(t *testing.T) {
+	// Document: negative count behaves like 0 (unbounded)
+	instance := newInstance(t)
+	ch, unsub, err := instance.Listen("OrderCreated", -1)
+	if err != nil {
+		t.Fatalf("expected nil error for negative count, got %v", err)
+	}
+	defer unsub()
+
+	// Channel should not be auto-closing — send 2 events, both must arrive.
+	for i := range 2 {
+		cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf("neg-%d", i), Total: float64(i + 1)}
+		if _, err := instance.SendWait(context.Background(), cmd); err != nil {
+			t.Fatalf("SendWait: %v", err)
+		}
+	}
+	for i := range 2 {
+		select {
+		case evt := <-ch:
+			expected := fmt.Sprintf("neg-%d", i)
+			if evt.AggregateID != expected {
+				t.Fatalf("expected %s, got %s", expected, evt.AggregateID)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for event %d", i)
+		}
+	}
+}
+
+// TestListen_BoundedRace_NOverCount exercises the n > count early-return (branch #1):
+// with count=1 and 50 concurrent senders the auto-unsubscribe goroutine races with
+// further dispatches, so some handlers observe n=2,3,... and return early.
+// The test also covers branch #2 (closed.Load() after sendMu.Lock()) by using count=5
+// so that multiple handlers can pass received.Add before any of them takes the lock;
+// the last one to acquire the lock after the count-th handler has set closed=true
+// returns through that guard.
+func TestListen_BoundedRace_NOverCount(t *testing.T) {
+	for iter := range 10 {
+		func() {
+			instance := newInstance(t)
+
+			const count = 1
+			ch, unsub, err := instance.Listen("OrderCreated", count)
+			if err != nil {
+				t.Fatalf("iter %d: Listen: %v", iter, err)
+			}
+			defer unsub()
+
+			// Drain in background so the buffered channel never blocks a handler.
+			go func() {
+				for range ch {
+				}
+			}()
+
+			// Burst many concurrent events — handlers race around received.Add(1).
+			var wg sync.WaitGroup
+			for i := range 100 {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					instance.Send(context.Background(), mocks.CreateOrderCmd{ //nolint:errcheck
+						ID:    fmt.Sprintf("race1-%d-%d", iter, idx),
+						Total: float64(idx + 1),
+					})
+				}(i)
+			}
+			wg.Wait()
+			waitPublish(t, instance)
+		}()
+	}
+}
+
+// TestListen_BoundedRace_PostClosedGuard exercises branch #2: the closed.Load()
+// check inside sendMu. With count=5 there is a window where handlers with n<count
+// block on sendMu.Lock() while the count-th handler sets closed=true and releases
+// the lock; those handlers then enter the body and return early via the closed guard.
+func TestListen_BoundedRace_PostClosedGuard(t *testing.T) {
+	for iter := range 10 {
+		func() {
+			instance := newInstance(t)
+
+			// count=5 gives a wide window: 5 handlers can all pass received.Add
+			// before any takes the lock. Whichever takes the lock last finds
+			// closed==true (set by the count-th handler) and returns via branch #2.
+			const count = 5
+			ch, unsub, err := instance.Listen("OrderCreated", count)
+			if err != nil {
+				t.Fatalf("iter %d: Listen: %v", iter, err)
+			}
+			defer unsub()
+
+			// Drain in background.
+			go func() {
+				for range ch {
+				}
+			}()
+
+			// Burst more events than count so the n > count guard (branch #1) and
+			// the post-close guard (branch #2) both get exercised.
+			var wg sync.WaitGroup
+			for i := range 50 {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					instance.Send(context.Background(), mocks.CreateOrderCmd{ //nolint:errcheck
+						ID:    fmt.Sprintf("race2-%d-%d", iter, idx),
+						Total: float64(idx + 1),
+					})
+				}(i)
+			}
+			wg.Wait()
+			waitPublish(t, instance)
+		}()
+	}
+}
+
+func TestListen_UnsubDuringHandler_BoundedReturnsCleanly(t *testing.T) {
+	// Verifies the defensive `if closed.Load()` check inside sendMu.Lock() in
+	// bounded mode. The path triggers when unsub() flips `closed` after a
+	// handler has claimed an n via received.Add(1) but before it acquires sendMu.
+	// Stress with many iterations to ensure the timing window is hit.
+	for iter := 0; iter < 100; iter++ {
+		instance := newInstance(t)
+
+		ch, unsub, err := instance.Listen("OrderCreated", 50)
+		if err != nil {
+			t.Fatalf("iter %d: Listen: %v", iter, err)
+		}
+
+		// Drain in background so sends don't block.
+		drained := make(chan struct{})
+		go func() {
+			for range ch {
+			}
+			close(drained)
+		}()
+
+		// Fire several events concurrently, then immediately call unsub().
+		var wg sync.WaitGroup
+		for j := 0; j < 20; j++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf("uh-%d-%d", iter, idx), Total: 1.0}
+				_, _ = instance.Send(context.Background(), cmd)
+			}(j)
+		}
+
+		// Race unsub against the in-flight events. unsub() doesn't take sendMu,
+		// so it can flip `closed` between a handler's Add() and Lock().
+		unsub()
+		wg.Wait()
+
+		// Cleanup: ensure no goroutine is leaked.
+		<-drained
+		instance.Shutdown(context.Background())
+	}
+}
+
+// --- SubscribeWait ---
+
+func TestSubscribeWait_EmptyPattern(t *testing.T) {
+	instance := newInstance(t)
+	_, err := instance.SubscribeWait(context.Background(), "")
+	if err != models.ErrEmptyPattern {
+		t.Fatalf("expected ErrEmptyPattern, got %v", err)
+	}
+}
+
+func TestSubscribeWait_EventArrivesBeforeDeadline(t *testing.T) {
+	instance := newInstance(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cmd := mocks.CreateOrderCmd{ID: "sw-1", Total: 42.0}
+		instance.SendWait(context.Background(), cmd) //nolint:errcheck
+	}()
+
+	evt, err := instance.SubscribeWait(ctx, "OrderCreated")
+	if err != nil {
+		t.Fatalf("SubscribeWait: %v", err)
+	}
+	if evt.AggregateID != "sw-1" {
+		t.Fatalf("expected AggregateID sw-1, got %q", evt.AggregateID)
+	}
+	if evt.Aggregate.Total != 42.0 {
+		t.Fatalf("expected Total 42.0, got %f", evt.Aggregate.Total)
+	}
+}
+
+func TestSubscribeWait_DeadlineExceeded(t *testing.T) {
+	instance := newInstance(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	_, err := instance.SubscribeWait(ctx, "OrderCreated")
+	if err != context.DeadlineExceeded {
+		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestSubscribeWait_ContextCancel_ReturnsCanceled(t *testing.T) {
+	instance := newInstance(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := instance.SubscribeWait(ctx, "OrderCreated")
+	if err != context.Canceled {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestSubscribeWait_ConcurrentDifferentPatterns(t *testing.T) {
+	instance := newInstance(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	results := make([]models.Event[mocks.Order], 2)
+	errs := make([]error, 2)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		results[0], errs[0] = instance.SubscribeWait(ctx, "OrderCreated")
+	}()
+	go func() {
+		defer wg.Done()
+		results[1], errs[1] = instance.SubscribeWait(ctx, "OrderCancelled")
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	if _, err := instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: "conc-1", Total: 10.0}); err != nil {
+		t.Fatalf("Send create: %v", err)
+	}
+	if _, err := instance.SendWait(context.Background(), mocks.CancelOrderCmd{ID: "conc-1"}); err != nil {
+		t.Fatalf("Send cancel: %v", err)
+	}
+
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("SubscribeWait[%d]: %v", i, err)
+		}
+	}
+	if results[0].EventName != "OrderCreated" {
+		t.Fatalf("expected OrderCreated, got %q", results[0].EventName)
+	}
+	if results[1].EventName != "OrderCancelled" {
+		t.Fatalf("expected OrderCancelled, got %q", results[1].EventName)
+	}
+}
+
+func TestSubscribeWait_AutoUnsubscribes(t *testing.T) {
+	// After SubscribeWait returns (event arrived), the subscription should be cleaned up.
+	// We verify this by sending a SECOND matching event and confirming it does not
+	// affect anything (no panic, no leak). Indirect — but the proper assertion is
+	// via leak-detection which is out of scope here.
+	instance := newInstance(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: "auto-1", Total: 1.0}) //nolint:errcheck
+	}()
+
+	_, err := instance.SubscribeWait(ctx, "OrderCreated")
+	if err != nil {
+		t.Fatalf("SubscribeWait: %v", err)
+	}
+
+	// Second event after SubscribeWait returned — must not affect anything.
+	if _, err := instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: "auto-2", Total: 2.0}); err != nil {
+		t.Fatalf("second SendWait: %v", err)
+	}
+}
+
+func TestListen_BoundedSubID_NoLeakOnImmediateFire(t *testing.T) {
+	// Stress: race the subID publication against the handler's auto-unsub.
+	// If the bug is present, repeated runs will leak subscriptions silently.
+	// We can't directly observe bus state from outside, but we can detect
+	// the leak via behavior: after Listen returns and we've consumed the one event,
+	// publishing more events on the same pattern must not invoke any "leftover" handler.
+	for iter := 0; iter < 50; iter++ {
+		instance := newInstance(t)
+
+		ch, unsub, err := instance.Listen("OrderCreated", 1)
+		if err != nil {
+			t.Fatalf("iter %d: Listen: %v", iter, err)
+		}
+
+		// Fire immediately to race subID publication.
+		if _, err := instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: "leak-1", Total: 1.0}); err != nil {
+			t.Fatalf("iter %d: SendWait: %v", iter, err)
+		}
+
+		// Drain the one event.
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iter %d: did not receive event", iter)
+		}
+
+		// Subscribe a *new* counting handler on the same pattern AFTER auto-unsub.
+		// If the original Listen subscription leaked, it would still be in the index;
+		// however we cannot detect that directly from the public API.
+		// Instead: confirm Listen's channel does NOT receive a second event.
+		// (The leaked subscription's handler would short-circuit on closed.Load(),
+		// so this test mostly stresses the race rather than asserting the leak —
+		// useful as a regression guard alongside the fix.)
+		if _, err := instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: "leak-2", Total: 1.0}); err != nil {
+			t.Fatalf("iter %d: SendWait 2: %v", iter, err)
+		}
+
+		select {
+		case evt, ok := <-ch:
+			if ok {
+				t.Fatalf("iter %d: leaked event %v on closed-channel sub", iter, evt)
+			}
+		case <-time.After(50 * time.Millisecond):
+			// Channel closed (good) or no extra send (also good)
+		}
+
+		unsub()
+		instance.Shutdown(context.Background())
+	}
+}
+
+func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(t *testing.T) {
+	// Verifies that in unbounded mode (count=0), a handler blocked on a full
+	// channel does not deadlock unsub().
+	instance := newInstance(t)
+
+	ch, unsub, err := instance.Listen("OrderCreated", 0)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	// Fill the buffer (16) plus a few more events that will block in handlers.
+	// Use Send (async) so we don't block the test goroutine.
+	for i := range 25 {
+		cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf("fill-%d", i), Total: 1.0}
+		if _, err := instance.Send(context.Background(), cmd); err != nil {
+			t.Fatalf("Send %d: %v", i, err)
+		}
+	}
+
+	// Give some handlers a chance to start blocking on ch <- evt.
+	time.Sleep(100 * time.Millisecond)
+
+	// unsub MUST return promptly even with handlers blocked.
+	done := make(chan struct{})
+	go func() {
+		unsub()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good
+	case <-time.After(2 * time.Second):
+		t.Fatal("unsub deadlocked — handlers blocked on full channel")
+	}
+
+	// Drain whatever's in the channel — no panic, no hang.
+	drainTimeout := time.After(500 * time.Millisecond)
+	for {
+		select {
+		case <-ch:
+		case <-drainTimeout:
+			return
+		}
+	}
+}
+
+
+func TestListen_BoundedConcurrent_DeliversAllCountEvents(t *testing.T) {
+	// Regression test for close-race bug: with count > 1 and concurrent events,
+	// the n==count handler could acquire sendMu before n<count handlers and close
+	// the channel prematurely, dropping earlier events.
+	// Run multiple iterations to expose the race; the fix uses a `delivered`
+	// counter inside sendMu so close fires only after exactly `count` real sends.
+	for iter := 0; iter < 20; iter++ {
+		instance := newInstance(t)
+
+		const count = 5
+		ch, unsub, err := instance.Listen("OrderCreated", count)
+		if err != nil {
+			t.Fatalf("iter %d: Listen: %v", iter, err)
+		}
+
+		// Fire `count` events concurrently to maximize lock-acquisition reordering.
+		var wg sync.WaitGroup
+		for j := 0; j < count; j++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf("br-%d-%d", iter, idx), Total: float64(idx + 1)}
+				_, _ = instance.Send(context.Background(), cmd)
+			}(j)
+		}
+		wg.Wait()
+
+		// Drain the channel — must receive exactly `count` events before close.
+		received := 0
+		drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		for {
+			select {
+			case _, ok := <-ch:
+				if !ok {
+					goto done
+				}
+				received++
+			case <-drainCtx.Done():
+				cancel()
+				t.Fatalf("iter %d: timed out waiting for events; received %d/%d", iter, received, count)
+			}
+		}
+	done:
+		cancel()
+
+		if received != count {
+			t.Fatalf("iter %d: received %d events, want %d (close-race bug?)", iter, received, count)
+		}
+
+		unsub()
+		instance.Shutdown(context.Background())
+	}
+}
