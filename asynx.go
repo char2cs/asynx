@@ -193,8 +193,9 @@ func (i *asynxImpl[T]) Listen(
 		// sendMu serialises send+close in bounded mode so close(ch) never races with ch<-evt.
 		sendMu sync.Mutex
 		subID  string
-		done   = make(chan struct{}) // signals unbounded-mode handlers to abort on unsub
 	)
+	done := make(chan struct{})       // signals unbounded-mode handlers to abort on unsub
+	subIDReady := make(chan struct{}) // closed once subID is written; gates auto-unsub goroutine
 
 	handler := func(_ context.Context, evt models.Event[T]) {
 		// Fast-path short-circuit if already closed/unsubbed.
@@ -220,24 +221,24 @@ func (i *asynxImpl[T]) Listen(
 			return
 		}
 
-		// sendMu serialises send+close so that close(ch) never races with ch<-evt.
 		sendMu.Lock()
-		defer sendMu.Unlock()
 		if closed.Load() {
+			sendMu.Unlock()
 			return
 		}
-		ch <- evt
-		if n == int64(count) {
+		ch <- evt // capacity == count, never blocks
+		isLast := n == int64(count)
+		if isLast {
 			closed.Store(true)
 			close(ch)
-			// Auto-unsubscribe asynchronously — don't block the bus's handler goroutine.
+		}
+		sendMu.Unlock()
+
+		if isLast {
+			// Auto-unsubscribe asynchronously — wait for subID to be published, then unsub.
 			go func() {
-				sendMu.Lock()
-				id := subID
-				sendMu.Unlock()
-				if id != "" {
-					_ = i.bus.Unsubscribe(id)
-				}
+				<-subIDReady
+				_ = i.bus.Unsubscribe(subID)
 			}()
 		}
 	}
@@ -246,31 +247,18 @@ func (i *asynxImpl[T]) Listen(
 	if err != nil {
 		return nil, nil, err
 	}
-	// C1 fix: write subID under sendMu so a handler that fires before this
-	// assignment completes (in unbounded mode via done-select, or in bounded
-	// mode via sendMu) cannot read a stale empty string.
+
 	sendMu.Lock()
 	subID = id
-	alreadyClosed := closed.Load()
 	sendMu.Unlock()
-
-	// If the handler raced past `subID = id` and closed before we published the ID,
-	// its auto-unsub goroutine saw subID == "" and skipped. Clean up here.
-	if alreadyClosed {
-		_ = i.bus.Unsubscribe(id)
-	}
+	close(subIDReady)
 
 	unsub := func() {
 		if !closed.CompareAndSwap(false, true) {
 			return
 		}
 		close(done)
-		sendMu.Lock()
-		id := subID
-		sendMu.Unlock()
-		if id != "" {
-			_ = i.bus.Unsubscribe(id)
-		}
+		_ = i.bus.Unsubscribe(subID)
 	}
 
 	return ch, unsub, nil
