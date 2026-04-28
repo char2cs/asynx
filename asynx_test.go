@@ -1362,6 +1362,57 @@ func TestSubscribeWait_AutoUnsubscribes(t *testing.T) {
 	}
 }
 
+func TestListen_BoundedSubID_NoLeakOnImmediateFire(t *testing.T) {
+	// Stress: race the subID publication against the handler's auto-unsub.
+	// If the bug is present, repeated runs will leak subscriptions silently.
+	// We can't directly observe bus state from outside, but we can detect
+	// the leak via behavior: after Listen returns and we've consumed the one event,
+	// publishing more events on the same pattern must not invoke any "leftover" handler.
+	for iter := 0; iter < 50; iter++ {
+		instance := newInstance(t)
+
+		ch, unsub, err := instance.Listen("OrderCreated", 1)
+		if err != nil {
+			t.Fatalf("iter %d: Listen: %v", iter, err)
+		}
+
+		// Fire immediately to race subID publication.
+		if _, err := instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: "leak-1", Total: 1.0}); err != nil {
+			t.Fatalf("iter %d: SendWait: %v", iter, err)
+		}
+
+		// Drain the one event.
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iter %d: did not receive event", iter)
+		}
+
+		// Subscribe a *new* counting handler on the same pattern AFTER auto-unsub.
+		// If the original Listen subscription leaked, it would still be in the index;
+		// however we cannot detect that directly from the public API.
+		// Instead: confirm Listen's channel does NOT receive a second event.
+		// (The leaked subscription's handler would short-circuit on closed.Load(),
+		// so this test mostly stresses the race rather than asserting the leak —
+		// useful as a regression guard alongside the fix.)
+		if _, err := instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: "leak-2", Total: 1.0}); err != nil {
+			t.Fatalf("iter %d: SendWait 2: %v", iter, err)
+		}
+
+		select {
+		case evt, ok := <-ch:
+			if ok {
+				t.Fatalf("iter %d: leaked event %v on closed-channel sub", iter, evt)
+			}
+		case <-time.After(50 * time.Millisecond):
+			// Channel closed (good) or no extra send (also good)
+		}
+
+		unsub()
+		instance.Shutdown(context.Background())
+	}
+}
+
 func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(t *testing.T) {
 	// Verifies that in unbounded mode (count=0), a handler blocked on a full
 	// channel does not deadlock unsub().

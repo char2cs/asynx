@@ -251,7 +251,14 @@ func (i *asynxImpl[T]) Listen(
 	// mode via sendMu) cannot read a stale empty string.
 	sendMu.Lock()
 	subID = id
+	alreadyClosed := closed.Load()
 	sendMu.Unlock()
+
+	// If the handler raced past `subID = id` and closed before we published the ID,
+	// its auto-unsub goroutine saw subID == "" and skipped. Clean up here.
+	if alreadyClosed {
+		_ = i.bus.Unsubscribe(id)
+	}
 
 	unsub := func() {
 		if !closed.CompareAndSwap(false, true) {
