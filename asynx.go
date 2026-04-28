@@ -77,8 +77,11 @@ type Asynx[T any] interface {
 	//
 	// count > 0: the channel has capacity equal to count, auto-closes and
 	//            auto-unsubscribes after count events are received.
-	// count == 0: unbounded — the channel never auto-closes; the caller must
-	//             call the returned unsubscribe func to clean up.
+	// count == 0: unbounded — the channel has a default capacity of 16; it never
+	//             auto-closes. The caller must call the returned unsubscribe func
+	//             to clean up. Note: unsub() does NOT close the channel in
+	//             unbounded mode; do not range over the channel after calling unsub.
+	// count < 0: treated the same as count == 0 (unbounded, capacity 16).
 	//
 	// The returned unsubscribe func is idempotent.
 	// Returns ErrEmptyPattern if pattern is empty.
@@ -174,48 +177,80 @@ func (i *asynxImpl[T]) Listen(
 	var (
 		received atomic.Int64
 		closed   atomic.Bool
-		unsubMu  sync.Mutex
-		unsubbed bool
-		subID    string
+		// sendMu serialises send+close in bounded mode so close(ch) never races with ch<-evt.
+		sendMu sync.Mutex
+		subID  string
+		done   = make(chan struct{}) // signals unbounded-mode handlers to abort on unsub
 	)
 
 	handler := func(_ context.Context, evt models.Event[T]) {
-		if count > 0 && received.Load() >= int64(count) {
+		// Fast-path short-circuit if already closed/unsubbed.
+		if closed.Load() {
 			return
 		}
-		n := received.Add(1)
-		if count > 0 && n > int64(count) {
-			return
-		}
-		// sendMu serialises send+close so that close(ch) never races with ch<-evt.
-		unsubMu.Lock()
-		if !unsubbed {
-			ch <- evt
-			if count > 0 && n == int64(count) {
-				unsubbed = true
-				_ = i.bus.Unsubscribe(subID)
-				if closed.CompareAndSwap(false, true) {
-					close(ch)
-				}
+
+		if count <= 0 {
+			// Unbounded mode: send may block if consumer doesn't drain.
+			// Use the done channel to abort cleanly when unsub() is called.
+			select {
+			case <-done:
+				return
+			case ch <- evt:
 			}
+			return
 		}
-		unsubMu.Unlock()
+
+		// Bounded mode: channel capacity == count, so send never blocks once we
+		// hold the guard. Use received to gate exactly count deliveries.
+		n := received.Add(1)
+		if n > int64(count) {
+			return
+		}
+
+		// sendMu serialises send+close so that close(ch) never races with ch<-evt.
+		sendMu.Lock()
+		defer sendMu.Unlock()
+		if closed.Load() {
+			return
+		}
+		ch <- evt
+		if n == int64(count) {
+			closed.Store(true)
+			close(ch)
+			// Auto-unsubscribe asynchronously — don't block the bus's handler goroutine.
+			go func() {
+				sendMu.Lock()
+				id := subID
+				sendMu.Unlock()
+				if id != "" {
+					_ = i.bus.Unsubscribe(id)
+				}
+			}()
+		}
 	}
 
 	id, err := i.bus.Subscribe(Topic(pattern), handler)
 	if err != nil {
 		return nil, nil, err
 	}
+	// C1 fix: write subID under sendMu so a handler that fires before this
+	// assignment completes (in unbounded mode via done-select, or in bounded
+	// mode via sendMu) cannot read a stale empty string.
+	sendMu.Lock()
 	subID = id
+	sendMu.Unlock()
 
 	unsub := func() {
-		unsubMu.Lock()
-		defer unsubMu.Unlock()
-		if unsubbed {
+		if !closed.CompareAndSwap(false, true) {
 			return
 		}
-		unsubbed = true
-		_ = i.bus.Unsubscribe(subID)
+		close(done)
+		sendMu.Lock()
+		id := subID
+		sendMu.Unlock()
+		if id != "" {
+			_ = i.bus.Unsubscribe(id)
+		}
 	}
 
 	return ch, unsub, nil

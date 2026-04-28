@@ -1113,3 +1113,79 @@ func TestListen_SubscribeError_ReturnsError(t *testing.T) {
 		t.Fatalf("expected nil unsub on error, got non-nil")
 	}
 }
+
+func TestListen_NegativeCount_TreatedAsZero(t *testing.T) {
+	// Document: negative count behaves like 0 (unbounded)
+	instance := newInstance(t)
+	ch, unsub, err := instance.Listen("OrderCreated", -1)
+	if err != nil {
+		t.Fatalf("expected nil error for negative count, got %v", err)
+	}
+	defer unsub()
+
+	// Channel should not be auto-closing — send 2 events, both must arrive.
+	for i := range 2 {
+		cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf("neg-%d", i), Total: float64(i + 1)}
+		if _, err := instance.SendWait(context.Background(), cmd); err != nil {
+			t.Fatalf("SendWait: %v", err)
+		}
+	}
+	for i := range 2 {
+		select {
+		case evt := <-ch:
+			expected := fmt.Sprintf("neg-%d", i)
+			if evt.AggregateID != expected {
+				t.Fatalf("expected %s, got %s", expected, evt.AggregateID)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for event %d", i)
+		}
+	}
+}
+
+func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(t *testing.T) {
+	// Verifies that in unbounded mode (count=0), a handler blocked on a full
+	// channel does not deadlock unsub().
+	instance := newInstance(t)
+
+	ch, unsub, err := instance.Listen("OrderCreated", 0)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	// Fill the buffer (16) plus a few more events that will block in handlers.
+	// Use Send (async) so we don't block the test goroutine.
+	for i := range 25 {
+		cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf("fill-%d", i), Total: 1.0}
+		if _, err := instance.Send(context.Background(), cmd); err != nil {
+			t.Fatalf("Send %d: %v", i, err)
+		}
+	}
+
+	// Give some handlers a chance to start blocking on ch <- evt.
+	time.Sleep(100 * time.Millisecond)
+
+	// unsub MUST return promptly even with handlers blocked.
+	done := make(chan struct{})
+	go func() {
+		unsub()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good
+	case <-time.After(2 * time.Second):
+		t.Fatal("unsub deadlocked — handlers blocked on full channel")
+	}
+
+	// Drain whatever's in the channel — no panic, no hang.
+	drainTimeout := time.After(500 * time.Millisecond)
+	for {
+		select {
+		case <-ch:
+		case <-drainTimeout:
+			return
+		}
+	}
+}
