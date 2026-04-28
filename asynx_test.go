@@ -1230,6 +1230,49 @@ func TestListen_BoundedRace_PostClosedGuard(t *testing.T) {
 	}
 }
 
+func TestListen_UnsubDuringHandler_BoundedReturnsCleanly(t *testing.T) {
+	// Verifies the defensive `if closed.Load()` check inside sendMu.Lock() in
+	// bounded mode. The path triggers when unsub() flips `closed` after a
+	// handler has claimed an n via received.Add(1) but before it acquires sendMu.
+	// Stress with many iterations to ensure the timing window is hit.
+	for iter := 0; iter < 100; iter++ {
+		instance := newInstance(t)
+
+		ch, unsub, err := instance.Listen("OrderCreated", 50)
+		if err != nil {
+			t.Fatalf("iter %d: Listen: %v", iter, err)
+		}
+
+		// Drain in background so sends don't block.
+		drained := make(chan struct{})
+		go func() {
+			for range ch {
+			}
+			close(drained)
+		}()
+
+		// Fire several events concurrently, then immediately call unsub().
+		var wg sync.WaitGroup
+		for j := 0; j < 20; j++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf("uh-%d-%d", iter, idx), Total: 1.0}
+				_, _ = instance.Send(context.Background(), cmd)
+			}(j)
+		}
+
+		// Race unsub against the in-flight events. unsub() doesn't take sendMu,
+		// so it can flip `closed` between a handler's Add() and Lock().
+		unsub()
+		wg.Wait()
+
+		// Cleanup: ensure no goroutine is leaked.
+		<-drained
+		instance.Shutdown(context.Background())
+	}
+}
+
 // --- SubscribeWait ---
 
 func TestSubscribeWait_EmptyPattern(t *testing.T) {
