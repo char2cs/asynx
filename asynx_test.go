@@ -823,3 +823,293 @@ func TestOnForget_Unsubscribe_StopsHandler(t *testing.T) {
 		t.Errorf("handler called %d times after Unsubscribe, want 0", called)
 	}
 }
+
+// --- Listen ---
+
+func TestListen_EmptyPattern(t *testing.T) {
+	instance := newInstance(t)
+	_, _, err := instance.Listen("", 1)
+	if err != models.ErrEmptyPattern {
+		t.Fatalf("expected ErrEmptyPattern, got %v", err)
+	}
+}
+
+func TestListen_EventArrivesBeforeDeadline(t *testing.T) {
+	instance := newInstance(t)
+
+	ch, unsub, err := instance.Listen("OrderCreated", 1)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer unsub()
+
+	cmd := mocks.CreateOrderCmd{ID: "listen-1", Total: 50.0}
+	if _, err := instance.SendWait(context.Background(), cmd); err != nil {
+		t.Fatalf("SendWait: %v", err)
+	}
+
+	select {
+	case evt := <-ch:
+		if evt.AggregateID != "listen-1" {
+			t.Fatalf("expected AggregateID listen-1, got %q", evt.AggregateID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for event")
+	}
+}
+
+func TestListen_UnsubscribeCleansUp(t *testing.T) {
+	instance := newInstance(t)
+
+	ch, unsub, err := instance.Listen("OrderCreated", 0)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	unsub()
+
+	cmd := mocks.CreateOrderCmd{ID: "listen-unsub", Total: 50.0}
+	if _, err := instance.SendWait(context.Background(), cmd); err != nil {
+		t.Fatalf("SendWait: %v", err)
+	}
+
+	select {
+	case evt, ok := <-ch:
+		if ok {
+			t.Fatalf("expected no event after unsub, got %v", evt)
+		}
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestListen_UnsubIsIdempotent(t *testing.T) {
+	instance := newInstance(t)
+
+	_, unsub, err := instance.Listen("OrderCreated", 0)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	unsub()
+	unsub() // should not panic, should not error
+}
+
+func TestListen_CountAutoCloses(t *testing.T) {
+	instance := newInstance(t)
+
+	ch, unsub, err := instance.Listen("OrderCreated", 1)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer unsub()
+
+	cmd := mocks.CreateOrderCmd{ID: "listen-auto", Total: 50.0}
+	if _, err := instance.SendWait(context.Background(), cmd); err != nil {
+		t.Fatalf("SendWait: %v", err)
+	}
+
+	select {
+	case _, ok := <-ch:
+		if !ok {
+			t.Fatal("channel closed before delivering event")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for event")
+	}
+
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("expected channel to be closed after count events")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for channel close")
+	}
+}
+
+func TestListen_BufferedChannelPreservesEvent(t *testing.T) {
+	instance := newInstance(t)
+
+	ch, unsub, err := instance.Listen("OrderCreated", 1)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer unsub()
+
+	cmd := mocks.CreateOrderCmd{ID: "listen-buf", Total: 75.0}
+	if _, err := instance.SendWait(context.Background(), cmd); err != nil {
+		t.Fatalf("SendWait: %v", err)
+	}
+
+	select {
+	case evt := <-ch:
+		if evt.Aggregate.Total != 75.0 {
+			t.Fatalf("expected Total 75.0, got %f", evt.Aggregate.Total)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("event was lost — not in buffer")
+	}
+}
+
+func TestListen_Unbounded_ReceivesMultipleEvents(t *testing.T) {
+	instance := newInstance(t)
+
+	ch, unsub, err := instance.Listen("OrderCreated", 0)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer unsub()
+
+	for i := range 3 {
+		cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf("listen-ub-%d", i), Total: float64(i + 1)}
+		if _, err := instance.SendWait(context.Background(), cmd); err != nil {
+			t.Fatalf("SendWait: %v", err)
+		}
+	}
+
+	for i := range 3 {
+		select {
+		case evt := <-ch:
+			expected := fmt.Sprintf("listen-ub-%d", i)
+			if evt.AggregateID != expected {
+				t.Fatalf("expected %s, got %s", expected, evt.AggregateID)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for event %d", i)
+		}
+	}
+}
+
+func TestListen_UsesTopicPattern(t *testing.T) {
+	// "Order.*" uses Topic()-style dot-segment wildcards.
+	// Topic("Order.*") → ^Order\..*$ which matches "OrderCreated" (no leading dot needed).
+	// A bare Subscribe("Order.*") would use it as a regex directly (matching the same),
+	// but what matters is that Listen internally calls Topic() to translate the pattern.
+	// We use "*" here: Topic("*") → ^.*$ which matches any event name — verifying
+	// that Listen uses Topic() because "*" alone is not valid regex (it would panic).
+	instance := newInstance(t)
+
+	ch, unsub, err := instance.Listen("*", 1)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer unsub()
+
+	cmd := mocks.CreateOrderCmd{ID: "listen-topic", Total: 10.0}
+	if _, err := instance.SendWait(context.Background(), cmd); err != nil {
+		t.Fatalf("SendWait: %v", err)
+	}
+
+	select {
+	case evt := <-ch:
+		if evt.AggregateID != "listen-topic" {
+			t.Fatalf("expected listen-topic, got %q", evt.AggregateID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("topic pattern did not match — Listen should use Topic() internally")
+	}
+}
+
+func TestListen_CountOverflow_DoesNotBlock(t *testing.T) {
+	// When count=1 and multiple events are published, only the first is sent.
+	// The second event must not block the publisher (handler returns early).
+	instance := newInstance(t)
+
+	ch, unsub, err := instance.Listen("OrderCreated", 1)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer unsub()
+
+	// First event — fills the channel and triggers auto-close.
+	if _, err := instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: "ovf-1", Total: 1.0}); err != nil {
+		t.Fatalf("SendWait 1: %v", err)
+	}
+	// Second event — handler must not push to closed channel.
+	if _, err := instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: "ovf-2", Total: 2.0}); err != nil {
+		t.Fatalf("SendWait 2: %v", err)
+	}
+
+	// Drain
+	<-ch
+	if _, ok := <-ch; ok {
+		t.Fatal("expected channel closed")
+	}
+}
+
+func TestListen_CountOverflowConcurrent_GuardsEnforced(t *testing.T) {
+	// Exercises the concurrent-overflow branches: count=1 with many concurrent
+	// publishers. Because handlers for different aggregates run in separate
+	// goroutines (the bus spawns one goroutine per subscription per event), two
+	// handlers can overlap: both load received=0 (< count=1) and pass the first
+	// guard, but only n=1 is ≤ count; goroutines where n>1 hit the second guard.
+	// Repeating across iterations makes it highly likely to hit both guards.
+	for iter := range 10 {
+		func() {
+			instance := newInstance(t)
+
+			const count = 1
+			ch, unsub, err := instance.Listen("OrderCreated", count)
+			if err != nil {
+				t.Fatalf("iter %d: Listen: %v", iter, err)
+			}
+			defer unsub()
+
+			// Fire many events concurrently before auto-unsubscribe can remove the sub.
+			const total = 16
+			var wg sync.WaitGroup
+			for i := range total {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					instance.Send(context.Background(), mocks.CreateOrderCmd{ //nolint:errcheck
+						ID:    fmt.Sprintf("ovfc-%d-%d", iter, idx),
+						Total: float64(idx + 1),
+					})
+				}(i)
+			}
+			wg.Wait()
+			waitPublish(t, instance)
+
+			// Channel must yield exactly 1 event, then close.
+			got := 0
+			deadline := time.After(2 * time.Second)
+			for {
+				select {
+				case _, ok := <-ch:
+					if !ok {
+						if got != count {
+							t.Fatalf("iter %d: expected %d events before close, got %d", iter, count, got)
+						}
+						return
+					}
+					got++
+				case <-deadline:
+					t.Fatalf("iter %d: timed out: got %d events, channel not closed", iter, got)
+				}
+			}
+		}()
+	}
+}
+
+func TestListen_SubscribeError_ReturnsError(t *testing.T) {
+	// If the bus is closed (after Shutdown), Subscribe returns ErrBusClosed.
+	// Listen must propagate that error and return nil channel.
+	s := store.New()
+	instance, err := asynx.New[mocks.Order]().WithEventStore(s).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance.Shutdown(context.Background())
+
+	ch, unsub, err := instance.Listen("OrderCreated", 1)
+	if err == nil {
+		t.Fatal("expected error when bus is closed, got nil")
+	}
+	if ch != nil {
+		t.Fatalf("expected nil channel on error, got non-nil")
+	}
+	if unsub != nil {
+		t.Fatalf("expected nil unsub on error, got non-nil")
+	}
+}

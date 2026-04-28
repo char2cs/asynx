@@ -3,6 +3,8 @@ package asynx
 import (
 	"context"
 	"fmt"
+	"sync"
+	"sync/atomic"
 
 	"github.com/char2cs/asynx/internal/commands"
 	"github.com/char2cs/asynx/internal/eventstore"
@@ -69,6 +71,21 @@ type Asynx[T any] interface {
 	Unsubscribe(
 		id string,
 	) error
+
+	// Listen opens a channel-based subscription for events matching the given pattern.
+	// The pattern is converted via Topic() internally.
+	//
+	// count > 0: the channel has capacity equal to count, auto-closes and
+	//            auto-unsubscribes after count events are received.
+	// count == 0: unbounded — the channel never auto-closes; the caller must
+	//             call the returned unsubscribe func to clean up.
+	//
+	// The returned unsubscribe func is idempotent.
+	// Returns ErrEmptyPattern if pattern is empty.
+	Listen(
+		pattern string,
+		count int,
+	) (<-chan models.Event[T], func(), error)
 
 	Replay(
 		ctx context.Context,
@@ -138,6 +155,70 @@ func (i *asynxImpl[T]) Subscribe(
 
 func (i *asynxImpl[T]) Unsubscribe(id string) error {
 	return i.bus.Unsubscribe(id)
+}
+
+func (i *asynxImpl[T]) Listen(
+	pattern string,
+	count int,
+) (<-chan models.Event[T], func(), error) {
+	if pattern == "" {
+		return nil, nil, models.ErrEmptyPattern
+	}
+
+	capacity := count
+	if capacity <= 0 {
+		capacity = 16
+	}
+	ch := make(chan models.Event[T], capacity)
+
+	var (
+		received atomic.Int64
+		closed   atomic.Bool
+		unsubMu  sync.Mutex
+		unsubbed bool
+		subID    string
+	)
+
+	handler := func(_ context.Context, evt models.Event[T]) {
+		if count > 0 && received.Load() >= int64(count) {
+			return
+		}
+		n := received.Add(1)
+		if count > 0 && n > int64(count) {
+			return
+		}
+		// sendMu serialises send+close so that close(ch) never races with ch<-evt.
+		unsubMu.Lock()
+		if !unsubbed {
+			ch <- evt
+			if count > 0 && n == int64(count) {
+				unsubbed = true
+				_ = i.bus.Unsubscribe(subID)
+				if closed.CompareAndSwap(false, true) {
+					close(ch)
+				}
+			}
+		}
+		unsubMu.Unlock()
+	}
+
+	id, err := i.bus.Subscribe(Topic(pattern), handler)
+	if err != nil {
+		return nil, nil, err
+	}
+	subID = id
+
+	unsub := func() {
+		unsubMu.Lock()
+		defer unsubMu.Unlock()
+		if unsubbed {
+			return
+		}
+		unsubbed = true
+		_ = i.bus.Unsubscribe(subID)
+	}
+
+	return ch, unsub, nil
 }
 
 func (i *asynxImpl[T]) Replay(
