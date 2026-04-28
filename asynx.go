@@ -265,6 +265,13 @@ func (i *asynxImpl[T]) Listen(
 		}
 		close(done)
 		_ = i.bus.Unsubscribe(subID)
+		// In bounded mode, close ch under sendMu so any handler that slipped
+		// past the fast-path closed.Load() check cannot send to a closed channel.
+		if count > 0 {
+			sendMu.Lock()
+			close(ch)
+			sendMu.Unlock()
+		}
 	}
 
 	return ch, unsub, nil
