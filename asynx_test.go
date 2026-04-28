@@ -1459,3 +1459,58 @@ func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(t *testing.T) {
 		}
 	}
 }
+
+
+func TestListen_BoundedConcurrent_DeliversAllCountEvents(t *testing.T) {
+	// Regression test for close-race bug: with count > 1 and concurrent events,
+	// the n==count handler could acquire sendMu before n<count handlers and close
+	// the channel prematurely, dropping earlier events.
+	// Run multiple iterations to expose the race; the fix uses a `delivered`
+	// counter inside sendMu so close fires only after exactly `count` real sends.
+	for iter := 0; iter < 20; iter++ {
+		instance := newInstance(t)
+
+		const count = 5
+		ch, unsub, err := instance.Listen("OrderCreated", count)
+		if err != nil {
+			t.Fatalf("iter %d: Listen: %v", iter, err)
+		}
+
+		// Fire `count` events concurrently to maximize lock-acquisition reordering.
+		var wg sync.WaitGroup
+		for j := 0; j < count; j++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf("br-%d-%d", iter, idx), Total: float64(idx + 1)}
+				_, _ = instance.Send(context.Background(), cmd)
+			}(j)
+		}
+		wg.Wait()
+
+		// Drain the channel — must receive exactly `count` events before close.
+		received := 0
+		drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		for {
+			select {
+			case _, ok := <-ch:
+				if !ok {
+					goto done
+				}
+				received++
+			case <-drainCtx.Done():
+				cancel()
+				t.Fatalf("iter %d: timed out waiting for events; received %d/%d", iter, received, count)
+			}
+		}
+	done:
+		cancel()
+
+		if received != count {
+			t.Fatalf("iter %d: received %d events, want %d (close-race bug?)", iter, received, count)
+		}
+
+		unsub()
+		instance.Shutdown(context.Background())
+	}
+}

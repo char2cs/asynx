@@ -96,6 +96,10 @@ type Asynx[T any] interface {
 	// Returns the matching event, or ctx.Err() if the context is cancelled or its
 	// deadline is exceeded. Auto-unsubscribes in all cases.
 	//
+	// To bound the wait time, pass a context with a deadline (e.g.,
+	// context.WithTimeout(parent, 5*time.Second)); pass context.Background() to
+	// wait indefinitely.
+	//
 	// For subscribe-before-act ordering (subscribe → check state → send command →
 	// then read), use Listen directly.
 	SubscribeWait(
@@ -188,8 +192,9 @@ func (i *asynxImpl[T]) Listen(
 	ch := make(chan models.Event[T], capacity)
 
 	var (
-		received atomic.Int64
-		closed   atomic.Bool
+		received  atomic.Int64
+		delivered int64 // protected by sendMu; counts actual sends so close fires after exactly count deliveries
+		closed    atomic.Bool
 		// sendMu serialises send+close in bounded mode so close(ch) never races with ch<-evt.
 		sendMu sync.Mutex
 		subID  string
@@ -227,7 +232,8 @@ func (i *asynxImpl[T]) Listen(
 			return
 		}
 		ch <- evt // capacity == count, never blocks
-		isLast := n == int64(count)
+		delivered++
+		isLast := delivered == int64(count)
 		if isLast {
 			closed.Store(true)
 			close(ch)
