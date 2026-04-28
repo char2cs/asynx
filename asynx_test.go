@@ -1143,6 +1143,93 @@ func TestListen_NegativeCount_TreatedAsZero(t *testing.T) {
 	}
 }
 
+// TestListen_BoundedRace_NOverCount exercises the n > count early-return (branch #1):
+// with count=1 and 50 concurrent senders the auto-unsubscribe goroutine races with
+// further dispatches, so some handlers observe n=2,3,... and return early.
+// The test also covers branch #2 (closed.Load() after sendMu.Lock()) by using count=5
+// so that multiple handlers can pass received.Add before any of them takes the lock;
+// the last one to acquire the lock after the count-th handler has set closed=true
+// returns through that guard.
+func TestListen_BoundedRace_NOverCount(t *testing.T) {
+	for iter := range 10 {
+		func() {
+			instance := newInstance(t)
+
+			const count = 1
+			ch, unsub, err := instance.Listen("OrderCreated", count)
+			if err != nil {
+				t.Fatalf("iter %d: Listen: %v", iter, err)
+			}
+			defer unsub()
+
+			// Drain in background so the buffered channel never blocks a handler.
+			go func() {
+				for range ch {
+				}
+			}()
+
+			// Burst many concurrent events — handlers race around received.Add(1).
+			var wg sync.WaitGroup
+			for i := range 100 {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					instance.Send(context.Background(), mocks.CreateOrderCmd{ //nolint:errcheck
+						ID:    fmt.Sprintf("race1-%d-%d", iter, idx),
+						Total: float64(idx + 1),
+					})
+				}(i)
+			}
+			wg.Wait()
+			waitPublish(t, instance)
+		}()
+	}
+}
+
+// TestListen_BoundedRace_PostClosedGuard exercises branch #2: the closed.Load()
+// check inside sendMu. With count=5 there is a window where handlers with n<count
+// block on sendMu.Lock() while the count-th handler sets closed=true and releases
+// the lock; those handlers then enter the body and return early via the closed guard.
+func TestListen_BoundedRace_PostClosedGuard(t *testing.T) {
+	for iter := range 10 {
+		func() {
+			instance := newInstance(t)
+
+			// count=5 gives a wide window: 5 handlers can all pass received.Add
+			// before any takes the lock. Whichever takes the lock last finds
+			// closed==true (set by the count-th handler) and returns via branch #2.
+			const count = 5
+			ch, unsub, err := instance.Listen("OrderCreated", count)
+			if err != nil {
+				t.Fatalf("iter %d: Listen: %v", iter, err)
+			}
+			defer unsub()
+
+			// Drain in background.
+			go func() {
+				for range ch {
+				}
+			}()
+
+			// Burst more events than count so the n > count guard (branch #1) and
+			// the post-close guard (branch #2) both get exercised.
+			var wg sync.WaitGroup
+			for i := range 50 {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					instance.Send(context.Background(), mocks.CreateOrderCmd{ //nolint:errcheck
+						ID:    fmt.Sprintf("race2-%d-%d", iter, idx),
+						Total: float64(idx + 1),
+					})
+				}(i)
+			}
+			wg.Wait()
+			waitPublish(t, instance)
+		}()
+	}
+}
+
 func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(t *testing.T) {
 	// Verifies that in unbounded mode (count=0), a handler blocked on a full
 	// channel does not deadlock unsub().
