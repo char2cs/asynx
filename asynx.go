@@ -90,6 +90,19 @@ type Asynx[T any] interface {
 		count int,
 	) (<-chan models.Event[T], func(), error)
 
+	// SubscribeWait blocks until the first event matching pattern arrives or ctx
+	// is cancelled. The pattern is converted via Topic() internally (through Listen).
+	//
+	// Returns the matching event, or ctx.Err() if the context is cancelled or its
+	// deadline is exceeded. Auto-unsubscribes in all cases.
+	//
+	// For subscribe-before-act ordering (subscribe → check state → send command →
+	// then read), use Listen directly.
+	SubscribeWait(
+		ctx context.Context,
+		pattern string,
+	) (models.Event[T], error)
+
 	Replay(
 		ctx context.Context,
 		aggregateID string,
@@ -254,6 +267,26 @@ func (i *asynxImpl[T]) Listen(
 	}
 
 	return ch, unsub, nil
+}
+
+func (i *asynxImpl[T]) SubscribeWait(
+	ctx context.Context,
+	pattern string,
+) (models.Event[T], error) {
+	ch, unsub, err := i.Listen(pattern, 1)
+	if err != nil {
+		var zero models.Event[T]
+		return zero, err
+	}
+	defer unsub()
+
+	select {
+	case evt := <-ch:
+		return evt, nil
+	case <-ctx.Done():
+		var zero models.Event[T]
+		return zero, ctx.Err()
+	}
 }
 
 func (i *asynxImpl[T]) Replay(

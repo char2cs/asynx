@@ -1230,6 +1230,138 @@ func TestListen_BoundedRace_PostClosedGuard(t *testing.T) {
 	}
 }
 
+// --- SubscribeWait ---
+
+func TestSubscribeWait_EmptyPattern(t *testing.T) {
+	instance := newInstance(t)
+	_, err := instance.SubscribeWait(context.Background(), "")
+	if err != models.ErrEmptyPattern {
+		t.Fatalf("expected ErrEmptyPattern, got %v", err)
+	}
+}
+
+func TestSubscribeWait_EventArrivesBeforeDeadline(t *testing.T) {
+	instance := newInstance(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cmd := mocks.CreateOrderCmd{ID: "sw-1", Total: 42.0}
+		instance.SendWait(context.Background(), cmd) //nolint:errcheck
+	}()
+
+	evt, err := instance.SubscribeWait(ctx, "OrderCreated")
+	if err != nil {
+		t.Fatalf("SubscribeWait: %v", err)
+	}
+	if evt.AggregateID != "sw-1" {
+		t.Fatalf("expected AggregateID sw-1, got %q", evt.AggregateID)
+	}
+	if evt.Aggregate.Total != 42.0 {
+		t.Fatalf("expected Total 42.0, got %f", evt.Aggregate.Total)
+	}
+}
+
+func TestSubscribeWait_DeadlineExceeded(t *testing.T) {
+	instance := newInstance(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	_, err := instance.SubscribeWait(ctx, "OrderCreated")
+	if err != context.DeadlineExceeded {
+		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestSubscribeWait_ContextCancel_ReturnsCanceled(t *testing.T) {
+	instance := newInstance(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := instance.SubscribeWait(ctx, "OrderCreated")
+	if err != context.Canceled {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestSubscribeWait_ConcurrentDifferentPatterns(t *testing.T) {
+	instance := newInstance(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	results := make([]models.Event[mocks.Order], 2)
+	errs := make([]error, 2)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		results[0], errs[0] = instance.SubscribeWait(ctx, "OrderCreated")
+	}()
+	go func() {
+		defer wg.Done()
+		results[1], errs[1] = instance.SubscribeWait(ctx, "OrderCancelled")
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	if _, err := instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: "conc-1", Total: 10.0}); err != nil {
+		t.Fatalf("Send create: %v", err)
+	}
+	if _, err := instance.SendWait(context.Background(), mocks.CancelOrderCmd{ID: "conc-1"}); err != nil {
+		t.Fatalf("Send cancel: %v", err)
+	}
+
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("SubscribeWait[%d]: %v", i, err)
+		}
+	}
+	if results[0].EventName != "OrderCreated" {
+		t.Fatalf("expected OrderCreated, got %q", results[0].EventName)
+	}
+	if results[1].EventName != "OrderCancelled" {
+		t.Fatalf("expected OrderCancelled, got %q", results[1].EventName)
+	}
+}
+
+func TestSubscribeWait_AutoUnsubscribes(t *testing.T) {
+	// After SubscribeWait returns (event arrived), the subscription should be cleaned up.
+	// We verify this by sending a SECOND matching event and confirming it does not
+	// affect anything (no panic, no leak). Indirect — but the proper assertion is
+	// via leak-detection which is out of scope here.
+	instance := newInstance(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: "auto-1", Total: 1.0}) //nolint:errcheck
+	}()
+
+	_, err := instance.SubscribeWait(ctx, "OrderCreated")
+	if err != nil {
+		t.Fatalf("SubscribeWait: %v", err)
+	}
+
+	// Second event after SubscribeWait returned — must not affect anything.
+	if _, err := instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: "auto-2", Total: 2.0}); err != nil {
+		t.Fatalf("second SendWait: %v", err)
+	}
+}
+
 func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(t *testing.T) {
 	// Verifies that in unbounded mode (count=0), a handler blocked on a full
 	// channel does not deadlock unsub().
