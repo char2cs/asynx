@@ -1557,3 +1557,47 @@ func TestListen_BoundedConcurrent_DeliversAllCountEvents(t *testing.T) {
 		instance.Shutdown(context.Background())
 	}
 }
+
+// TestWaitPublish_NoRaceWithConcurrentDispatch reproduces the race where a pool
+// worker is still inside dispatcher.Dispatch() when WaitPublish() returns.
+//
+// The race: a goroutine enters Dispatch() and accesses d.mu/d.queues before
+// calling jobsWg.Add(1). If WaitIdle() checks idleness too early, it can
+// return while that goroutine is still inside Dispatch() accessing protected
+// fields, causing a data race.
+//
+// Run with: go test -race -run TestWaitPublish_NoRaceWithConcurrentDispatch ./...
+func TestWaitPublish_NoRaceWithConcurrentDispatch(t *testing.T) {
+	// Run many iterations to catch the tight race window.
+	for iter := 0; iter < 100; iter++ {
+		func() {
+			instance := newInstance(t)
+
+			// Send many commands concurrently, waiting for all Send() calls to
+			// complete (i.e., all commands are enqueued to their pool shards).
+			const n = 50
+			var wg sync.WaitGroup
+			for i := 0; i < n; i++ {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					cmd := mocks.CreateOrderCmd{
+						ID:    fmt.Sprintf("race-wp-%d-%d", iter, idx),
+						Total: float64(idx + 1),
+					}
+					instance.Send(context.Background(), cmd) //nolint:errcheck
+				}(i)
+			}
+			wg.Wait() // All Send() calls have returned; commands are enqueued
+
+			// Now some pool workers may still be inside executor.Execute() →
+			// dispatcher.Dispatch() even though Send() returned. WaitPublish()
+			// must wait for these workers to finish before returning.
+			// The race detector fires if a worker is still in Dispatch()
+			// accessing d.mu/d.queues when WaitPublish() returns.
+			waitPublish(t, instance)
+
+			// If we reach here without race detector firing, the bug is fixed.
+		}()
+	}
+}
