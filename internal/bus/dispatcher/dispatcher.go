@@ -76,6 +76,11 @@ func New[T any](bus asynxmd.Bus[T], opts ...Opt[T]) *Dispatcher[T] {
 // synchronous (establishes ordering). If waitHandlers is true the call blocks
 // until the event's handlers have completed.
 func (d *Dispatcher[T]) Dispatch(ctx context.Context, event asynxmd.Event[T], waitHandlers bool) error {
+	// Track this dispatch call immediately, before accessing any shared state.
+	// This ensures WaitIdle() cannot return with jobsWg==0 while a goroutine
+	// is still inside this function (potentially accessing d.mu/d.queues).
+	d.jobsWg.Add(1)
+
 	job := &dispatchJob[T]{
 		event: event,
 		ctx:   context.WithoutCancel(ctx),
@@ -85,6 +90,8 @@ func (d *Dispatcher[T]) Dispatch(ctx context.Context, event asynxmd.Event[T], wa
 	d.mu.Lock()
 	if d.closed {
 		d.mu.Unlock()
+		// Undo the Add(1) since we're not enqueueing a job.
+		d.jobsWg.Done()
 		return asynxmd.ErrDispatcherClosed
 	}
 
@@ -96,7 +103,6 @@ func (d *Dispatcher[T]) Dispatch(ctx context.Context, event asynxmd.Event[T], wa
 		go d.worker(event.AggregateID, q)
 	}
 
-	d.jobsWg.Add(1)
 	d.mu.Unlock()
 
 	q.ch <- job
