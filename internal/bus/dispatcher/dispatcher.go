@@ -41,6 +41,7 @@ type Dispatcher[T any] struct {
 	mu             sync.Mutex
 	queues         map[string]*aggregateQueue[T]
 	closed         bool
+	waiting        bool // prevents new Dispatch calls during WaitIdle
 	stopCh         chan struct{} // closed on Close to signal workers to drain and exit
 	wg             sync.WaitGroup // tracks goroutine lifetime (for Close)
 	jobsWg         sync.WaitGroup // tracks in-flight jobs (for WaitIdle)
@@ -76,10 +77,16 @@ func New[T any](bus asynxmd.Bus[T], opts ...Opt[T]) *Dispatcher[T] {
 // synchronous (establishes ordering). If waitHandlers is true the call blocks
 // until the event's handlers have completed.
 func (d *Dispatcher[T]) Dispatch(ctx context.Context, event asynxmd.Event[T], waitHandlers bool) error {
-	// Track this dispatch call immediately, before accessing any shared state.
+	d.mu.Lock()
+	if d.closed || d.waiting {
+		d.mu.Unlock()
+		return asynxmd.ErrDispatcherClosed
+	}
+	// Track this dispatch call immediately after checking not-waiting/not-closed.
 	// This ensures WaitIdle() cannot return with jobsWg==0 while a goroutine
 	// is still inside this function (potentially accessing d.mu/d.queues).
 	d.jobsWg.Add(1)
+	d.mu.Unlock()
 
 	job := &dispatchJob[T]{
 		event: event,
@@ -123,6 +130,7 @@ func (d *Dispatcher[T]) Close(ctx context.Context) error {
 		return nil
 	}
 	d.closed = true
+	d.waiting = false // allow any remaining Dispatch calls to fail cleanly
 	close(d.stopCh) // signal all workers to drain and exit
 	d.mu.Unlock()
 
@@ -139,8 +147,20 @@ func (d *Dispatcher[T]) Close(ctx context.Context) error {
 
 // WaitIdle blocks until all in-flight jobs have been handled. The per-aggregate
 // worker goroutines may still be alive (waiting for their idle timeout), but
-// every dispatched event has been delivered to the bus.
-func (d *Dispatcher[T]) WaitIdle() { d.jobsWg.Wait() }
+// every dispatched event has been delivered to the bus. New Dispatch calls are
+// rejected during WaitIdle to prevent the race where a new goroutine enters
+// Dispatch while WaitIdle is checking idleness.
+func (d *Dispatcher[T]) WaitIdle() {
+	d.mu.Lock()
+	d.waiting = true
+	d.mu.Unlock()
+
+	d.jobsWg.Wait()
+
+	d.mu.Lock()
+	d.waiting = false
+	d.mu.Unlock()
+}
 
 // waitWorkers blocks until all per-aggregate worker goroutines have exited
 // (i.e. after their idle timeout elapses). Only for use in tests.
