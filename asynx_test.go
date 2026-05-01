@@ -1601,3 +1601,60 @@ func TestWaitPublish_NoRaceWithConcurrentDispatch(t *testing.T) {
 		}()
 	}
 }
+
+// TestWaitPublish_RaceWithAsyncReactionGoroutines reproduces the race where a
+// reaction handler spawns a goroutine that sends commands to asynx while
+// WaitPublish() is being called.
+//
+// Run with: go test -race -run TestWaitPublish_RaceWithAsyncReactionGoroutines ./...
+func TestWaitPublish_RaceWithAsyncReactionGoroutines(t *testing.T) {
+	for iter := 0; iter < 100; iter++ {
+		func() {
+			instance := newInstance(t)
+
+			// Register a reaction that spawns a goroutine sending commands
+			var reactionStarted atomic.Int32
+			var reactionFinished atomic.Int32
+			
+			handlerID, err := instance.Subscribe("OrderCreated", func(ctx context.Context, evt models.Event[mocks.Order]) {
+				reactionStarted.Store(1)
+				defer func() { reactionFinished.Store(1) }()
+				
+				// Spawn a goroutine that sends a command after a small delay
+				go func() {
+					// Small delay to ensure this happens while WaitPublish is being called
+					time.Sleep(1 * time.Millisecond)
+					
+					// Send a new command from the reaction handler's goroutine
+					cmd := mocks.UpdateOrderCmd{
+						ID:       evt.AggregateID,
+						NewState: mocks.Order{ID: evt.AggregateID, Total: 999.0, Status: "Updated"},
+					}
+					instance.Send(ctx, cmd) //nolint:errcheck
+				}()
+			})
+			if err != nil {
+				t.Fatalf("Subscribe failed: %v", err)
+			}
+			defer instance.Unsubscribe(handlerID)
+
+			// Send an initial command to trigger the reaction
+			cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf("race-reaction-%d", iter), Total: 100.0}
+			_, err = instance.Send(context.Background(), cmd)
+			if err != nil {
+				t.Fatalf("Send failed: %v", err)
+			}
+
+			// Wait for publish - this is where the race should occur if unfixed
+			waitPublish(t, instance)
+
+			// Verify the reaction handler goroutine completed
+			if reactionStarted.Load() == 0 {
+				t.Logf("Iteration %d: reaction never started", iter)
+			}
+			if reactionFinished.Load() == 0 {
+				t.Logf("Iteration %d: reaction never finished", iter)
+			}
+		}()
+	}
+}
