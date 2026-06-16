@@ -4,6 +4,8 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
 
+permissions: {}
+
 jobs:
   enforce:
     name: Enforce branch naming & target
