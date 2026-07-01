@@ -7,7 +7,7 @@ import (
 	"time"
 
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	"github.com/char2cs/asynx/internal/store"
+	"github.com/char2cs/asynx/store"
 )
 
 func benchEventBlob(version int64, patches json.RawMessage) []byte {
@@ -39,7 +39,7 @@ func benchSnapshotBlob(version int64, state order) []byte {
 	return b
 }
 
-func populateEvents(b *testing.B, es *store.Memory, startVersion, n int) {
+func populateEvents(b *testing.B, es store.Memory, startVersion, n int) {
 	b.Helper()
 	patch := json.RawMessage(`[{"op":"replace","path":"/Status","value":"x"}]`)
 	ctx := context.Background()

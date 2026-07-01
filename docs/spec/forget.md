@@ -241,7 +241,7 @@ return fmt.Errorf("%w: %w", models.ErrForgetFailed, err)
 
 - `Send` followed immediately by `Forget` on the same aggregate: shard serialization guarantees `Send` completes before the tombstone is written
 
-### Store Tests (`internal/store/memory_test.go`)
+### Store Tests (`store/memory_test.go`)
 
 - `Delete` removes all events and snapshots for the aggregate
 - `Delete` on a non-existent aggregate is a no-op (returns nil)
