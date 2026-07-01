@@ -11,7 +11,7 @@ import (
 	"github.com/char2cs/asynx/internal/processor/exec"
 	"github.com/char2cs/asynx/internal/processor/models"
 	"github.com/char2cs/asynx/internal/processor/pool"
-	"github.com/char2cs/asynx/internal/store"
+	"github.com/char2cs/asynx/store"
 )
 
 func BenchmarkShard_SingleWorker(b *testing.B) {

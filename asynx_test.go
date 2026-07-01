@@ -12,7 +12,7 @@ import (
 
 	"github.com/char2cs/asynx"
 	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/internal/store"
+	"github.com/char2cs/asynx/store"
 	"github.com/char2cs/asynx/models"
 )
 
@@ -717,7 +717,7 @@ func TestForget_SerializedAfterSend(t *testing.T) {
 
 // deleteErrStore wraps store.Memory and injects a one-shot error on the next Delete call.
 type deleteErrStore struct {
-	*store.Memory
+	store.Memory
 	deleteErr error
 }
 

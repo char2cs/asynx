@@ -6,7 +6,7 @@ import (
 
 	"github.com/char2cs/asynx"
 	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/internal/store"
+	"github.com/char2cs/asynx/store"
 	"github.com/char2cs/asynx/models"
 )
 
