@@ -9,7 +9,7 @@ import (
 	"github.com/char2cs/asynx/example/commands"
 	"github.com/char2cs/asynx/example/domain"
 	"github.com/char2cs/asynx/example/projections"
-	"github.com/char2cs/asynx/internal/store"
+	"github.com/char2cs/asynx/store"
 )
 
 func run(ctx context.Context) error {

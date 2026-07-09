@@ -1,4 +1,6 @@
-// Package store provides in-memory implementations of models.Store for use in tests.
+// Package store provides an in-memory implementation of models.Store,
+// intended for tests and examples. Data is not persisted across restarts;
+// production deployments should implement models.Store over a durable backend.
 package store
 
 import (
@@ -11,9 +13,21 @@ import (
 	"github.com/char2cs/asynx/models"
 )
 
-// Memory is a thread-safe in-memory implementation of models.Store.
-// Only for testing.
-type Memory struct {
+// Memory is a thread-safe in-memory event store for tests and examples.
+// It satisfies models.Store and adds failure injection via SetError.
+type Memory interface {
+	models.Store
+
+	// SetError schedules a one-shot error for the next Append call on
+	// aggregateID. The error is consumed and removed after the first
+	// matching Append.
+	SetError(
+		aggregateID string,
+		err error,
+	)
+}
+
+type memory struct {
 	mu      sync.RWMutex
 	streams map[string][]entry
 	errOn   map[string]error
@@ -24,23 +38,21 @@ type entry struct {
 	data    []byte
 }
 
-// New returns an empty Memory store.
-func New() *Memory {
-	return &Memory{
+// New returns an empty in-memory store.
+func New() Memory {
+	return &memory{
 		streams: make(map[string][]entry),
 		errOn:   make(map[string]error),
 	}
 }
 
-// SetError schedules a one-shot error for the next Append call on aggregateID.
-// The error is consumed and removed after the first matching Append.
-func (s *Memory) SetError(aggregateID string, err error) {
+func (s *memory) SetError(aggregateID string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.errOn[aggregateID] = err
 }
 
-func (s *Memory) Append(ctx context.Context, aggregateID string, version int64, data []byte) error {
+func (s *memory) Append(ctx context.Context, aggregateID string, version int64, data []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -65,7 +77,7 @@ func (s *Memory) Append(ctx context.Context, aggregateID string, version int64, 
 	return nil
 }
 
-func (s *Memory) ReadFrom(ctx context.Context, aggregateID string, fromVersion int64) ([][]byte, error) {
+func (s *memory) ReadFrom(ctx context.Context, aggregateID string, fromVersion int64) ([][]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -76,7 +88,7 @@ func (s *Memory) ReadFrom(ctx context.Context, aggregateID string, fromVersion i
 	return toBlobs(s.entriesFrom(aggregateID, fromVersion)), nil
 }
 
-func (s *Memory) ReadRange(ctx context.Context, aggregateID string, fromVersion, count int64) ([][]byte, error) {
+func (s *memory) ReadRange(ctx context.Context, aggregateID string, fromVersion, count int64) ([][]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -92,7 +104,7 @@ func (s *Memory) ReadRange(ctx context.Context, aggregateID string, fromVersion,
 	return toBlobs(entries), nil
 }
 
-func (s *Memory) entriesFrom(aggregateID string, fromVersion int64) []entry {
+func (s *memory) entriesFrom(aggregateID string, fromVersion int64) []entry {
 	entries := s.streams[aggregateID]
 	if len(entries) == 0 {
 		return nil
@@ -103,7 +115,7 @@ func (s *Memory) entriesFrom(aggregateID string, fromVersion int64) []entry {
 	return entries[startIdx:]
 }
 
-func (s *Memory) Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error) {
+func (s *memory) Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -112,7 +124,7 @@ func (s *Memory) Count(ctx context.Context, aggregateID string, fromVersion int6
 	return int64(len(s.entriesFrom(aggregateID, fromVersion))), nil
 }
 
-func (s *Memory) Delete(ctx context.Context, aggregateID string) error {
+func (s *memory) Delete(ctx context.Context, aggregateID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

@@ -91,7 +91,10 @@ func (es *EventStore[T]) Write(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
 ) (asynxmd.Event[T], error) {
-	current, err := es.Get(ctx, cmd.AggregateID())
+	// Load state and its version together so the command is validated and the
+	// event is appended against the same version. ErrNotFound yields version 0,
+	// so a first write appends at version 1.
+	current, loadedVersion, err := es.reader.Load(ctx, cmd.AggregateID())
 	if err != nil && err != asynxmd.ErrNotFound {
 		return asynxmd.Event[T]{}, err
 	}
@@ -116,6 +119,7 @@ func (es *EventStore[T]) Write(
 		ctx,
 		cmd.AggregateID(),
 		cmd.EventName(),
+		loadedVersion,
 		previousState,
 		newState,
 		cmd.ShouldSnapshot(),

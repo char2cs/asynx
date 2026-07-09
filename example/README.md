@@ -206,7 +206,7 @@ go run .
 - `asynx.ShardingOpts` - Configuration for sharding
 - `models.Store`, `models.Bus`, `models.Command` - Public interfaces
 
-The only exception is `internal/store` for the in-memory store, which is provided for testing/example purposes.
+The example uses the public `store` package for the in-memory store, which is provided for testing/example purposes.
 
 **Expected Output:**
 ```

@@ -9,7 +9,7 @@ import (
 
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
 	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/internal/store"
+	"github.com/char2cs/asynx/store"
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
@@ -23,16 +23,6 @@ func newTestWriter(es, ss asynxmd.Store) *Writer[order] {
 	return New[order](es, ss, 1)
 }
 
-func makeSnapshotBlob(version int64, schemaVersion int, state order) []byte {
-	snap := esmodels.SnapshotBlob[order]{
-		Version:       version,
-		SchemaVersion: schemaVersion,
-		State:         state,
-	}
-	b, _ := json.Marshal(snap)
-	return b
-}
-
 // --- Write ---
 
 func TestWrite_AppendsEventAndReturnsPublicEvent(t *testing.T) {
@@ -42,7 +32,7 @@ func TestWrite_AppendsEventAndReturnsPublicEvent(t *testing.T) {
 	prev := order{Status: "Pending", Total: 50}
 	next := order{Status: "Shipped", Total: 50}
 
-	evt, err := w.Write(context.Background(), "agg1", "Shipped", prev, next, false)
+	evt, err := w.Write(context.Background(), "agg1", "Shipped", 0, prev, next, false)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -68,7 +58,7 @@ func TestWrite_PatchRecordsOnlyDiff(t *testing.T) {
 	es := store.New()
 	w := newTestWriter(es, store.New())
 
-	_, err := w.Write(context.Background(), "agg1", "Updated",
+	_, err := w.Write(context.Background(), "agg1", "Updated", 0,
 		order{Status: "Pending", Total: 50},
 		order{Status: "Shipped", Total: 50},
 		false,
@@ -101,7 +91,7 @@ func TestWrite_VersionIncrements(t *testing.T) {
 	ctx := context.Background()
 
 	for i := int64(1); i <= 3; i++ {
-		evt, err := w.Write(ctx, "agg1", "Event", order{}, order{Status: "x"}, false)
+		evt, err := w.Write(ctx, "agg1", "Event", i-1, order{}, order{Status: "x"}, false)
 		if err != nil {
 			t.Fatalf("Write #%d: %v", i, err)
 		}
@@ -111,23 +101,18 @@ func TestWrite_VersionIncrements(t *testing.T) {
 	}
 }
 
-func TestWrite_VersionContinuesFromSnapshot(t *testing.T) {
-	es := store.New()
-	ss := store.New()
+func TestWrite_AppendsAtExpectedVersionPlusOne(t *testing.T) {
+	w := newTestWriter(store.New(), store.New())
 	ctx := context.Background()
 
-	ss.Append(ctx, "snapshots:agg1", 5, makeSnapshotBlob(5, 1, order{})) //nolint:errcheck
-	es.Append(ctx, "events:agg1", 6, []byte(`{}`))                        //nolint:errcheck
-	es.Append(ctx, "events:agg1", 7, []byte(`{}`))                        //nolint:errcheck
-
-	w := newTestWriter(es, ss)
-
-	evt, err := w.Write(ctx, "agg1", "Next", order{}, order{}, false)
+	// The writer no longer derives the version from storage; it appends at
+	// expectedVersion+1. Deriving the loaded version is the reader's job.
+	evt, err := w.Write(ctx, "agg1", "Next", 7, order{}, order{}, false)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if evt.Version != 8 {
-		t.Errorf("Version = %d, want 8 (5 snapshot + 2 deltas + 1)", evt.Version)
+		t.Errorf("Version = %d, want 8 (expectedVersion 7 + 1)", evt.Version)
 	}
 }
 
@@ -136,7 +121,7 @@ func TestWrite_WritesSnapshot_WhenRequested(t *testing.T) {
 	ss := store.New()
 	w := newTestWriter(es, ss)
 
-	_, err := w.Write(context.Background(), "agg1", "Created", order{}, order{Status: "Active"}, true)
+	_, err := w.Write(context.Background(), "agg1", "Created", 0, order{}, order{Status: "Active"}, true)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -159,7 +144,7 @@ func TestWrite_NoSnapshot_WhenNotRequested(t *testing.T) {
 	ss := store.New()
 	w := newTestWriter(store.New(), ss)
 
-	_, err := w.Write(context.Background(), "agg1", "Created", order{}, order{}, false)
+	_, err := w.Write(context.Background(), "agg1", "Created", 0, order{}, order{}, false)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -173,7 +158,7 @@ func TestWrite_NoSnapshot_WhenNotRequested(t *testing.T) {
 func TestWrite_EventStoreError_ReturnsError(t *testing.T) {
 	w := newTestWriter(&mocks.ErrStore{Err: storageErr}, store.New())
 
-	_, err := w.Write(context.Background(), "agg1", "Evt", order{}, order{}, false)
+	_, err := w.Write(context.Background(), "agg1", "Evt", 0, order{}, order{}, false)
 	if !errors.Is(err, storageErr) {
 		t.Errorf("err = %v, want storageErr", err)
 	}
@@ -185,7 +170,7 @@ func TestWrite_EventStoreAppendError(t *testing.T) {
 
 	w := newTestWriter(es, store.New())
 
-	_, err := w.Write(context.Background(), "agg1", "Evt", order{}, order{Status: "x"}, false)
+	_, err := w.Write(context.Background(), "agg1", "Evt", 0, order{}, order{Status: "x"}, false)
 	if !errors.Is(err, storageErr) {
 		t.Errorf("err = %v, want storageErr", err)
 	}
@@ -196,7 +181,7 @@ func TestWrite_SnapshotStoreError_ReturnsError(t *testing.T) {
 	ss.SetError("snapshots:agg1", storageErr)
 	w := newTestWriter(store.New(), ss)
 
-	_, err := w.Write(context.Background(), "agg1", "Evt", order{}, order{}, true)
+	_, err := w.Write(context.Background(), "agg1", "Evt", 0, order{}, order{}, true)
 	if !errors.Is(err, storageErr) {
 		t.Errorf("err = %v, want storageErr", err)
 	}
@@ -205,7 +190,7 @@ func TestWrite_SnapshotStoreError_ReturnsError(t *testing.T) {
 func TestWrite_MarshalPreviousStateError(t *testing.T) {
 	w := New[mocks.ErrMarshal](store.New(), store.New(), 1)
 
-	_, err := w.Write(context.Background(), "agg1", "Evt", mocks.ErrMarshal{}, mocks.ErrMarshal{}, false)
+	_, err := w.Write(context.Background(), "agg1", "Evt", 0, mocks.ErrMarshal{}, mocks.ErrMarshal{}, false)
 	if err == nil {
 		t.Fatal("expected marshal error on previousState")
 	}
@@ -215,7 +200,7 @@ func TestWrite_MarshalNewStateError(t *testing.T) {
 	w := New[*mocks.CountedMarshal](store.New(), store.New(), 1)
 
 	cm := &mocks.CountedMarshal{FailAt: 2}
-	_, err := w.Write(context.Background(), "agg1", "Evt", cm, cm, false)
+	_, err := w.Write(context.Background(), "agg1", "Evt", 0, cm, cm, false)
 	if err == nil {
 		t.Fatal("expected marshal error on newState")
 	}
@@ -227,77 +212,9 @@ func TestWriteSnapshot_MarshalStateError(t *testing.T) {
 	w := New[*mocks.CountedMarshal](store.New(), store.New(), 1)
 
 	cm := &mocks.CountedMarshal{FailAt: 3}
-	_, err := w.Write(context.Background(), "agg1", "Evt", cm, cm, true)
+	_, err := w.Write(context.Background(), "agg1", "Evt", 0, cm, cm, true)
 	if err == nil {
 		t.Fatal("expected marshal error on newState before writeSnapshotFromBytes")
-	}
-}
-
-// --- nextVersion ---
-
-func TestNextVersion_NewAggregate_Returns1(t *testing.T) {
-	w := newTestWriter(store.New(), store.New())
-
-	v, err := w.nextVersion(context.Background(), "agg1")
-	if err != nil {
-		t.Fatalf("nextVersion: %v", err)
-	}
-	if v != 1 {
-		t.Errorf("nextVersion = %d, want 1", v)
-	}
-}
-
-func TestNextVersion_AfterEvents_CountsDelta(t *testing.T) {
-	es := store.New()
-	ctx := context.Background()
-	es.Append(ctx, "events:agg1", 1, []byte(`{}`)) //nolint:errcheck
-	es.Append(ctx, "events:agg1", 2, []byte(`{}`)) //nolint:errcheck
-
-	w := newTestWriter(es, store.New())
-
-	v, err := w.nextVersion(ctx, "agg1")
-	if err != nil {
-		t.Fatalf("nextVersion: %v", err)
-	}
-	if v != 3 {
-		t.Errorf("nextVersion = %d, want 3", v)
-	}
-}
-
-func TestNextVersion_CorruptSnapshot_FallsBackToZero(t *testing.T) {
-	es := store.New()
-	ss := store.New()
-	ctx := context.Background()
-
-	ss.Append(ctx, "snapshots:agg1", 1, []byte(`not-json`)) //nolint:errcheck
-	es.Append(ctx, "events:agg1", 1, []byte(`{}`))          //nolint:errcheck
-
-	w := newTestWriter(es, ss)
-
-	v, err := w.nextVersion(ctx, "agg1")
-	if err != nil {
-		t.Fatalf("nextVersion: %v", err)
-	}
-	if v != 2 {
-		t.Errorf("nextVersion = %d, want 2", v)
-	}
-}
-
-func TestNextVersion_SnapshotStoreError(t *testing.T) {
-	w := newTestWriter(store.New(), &mocks.ErrStore{Err: storageErr})
-
-	_, err := w.nextVersion(context.Background(), "agg1")
-	if !errors.Is(err, storageErr) {
-		t.Errorf("err = %v, want storageErr", err)
-	}
-}
-
-func TestNextVersion_EventStoreError(t *testing.T) {
-	w := newTestWriter(&mocks.ErrStore{Err: storageErr}, store.New())
-
-	_, err := w.nextVersion(context.Background(), "agg1")
-	if !errors.Is(err, storageErr) {
-		t.Errorf("err = %v, want storageErr", err)
 	}
 }
 

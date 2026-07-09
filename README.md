@@ -49,12 +49,18 @@ func (c CreateOrderCmd) EmitEvent(current *Order) Order {
 
 **Initialize and send commands:**
 ```go
+import (
+	"github.com/char2cs/asynx"
+	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/store" // in-memory store for tests/examples
+)
+
 ax, _ := asynx.New[Order]().
-	WithEventStore(memStore).
+	WithEventStore(store.New()).
 	Build()
 
-err := ax.Send(ctx, CreateOrderCmd{ID: "ORD-001", Total: 99.99})
-if err == models.ErrValidation {
+event, err := ax.Send(ctx, CreateOrderCmd{ID: "ORD-001", Total: 99.99})
+if errors.Is(err, models.ErrValidation) {
 	// Invalid command rejected before event creation
 }
 
@@ -92,13 +98,15 @@ func (c UpdateOrderCmd) EmitEvent(current *Order) Order {
 ```
 
 ### Events
-Automatic RFC 6902 JSON patches computed from state changes. Durably stored before publication.
+Automatic RFC 6902 JSON patches computed from state changes. Durably stored before publication. `Send` returns the resulting event once it is persisted.
 
 ```go
-// Event contains both states
+event, _ := ax.Send(ctx, ConfirmOrderCmd{OrderID: "ORD-001"})
+
 event.PreviousAggregate // Order{Status: "Pending"}
 event.Aggregate         // Order{Status: "Confirmed"}
 event.Version           // int64 (total changes for this aggregate)
+event.SchemaVersion     // Schema version the event was written with
 event.EventName         // "OrderConfirmed"
 event.OccurredAt        // timestamp
 ```
@@ -124,7 +132,7 @@ ax.Subscribe("Order.*", func(ctx context.Context, event models.Event[Order]) {
 ```
 
 ### Store
-Persistent event backend. Bring your own (PostgreSQL, DynamoDB) or use in-memory for testing.
+Persistent event backend. Bring your own (PostgreSQL, SQLite, DynamoDB) or use the bundled in-memory `store` package for testing.
 
 ### Bus
 Event publication after durably writing to store. In-process by default; can be replaced.
@@ -151,6 +159,18 @@ ax.Subscribe("OrderShipped", handler)
 ax.Subscribe("Order(Created|Confirmed)", handler)
 ```
 
+**Topic-style event names.** For dynamic, dotted event names (e.g. `EventName()` returns `"order.created." + id`), the `Topic` helper converts a `{{aggregate}}.{{action}}.{{id}}` pattern into an anchored regex — `*` in the middle matches one segment, a trailing `*` matches the rest:
+
+```go
+// Matches order.created.<any id>
+ax.Subscribe(asynx.Topic("order.created.*"), handler)
+
+// Matches any action on aggregate "order" for id ORD-001
+ax.Subscribe(asynx.Topic("order.*.ORD-001"), handler)
+```
+
+`Listen` and `SubscribeWait` apply `Topic()` to their pattern automatically; `Subscribe` takes a raw regex, so wrap dotted patterns in `Topic()` yourself.
+
 **Fallback handler (failure resilience):**
 ```go
 // If primary panics, fallback runs instead
@@ -175,10 +195,32 @@ handler := func(ctx context.Context, event models.Event[Order]) {
 	event.AggregateID         // "ORD-001"
 	event.EventName           // "OrderConfirmed"
 	event.Version             // Total changes for this aggregate
+	event.SchemaVersion       // Schema version of the event
 	event.Aggregate           // New state
 	event.PreviousAggregate   // State before this event
 	event.OccurredAt          // Timestamp
 }
+```
+
+**Channel-based subscription:**
+```go
+// Receive exactly 3 matching events, then the channel closes automatically
+ch, unsub, err := ax.Listen("order.created.*", 3)
+defer unsub()
+for event := range ch {
+	fmt.Println(event.EventName)
+}
+
+// count <= 0: unbounded channel (capacity 16), never auto-closes.
+// Call unsub() to clean up — and don't range after unsub().
+```
+
+**Wait for a single event:**
+```go
+// Block until the first matching event, or the context deadline
+ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+defer cancel()
+event, err := ax.SubscribeWait(ctx, "order.shipped.*")
 ```
 
 **Unsubscribe:**
@@ -186,6 +228,25 @@ handler := func(ctx context.Context, event models.Event[Order]) {
 subID, _ := ax.Subscribe("Order.*", handler)
 ax.Unsubscribe(subID) // Stop receiving events
 ```
+
+## Forgetting Aggregates
+
+`Forget` permanently erases an aggregate — a tombstone event is written, all `ForgetHandler`s are notified with the last known state, then every event, snapshot, and cached entry is deleted. Useful for GDPR-style erasure.
+
+```go
+// React to erasure (e.g., clean up read models)
+ax.OnForget(func(ctx context.Context, event models.Event[Order]) {
+	deleteFromReadModel(event.AggregateID) // event.Aggregate = last known state
+})
+
+// Erase the aggregate
+err := ax.Forget(ctx, "ORD-001")
+if errors.Is(err, models.ErrValidation) {
+	// Aggregate does not exist
+}
+```
+
+Forget handlers can also be registered at build time with `WithForgetHandler`.
 
 ## Schema Evolution
 
@@ -239,6 +300,8 @@ func upcastOrderV1toV2(ctx context.Context, eventName string, patches []byte) ([
 | `WithUpcaster(from, fn)` | Schema version migration | — | No |
 | `WithPanicHandler(fn)` | Projection panic handler | Log and continue | No |
 | `WithCorruptionHook(fn)` | Snapshot corruption hook | Log and replay | No |
+| `WithPublishErrorHandler(fn)` | Observe async publish errors | Silently dropped | No |
+| `WithForgetHandler(fn)` | Register forget handler at build time | — | No |
 
 **Configure concurrency:**
 ```go
@@ -277,9 +340,20 @@ ax, _ := asynx.New[Order]().
 	Build()
 ```
 
+**Observe async publish errors:**
+```go
+ax, _ := asynx.New[Order]().
+	WithEventStore(store).
+	WithPublishErrorHandler(func(ctx context.Context, event models.Event[Order], err error) {
+		// Event is already durably stored; this is observability only
+		log.Printf("publish failed for %s: %v", event.EventName, err)
+	}).
+	Build()
+```
+
 ## Bring Your Own Store
 
-Implement the `Store` interface for any persistent backend (PostgreSQL, DynamoDB, SQLite, etc.):
+Implement the `Store` interface for any persistent backend (PostgreSQL, SQLite, DynamoDB, etc.):
 
 ```go
 type Store interface {
@@ -295,6 +369,10 @@ type Store interface {
 
 	// Count returns number of events since version
 	Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error)
+
+	// Delete removes all records for the aggregate (used by Forget).
+	// Must be idempotent — deleting a missing aggregate is not an error.
+	Delete(ctx context.Context, aggregateID string) error
 }
 ```
 
@@ -309,7 +387,11 @@ func (s *PostgresStore) Append(ctx context.Context, aggID string, v int64, data 
 		"INSERT INTO events (aggregate_id, version, data) VALUES ($1, $2, $3)",
 		aggID, v, data,
 	)
-	// Postgres UNIQUE(aggregate_id, version) enforces atomically
+	if isUniqueViolation(err) {
+		// Postgres UNIQUE(aggregate_id, version) detects concurrent writers.
+		// Map conflicts to ErrPipelineFailed so callers can retry (see Patterns).
+		return fmt.Errorf("%w: version conflict", models.ErrPipelineFailed)
+	}
 	return err
 }
 
@@ -319,6 +401,11 @@ func (s *PostgresStore) ReadFrom(ctx context.Context, aggID string, fromV int64)
 		aggID, fromV,
 	)
 	// ... scan and return patches
+}
+
+func (s *PostgresStore) Delete(ctx context.Context, aggID string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM events WHERE aggregate_id=$1", aggID)
+	return err
 }
 ```
 
@@ -332,36 +419,49 @@ ax, _ := asynx.New[Order]().
 	Build()
 ```
 
-**For testing, use in-memory store:**
+**For testing, use the bundled in-memory store:**
 ```go
-import "github.com/char2cs/asynx/internal/store"
+import "github.com/char2cs/asynx/store"
 
 ax, _ := asynx.New[Order]().
 	WithEventStore(store.New()).  // Fast, no persistence
 	Build()
 ```
 
+The in-memory store also supports one-shot failure injection for tests via `SetError(aggregateID, err)`.
+
 ## Error Handling
 
-Common error types returned by Asynx:
+All errors are sentinel values in the `models` package — match them with `errors.Is`:
 
 | Error | When | Action |
 |-------|------|--------|
-| `ErrValidation` | `Validate()` returns an error | Command rejected; state unchanged |
+| `ErrValidation` | `Validate()` rejects a command, or `Forget()` on a missing aggregate | Command rejected; state unchanged |
 | `ErrNotFound` | `Get()` or `Replay()` on missing aggregate | Check aggregate ID |
+| `ErrPipelineFailed` | Store `Append` failed (e.g. version conflict from a concurrent writer) | Safe to retry the command |
 | `ErrQueueFull` | Send exceeds buffer (with `QueueDepth`) | Retry or increase capacity |
 | `ErrShuttingDown` | Send after `Shutdown()` called | Wait for shutdown to complete |
+| `ErrAlreadyShuttingDown` | `Shutdown()` called twice | Await the first call |
 | `ErrContextCancelled` | Context cancelled during operation | Check caller context |
 | `ErrMissingEventStore` | `Build()` without `WithEventStore()` | Provide an event store |
+| `ErrForgetFailed` | `Forget()` tombstoned the aggregate but deletion failed | Retry `Forget` |
+| `ErrEmptyPattern` | `Listen()`/`SubscribeWait()` with empty pattern | Provide a pattern |
+| `ErrNilHandler` | `Subscribe()` with nil handler | Provide a handler |
+| `ErrBusClosed` | Subscribe/publish after bus shutdown | Rebuild or stop using the instance |
+| `ErrDispatcherClosed` | Internal dispatch after shutdown | Stop sending |
 
-See [github.com/char2cs/asynx/models/errors.go](./models/errors.go) for the full error list.
+See [models/errors.go](./models/errors.go) for the full list.
 
 ## Asynx Interface
 
 ```go
 type Asynx[T any] interface {
-	// Send executes a command
-	Send(ctx context.Context, cmd models.Command[T]) error
+	// Send validates and persists the command, returning the resulting event
+	// once durably written. Projections fire asynchronously.
+	Send(ctx context.Context, cmd models.Command[T]) (models.Event[T], error)
+
+	// SendWait is Send, but also blocks until all matching projections finish
+	SendWait(ctx context.Context, cmd models.Command[T]) (models.Event[T], error)
 
 	// Get reconstructs current aggregate state (replayed from events)
 	Get(ctx context.Context, aggregateID string) (T, error)
@@ -372,12 +472,26 @@ type Asynx[T any] interface {
 	// Preload caches an aggregate in memory for fast reads
 	Preload(ctx context.Context, aggregateID string) error
 
+	// Forget tombstones the aggregate, notifies ForgetHandlers, then erases
+	// all events, snapshots, and cached state
+	Forget(ctx context.Context, aggregateID string) error
+
+	// OnForget registers a handler invoked when any aggregate is forgotten
+	OnForget(fn models.ForgetHandler[T]) (string, error)
+
 	// Subscribe registers an event handler (async, non-blocking)
 	Subscribe(pattern string, handler models.ProjectionHandler[T],
 		opts ...models.SubscriptionOpt[T]) (string, error)
 
 	// Unsubscribe stops an event handler
 	Unsubscribe(id string) error
+
+	// Listen opens a channel-based subscription; count > 0 auto-closes
+	// after count events, count <= 0 is unbounded (call unsub to clean up)
+	Listen(pattern string, count int) (<-chan models.Event[T], func(), error)
+
+	// SubscribeWait blocks until the first matching event or ctx is done
+	SubscribeWait(ctx context.Context, pattern string) (models.Event[T], error)
 
 	// Replay runs a handler over a version range (for resync/migration)
 	Replay(ctx context.Context, aggregateID string, fromVersion, toVersion int64,
@@ -395,16 +509,22 @@ type Asynx[T any] interface {
 
 Send command and check for validation errors:
 ```go
-err := ax.Send(ctx, cmd)
-if err == models.ErrValidation {
+_, err := ax.Send(ctx, cmd)
+if errors.Is(err, models.ErrValidation) {
 	// Invalid command — event not created
 }
+```
+
+Send and wait when the caller needs projections to be consistent:
+```go
+event, err := ax.SendWait(ctx, cmd)
+// All subscribed projections have completed for this event
 ```
 
 Read current state:
 ```go
 order, err := ax.Get(ctx, "ORD-001")
-if err == models.ErrNotFound {
+if errors.Is(err, models.ErrNotFound) {
 	// Aggregate doesn't exist
 }
 ```
@@ -429,6 +549,10 @@ ax.Send(ctx, cmd2)
 ax.WaitPublish() // Block until all events published to projections
 // Now safe to check projection side effects
 ```
+
+## Production Patterns
+
+Battle-tested patterns for running asynx in real applications — optimistic-concurrency retries, graceful shutdown with background reactions, crash recovery via replay, and resilient projections — are collected in [docs/spec/patterns.md](./docs/spec/patterns.md).
 
 ## Full Specification
 

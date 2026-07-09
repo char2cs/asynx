@@ -6,7 +6,7 @@ import (
 
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/internal/store"
+	"github.com/char2cs/asynx/store"
 )
 
 func BenchmarkExecute_CreateNew(b *testing.B) {
