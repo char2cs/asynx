@@ -55,9 +55,23 @@ func (r *Reader[T]) Get(
 	ctx context.Context,
 	aggregateID string,
 ) (T, error) {
+	state, _, err := r.Load(ctx, aggregateID)
+	return state, err
+}
+
+// Load returns the current aggregate state together with its version — the
+// version of the last event applied to build that state (or the snapshot
+// version when no deltas follow it). The version is captured from the same
+// read that produced the state, so callers can use it as the expected version
+// for an optimistic-concurrency write. A brand-new aggregate returns
+// ErrNotFound with version 0.
+func (r *Reader[T]) Load(
+	ctx context.Context,
+	aggregateID string,
+) (T, int64, error) {
 	snapshotBlobs, err := r.snapshotStore.ReadFrom(ctx, "snapshots:"+aggregateID, 0)
 	if err != nil {
-		return r.stateZeroValue, err
+		return r.stateZeroValue, 0, err
 	}
 
 	if len(snapshotBlobs) == 0 {
@@ -74,17 +88,22 @@ func (r *Reader[T]) Get(
 
 	eventBlobs, err := r.eventStore.ReadFrom(ctx, "events:"+aggregateID, snap.Version+1)
 	if err != nil {
-		return r.stateZeroValue, err
+		return r.stateZeroValue, 0, err
 	}
 
 	events, err := deserializeEvents(eventBlobs)
 	if err != nil {
-		return r.stateZeroValue, err
+		return r.stateZeroValue, 0, err
 	}
 
 	result, err := r.replayer.Hydrate(ctx, aggregateID, snap.State, events)
 	if err != nil {
-		return r.stateZeroValue, err
+		return r.stateZeroValue, 0, err
+	}
+
+	loadedVersion := snap.Version
+	if len(events) > 0 {
+		loadedVersion = events[len(events)-1].Version
 	}
 
 	if result.DidUpcast {
@@ -93,32 +112,34 @@ func (r *Reader[T]) Get(
 		_ = r.writeAutoSnapshot(ctx, aggregateID, result.LastVersion, result.State)
 	}
 
-	return result.State, nil
+	return result.State, loadedVersion, nil
 }
 
 // coldPath performs a full replay from event 1 using the zero value as seed.
 func (r *Reader[T]) coldPath(
 	ctx context.Context,
 	aggregateID string,
-) (T, error) {
+) (T, int64, error) {
 	eventBlobs, err := r.eventStore.ReadFrom(ctx, "events:"+aggregateID, 1)
 	if err != nil {
-		return r.stateZeroValue, err
+		return r.stateZeroValue, 0, err
 	}
 
 	if len(eventBlobs) == 0 {
-		return r.stateZeroValue, asynxmd.ErrNotFound
+		return r.stateZeroValue, 0, asynxmd.ErrNotFound
 	}
 
 	events, err := deserializeEvents(eventBlobs)
 	if err != nil {
-		return r.stateZeroValue, err
+		return r.stateZeroValue, 0, err
 	}
 
 	result, err := r.replayer.Hydrate(ctx, aggregateID, r.stateZeroValue, events)
 	if err != nil {
-		return r.stateZeroValue, err
+		return r.stateZeroValue, 0, err
 	}
+
+	loadedVersion := events[len(events)-1].Version
 
 	if result.DidUpcast {
 		// Auto-snapshot write is best-effort; snapshot failures don't affect state availability
@@ -126,7 +147,7 @@ func (r *Reader[T]) coldPath(
 		_ = r.writeAutoSnapshot(ctx, aggregateID, result.LastVersion, result.State)
 	}
 
-	return result.State, nil
+	return result.State, loadedVersion, nil
 }
 
 // writeAutoSnapshot packs a SnapshotBlob[T] and appends it to the snapshot store.

@@ -61,7 +61,7 @@ func TestBuilderFluent(t *testing.T) {
 		WithEventStore(&mocks.Store{}).
 		WithSnapshotStore(&mocks.Store{}).
 		WithBus(&mocks.Bus[mocks.Order]{}).
-		WithShardingOpts(asynx.ShardingOpts{Shards: 16, QueueDepth: 100}).
+		WithShardingOpts(asynx.ShardingOpts{Shards: 16, QueueDepth: 100, WorkersPerShard: 4}).
 		WithSchemaVersion(3).
 		WithUpcaster(1, upcaster).
 		WithUpcaster(2, upcaster).
@@ -104,8 +104,26 @@ func TestBuilderWithPublishErrorHandler(t *testing.T) {
 
 func TestShardingOptsZeroValue(t *testing.T) {
 	opts := asynx.ShardingOpts{}
-	if opts.Shards != 0 || opts.QueueDepth != 0 {
+	if opts.Shards != 0 || opts.QueueDepth != 0 || opts.WorkersPerShard != 0 {
 		t.Errorf("unexpected zero ShardingOpts: %+v", opts)
+	}
+}
+
+func TestBuildWithWorkersPerShard(t *testing.T) {
+	instance, err := asynx.New[mocks.Order]().
+		WithEventStore(store.New()).
+		WithShardingOpts(asynx.ShardingOpts{Shards: 8, WorkersPerShard: 1}).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error: %v", err)
+	}
+	if instance == nil {
+		t.Fatal("Build() returned nil instance")
+	}
+	t.Cleanup(func() { instance.Shutdown(context.Background()) })
+
+	if _, err := instance.Send(context.Background(), mocks.CreateOrderCmd{ID: "order-1", Total: 10.0}); err != nil {
+		t.Fatalf("Send: %v", err)
 	}
 }
 

@@ -8,8 +8,10 @@
 //   - executeJob         — Called by workers; sends corrections only when workersPerShard == 1
 //   - sendResult         — Non-blocking result send; drops if receiver gone
 //
-// Serial ordering per aggregate is guaranteed by consistent hashing at router level;
-// each aggregate always routes to the same shard and dispatcher sequence.
+// Consistent hashing at the router routes each aggregate to a fixed shard and
+// dispatcher, so versions are assigned in arrival order. Execution is serial per
+// aggregate only when workersPerShard is 1; with more workers the dispatched
+// commands run in parallel across the shard's worker pool.
 package pool
 
 import (

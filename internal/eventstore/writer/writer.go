@@ -31,10 +31,16 @@ func New[T any](es, ss asynxmd.Store, schemaVersion int) *Writer[T] {
 	}
 }
 
-// Write determines the next version from storage, computes the RFC 6902 diff
-// from previousState to newState, serializes it as an InternalEvent, and
-// appends it to the event stream. A snapshot is written if shouldSnapshot is
-// true.
+// Write appends the event at expectedVersion+1, where expectedVersion is the
+// version of the state the command was validated against (0 for a brand-new
+// aggregate). Appending at the validated version is what makes the store's
+// (aggregateID, version) uniqueness act as optimistic-concurrency control: two
+// writers that validated against the same state target the same version, so one
+// wins and the other gets ErrPipelineFailed.
+//
+// It computes the RFC 6902 diff from previousState to newState, serializes it as
+// an InternalEvent, and appends it to the event stream. A snapshot is written if
+// shouldSnapshot is true.
 //
 // The event stream append is the save point: once it succeeds, the event is
 // durable in the store. If snapshot write fails, the append is not rolled back
@@ -46,14 +52,12 @@ func (w *Writer[T]) Write(
 	ctx context.Context,
 	aggregateID string,
 	eventName string,
+	expectedVersion int64,
 	previousState T,
 	newState T,
 	shouldSnapshot bool,
 ) (asynxmd.Event[T], error) {
-	version, err := w.nextVersion(ctx, aggregateID)
-	if err != nil {
-		return asynxmd.Event[T]{}, err
-	}
+	version := expectedVersion + 1
 
 	patch, err := jsondiff.Compare(previousState, newState)
 	if err != nil {
@@ -101,40 +105,6 @@ func (w *Writer[T]) Write(
 		Aggregate:         newState,
 		PreviousAggregate: previousState,
 	}, nil
-}
-
-// nextVersion determines the version at which the next event should be written.
-// It reads the snapshot (to skip over sealed history) then counts delta events
-// to compute latestVersion + 1.
-//
-// For a brand-new aggregate (no snapshot, no events) it returns 1.
-func (w *Writer[T]) nextVersion(ctx context.Context, aggregateID string) (int64, error) {
-	var snapVersion int64
-
-	snapBlobs, err := w.snapshotStore.ReadFrom(ctx, "snapshots:"+aggregateID, 0)
-	if err != nil {
-		return 0, err
-	}
-
-	if len(snapBlobs) > 0 {
-		// Only the version field is needed here — use a minimal struct so a
-		// corrupt or schema-mismatched State does not block version recovery.
-		var meta struct {
-			Version int64 `json:"version"`
-		}
-		if err := json.Unmarshal(snapBlobs[len(snapBlobs)-1], &meta); err == nil {
-			snapVersion = meta.Version
-		}
-	}
-
-	count, err := w.eventStore.Count(ctx, "events:"+aggregateID, snapVersion+1)
-	if err != nil {
-		return 0, err
-	}
-
-	// Versions are consecutive integers starting at 1, so the next version is
-	// simply (last known version) + 1 without unmarshalling individual blobs.
-	return snapVersion + count + 1, nil
 }
 
 // EventStore returns the backing event store.

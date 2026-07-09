@@ -11,9 +11,22 @@ import (
 
 // ShardingOpts configures the processor's worker pool.
 // Shards defaults to 8; QueueDepth defaults to 0 (unbounded).
+//
+// WorkersPerShard controls how many workers drain each shard's queue and
+// defaults to 8 when left zero. It is a correctness knob, not just a
+// throughput dial:
+//
+//   - WorkersPerShard: 1 serializes the load-validate-write cycle for every
+//     aggregate on a shard. Commands targeting the same aggregate can never
+//     run concurrently, so there is no lost-update or version-conflict window.
+//   - WorkersPerShard > 1 (including the default 8) lets a shard execute queued
+//     commands in parallel. Two commands that hit the same aggregate at the
+//     same time may conflict: one succeeds and the other fails with
+//     ErrPipelineFailed for the caller to re-read state and retry.
 type ShardingOpts struct {
-	Shards     int
-	QueueDepth int
+	Shards          int
+	QueueDepth      int
+	WorkersPerShard int
 }
 
 type Builder[T any] struct {
@@ -146,6 +159,7 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 	procOpts := []processor.ProcessorOpt[T]{
 		processor.WithShards[T](b.shardingOpts.Shards),
 		processor.WithQueueDepth[T](b.shardingOpts.QueueDepth),
+		processor.WithWorkersPerShard[T](b.shardingOpts.WorkersPerShard),
 	}
 	if b.publishErrorHandler != nil {
 		procOpts = append(procOpts, processor.WithPublishErrorHandler[T](b.publishErrorHandler))
