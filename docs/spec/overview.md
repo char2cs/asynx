@@ -57,7 +57,7 @@ type Bus[T any] interface {
 ```go
 instance, err := asynx.New[Order]().
     WithEventStore(myEventStore).              // required — Build() errors if missing
-    WithSnapshotStore(mySnapshotStore).        // optional — defaults to WithEventStore value
+    WithSnapshotStore(mySnapshotStore).        // required — Build() errors if missing; a SnapshotStore, not a Store
     WithBus(myBus).                            // optional — defaults to in-process channel bus
     WithShardingOpts(asynx.ShardingOpts{
         Shards:     8,
@@ -75,7 +75,7 @@ instance, err := asynx.New[Order]().
     Build()
 ```
 
-`Build()` returns `(Instance, error)`. The only hard error at build time is a missing `EventStore` — everything else has a safe default. If `WithSnapshotStore` is not provided, snapshots are written to the same store as events.
+`Build()` returns `(Instance, error)`. Build-time hard errors: a missing `EventStore` (`ErrMissingEventStore`) or a missing `SnapshotStore` (`ErrMissingSnapshotStore`) — everything else has a safe default. `WithSnapshotStore` cannot default to the event store: `SnapshotStore` is a distinct interface (`Put`/`Get`/`Delete`, one upserted row per aggregate), not a second `Store`.
 
 ---
 
@@ -230,12 +230,13 @@ Inside this call, the transformation happens:
 
 The `snapshot` flag is set by `processor` based on `cmd.ShouldSnapshot()`. The `writer` never decides when to snapshot — it only executes the decision.
 
-Stream names are owned entirely by Asynx:
+The event stream name is owned entirely by Asynx:
 
 ```
 events:{aggregateID}    → append-only stream of RFC 6902 patches + SchemaVersion
-snapshots:{aggregateID} → append-only stream, latest entry is the current snapshot
 ```
+
+Snapshots are not a stream at all — `SnapshotStore.Put(ctx, aggregateID, version, data)` upserts a single row per aggregate, keyed on `aggregateID` alone, with no prefix.
 
 RFC 6902 is the permanent, stable format for all CDC diffs in Asynx. It is standard, well-tooled, human-readable, and language-agnostic.
 
@@ -442,13 +443,15 @@ asynx.Replay(ctx, aggregateID, fromVersion, toVersion, func(e asynx.Event[T]) {
 
 ### `store`
 
-The stream interface contract. Three methods, raw bytes, no opinions:
+Two independent, required interfaces — `Store` for the event stream, `SnapshotStore` for a single cached snapshot per aggregate. They are not variants of each other; a `Store` cannot satisfy `WithSnapshotStore`. Full contract: [store.md](./store.md).
 
 ```go
 type Store interface {
     Append(ctx context.Context, aggregateID string, version int64, data []byte) error
     ReadFrom(ctx context.Context, aggregateID string, fromVersion int64) ([][]byte, error)
     ReadRange(ctx context.Context, aggregateID string, fromVersion int64, count int64) ([][]byte, error)
+    Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error)
+    Delete(ctx context.Context, aggregateID string) error
 }
 ```
 
@@ -458,24 +461,38 @@ Asynx owns stream naming, serialization, and all knowledge of what lives inside 
 
 **`ReadFrom`** — returns all entries in the named stream starting at `fromVersion`, inclusive, through to the latest entry. Entries must be returned in strict ascending version order. Asynx derives each entry's version by incrementing from `fromVersion` — there must be no gaps.
 
-**`ReadRange`** — returns up to `count` entries starting at `fromVersion`, inclusive, in strict ascending version order. Useful for bounded reads where the caller knows exactly how many entries it needs.
+**`ReadRange`** — returns up to `count` entries starting at `fromVersion`, inclusive, in strict ascending version order. Useful for bounded reads where the caller knows exactly how many entries it needs — e.g. `Exists()` calls `ReadRange(fromVersion=1, count=1)`.
+
+**`Count`** — returns the number of entries at or after `fromVersion` without transferring them. The writer uses it to compute the next version cheaply (native `COUNT(*)` rather than reading and discarding blobs).
+
+**`Delete`** — removes every entry for an aggregate. The one non-append-only method; it exists solely to back `Forget` (GDPR-style erasure). Must be idempotent.
 
 Both read methods return `[][]byte` — a slice of blobs in version order. Errors are returned explicitly; there is no mid-iteration failure path.
 
-**Two stores, one interface.** The builder accepts two independent Store instances — one for events, one for snapshots. Both implement the same `Store` interface. This lets developers route each concern to the most appropriate infrastructure:
+**`SnapshotStore` is a different shape entirely** — an upserted cell, not a stream:
+
+```go
+type SnapshotStore interface {
+    Put(ctx context.Context, aggregateID string, version int64, data []byte) error
+    Get(ctx context.Context, aggregateID string) (data []byte, found bool, err error)
+    Delete(ctx context.Context, aggregateID string) error
+}
+```
+
+`Put` must upsert — the primary key is `aggregateID` alone. `Get`'s `found == false` is the normal state of an aggregate that hasn't been snapshotted yet, not an error. Because every snapshot is rebuildable by replaying events, a `SnapshotStore` can lose data safely; the only cost is a slower next read. Route it to fast, low-durability infrastructure if useful:
 
 ```go
 instance, err := asynx.New[Order]().
-    WithEventStore(redisStore).       // fast, high-write — event stream
-    WithSnapshotStore(postgresStore). // durable, low-frequency — snapshot stream
+    WithEventStore(postgresStore).       // durable, append-only — event stream
+    WithSnapshotStore(redisSnapshotStore). // fast, optional durability — snapshot cache
     Build()
 ```
 
-If `WithSnapshotStore` is not provided, snapshots are written to the same store as events. A single store implementation works fine for most deployments — splitting is purely an infrastructure optimisation.
+Both are required — `Build()` returns `ErrMissingEventStore` or `ErrMissingSnapshotStore` if either is missing. `WithSnapshotStore` cannot default to the event store: the interfaces don't overlap enough to substitute one for the other.
 
-**Consistency and multi-node coordination are the developer's concern.** Asynx passes `version` explicitly to `Append` — the developer's store uses it as a unique constraint on `(aggregateID, version)`. If two nodes race to write the same aggregate at the same version, one wins and one gets a constraint violation. The losing `Append` returns an error, Asynx surfaces `ErrPipelineFailed`, and the caller retries `Send()` from scratch — reloading state, revalidating, and re-emitting. **Blindly retrying with an incremented version is incorrect and will corrupt the stream** — the command was validated against stale state and must be reprocessed entirely.
+**Consistency and multi-node coordination are the developer's concern.** Asynx passes `version` explicitly to `Store.Append` — the developer's store uses it as a unique constraint on `(aggregateID, version)`. If two nodes race to write the same aggregate at the same version, one wins and one gets a constraint violation. The losing `Append` returns an error, Asynx surfaces `ErrPipelineFailed`, and the caller retries `Send()` from scratch — reloading state, revalidating, and re-emitting. **Blindly retrying with an incremented version is incorrect and will corrupt the stream** — the command was validated against stale state and must be reprocessed entirely.
 
-A typical schema for a SQL-backed store makes the contract obvious:
+A typical schema for a SQL-backed event store makes the contract obvious:
 
 ```sql
 CREATE TABLE events (
@@ -486,23 +503,24 @@ CREATE TABLE events (
 );
 ```
 
-The primary key constraint is the only coordination mechanism needed. No distributed locking, no consensus protocol — the store's atomicity is the guard.
+The primary key constraint is the only coordination mechanism needed. No distributed locking, no consensus protocol — the store's atomicity is the guard. The companion `snapshots` table is keyed on `aggregate_id` alone — see [store.md](./store.md#snapshotstore) for the full schema.
 
 #### Testing
 
-Asynx ships `asynx.NewMemoryStore()` — an in-memory Store implementation for use in tests. It requires zero infrastructure, zero configuration, and resets between test runs. Pair it with the default in-process bus to test your entire command and projection logic with no external dependencies:
+The `store` package ships `store.New()` and `store.NewSnapshots()` — in-memory implementations of `Store` and `SnapshotStore` for use in tests, both with one-shot failure injection via `SetError`. They require zero infrastructure, zero configuration, and reset between test runs. Pair them with the default in-process bus to test your entire command and projection logic with no external dependencies:
 
 ```go
 func TestPackageInstalled(t *testing.T) {
     instance, _ := asynx.New[Package]().
-        WithEventStore(asynx.NewMemoryStore()).
+        WithEventStore(store.New()).
+        WithSnapshotStore(store.NewSnapshots()).
         Build()
 
     // test your commands and projections
 }
 ```
 
-`NewMemoryStore` is not safe for production use — it holds all data in memory with no durability guarantees.
+Neither is safe for production use — they hold all data in memory with no durability guarantees.
 
 ---
 
@@ -668,7 +686,7 @@ instance, err := asynx.New[Order]().
 |Method|Required|Default|
 |---|---|---|
 |`WithEventStore(Store)`|Yes — `Build()` errors if missing|none|
-|`WithSnapshotStore(Store)`|No|same store as `WithEventStore`|
+|`WithSnapshotStore(SnapshotStore)`|Yes — `Build()` errors if missing|none — cannot default to `WithEventStore`|
 |`WithBus(Bus)`|No|in-process channel bus|
 
 ### Behavioural methods (how Asynx operates)
@@ -760,7 +778,7 @@ Asynx works on multiple nodes. The developer is responsible for two things:
 
 ### Known Limitations
 
-**GDPR / right to be forgotten.** The event stream is append-only by design. There is no native mechanism to delete an aggregate's history. For use cases requiring hard deletion of personal data, the recommended industry approach is crypto-shredding — encrypting each aggregate's events with a per-aggregate key and destroying the key to render events permanently unreadable. Key management and encryption are outside Asynx's scope and must be handled at the infrastructure layer. A hard-delete `asynx.Purge()` API may be considered in a future version.
+**GDPR / right to be forgotten.** `Asynx.Forget(ctx, aggregateID)` provides native hard deletion: it writes a tombstone event, notifies registered `ForgetHandler`s, then calls `Delete` on both the event store and the snapshot store to erase the aggregate. See [forget.md](./forget.md). This reaches only storage your `Store`/`SnapshotStore` implementations directly control — replicas, backups, and WAL archives that already copied the data before `Forget` ran are outside Asynx's reach. For infrastructure where those copies can't be reliably purged, layer crypto-shredding underneath `Delete`: encrypt each aggregate's events with a per-aggregate key and destroy the key to render any surviving copy permanently unreadable. Key management and encryption are outside Asynx's scope and must be handled at the infrastructure layer.
 
 ---
 
@@ -775,7 +793,7 @@ Asynx works on multiple nodes. The developer is responsible for two things:
     - `writer` — RFC 6902 diff, stream append, snapshot write, `snapshot bool` flag handling
     - `replayer` — version-ordered iteration, upcaster chain, post-upcast snapshot, `asynx.Replay()`
 - Event envelope schema and version number management
-- Stream naming (`events:` and `snapshots:` namespaces)
+- Stream naming (`events:` prefix for `Store`; `SnapshotStore` needs no prefix, it's keyed on `aggregateID` alone)
 - Serialization and deserialization
 - Subscription dispatch, panic recovery, and fallback handler triggering
 - Graceful shutdown and drain sequencing

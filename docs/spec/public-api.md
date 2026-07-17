@@ -47,6 +47,7 @@ type Asynx[T any] interface {
 ```go
 ax, err := asynx.New[Order]().
     WithEventStore(store).
+    WithSnapshotStore(snapshotStore).
     WithBus(bus).
     Build()  // Returns Asynx[T]
 ```
@@ -292,6 +293,7 @@ err := ax.Replay(ctx, "order_123", 0, 0, func(ctx context.Context, e models.Even
 // Build instance
 ax, err := asynx.New[Order]().
     WithEventStore(postgresStore).
+    WithSnapshotStore(postgresSnapshotStore).
     Build()
 if err != nil {
     log.Fatal(err)
@@ -348,6 +350,7 @@ All errors are sentinel values in the `models` package; match with `errors.Is`. 
 - `ErrEmptyPattern` / `ErrNilHandler` — from subscription calls with invalid input
 - `ErrBusClosed` / `ErrDispatcherClosed` — from operations after shutdown
 - `ErrMissingEventStore` — from `Build()` without `WithEventStore()`
+- `ErrMissingSnapshotStore` — from `Build()` without `WithSnapshotStore()` (required; does not default to the event store)
 
 ---
 
@@ -383,7 +386,7 @@ go func() { ax.Subscribe(pattern, handler) }()
 
 ```go
 // 1. Create via builder
-ax, _ := asynx.New[Order]().WithEventStore(store).Build()
+ax, _ := asynx.New[Order]().WithEventStore(store).WithSnapshotStore(snapshotStore).Build()
 
 // 2. Use for command execution and queries
 ax.Send(ctx, cmd)

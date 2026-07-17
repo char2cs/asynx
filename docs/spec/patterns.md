@@ -157,6 +157,26 @@ Guidelines proven out by SQL-backed implementations:
 - **Expose a `Close()` beyond the Store interface** if the backend needs
   teardown (e.g. WAL checkpointing), and call it after `ax.Shutdown` returns.
 
+## Implementing a durable SnapshotStore
+
+`models.SnapshotStore` is a separate, required interface (`Put`/`Get`/`Delete`)
+— not a second `Store`. Guidelines:
+
+- **`Put` must be a true upsert, keyed on `aggregate_id` alone.** A
+  `PRIMARY KEY (aggregate_id, version)` table reintroduces the unbounded
+  growth this interface exists to avoid — see
+  [docs/spec/store.md § SnapshotStore](./store.md#snapshotstore) for the
+  schema and reference SQL.
+- **The optional monotonicity guard (`WHERE excluded.version > snapshots.version`)
+  is a nice-to-have, not a correctness requirement.** Asynx tolerates
+  last-write-wins on snapshots — an older snapshot overwriting a newer one
+  just costs extra replay on the next read, never incorrect state.
+- **Losing data is safe; corrupting data is not.** A `SnapshotStore` may be
+  backed by something without durability guarantees (Redis without
+  persistence, an LRU cache) — every snapshot is rebuildable from the event
+  stream. What must not happen is `Get` returning a snapshot for the wrong
+  aggregate or a truncated blob without an error.
+
 ## Testing with a real asynx instance
 
 Prefer exercising real event sourcing over mocking `Asynx[T]`. Build an
@@ -168,6 +188,7 @@ func newTestAsynx(t *testing.T) asynx.Asynx[Order] {
 	t.Helper()
 	ax, err := asynx.New[Order]().
 		WithEventStore(store.New()).
+		WithSnapshotStore(store.NewSnapshots()).
 		WithShardingOpts(asynx.ShardingOpts{Shards: 4, QueueDepth: 100}).
 		Build()
 	if err != nil {

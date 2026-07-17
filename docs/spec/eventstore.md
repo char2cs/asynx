@@ -10,7 +10,7 @@ Internally, eventstore is composed of three sub-responsibilities:
 2. **writer** — Boundary where commands become events (diffing, RFC 6902 serialization, append, snapshot flag)
 3. **replayer** — Version-ordered event iteration with schema upcasting and automatic migration snapshots
 
-The eventstore owns stream naming, event serialization, snapshot logic, and version management. The developer's Store owns durability, consistency, and multi-node coordination.
+The eventstore owns stream naming, event serialization, snapshot logic, and version management. The developer's `Store` (events) and `SnapshotStore` (snapshots) own durability, consistency, and multi-node coordination — they are two separate interfaces, not one `Store` used twice. See [store.md](./store.md).
 
 ---
 
@@ -42,7 +42,7 @@ Preload(ctx context.Context, aggregateID string) error
 When a snapshot exists for the aggregate:
 
 ```
-1. ReadFrom(snapshotStore, aggregateID, 0)
+1. snapshotStore.Get(ctx, aggregateID)
    ↓ snapshot found at version N
 2. ReadFrom(eventStore, aggregateID, N+1)
    ↓ some events exist after snapshot
@@ -59,8 +59,8 @@ When a snapshot exists for the aggregate:
 When no snapshot exists:
 
 ```
-1. ReadFrom(snapshotStore, aggregateID, 0)
-   ↓ no snapshot
+1. snapshotStore.Get(ctx, aggregateID)
+   ↓ not found
 2. ReadFrom(eventStore, aggregateID, 0)
    ↓ events exist (or don't)
 3. If no events: ErrNotFound
@@ -327,10 +327,10 @@ Commits a command's state transition to the eventstore and optionally to the sna
 5. Serialize Event[T] to JSON
 6. Append to event stream (events:aggregateID) via Store.Append()
    - **Save point** ← event is now durable
-7. If shouldSnapshot, append to snapshot stream (snapshots:aggregateID):
+7. If shouldSnapshot, upsert the snapshot for aggregateID:
    - Serialize full newState to JSON
    - Include version and schemaVersion in snapshot metadata
-   - Append via Store.Append()
+   - Write via SnapshotStore.Put() — replaces any prior snapshot for this aggregate, never appends
 
 **Invariants**
 - **Event is durable before returning (save point)** — Event Append must succeed; Write() is idempotent only at the event stream level
@@ -340,7 +340,7 @@ Commits a command's state transition to the eventstore and optionally to the sna
 
 **Side Effects**
 - Writes to event stream (append only)
-- May write to snapshot stream if shouldSnapshot == true
+- May upsert the snapshot store if shouldSnapshot == true
 - Updates version tracking (version counter incremented by caller before Write)
 
 **Error Handling**
@@ -352,9 +352,9 @@ Commits a command's state transition to the eventstore and optionally to the sna
    - Caller retries Send() from scratch
    - **Event was NOT written** (save point not reached)
 
-2. **Snapshot stream write failure** — Append fails when shouldSnapshot=true
+2. **Snapshot write failure** — SnapshotStore.Put fails when shouldSnapshot=true
    - Snapshot write is part of Write() call
-   - If snapshot Append fails, return error
+   - If the Put fails, return error
    - **Event WAS written to event stream** (save point already passed)
    - **But snapshot write failed** — event is durable, but rehydration will be slower next time
    - Processor interprets as ErrPipelineFailed
@@ -369,7 +369,7 @@ Commits a command's state transition to the eventstore and optionally to the sna
    - Return error
    - Caller retries or fails
    - For event stream: event may or may not have been written (depends on when failure occurred)
-   - For snapshot stream: less critical (snapshot is optional)
+   - For the snapshot store: less critical (snapshot is optional)
 
 5. **JSON serialization error** — aggregate is not JSON-serializable
    - This is a programming error (aggregate struct is malformed)
@@ -631,7 +631,7 @@ instance.Replay(ctx, "order_123", 0, 0, fn)
 // NO snapshot is written
 ```
 
-Manual recovery via Replay should not pollute the snapshot stream. Only automatic rehydration during Get() can trigger upcaster snapshots.
+Manual recovery via Replay should not overwrite the stored snapshot. Only automatic rehydration during Get() can trigger upcaster snapshots.
 
 ---
 
@@ -691,7 +691,8 @@ Schema version and upcasters are set on the builder:
 
 ```go
 asynx.New[Order]().
-    WithEventStore(store).
+    WithEventStore(eventStore).
+    WithSnapshotStore(snapshotStore).
     WithSchemaVersion(2).
     WithUpcaster(1, migrateV1toV2).
     Build()
@@ -778,7 +779,7 @@ After upcasting, snapshot is written. Next access loads snapshot directly (warm 
 // Build instance with eventstore config:
 instance, _ := asynx.New[Order]().
     WithEventStore(postgresStore).
-    WithSnapshotStore(redisStore).  // Optional: fast snapshots
+    WithSnapshotStore(redisSnapshotStore).  // Required: models.SnapshotStore, not a Store
     WithSchemaVersion(2).
     WithUpcaster(1, func(name string, raw []byte) []byte {
         // Fix schema v1 → v2: rename "/status" to "/state"

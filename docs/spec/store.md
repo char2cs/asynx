@@ -2,9 +2,11 @@
 
 ## Overview
 
-The `store` package defines the `Store` interface — the raw persistence contract for event and snapshot streams. Store is the only durable boundary in Asynx. It accepts three operations: append a blob to a stream, read all entries from a version, and read a bounded range.
+The `models` package defines two independent persistence contracts: `Store` — the append-only **event** stream contract — and `SnapshotStore` — a single upserted cache cell per aggregate. This document covers `Store`. See [SnapshotStore](#snapshotstore) below for the other.
 
-The Store interface is intentionally minimal — three methods, raw bytes, no opinions about serialization or schema. Asynx owns what goes into the blobs (RFC 6902 diffs, full snapshots); the developer owns how and where they are stored. Developers implement Store for whatever infrastructure they have: SQLite, Postgres, Redis, DynamoDB, cloud storage, etc.
+`Store` accepts five operations: append a blob to a stream, read all entries from a version, read a bounded range, count entries from a version, and delete every entry for an aggregate.
+
+The Store interface is intentionally minimal — five methods, raw bytes, no opinions about serialization or schema. Asynx owns what goes into the blobs (RFC 6902 diffs); the developer owns how and where they are stored. Developers implement Store for whatever infrastructure they have: SQLite, Postgres, Redis, DynamoDB, cloud storage, etc.
 
 The critical responsibility is enforcing the `(aggregateID, version)` uniqueness constraint — this is the only coordination mechanism needed for multi-node consistency.
 
@@ -12,7 +14,7 @@ The critical responsibility is enforcing the `(aggregateID, version)` uniqueness
 
 ### `Store` Interface
 
-The stream persistence contract. Append-only semantics, no updates or deletes. Two independent Store instances can be used — one for events, one for snapshots — or a single store can handle both.
+The event stream persistence contract. Append-only semantics for `Append`/`ReadFrom`/`ReadRange`/`Count`; `Delete` is the sole exception, added for forget-as-a-service (see [Known Limitations](#known-limitations)).
 
 ```go
 type Store interface {
@@ -24,6 +26,13 @@ type Store interface {
 
     // ReadRange returns up to count entries from the stream starting at fromVersion.
     ReadRange(ctx context.Context, aggregateID string, fromVersion int64, count int64) ([][]byte, error)
+
+    // Count returns the number of entries with version >= fromVersion.
+    Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error)
+
+    // Delete removes all records for the given aggregateID.
+    // Idempotent — deleting a non-existent aggregateID is not an error.
+    Delete(ctx context.Context, aggregateID string) error
 }
 ```
 
@@ -40,9 +49,9 @@ Writes a single entry to the stream for the given aggregate at the specified ver
 **Parameters**
 - `ctx` — context for cancellation and timeouts
 - `aggregateID` — the aggregate this entry belongs to (non-empty string)
-  - Asynx will use stream names like `events:{aggregateID}` or `snapshots:{aggregateID}` (stream naming is Asynx's concern, not the store's)
+  - Asynx always calls Store with the stream name `events:{aggregateID}` (stream naming is Asynx's concern, not the store's) — see [Stream Naming Convention](#stream-naming-convention)
 - `version` — the monotonically increasing version for this aggregate (must be >= 1)
-- `data` — the blob to store (could be RFC 6902 diff, full snapshot, or any bytes)
+- `data` — the blob to store (an RFC 6902 diff, serialized as JSON)
 
 **Return Values**
 - `error` — non-nil if append failed
@@ -91,12 +100,6 @@ err := store.Append(ctx, "order_123", 1, rfcDiffBlob)
 if err != nil {
     // Could be uniqueness violation, context cancelled, or storage error
     // Asynx decides what to do based on error type
-}
-
-// Asynx writes a snapshot (to the same or different store):
-err := store.Append(ctx, "order_123", 5, fullSnapshotBlob)
-if err != nil {
-    // Same error handling as above
 }
 ```
 
@@ -171,7 +174,7 @@ for i, blob := range entries {
 }
 
 // Asynx also uses ReadFrom to read only delta events after a snapshot:
-// If snapshot is at version 5, read starting from version 6:
+// If the snapshot is at version 5, read starting from version 6:
 deltas, err := store.ReadFrom(ctx, "order_123", 6)
 // deltas[0] is version 6, deltas[1] is version 7, etc.
 ```
@@ -186,7 +189,7 @@ ReadRange(ctx context.Context, aggregateID string, fromVersion int64, count int6
 ```
 
 **Purpose**
-Like `ReadFrom`, but returns at most `count` entries instead of the entire stream. Used when the caller knows exactly how many entries it needs (e.g., `Replay()` with a specific version range).
+Like `ReadFrom`, but returns at most `count` entries instead of the entire stream. Used when the caller knows exactly how many entries it needs — e.g. `Exists()` issues a `ReadRange(fromVersion=1, count=1)` to check for at least one event without loading the whole stream, and `Replay()` uses it for a specific version range.
 
 **Parameters**
 - `ctx` — context for cancellation and timeouts
@@ -238,18 +241,101 @@ entries, _ := store.ReadRange(ctx, "order_123", 201, 100)
 
 ---
 
+### Method: `Count`
+
+**Signature**
+```go
+Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error)
+```
+
+**Purpose**
+Returns the number of entries at or after `fromVersion`, without transferring the entries themselves. The writer uses this to compute the next version to append at: it reads the trusted version from the latest snapshot (0 if none), then calls `Count(ctx, aggregateID, snapVersion+1)` and adds the result to get `nextVersion` — cheaper than reading and unmarshalling every delta blob just to count them.
+
+**Parameters**
+- `ctx` — context for cancellation and timeouts
+- `aggregateID` — the aggregate to count entries for (non-empty string)
+- `fromVersion` — inclusive starting version (>= 0)
+
+**Return Values**
+- `int64` — number of entries with version >= fromVersion (0 if the aggregate has no entries in that range)
+- `error` — non-nil if the count failed
+
+**Invariants**
+- **Equivalent to `len(ReadFrom(ctx, aggregateID, fromVersion))`** without materializing the blobs — implementations should use a native count query (`SELECT COUNT(*) ...`) rather than reading and discarding data
+- **No entries is not an error** — returns `(0, nil)`
+
+**Side Effects**
+- None — pure read operation
+
+**Error Handling**
+- Storage unavailable → return error
+- Context cancelled → return context error
+
+**Example**
+```go
+// SQL implementation:
+func (s *SQLStore) Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error) {
+    const query = `SELECT COUNT(*) FROM events WHERE aggregate_id = $1 AND version >= $2`
+    var n int64
+    err := s.db.QueryRowContext(ctx, query, aggregateID, fromVersion).Scan(&n)
+    return n, err
+}
+```
+
+---
+
+### Method: `Delete`
+
+**Signature**
+```go
+Delete(ctx context.Context, aggregateID string) error
+```
+
+**Purpose**
+Removes every entry for `aggregateID` from the stream. This is the only method on `Store` that breaks append-only semantics — it exists to support forget-as-a-service (GDPR-style erasure). See [forget.md](./forget.md) and [Known Limitations](#known-limitations).
+
+**Parameters**
+- `ctx` — context for cancellation and timeouts
+- `aggregateID` — the aggregate whose entries should be removed (non-empty string)
+
+**Return Values**
+- `error` — non-nil if the deletion failed
+
+**Invariants**
+- **Idempotent** — deleting a non-existent or already-deleted `aggregateID` returns `nil`, not an error
+- **Total** — every version for the aggregate is removed; there is no partial or version-scoped delete
+- **Called by `Asynx.Forget`, never by ordinary command processing** — no other code path in Asynx calls `Delete`
+
+**Side Effects**
+- Permanently removes durable data — this is a genuine hard delete, not a tombstone
+
+**Error Handling**
+- Storage unavailable → return error; `Forget` surfaces `ErrForgetFailed` wrapping it
+- Context cancelled → return context error
+
+**Example**
+```go
+// SQL implementation:
+func (s *SQLStore) Delete(ctx context.Context, aggregateID string) error {
+    const query = `DELETE FROM events WHERE aggregate_id = $1`
+    _, err := s.db.ExecContext(ctx, query, aggregateID)
+    return err
+}
+```
+
+---
+
 ## Stream Naming Convention
 
-Asynx owns stream naming. The developer's Store implementation receives aggregateID and implicitly handles two stream families:
+Asynx owns stream naming. The developer's `Store` implementation receives `aggregateID` as-is for `Append`/`ReadFrom`/`ReadRange`/`Count`/`Delete` — but every call is prefixed by Asynx before it reaches the store:
 
 ```
-events:{aggregateID}     → append-only stream of RFC 6902 patches
-snapshots:{aggregateID}  → append-only stream of full aggregate state snapshots
+events:{aggregateID}  → append-only stream of RFC 6902 patches
 ```
 
-The developer's implementation receives `aggregateID` (e.g., `"order_123"`) and the actual stream name (e.g., `"events:order_123"`) is constructed by Asynx before calling Append/ReadFrom/ReadRange.
+For example, `store.Append(ctx, "order_123", 5, patch)` never happens directly — Asynx calls `store.Append(ctx, "events:order_123", 5, patch)`. The developer's implementation just needs to treat whatever string it receives as an opaque stream key; it doesn't need to know or care that the `events:` prefix exists.
 
-**The Store interface never sees the "events:" or "snapshots:" prefix — that's Asynx's concern.**
+**There is only one prefix.** Before this release, snapshots were written through this same `Store` interface under a separate, similarly-prefixed stream, so a `Store` implementation might have seen more than one prefix. `SnapshotStore` (below) replaced that: snapshots no longer go through `Store` at all, so `Store` implementations only ever see `events:{aggregateID}`.
 
 Typical SQL implementation:
 
@@ -261,40 +347,12 @@ CREATE TABLE events (
     PRIMARY KEY (aggregate_id, version)
 );
 
-CREATE TABLE snapshots (
-    aggregate_id TEXT    NOT NULL,
-    version      INTEGER NOT NULL,
-    data         BLOB    NOT NULL,
-    PRIMARY KEY (aggregate_id, version)
-);
-
--- Two Store instances, one per table:
+-- Single Store instance:
 eventStore := &SQLStore{table: "events"}
-snapshotStore := &SQLStore{table: "snapshots"}
 
 asynx.New[Order]().
     WithEventStore(eventStore).
-    WithSnapshotStore(snapshotStore).
-    Build()
-```
-
-Or a single Store handles both:
-
-```sql
-CREATE TABLE streams (
-    stream_type  TEXT    NOT NULL,  -- "events" or "snapshots"
-    aggregate_id TEXT    NOT NULL,
-    version      INTEGER NOT NULL,
-    data         BLOB    NOT NULL,
-    PRIMARY KEY (stream_type, aggregate_id, version)
-);
-
--- Single Store instance:
-store := &SQLStore{table: "streams"}
-
-asynx.New[Order]().
-    WithEventStore(store).
-    WithSnapshotStore(store).  -- same store
+    WithSnapshotStore(snapshotStore).  // a *different* interface — see below
     Build()
 ```
 
@@ -319,7 +377,6 @@ This is fundamental: **blind retries with incremented versions corrupt the strea
 The Store interface works with raw bytes. Asynx handles all serialization:
 
 - **Events** → stored as RFC 6902 JSON patches (serialized by eventstore.writer)
-- **Snapshots** → stored as full aggregate state (JSON, serialized by eventstore.writer)
 - **Deserialization** → handled by eventstore.reader and replayer
 
 The Store implementation must NOT:
@@ -330,23 +387,31 @@ The Store implementation must NOT:
 
 ### Error Semantics
 
-The Store returns `error` for all three methods. The caller (eventstore, processor) interprets specific errors:
+The Store returns `error` for all five methods. The caller (eventstore, processor) interprets specific errors:
 
 - Uniqueness violation on Append → `ErrPipelineFailed` (retry from scratch)
 - Context cancelled → `ErrContextCancelled`
 - Storage unavailable → propagate as-is (caller decides what to do)
+- Deletion failure on Delete → `ErrForgetFailed` (wraps the underlying error)
 
 The Store should **not** try to distinguish between different error categories — just return the error. Asynx and the application layer handle interpretation.
 
 ### Testing
 
-Asynx ships `asynx.NewMemoryStore()` — a simple in-memory Store for testing. It's not production-safe, but it's useful for testing commands and projections without infrastructure.
+Asynx ships `store.New()` in the `store` package — a simple in-memory `Store` for testing, with one-shot failure injection via `SetError`. It's not production-safe, but it's useful for testing commands and projections without infrastructure. The companion `store.NewSnapshots()` provides the same for `SnapshotStore`.
 
-Developers implementing custom Store should provide their own in-memory test doubles for unit testing.
+```go
+ax, err := asynx.New[Order]().
+    WithEventStore(store.New()).
+    WithSnapshotStore(store.NewSnapshots()).
+    Build()
+```
+
+Developers implementing a custom Store should provide their own in-memory test doubles for unit testing.
 
 ### Context Handling
 
-All three methods receive `ctx context.Context`. Implementations must:
+All five methods receive `ctx context.Context`. Implementations must:
 
 - Respect context cancellation — if `ctx.Done()` fires, stop the operation and return the context error
 - Respect context deadlines — if approaching deadline, return deadline exceeded error
@@ -458,16 +523,29 @@ func (s *SQLStore) ReadRange(ctx context.Context, aggregateID string, fromVersio
 
     return results, rows.Err()
 }
+
+func (s *SQLStore) Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error) {
+    const query = `SELECT COUNT(*) FROM events WHERE aggregate_id = $1 AND version >= $2`
+    var n int64
+    err := s.db.QueryRowContext(ctx, query, aggregateID, fromVersion).Scan(&n)
+    return n, err
+}
+
+func (s *SQLStore) Delete(ctx context.Context, aggregateID string) error {
+    const query = `DELETE FROM events WHERE aggregate_id = $1`
+    _, err := s.db.ExecContext(ctx, query, aggregateID)
+    return err
+}
 ```
 
 ---
 
 ## Example: Schema
 
-A minimal SQL schema for event and snapshot streams:
+A minimal SQL schema for the event stream, alongside the snapshot table (see [SnapshotStore](#snapshotstore)):
 
 ```sql
--- Events stream
+-- Event stream: append-only, (aggregate_id, version) unique.
 CREATE TABLE events (
     aggregate_id TEXT    NOT NULL,
     version      INTEGER NOT NULL,
@@ -476,39 +554,122 @@ CREATE TABLE events (
     PRIMARY KEY (aggregate_id, version)
 );
 
-CREATE INDEX idx_events_aggregate_id ON events(aggregate_id, version);
-
--- Snapshots stream (could be same table with stream_type, or separate table)
+-- Snapshots: exactly one row per aggregate. Note the primary key.
 CREATE TABLE snapshots (
     aggregate_id TEXT    NOT NULL,
     version      INTEGER NOT NULL,
     data         BLOB    NOT NULL,
-    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (aggregate_id, version)
+    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (aggregate_id)
 );
-
-CREATE INDEX idx_snapshots_aggregate_id ON snapshots(aggregate_id, version);
 ```
 
-Or combined:
+The two tables are not interchangeable, and the difference is load-bearing: `events` is keyed on `(aggregate_id, version)` because every version must be retained; `snapshots` is keyed on `aggregate_id` alone because only the newest snapshot is ever useful.
+
+---
+
+## SnapshotStore
+
+`models.SnapshotStore` is a **separate interface**, not a second `Store` instance. It persists exactly one snapshot per aggregate — the most recent — as a single upserted row, cell, or key.
+
+```go
+type SnapshotStore interface {
+    // Put stores the snapshot for aggregateID, replacing any snapshot already
+    // stored for it. Implementations MUST upsert: the primary key is
+    // (aggregateID) alone, never (aggregateID, version).
+    Put(ctx context.Context, aggregateID string, version int64, data []byte) error
+
+    // Get returns the stored snapshot for aggregateID. found is false when no
+    // snapshot exists — that is not an error, it is the normal state of an
+    // aggregate that has never been snapshotted.
+    Get(ctx context.Context, aggregateID string) (data []byte, found bool, err error)
+
+    // Delete removes the snapshot for aggregateID.
+    // Idempotent — deleting a non-existent aggregateID is not an error.
+    Delete(ctx context.Context, aggregateID string) error
+}
+```
+
+**Why not `Store`.** Nothing in Asynx ever reads a snapshot other than the newest one. Modelling snapshots as a `Store` stream forced "read the newest" to be emulated as "read every snapshot ever written for this aggregate and discard all but the last" — O(n) on every read *and* every write, with the table growing without bound. `SnapshotStore` makes "keep only the newest" the storage model directly: one row, upserted in place.
+
+**`Put` must upsert.** The primary key is `aggregate_id` alone (see the schema above) — never `(aggregate_id, version)`. A `Put` implemented as a blind `INSERT` will violate the primary key on the second call for the same aggregate and break every subsequent snapshot write for it.
+
+**Snapshots are a cache, not a source of truth.** Every snapshot can be rebuilt by replaying the aggregate's event stream from version 1. A `SnapshotStore` may therefore lose or discard data without affecting correctness — the only cost is a slower read next time. This is why `Get`'s `found == false` is a normal outcome, not an error: it just means the reader falls back to a full replay.
+
+**The optional monotonicity guard.** `version` is the aggregate version the snapshot represents. Asynx never reads it back through this interface — it exists so an implementation can persist it as a column for observability, or guard the upsert against writing an older snapshot over a newer one:
 
 ```sql
-CREATE TABLE streams (
-    stream_type  TEXT     NOT NULL,  -- "events" or "snapshots"
-    aggregate_id TEXT     NOT NULL,
-    version      INTEGER  NOT NULL,
-    data         BLOB     NOT NULL,
-    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (stream_type, aggregate_id, version)
-);
-
-CREATE INDEX idx_streams ON streams(stream_type, aggregate_id, version);
+ON CONFLICT (aggregate_id) DO UPDATE SET ...
+WHERE excluded.version > snapshots.version
 ```
+
+That guard is optional. Asynx tolerates last-write-wins: an older snapshot overwriting a newer one is safe, because the reader replays whatever delta events exist after the stored version. It only costs extra replay, never incorrect state.
+
+**Reference implementation:**
+
+```go
+func (s *SQLSnapshotStore) Put(ctx context.Context, aggregateID string, version int64, data []byte) error {
+    const query = `
+        INSERT INTO snapshots (aggregate_id, version, data)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (aggregate_id) DO UPDATE
+            SET version = excluded.version, data = excluded.data
+            WHERE excluded.version > snapshots.version
+    `
+    _, err := s.db.ExecContext(ctx, query, aggregateID, version, data)
+    return err
+}
+
+func (s *SQLSnapshotStore) Get(ctx context.Context, aggregateID string) ([]byte, bool, error) {
+    const query = `SELECT data FROM snapshots WHERE aggregate_id = $1`
+
+    var data []byte
+    err := s.db.QueryRowContext(ctx, query, aggregateID).Scan(&data)
+    if errors.Is(err, sql.ErrNoRows) {
+        return nil, false, nil
+    }
+    if err != nil {
+        return nil, false, err
+    }
+    return data, true, nil
+}
+
+func (s *SQLSnapshotStore) Delete(ctx context.Context, aggregateID string) error {
+    const query = `DELETE FROM snapshots WHERE aggregate_id = $1`
+    _, err := s.db.ExecContext(ctx, query, aggregateID)
+    return err
+}
+```
+
+`WithSnapshotStore` is required on the builder — `Build()` returns `models.ErrMissingSnapshotStore` if it is nil. It cannot default to the event store: `models.Store` is not a `models.SnapshotStore`, and a `Store` implementation would need an entirely different upsert-shaped table to satisfy it anyway. See the [in-memory reference implementation](../../store/snapshot_memory.go) (`store.NewSnapshots()`) for a minimal, non-durable example.
+
+---
+
+## Migrating from v0.7.x
+
+Before v0.8.0, snapshots were written to a `models.Store` as an append-only
+stream: one row per snapshot, `PRIMARY KEY (aggregate_id, version)`. Reading
+the current state loaded *every* snapshot ever written for the aggregate and
+discarded all but the newest, so both reads and writes were O(number of
+snapshots) and the table grew without bound.
+
+Snapshots are a derived cache — every one can be rebuilt by replaying events.
+So there is no data to migrate:
+
+1. Implement `models.SnapshotStore` against a table keyed by `aggregate_id`
+   alone (schema above).
+2. Drop the old snapshot table, or leave it orphaned and drop it later.
+3. Pass the new store to `WithSnapshotStore`. It is now required — `Build()`
+   returns `ErrMissingSnapshotStore` without it, and it no longer defaults to
+   the event store.
+
+The first `Get` per aggregate cold-replays its event stream once and writes a
+single fresh snapshot row.
 
 ---
 
 ## Known Limitations
 
-**No hard deletes.** The Store is append-only — entries cannot be deleted or overwritten. For GDPR "right to be forgotten," implement crypto-shredding at the application layer: encrypt each aggregate's events with a per-aggregate key and destroy the key to render events unreadable. Key management is outside Asynx's scope.
+**`Delete` is total and immediate, not a soft delete.** `Store.Delete` removes every version of an aggregate's event stream in one call, backing the `Forget` API for GDPR-style erasure (see [forget.md](./forget.md)). It is intentionally the only non-append-only operation on `Store` — ordinary command processing never calls it. `Delete` only reaches storage your `Store` implementation directly controls, though: replicas, backups, and WAL archives that already copied the data before `Forget` ran are outside Asynx's reach. For infrastructure where those copies can't be reliably purged, layer crypto-shredding underneath `Delete`: encrypt each aggregate's events with a per-aggregate key and destroy the key so that any surviving copy is unreadable. Key management is outside Asynx's scope.
 
 **No ordering across aggregates.** Streams are ordered per aggregate (version order), but there is no global ordering across all aggregates. This is intentional — it avoids a distributed consensus problem. If you need cross-aggregate causal ordering, add correlation IDs or timestamps to your projections.

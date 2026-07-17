@@ -25,7 +25,7 @@ Asynx makes no consistency guarantees beyond what your Store implementation prov
 - **Events** - Automatically generated CDC diffs of state changes. Never manually emitted by developers.
 - **Aggregates** - Domain entities managed by Asynx. State is reconstructed by replaying events.
 - **Projections** - Eventual-consistency callbacks that subscribe to events and build read models.
-- **Event Store** - The single persistence boundary. Everything durable goes here.
+- **Event Store** - The persistence boundary for events (`Store`) and snapshots (`SnapshotStore` — a separate, required interface holding one upserted snapshot per aggregate). Everything durable goes through these two.
 - **Bus** - In-process or external event dispatcher. Pluggable for multi-node deployments.
 
 ## Quick Links
