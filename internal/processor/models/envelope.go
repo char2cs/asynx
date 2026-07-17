@@ -27,6 +27,5 @@ type CommandEnvelope[T any] struct {
 }
 
 type CommandJob[T any] struct {
-	Envelope    *CommandEnvelope[T]
-	NextVersion int64
+	Envelope *CommandEnvelope[T]
 }

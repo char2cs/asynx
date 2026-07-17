@@ -6,13 +6,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/store"
 	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/store"
 )
 
 type order = mocks.Order
@@ -25,7 +24,7 @@ func TestExecute_SuccessNewAggregate(t *testing.T) {
 	ctx := context.Background()
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 
-	_, err := executor.Execute(ctx, cmd, 1, false)
+	_, err := executor.Execute(ctx, cmd, false)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -47,7 +46,7 @@ func TestExecute_SuccessExistingAggregate(t *testing.T) {
 	ctx := context.Background()
 
 	cmd1 := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
-	_, err := executor.Execute(ctx, cmd1, 1, false)
+	_, err := executor.Execute(ctx, cmd1, false)
 	if err != nil {
 		t.Fatalf("first command failed: %v", err)
 	}
@@ -56,7 +55,7 @@ func TestExecute_SuccessExistingAggregate(t *testing.T) {
 		ID:       "order1",
 		NewState: order{ID: "order1", Total: 150.0, Status: "Confirmed"},
 	}
-	_, err = executor.Execute(ctx, cmd2, 2, false)
+	_, err = executor.Execute(ctx, cmd2, false)
 	if err != nil {
 		t.Fatalf("second command failed: %v", err)
 	}
@@ -78,7 +77,7 @@ func TestExecute_ValidationFailure(t *testing.T) {
 	ctx := context.Background()
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: -100.0}
 
-	_, err := executor.Execute(ctx, cmd, 1, false)
+	_, err := executor.Execute(ctx, cmd, false)
 	if err != asynxmd.ErrValidation {
 		t.Fatalf("expected ErrValidation, got %v", err)
 	}
@@ -97,11 +96,11 @@ func TestExecute_ValidationFailureNoWrite(t *testing.T) {
 	ctx := context.Background()
 
 	cmd1 := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
-	executor.Execute(ctx, cmd1, 1, false)
+	executor.Execute(ctx, cmd1, false)
 
 	cmd2 := mocks.CancelOrderCmd{ID: "order2"}
 
-	_, err := executor.Execute(ctx, cmd2, 1, false)
+	_, err := executor.Execute(ctx, cmd2, false)
 	if err != asynxmd.ErrValidation {
 		t.Fatalf("expected ErrValidation, got %v", err)
 	}
@@ -123,7 +122,7 @@ func TestExecute_GetStorageError(t *testing.T) {
 		NewState: order{ID: "order1", Total: 100.0},
 	}
 
-	_, err := executor.Execute(ctx, cmd, 1, false)
+	_, err := executor.Execute(ctx, cmd, false)
 	if err != nil {
 		t.Fatalf("expected success (nil state for missing agg), got %v", err)
 	}
@@ -140,7 +139,7 @@ func TestExecute_WriteStorageError(t *testing.T) {
 	someError := errors.New("storage error")
 	s.SetError("events:order1", someError)
 
-	_, err := executor.Execute(ctx, cmd, 1, false)
+	_, err := executor.Execute(ctx, cmd, false)
 	if !errors.Is(err, asynxmd.ErrPipelineFailed) {
 		t.Errorf("expected ErrPipelineFailed, got %v", err)
 	}
@@ -154,7 +153,7 @@ func TestExecute_NilDispatcherNoPanic(t *testing.T) {
 	ctx := context.Background()
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 
-	_, err := executor.Execute(ctx, cmd, 1, false)
+	_, err := executor.Execute(ctx, cmd, false)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -173,7 +172,7 @@ func TestExecute_DispatchCalledAsync(t *testing.T) {
 	ctx := context.Background()
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 
-	_, err := executor.Execute(ctx, cmd, 1, false)
+	_, err := executor.Execute(ctx, cmd, false)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -197,7 +196,7 @@ func TestExecute_ContextAlreadyCancelled(t *testing.T) {
 
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 
-	_, err := executor.Execute(ctx, cmd, 1, false)
+	_, err := executor.Execute(ctx, cmd, false)
 	if err != nil {
 		t.Logf("expected context.Canceled, got %v", err)
 	}
@@ -211,7 +210,7 @@ func TestExecute_AggregateStatePreserved(t *testing.T) {
 	ctx := context.Background()
 
 	cmd1 := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
-	_, err := executor.Execute(ctx, cmd1, 1, false)
+	_, err := executor.Execute(ctx, cmd1, false)
 	if err != nil {
 		t.Fatalf("first execute failed: %v", err)
 	}
@@ -225,7 +224,7 @@ func TestExecute_AggregateStatePreserved(t *testing.T) {
 		ID:       "order1",
 		NewState: order{ID: "order1", Total: 150.0, Status: "Updated"},
 	}
-	_, err = executor.Execute(ctx, cmd2, 2, false)
+	_, err = executor.Execute(ctx, cmd2, false)
 	if err != nil {
 		t.Fatalf("second execute failed: %v", err)
 	}
@@ -248,7 +247,7 @@ func TestExecute_ReturnsEvent(t *testing.T) {
 	ctx := context.Background()
 	cmd := mocks.CreateOrderCmd{ID: "evt-order", Total: 77.0}
 
-	event, err := executor.Execute(ctx, cmd, 1, false)
+	event, err := executor.Execute(ctx, cmd, false)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -278,7 +277,7 @@ func TestExecute_WaitHandlersTrue_HandlersDoneBeforeReturn(t *testing.T) {
 	ctx := context.Background()
 	cmd := mocks.CreateOrderCmd{ID: "wait-order", Total: 10.0}
 
-	_, err := executor.Execute(ctx, cmd, 1, true)
+	_, err := executor.Execute(ctx, cmd, true)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -300,7 +299,7 @@ func TestExecute_WaitHandlersFalse_DispatchCalled(t *testing.T) {
 	ctx := context.Background()
 	cmd := mocks.CreateOrderCmd{ID: "async-order", Total: 20.0}
 
-	_, err := executor.Execute(ctx, cmd, 1, false)
+	_, err := executor.Execute(ctx, cmd, false)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -322,7 +321,7 @@ func TestExecute_WaitHandlers_NilDispatcherNoPanic(t *testing.T) {
 	ctx := context.Background()
 	cmd := mocks.CreateOrderCmd{ID: "nil-bus-order", Total: 5.0}
 
-	event, err := executor.Execute(ctx, cmd, 1, true)
+	event, err := executor.Execute(ctx, cmd, true)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -357,7 +356,7 @@ func TestPublishErrorHandler_CalledOnPublishError(t *testing.T) {
 	executor := New(es, d)
 
 	ctx := context.Background()
-	_, err := executor.Execute(ctx, mocks.CreateOrderCmd{ID: "err-order", Total: 1.0}, 1, false)
+	_, err := executor.Execute(ctx, mocks.CreateOrderCmd{ID: "err-order", Total: 1.0}, false)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -392,7 +391,7 @@ func TestPublishErrorHandler_NotCalledOnSuccess(t *testing.T) {
 	executor := New(es, d)
 
 	ctx := context.Background()
-	_, err := executor.Execute(ctx, mocks.CreateOrderCmd{ID: "ok-order", Total: 1.0}, 1, false)
+	_, err := executor.Execute(ctx, mocks.CreateOrderCmd{ID: "ok-order", Total: 1.0}, false)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -418,7 +417,7 @@ func TestPublishErrorHandler_NilHandlerDoesNotPanic(t *testing.T) {
 	executor := New(es, d)
 
 	ctx := context.Background()
-	_, err := executor.Execute(ctx, mocks.CreateOrderCmd{ID: "nil-handler-order", Total: 1.0}, 1, false)
+	_, err := executor.Execute(ctx, mocks.CreateOrderCmd{ID: "nil-handler-order", Total: 1.0}, false)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -453,16 +452,4 @@ func (b *recordingBus[T]) Subscribe(_ string, _ asynxmd.ProjectionHandler[T], _ 
 }
 func (b *recordingBus[T]) Unsubscribe(_ string) error    { return nil }
 func (b *recordingBus[T]) Close(_ context.Context) error { return nil }
-func (b *recordingBus[T]) WaitForHandlers()               {}
-
-// delayedRecordingBus adds a configurable delay to PublishSync, useful for
-// verifying that waitHandlers=false does not block on slow handlers.
-type delayedRecordingBus[T any] struct {
-	recordingBus[T]
-	delay time.Duration
-}
-
-func (b *delayedRecordingBus[T]) PublishSync(ctx context.Context, event asynxmd.Event[T]) error {
-	time.Sleep(b.delay)
-	return b.recordingBus.PublishSync(ctx, event)
-}
+func (b *recordingBus[T]) WaitForHandlers()              {}
