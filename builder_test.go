@@ -111,6 +111,7 @@ func TestShardingOptsZeroValue(t *testing.T) {
 func TestBuildWithWorkersPerShard(t *testing.T) {
 	instance, err := asynx.New[mocks.Order]().
 		WithEventStore(store.New()).
+		WithSnapshotStore(store.NewSnapshots()).
 		WithShardingOpts(asynx.ShardingOpts{Shards: 8, WorkersPerShard: 1}).
 		Build()
 	if err != nil {

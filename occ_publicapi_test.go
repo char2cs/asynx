@@ -19,6 +19,7 @@ func countConcurrentCancelSuccesses(t *testing.T, workersPerShard, attempts int)
 
 	instance, err := asynx.New[mocks.Order]().
 		WithEventStore(store.New()).
+		WithSnapshotStore(store.NewSnapshots()).
 		WithShardingOpts(asynx.ShardingOpts{Shards: 1, QueueDepth: 4096, WorkersPerShard: workersPerShard}).
 		Build()
 	if err != nil {
