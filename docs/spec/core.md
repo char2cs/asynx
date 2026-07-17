@@ -305,7 +305,7 @@ func New[T any]() *Builder[T]
 
 // Set infrastructure (required or optional with defaults)
 func (b *Builder[T]) WithEventStore(s Store) *Builder[T]
-func (b *Builder[T]) WithSnapshotStore(s Store) *Builder[T]
+func (b *Builder[T]) WithSnapshotStore(s SnapshotStore) *Builder[T]
 func (b *Builder[T]) WithBus(bus Bus[T]) *Builder[T]
 
 // Set behavioral options (optional)
@@ -352,31 +352,31 @@ Returns `*Builder[T]` to allow method chaining.
 ```go
 asynx.New[Order]().
     WithEventStore(myPostgresStore).
-    WithSnapshotStore(myRedisStore).
+    WithSnapshotStore(myRedisSnapshotStore).
     Build()
 ```
 
 ---
 
-#### Method: `WithSnapshotStore(s Store)`
+#### Method: `WithSnapshotStore(s SnapshotStore)`
 
 **Purpose**
-Sets the snapshot store implementation. Optional — defaults to the same store as WithEventStore if not provided.
+Sets the snapshot store implementation. **Required** — `Build()` returns `ErrMissingSnapshotStore` if missing.
 
 **Parameters**
-- `s` — non-nil Store implementation
+- `s` — non-nil `SnapshotStore` implementation (`Put`/`Get`/`Delete`) — not a `Store`
 
 **Default Behavior**
-If not called, snapshots are written to the same store as events.
+None. Unlike the other infrastructure methods, this cannot default to `WithEventStore`'s value: `SnapshotStore` is a distinct interface from `Store` (an upserted single row per aggregate, not a versioned append-only stream), so a `Store` implementation does not satisfy it.
 
 **Use Case**
-Developers can route snapshots to fast infrastructure (Redis) and events to durable infrastructure (Postgres) for performance optimization.
+Developers can route snapshots to fast, low-durability infrastructure (Redis) separately from durable event infrastructure (Postgres) — snapshots are a rebuildable cache, so losing one is safe.
 
 **Example**
 ```go
 asynx.New[Order]().
-    WithEventStore(postgresStore).           // durable, slower
-    WithSnapshotStore(redisStore).           // fast, optional durability
+    WithEventStore(postgresStore).           // durable, slower — models.Store
+    WithSnapshotStore(redisSnapshotStore).   // fast, optional durability — models.SnapshotStore
     Build()
 ```
 
@@ -562,11 +562,13 @@ Validates all required fields and builds the fully-configured Asynx instance.
 
 **Validation Rules**
 - `WithEventStore` is required — Build() returns error if missing
+- `WithSnapshotStore` is required — Build() returns error if missing; it does not default to `WithEventStore`
 - All other methods are optional with sensible defaults
 - Regex patterns in upcasters are not validated (regex is compiled lazily during event replay)
 
 **Error Cases**
-- Missing event store: `ErrMissingEventStore` or similar
+- Missing event store: `ErrMissingEventStore`
+- Missing snapshot store: `ErrMissingSnapshotStore`
 - Invalid configuration: specific error describing the problem
 
 **Example**

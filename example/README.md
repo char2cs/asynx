@@ -112,9 +112,12 @@ case "OrderShipped":
 ### Setup Phase
 ```go
 // Use the public asynx.Builder API to create an Asynx instance
+eventStore := store.New()
+snapshotStore := store.NewSnapshots()
+
 ax, err := asynx.New[Order]().
-    WithEventStore(memoryStore).           // Your data store
-    WithSnapshotStore(memoryStore).        // Optional snapshot store
+    WithEventStore(eventStore).       // Event store (required)
+    WithSnapshotStore(snapshotStore). // Snapshot store (required)
     WithShardingOpts(asynx.ShardingOpts{
         Shards: 4,  // Number of worker shards
     }).

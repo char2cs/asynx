@@ -25,13 +25,6 @@ type Store interface {
 		count int64,
 	) ([][]byte, error)
 
-	// Count returns the number of entries with version >= fromVersion.
-	Count(
-		ctx context.Context,
-		aggregateID string,
-		fromVersion int64,
-	) (int64, error)
-
 	// Delete removes all records for the given aggregateID.
 	// Idempotent — deleting a non-existent aggregateID is not an error.
 	Delete(

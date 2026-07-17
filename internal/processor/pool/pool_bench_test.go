@@ -18,7 +18,7 @@ import (
 func BenchmarkPool_Send_SingleShard(b *testing.B) {
 	s := store.New()
 	bu := bus.NewChannelBus[order]()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	d := dispatcher.New[order](bu)
 	defer d.Close(context.Background())
 	executor := exec.New(es, d)
@@ -49,7 +49,7 @@ func BenchmarkPool_Send_MultiShard(b *testing.B) {
 		b.Run(fmt.Sprintf("shards=%d", shards), func(b *testing.B) {
 			s := store.New()
 			bu := bus.NewChannelBus[order]()
-			es := eventstore.New[order](s, s, nil, 1, nil)
+			es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 			d := dispatcher.New[order](bu)
 			defer d.Close(context.Background())
 			executor := exec.New(es, d)
@@ -82,7 +82,7 @@ func BenchmarkPool_Send_MultiShard(b *testing.B) {
 func BenchmarkPool_Send_Parallel(b *testing.B) {
 	s := store.New()
 	bu := bus.NewChannelBus[order]()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	d := dispatcher.New[order](bu)
 	defer d.Close(context.Background())
 	executor := exec.New(es, d)

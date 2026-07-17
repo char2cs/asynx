@@ -18,7 +18,7 @@ func BenchmarkSend_MultiShard(b *testing.B) {
 		b.Run(fmt.Sprintf("shards=%d", shards), func(b *testing.B) {
 			memStore := store.New()
 			channelBus := bus.NewChannelBus[order]()
-			es := eventstore.New[order](memStore, memStore, nil, 1, nil)
+			es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 			p := processor.New(es, channelBus, processor.WithShards[order](shards))
 			defer p.Shutdown(context.Background())
@@ -39,7 +39,7 @@ func BenchmarkSend_MultiShard(b *testing.B) {
 func BenchmarkSend_Parallel(b *testing.B) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
-	es := eventstore.New[order](memStore, memStore, nil, 1, nil)
+	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 	p := processor.New(es, channelBus, processor.WithShards[order](8))
 	defer p.Shutdown(context.Background())
@@ -60,7 +60,7 @@ func BenchmarkSend_Parallel(b *testing.B) {
 func BenchmarkSend_WithBusFanout(b *testing.B) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
-	es := eventstore.New[order](memStore, memStore, nil, 1, nil)
+	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 	// Subscribe 10 handlers to the bus
 	for i := 0; i < 10; i++ {

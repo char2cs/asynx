@@ -2,12 +2,13 @@ package asynx_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/char2cs/asynx"
 	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/store"
 	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/store"
 )
 
 func TestNewBuilderDefaults(t *testing.T) {
@@ -25,7 +26,10 @@ func TestBuildRequiresEventStore(t *testing.T) {
 }
 
 func TestBuildSucceeds(t *testing.T) {
-	instance, err := asynx.New[mocks.Order]().WithEventStore(&mocks.Store{}).Build()
+	instance, err := asynx.New[mocks.Order]().
+		WithEventStore(&mocks.Store{}).
+		WithSnapshotStore(&mocks.SnapshotStore{}).
+		Build()
 	if err != nil {
 		t.Fatalf("Build() error: %v", err)
 	}
@@ -34,16 +38,10 @@ func TestBuildSucceeds(t *testing.T) {
 	}
 }
 
-func TestBuildSnapshotStoreDefaultsToEventStore(t *testing.T) {
-	store := &mocks.Store{}
-	_, err := asynx.New[mocks.Order]().WithEventStore(store).Build()
-	if err != nil {
-		t.Fatalf("Build() error: %v", err)
-	}
-}
-
 func TestBuildMultipleTimesIndependent(t *testing.T) {
-	b := asynx.New[mocks.Order]().WithEventStore(&mocks.Store{})
+	b := asynx.New[mocks.Order]().
+		WithEventStore(&mocks.Store{}).
+		WithSnapshotStore(&mocks.SnapshotStore{})
 
 	i1, _ := b.Build()
 	i2, _ := b.Build()
@@ -59,7 +57,7 @@ func TestBuilderFluent(t *testing.T) {
 
 	_, err := asynx.New[mocks.Order]().
 		WithEventStore(&mocks.Store{}).
-		WithSnapshotStore(&mocks.Store{}).
+		WithSnapshotStore(&mocks.SnapshotStore{}).
 		WithBus(&mocks.Bus[mocks.Order]{}).
 		WithShardingOpts(asynx.ShardingOpts{Shards: 16, QueueDepth: 100, WorkersPerShard: 4}).
 		WithSchemaVersion(3).
@@ -73,13 +71,13 @@ func TestBuilderFluent(t *testing.T) {
 	}
 }
 
-
 func TestBuilderWithCorruptionHook(t *testing.T) {
 	called := false
 	hook := func(err error) { called = true }
 
 	_, err := asynx.New[mocks.Order]().
 		WithEventStore(&mocks.Store{}).
+		WithSnapshotStore(&mocks.SnapshotStore{}).
 		WithCorruptionHook(hook).
 		Build()
 	if err != nil {
@@ -94,6 +92,7 @@ func TestBuilderWithPublishErrorHandler(t *testing.T) {
 
 	_, err := asynx.New[mocks.Order]().
 		WithEventStore(&mocks.Store{}).
+		WithSnapshotStore(&mocks.SnapshotStore{}).
 		WithPublishErrorHandler(handler).
 		Build()
 	if err != nil {
@@ -112,6 +111,7 @@ func TestShardingOptsZeroValue(t *testing.T) {
 func TestBuildWithWorkersPerShard(t *testing.T) {
 	instance, err := asynx.New[mocks.Order]().
 		WithEventStore(store.New()).
+		WithSnapshotStore(store.NewSnapshots()).
 		WithShardingOpts(asynx.ShardingOpts{Shards: 8, WorkersPerShard: 1}).
 		Build()
 	if err != nil {
@@ -130,6 +130,7 @@ func TestBuildWithWorkersPerShard(t *testing.T) {
 func TestBuild_NilForgetHandler_ReturnsError(t *testing.T) {
 	_, err := asynx.New[mocks.Order]().
 		WithEventStore(&mocks.Store{}).
+		WithSnapshotStore(&mocks.SnapshotStore{}).
 		WithForgetHandler(nil).
 		Build()
 	if err == nil {
@@ -142,6 +143,7 @@ func TestWithForgetHandler_IsCalledOnForget(t *testing.T) {
 
 	instance, err := asynx.New[mocks.Order]().
 		WithEventStore(store.New()).
+		WithSnapshotStore(store.NewSnapshots()).
 		WithShardingOpts(asynx.ShardingOpts{Shards: 8, QueueDepth: 1000}).
 		WithForgetHandler(func(_ context.Context, e models.Event[mocks.Order]) {
 			gotTotal = e.Aggregate.Total
@@ -162,5 +164,29 @@ func TestWithForgetHandler_IsCalledOnForget(t *testing.T) {
 
 	if gotTotal != 77.0 {
 		t.Errorf("ForgetHandler got Total=%v, want 77.0", gotTotal)
+	}
+}
+
+func TestBuilder_MissingSnapshotStoreIsAnError(t *testing.T) {
+	_, err := asynx.New[mocks.Order]().
+		WithEventStore(store.New()).
+		Build()
+
+	if !errors.Is(err, models.ErrMissingSnapshotStore) {
+		t.Errorf("err = %v, want ErrMissingSnapshotStore", err)
+	}
+}
+
+func TestBuilder_SnapshotStoreSatisfiesBuild(t *testing.T) {
+	ax, err := asynx.New[mocks.Order]().
+		WithEventStore(store.New()).
+		WithSnapshotStore(store.NewSnapshots()).
+		Build()
+
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if ax == nil {
+		t.Fatal("instance = nil")
 	}
 }

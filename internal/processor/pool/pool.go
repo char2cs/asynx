@@ -4,11 +4,12 @@
 // shard serializes commands targeting the same aggregate only when
 // workersPerShard is 1; with more workers (the default 8) a shard drains its
 // queue in parallel, so two commands on the same aggregate may run concurrently.
-//   - Shard.dispatchCommands — Sole owner of versionMap; dispatches commands and
-//     handles version corrections on validation failures (single-worker only)
-//   - Shard.workerLoop       — Executes commands in parallel; sends results on completion
-//   - version management     — Incremented per dispatch, conditionally decremented on
-//     validation errors only when workersPerShard == 1
+//   - Shard.dispatchCommands — Reads envelopes off commandChan and hands them
+//     to the worker pool via jobQueue
+//   - Shard.workerLoop       — Executes commands; sends results on completion
+//
+// The event version is assigned by the event store on write (optimistic
+// concurrency), not by the pool.
 //
 // Shutdown is two-phase: signal all dispatchers to stop, drain jobQueues until
 // workers finish, then close all channels. Uses sync.WaitGroup for coordination.

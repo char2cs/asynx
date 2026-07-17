@@ -115,15 +115,6 @@ func (s *memory) entriesFrom(aggregateID string, fromVersion int64) []entry {
 	return entries[startIdx:]
 }
 
-func (s *memory) Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return int64(len(s.entriesFrom(aggregateID, fromVersion))), nil
-}
-
 func (s *memory) Delete(ctx context.Context, aggregateID string) error {
 	if err := ctx.Err(); err != nil {
 		return err

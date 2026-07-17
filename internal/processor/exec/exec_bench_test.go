@@ -11,7 +11,7 @@ import (
 
 func BenchmarkExecute_CreateNew(b *testing.B) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
 	ctx := context.Background()
@@ -23,7 +23,7 @@ func BenchmarkExecute_CreateNew(b *testing.B) {
 
 			for b.Loop() {
 				cmd := mocks.CreateOrderCmd{ID: "order" + string(rune(b.N)), Total: 100.0}
-				_, _ = executor.Execute(ctx, cmd, 1, false)
+				_, _ = executor.Execute(ctx, cmd, false)
 			}
 		})
 	}
@@ -31,14 +31,14 @@ func BenchmarkExecute_CreateNew(b *testing.B) {
 
 func BenchmarkExecute_UpdateExisting(b *testing.B) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
 	ctx := context.Background()
 
 	// Pre-populate with an aggregate
 	createCmd := mocks.CreateOrderCmd{ID: "order_base", Total: 100.0}
-	executor.Execute(ctx, createCmd, 1, false)
+	executor.Execute(ctx, createCmd, false)
 
 	for _, numEvents := range []int{1, 100, 1000} {
 		b.Run("events="+string(rune('0'+numEvents/100))+"_000", func(b *testing.B) {
@@ -50,7 +50,7 @@ func BenchmarkExecute_UpdateExisting(b *testing.B) {
 					ID:       "order_base",
 					NewState: order{ID: "order_base", Total: 150.0, Status: "Confirmed"},
 				}
-				_, _ = executor.Execute(ctx, cmd, int64(b.N), false)
+				_, _ = executor.Execute(ctx, cmd, false)
 			}
 		})
 	}

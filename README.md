@@ -57,6 +57,7 @@ import (
 
 ax, _ := asynx.New[Order]().
 	WithEventStore(store.New()).
+	WithSnapshotStore(store.NewSnapshots()).
 	Build()
 
 event, err := ax.Send(ctx, CreateOrderCmd{ID: "ORD-001", Total: 99.99})
@@ -132,7 +133,7 @@ ax.Subscribe("Order.*", func(ctx context.Context, event models.Event[Order]) {
 ```
 
 ### Store
-Persistent event backend. Bring your own (PostgreSQL, SQLite, DynamoDB) or use the bundled in-memory `store` package for testing.
+Persistent event backend (`models.Store`). Bring your own (PostgreSQL, SQLite, DynamoDB) or use the bundled in-memory `store` package for testing. A separate `models.SnapshotStore` — one upserted row per aggregate, holding only the newest snapshot — is also required; see [Bring Your Own Store](#bring-your-own-store).
 
 ### Bus
 Event publication after durably writing to store. In-process by default; can be replaced.
@@ -263,6 +264,7 @@ Handle breaking changes without data migration.
 ```go
 ax := asynx.New[Order]().
 	WithEventStore(store).
+	WithSnapshotStore(snapshotStore).
 	WithSchemaVersion(2).                    // Current schema version
 	WithUpcaster(1, upcastOrderV1toV2).      // v1→v2 transformation
 	WithUpcaster(2, upcastOrderV2toV3).      // v2→v3 transformation
@@ -293,7 +295,7 @@ func upcastOrderV1toV2(ctx context.Context, eventName string, patches []byte) ([
 | Method | Purpose | Default | Required |
 |--------|---------|---------|----------|
 | `WithEventStore(Store)` | Persistent event backend | — | **Yes** |
-| `WithSnapshotStore(Store)` | Dedicated snapshot backend | Use event store | No |
+| `WithSnapshotStore(SnapshotStore)` | Snapshot backend (one upserted row per aggregate) | — | **Yes** |
 | `WithBus(Bus[T])` | Custom event publisher | In-process channel bus | No |
 | `WithShardingOpts(opts)` | Worker concurrency | 8 shards, unbounded queue | No |
 | `WithSchemaVersion(int)` | Current aggregate schema | 1 | No |
@@ -312,6 +314,7 @@ opts := asynx.ShardingOpts{
 
 ax, _ := asynx.New[Order]().
 	WithEventStore(store).
+	WithSnapshotStore(snapshotStore).
 	WithShardingOpts(opts).
 	Build()
 ```
@@ -320,6 +323,7 @@ ax, _ := asynx.New[Order]().
 ```go
 ax, _ := asynx.New[Order]().
 	WithEventStore(store).
+	WithSnapshotStore(snapshotStore).
 	WithPanicHandler(func(ctx context.Context, event models.Event[Order], p any) {
 		// Custom panic handling: alert, log, etc.
 		log.Printf("Projection panicked on %s: %v", event.EventName, p)
@@ -344,6 +348,7 @@ ax, _ := asynx.New[Order]().
 ```go
 ax, _ := asynx.New[Order]().
 	WithEventStore(store).
+	WithSnapshotStore(snapshotStore).
 	WithPublishErrorHandler(func(ctx context.Context, event models.Event[Order], err error) {
 		// Event is already durably stored; this is observability only
 		log.Printf("publish failed for %s: %v", event.EventName, err)
@@ -353,8 +358,9 @@ ax, _ := asynx.New[Order]().
 
 ## Bring Your Own Store
 
-Implement the `Store` interface for any persistent backend (PostgreSQL, SQLite, DynamoDB, etc.):
+Two independent, required interfaces: `Store` for the event stream, and `SnapshotStore` for a single cached snapshot per aggregate. They are not interchangeable — `SnapshotStore` is not a second `Store` instance, and `WithSnapshotStore` does not default to the event store.
 
+**`Store`** — implement for any persistent backend (PostgreSQL, SQLite, DynamoDB, etc.):
 ```go
 type Store interface {
 	// Append must enforce (aggregateID, version) uniqueness
@@ -364,11 +370,8 @@ type Store interface {
 	// ReadFrom returns all events starting from version
 	ReadFrom(ctx context.Context, aggregateID string, fromVersion int64) ([][]byte, error)
 
-	// ReadRange returns up to count events (for snapshots)
+	// ReadRange returns up to count events starting from version
 	ReadRange(ctx context.Context, aggregateID string, fromVersion int64, count int64) ([][]byte, error)
-
-	// Count returns number of events since version
-	Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error)
 
 	// Delete removes all records for the aggregate (used by Forget).
 	// Must be idempotent — deleting a missing aggregate is not an error.
@@ -376,7 +379,24 @@ type Store interface {
 }
 ```
 
-**Implement it for PostgreSQL:**
+**`SnapshotStore`** — one upserted row per aggregate, never a versioned stream:
+```go
+type SnapshotStore interface {
+	// Put replaces the snapshot for aggregateID. Implementations MUST upsert —
+	// the primary key is aggregateID alone, never (aggregateID, version).
+	Put(ctx context.Context, aggregateID string, version int64, data []byte) error
+
+	// Get returns the stored snapshot. found == false means "never snapshotted"
+	// (normal, not an error) — the caller falls back to replaying from event 1.
+	Get(ctx context.Context, aggregateID string) (data []byte, found bool, err error)
+
+	// Delete removes the snapshot for the aggregate (used by Forget).
+	// Must be idempotent — deleting a missing aggregate is not an error.
+	Delete(ctx context.Context, aggregateID string) error
+}
+```
+
+**Implement `Store` for PostgreSQL:**
 ```go
 type PostgresStore struct {
 	db *sql.DB
@@ -409,26 +429,72 @@ func (s *PostgresStore) Delete(ctx context.Context, aggID string) error {
 }
 ```
 
-**Use your store:**
+**Implement `SnapshotStore` for PostgreSQL** — note the `ON CONFLICT` upsert, keyed on `aggregate_id` alone:
 ```go
-pgStore := &PostgresStore{db: pgConn}
+type PostgresSnapshotStore struct {
+	db *sql.DB
+}
+
+func (s *PostgresSnapshotStore) Put(ctx context.Context, aggID string, v int64, data []byte) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO snapshots (aggregate_id, version, data) VALUES ($1, $2, $3)
+		ON CONFLICT (aggregate_id) DO UPDATE
+			SET version = excluded.version, data = excluded.data
+			WHERE excluded.version > snapshots.version`,
+		aggID, v, data,
+	)
+	return err
+}
+
+func (s *PostgresSnapshotStore) Get(ctx context.Context, aggID string) ([]byte, bool, error) {
+	var data []byte
+	err := s.db.QueryRowContext(ctx,
+		"SELECT data FROM snapshots WHERE aggregate_id=$1", aggID,
+	).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	return data, err == nil, err
+}
+
+func (s *PostgresSnapshotStore) Delete(ctx context.Context, aggID string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM snapshots WHERE aggregate_id=$1", aggID)
+	return err
+}
+```
+
+**Use your stores:**
+```go
+eventStore := &PostgresStore{db: pgConn}
+snapshotStore := &PostgresSnapshotStore{db: pgConn}
 
 ax, _ := asynx.New[Order]().
-	WithEventStore(pgStore).
-	WithSnapshotStore(pgStore).  // Optional: separate snapshot backend
+	WithEventStore(eventStore).
+	WithSnapshotStore(snapshotStore).  // Required — Build() errors without it
 	Build()
 ```
 
-**For testing, use the bundled in-memory store:**
+**For testing, use the bundled in-memory stores:**
 ```go
 import "github.com/char2cs/asynx/store"
 
 ax, _ := asynx.New[Order]().
-	WithEventStore(store.New()).  // Fast, no persistence
+	WithEventStore(store.New()).            // Fast, no persistence
+	WithSnapshotStore(store.NewSnapshots()). // Fast, no persistence
 	Build()
 ```
 
-The in-memory store also supports one-shot failure injection for tests via `SetError(aggregateID, err)`.
+Both in-memory stores also support one-shot failure injection for tests via `SetError(aggregateID, err)`.
+
+See [docs/spec/store.md](./docs/spec/store.md) for the full `Store` and `SnapshotStore` contracts, including the SQL schema and error semantics.
+
+## Breaking changes in v0.8.0
+
+`WithSnapshotStore` now takes a `models.SnapshotStore`, not a `models.Store`, and is **required** — `Build()` returns `models.ErrMissingSnapshotStore` if it's not set. It no longer defaults to the event store.
+
+`Count` is removed from `models.Store` — it was dead API, unused since optimistic concurrency replaced the version-counting write path. Implementers should just delete their `Count` method. No data migration is needed: `Count` was read-only, so nothing stored changes; this is a compile-time-only update.
+
+Snapshots are a derived cache, so there is nothing to migrate: implement `models.SnapshotStore` against a table keyed by `aggregate_id` alone, drop the old snapshot table (or leave it orphaned), and pass the new store to `WithSnapshotStore`. After the switch, `Get` cold-replays correctly with no snapshot present — reading alone never writes one. The snapshot row reappears on the next command whose `ShouldSnapshot()` returns true (or a `Get` that triggers schema upcasting). Full details: [docs/spec/store.md § Migrating from v0.7.x](./docs/spec/store.md#migrating-from-v07x).
 
 ## Error Handling
 
@@ -444,6 +510,7 @@ All errors are sentinel values in the `models` package — match them with `erro
 | `ErrAlreadyShuttingDown` | `Shutdown()` called twice | Await the first call |
 | `ErrContextCancelled` | Context cancelled during operation | Check caller context |
 | `ErrMissingEventStore` | `Build()` without `WithEventStore()` | Provide an event store |
+| `ErrMissingSnapshotStore` | `Build()` without `WithSnapshotStore()` | Provide a snapshot store |
 | `ErrForgetFailed` | `Forget()` tombstoned the aggregate but deletion failed | Retry `Forget` |
 | `ErrEmptyPattern` | `Listen()`/`SubscribeWait()` with empty pattern | Provide a pattern |
 | `ErrNilHandler` | `Subscribe()` with nil handler | Provide a handler |

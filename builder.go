@@ -31,7 +31,7 @@ type ShardingOpts struct {
 
 type Builder[T any] struct {
 	eventStore          models.Store
-	snapshotStore       models.Store
+	snapshotStore       models.SnapshotStore
 	bus                 models.Bus[T]
 	shardingOpts        ShardingOpts
 	schemaVersion       int
@@ -57,10 +57,14 @@ func (b *Builder[T]) WithEventStore(
 	return b
 }
 
-// WithSnapshotStore sets a dedicated snapshot store.
-// Defaults to the event store when not provided.
+// WithSnapshotStore sets the snapshot store. Required — Build returns
+// ErrMissingSnapshotStore without it.
+//
+// This cannot default to the event store: snapshots are upserted cells keyed
+// by aggregateID (models.SnapshotStore), not append-only versioned streams
+// (models.Store).
 func (b *Builder[T]) WithSnapshotStore(
-	s models.Store,
+	s models.SnapshotStore,
 ) *Builder[T] {
 	b.snapshotStore = s
 	return b
@@ -126,15 +130,15 @@ func (b *Builder[T]) WithForgetHandler(fn models.ForgetHandler[T]) *Builder[T] {
 	return b
 }
 
-// Build requires WithEventStore; all other options have defaults.
+// Build requires WithEventStore and WithSnapshotStore; all other options have
+// defaults.
 func (b *Builder[T]) Build() (Asynx[T], error) {
 	if b.eventStore == nil {
 		return nil, models.ErrMissingEventStore
 	}
 
-	snapshotStore := b.snapshotStore
-	if snapshotStore == nil {
-		snapshotStore = b.eventStore
+	if b.snapshotStore == nil {
+		return nil, models.ErrMissingSnapshotStore
 	}
 
 	activeBus := b.bus
@@ -150,7 +154,7 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 
 	es := eventstore.New[T](
 		b.eventStore,
-		snapshotStore,
+		b.snapshotStore,
 		maps.Clone(b.upcasters),
 		b.schemaVersion,
 		b.corruptionHook,
