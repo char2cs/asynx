@@ -495,7 +495,7 @@ See [docs/spec/store.md](./docs/spec/store.md) for the full `Store` and `Snapsho
 
 `WithSnapshotStore` now takes a `models.SnapshotStore`, not a `models.Store`, and is **required** — `Build()` returns `models.ErrMissingSnapshotStore` if it's not set. It no longer defaults to the event store.
 
-Snapshots are a derived cache, so there is nothing to migrate: implement `models.SnapshotStore` against a table keyed by `aggregate_id` alone, drop the old snapshot table (or leave it orphaned), and pass the new store to `WithSnapshotStore`. The first `Get` per aggregate after the switch cold-replays its event stream once and writes a fresh snapshot row. Full details: [docs/spec/store.md § Migrating from v0.7.x](./docs/spec/store.md#migrating-from-v07x).
+Snapshots are a derived cache, so there is nothing to migrate: implement `models.SnapshotStore` against a table keyed by `aggregate_id` alone, drop the old snapshot table (or leave it orphaned), and pass the new store to `WithSnapshotStore`. After the switch, `Get` cold-replays correctly with no snapshot present — reading alone never writes one. The snapshot row reappears on the next command whose `ShouldSnapshot()` returns true (or a `Get` that triggers schema upcasting). Full details: [docs/spec/store.md § Migrating from v0.7.x](./docs/spec/store.md#migrating-from-v07x).
 
 ## Error Handling
 

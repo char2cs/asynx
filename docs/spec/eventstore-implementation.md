@@ -154,8 +154,10 @@ func (w *Writer[T]) Write(
 ### Replayer Sub-Module
 
 ```go
+// Replayer has no snapshot store — it never writes to any store. It only
+// applies patches and upcasts, and signals via hydrate's result whether
+// upcasting occurred so the caller (Reader) can decide to write a snapshot.
 type Replayer[T any] struct {
-    snapshotStore          SnapshotStore                  // For writing auto-snapshots (Put, not Append)
     stateDeserializer      func([]byte) (T, error)
     stateSerializer        func(T) ([]byte, error)        // For snapshot serialization
     patchApplier           *RFC6902Applier                // Applies RFC 6902 patches
@@ -178,22 +180,23 @@ func (r *Replayer[T]) Replay(
     fn func(Event[T]),
 ) error
 
-// Internal (used by Reader)
+// Internal (used by Reader). The result reports whether upcasting occurred
+// so Reader — not Replayer — can decide to write an auto-snapshot.
 func (r *Replayer[T]) hydrate(
     ctx context.Context,
     aggregateID string,
     seedState T,
     internalEvents []internalEvent,
-) (T, error)
+) (HydrateResult[T], error)
 ```
 
 **Invariants:**
-- Hydrate applies patches + upcasts + auto-snapshots (self-contained)
+- Hydrate applies patches + upcasts; it is read-only and never writes to any store
+- Hydrate signals whether upcasting occurred so the caller (Reader) can decide to write an auto-snapshot — Replayer itself never calls SnapshotStore.Put
 - Always upcasts events to currentSchemaVersion
 - Upcasters are chainable (1→2→3 → currentSchema)
 - Panics in upcasters propagate to caller (fail fast)
 - Replay() is read-only (yields upcasted public Event[T], never writes snapshots)
-- Hydrate() writes auto-snapshots when upcasting occurs (seals migration)
 
 ---
 
@@ -811,54 +814,58 @@ Next Get():
 
 Iterates events in version order, applies patches to hydrate state, upcasts to schema migrations, and supports manual projection recovery.
 
-### Hydration: Applying Patches, Upcasting, and Auto-Snapshots
+### Hydration: Applying Patches, Upcasting, and Signaling Upcast Occurred
 
-**Design Decision: Hydrate is self-contained — applies patches + upcasts + writes auto-snapshots.**
+**Design Decision: Hydrate applies patches and upcasts, but never writes to any store. It only reports whether upcasting occurred; the caller (Reader) decides whether to write an auto-snapshot.**
 
 ```go
+// HydrateResult carries the hydrated state plus enough information for the
+// caller to write an auto-snapshot. Replayer itself has no snapshot store
+// and calls no store method here — hydrate is read-only.
+type HydrateResult[T any] struct {
+    State       T
+    DidUpcast   bool   // true if any event's SchemaVersion < currentSchemaVersion
+    LastVersion int64  // version to snapshot at, valid when DidUpcast is true
+}
+
 func (r *Replayer[T]) hydrate(
     ctx context.Context,
     aggregateID string,
     seedState T,
     internalEvents []internalEvent,
-) (T, error) {
+) (HydrateResult[T], error) {
     current := seedState
-    upcasted := false  // Track if any upcasting happened
+    upcasted := false
     var lastVersion int64
 
-    for i, evt := range internalEvents {
-        // 1. Check if this event needs upcasting
+    for _, evt := range internalEvents {
+        // Check if this event needs upcasting
         if evt.SchemaVersion < r.currentSchemaVersion {
             upcasted = true
         }
 
-        // 2. Upcast internalEvent to current schema
+        // Upcast internalEvent to current schema
         upcastedEvt, err := r.upcastInternalEvent(evt)
         if err != nil {
-            return r.stateZeroValue, err
+            return HydrateResult[T]{}, err
         }
 
-        // 3. Apply patches to current state
+        // Apply patches to current state
         current, err = r.applyPatches(current, upcastedEvt.Patches)
         if err != nil {
-            return r.stateZeroValue, err
+            return HydrateResult[T]{}, err
         }
 
         lastVersion = evt.Version
     }
 
-    // 4. If upcasting happened, seal the migration by writing a snapshot
-    // (only if events were actually processed)
-    if upcasted && len(internalEvents) > 0 {
-        err := r.writeAutoSnapshot(ctx, aggregateID, lastVersion)
-        if err != nil {
-            // Auto-snapshot failed, but state is correct
-            // Propagate error (operator should investigate)
-            return r.stateZeroValue, err
-        }
+    result := HydrateResult[T]{State: current}
+    if upcasted {
+        result.DidUpcast = true
+        result.LastVersion = lastVersion
     }
 
-    return current, nil
+    return result, nil
 }
 
 func (r *Replayer[T]) applyPatches(state T, patches []jsonpatch.JsonPatchOperation) (T, error) {
@@ -883,80 +890,9 @@ func (r *Replayer[T]) applyPatches(state T, patches []jsonpatch.JsonPatchOperati
 
     return patchedState, nil
 }
-
-func (r *Replayer[T]) writeAutoSnapshot(
-    ctx context.Context,
-    aggregateID string,
-    version int64,
-) error {
-    // Serialize current state (but we don't have it here...)
-    // This is the challenge: Replayer needs to remember final state
-    // OR: This method should be called with final state
-}
 ```
 
-**Wait — there's an issue:** In hydrate, we apply patches sequentially but discard each intermediate state. To write auto-snapshot at the end, we need the final state. Let me refactor:
-
-```go
-func (r *Replayer[T]) hydrate(
-    ctx context.Context,
-    aggregateID string,
-    seedState T,
-    internalEvents []internalEvent,
-) (T, error) {
-    current := seedState
-    upcasted := false
-    var lastVersion int64
-
-    for _, evt := range internalEvents {
-        // Check if upcasting needed
-        if evt.SchemaVersion < r.currentSchemaVersion {
-            upcasted = true
-        }
-
-        // Upcast internalEvent
-        upcastedEvt, err := r.upcastInternalEvent(evt)
-        if err != nil {
-            return r.stateZeroValue, err
-        }
-
-        // Apply patches to state
-        current, err = r.applyPatches(current, upcastedEvt.Patches)
-        if err != nil {
-            return r.stateZeroValue, err
-        }
-
-        lastVersion = evt.Version
-    }
-
-    // If upcasting happened, seal the migration
-    if upcasted && len(internalEvents) > 0 {
-        // Write snapshot with final state
-        snapshot := snapshotBlob{
-            Version:       lastVersion,
-            SchemaVersion: r.currentSchemaVersion,
-            State:         r.serializeState(current),  // ← Need serializer
-        }
-
-        snapshotJSON, _ := json.Marshal(snapshot)
-        err := r.snapshotStore.Put(ctx, aggregateID, lastVersion, snapshotJSON)
-        if err != nil {
-            // Auto-snapshot failed (storage issue, not data corruption)
-            // State is correct and durable; snapshot is optimization only
-            // Return BOTH the error AND the hydrated state
-            // Caller (Reader.Get) decides whether to propagate error or succeed
-            return current, err
-        }
-    }
-
-    return current, nil
-}
-```
-
-**Better design:** Replayer should have:
-- `store` — for writing auto-snapshots
-- `stateSerializer` — for serializing final state to snapshot blob
-- The auto-snapshot write is automatic and transparent
+**Who actually writes the snapshot:** the caller. `Reader.Get` and `Reader.coldPath` inspect `result.DidUpcast` and, only when it is true, call `Reader.writeAutoSnapshot` (which serializes a snapshot blob and calls `SnapshotStore.Put`). This is a best-effort write — its failure is logged/ignored, not propagated, since the hydrated state is already correct and durable in the event store. A `Get` that takes the cold path but upcasts nothing (the common case right after a snapshot-table migration or deletion) returns correct state and writes no snapshot at all.
 
 ### Always-Upcast Design
 
@@ -1074,7 +1010,7 @@ Even though Replay uses upcastInternalEvent, it never writes a snapshot:
 instance.Replay(ctx, aggregateID, 0, 0, fn)  // No snapshots written
 ```
 
-Auto-snapshots are written only by `hydrate()` (called from Reader.Get/warmPath/coldPath).
+`hydrate()` never writes snapshots either — it only reports `DidUpcast` in its result. Auto-snapshots are written by `Reader.writeAutoSnapshot` (called from `Reader.Get`/`Reader.coldPath`) when that flag is true.
 
 ### Upcaster Chain: How It Works
 
@@ -1210,84 +1146,28 @@ err := instance.Replay(ctx, "order_123", 0, 0, func(e asynx.Event[Order]) {
 //   Operator sees it, investigates
 ```
 
-### Auto-Snapshot After Upcasting (in Hydrate, Not Replay)
+### Auto-Snapshot After Upcasting (in Reader, Not Replayer)
 
-When `hydrate()` loads old events and upcasts them, it automatically writes a snapshot to "seal the migration."
+When old events get upcasted during hydration, a snapshot should be written to "seal the migration" — but the write happens in **Reader**, not in Replayer. `hydrate()` only reports `DidUpcast`/`LastVersion` in its result (see the corrected listing above); it never touches the snapshot store itself.
 
-**Design Decision: Replayer.hydrate() auto-snapshots when upcasting occurs.**
-
-This is implemented directly in hydrate:
-
-```go
-func (r *Replayer[T]) hydrate(
-    ctx context.Context,
-    aggregateID string,
-    seedState T,
-    internalEvents []internalEvent,
-) (T, error) {
-    current := seedState
-    upcasted := false
-    var lastVersion int64
-
-    for _, evt := range internalEvents {
-        // Track if any event needed upcasting
-        if evt.SchemaVersion < r.currentSchemaVersion {
-            upcasted = true
-        }
-
-        // Upcast and apply patches
-        upcastedEvt, err := r.upcastInternalEvent(evt)
-        if err != nil {
-            return r.stateZeroValue, err
-        }
-
-        current, err = r.applyPatches(current, upcastedEvt.Patches)
-        if err != nil {
-            return r.stateZeroValue, err
-        }
-
-        lastVersion = evt.Version
-    }
-
-    // If upcasting happened, seal the migration by writing snapshot
-    if upcasted && len(internalEvents) > 0 {
-        snapshot := snapshotBlob{
-            Version:       lastVersion,
-            SchemaVersion: r.currentSchemaVersion,  // Current version
-            State:         r.serializeState(current),
-        }
-
-        snapshotJSON, _ := json.Marshal(snapshot)
-        err := r.snapshotStore.Put(ctx, aggregateID, lastVersion, snapshotJSON)
-        if err != nil {
-            // Auto-snapshot failed, but state is correct and durable
-            // Log and metric, but don't block hydration
-            // Next load may re-attempt snapshot write
-            log.Printf("auto-snapshot write failed for %s at version %d: %v",
-                aggregateID, lastVersion, err)
-            metrics.IncrementAutoSnapshotFailureCount()
-            // Continue anyway - state is already correct
-        }
-    }
-
-    return current, nil
-}
-```
+**Design Decision: Auto-snapshot writing lives in `Reader.writeAutoSnapshot`, gated on Replayer's `DidUpcast` signal.**
 
 **Rationale:**
 - First time an old event is loaded, it's upcasted (possibly expensive)
 - Snapshot "seals the migration" — subsequent loads use warm path (snapshot+delta)
 - Cost paid once per aggregate, then fast path forever
-- Happens automatically inside hydrate (transparent to caller)
+- The write is best-effort: on failure, Reader silently ignores the error, since the hydrated state is already correct and durable in the event store
 
 **Call Paths:**
-- **Reader.warmPath → hydrate()** — auto-snapshot after upcasting ✅
-- **Reader.coldPath → hydrate()** — auto-snapshot after upcasting ✅
+- **Reader.Get (warm path) → hydrate() → Reader.writeAutoSnapshot if DidUpcast** ✅
+- **Reader.coldPath → hydrate() → Reader.writeAutoSnapshot if DidUpcast** ✅
 - **Replay() → upcastInternalEvent()** — NO snapshot (read-only) ✅
+
+**Consequence:** a `Get` that takes the cold path but hydrates no event needing upcasting — e.g. right after a `SnapshotStore` migration, or after a snapshot row was deleted — returns correct state and writes **no** snapshot. That aggregate's snapshot row is only restored by a later `Get` that does trigger upcasting, or by the next command whose `ShouldSnapshot()` returns true.
 
 **Important: Replay() Never Auto-Snapshots**
 
-Replay() is for manual recovery and uses upcastInternalEvent, but it never calls hydrate (which writes snapshots). This keeps the snapshot stream clean — only explicit commands and Reader auto-migrations write snapshots.
+Replay() is for manual recovery and uses upcastInternalEvent, but it never calls hydrate or writes to any store. This keeps the snapshot table clean — only Reader's auto-migration path and explicit commands (via Writer) write snapshots.
 
 ---
 
@@ -1593,7 +1473,7 @@ The eventstore uses a **three-part architecture**:
 
 - **Reader** — Optimistic snapshot validation, warm/cold paths, no in-memory caching
 - **Writer** — RFC 6902 full-state diffs, snapshot on command demand
-- **Replayer** — Always-upcast events, hydrate applies patches, auto-snapshots on upcasting
+- **Replayer** — Always-upcast events, hydrate applies patches, signals upcasting to caller (never writes any store)
 
 ### Key Design Decisions Summary
 
@@ -1606,7 +1486,7 @@ The eventstore uses a **three-part architecture**:
 | Diff computation | Full-state RFC 6902 | Standard, deterministic, no reflection |
 | Empty diffs | Allowed and written | Idempotence markers, minimal cost |
 | Upcasting location | In Replayer, applies to internalEvent | Single point of logic, used by all paths |
-| Auto-snapshot trigger | Hydrate detects upcasting, writes directly | Self-contained, seals migration once |
+| Auto-snapshot trigger | Hydrate detects upcasting and reports it; Reader writes the snapshot | Replayer stays store-free; Reader owns all snapshot I/O |
 | Replay snapshots | Never (read-only) | Keeps the stored snapshot clean |
 | Snapshot persistence | Separate `SnapshotStore` interface (`Put`/`Get`/`Delete`), one upserted row per aggregate — not a `Store` stream | O(1) read/write regardless of snapshot history; `Store` keeps `events:id` naming, `SnapshotStore` needs no prefix |
 
@@ -1623,6 +1503,7 @@ Internal to eventstore:
 Reader:
   Deserializes internalEvent
   Calls Replayer.hydrate()
+  Writes an auto-snapshot (SnapshotStore.Put) when hydrate reports DidUpcast
   Returns aggregate state T
 
 Writer:
@@ -1635,7 +1516,7 @@ Replayer:
   Deserializes internalEvent
   Upcasts internalEvent (patches + metadata)
   Applies patches to state
-  Hydrate writes auto-snapshots
+  Hydrate reports DidUpcast/LastVersion — writes no store itself
   Replay yields public Event[T]
 ```
 

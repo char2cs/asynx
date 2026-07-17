@@ -663,8 +663,29 @@ So there is no data to migrate:
    returns `ErrMissingSnapshotStore` without it, and it no longer defaults to
    the event store.
 
-The first `Get` per aggregate cold-replays its event stream once and writes a
-single fresh snapshot row.
+Dropping the table is safe purely because snapshots are derived from events:
+`Get` cold-replays an aggregate's full event stream whenever no snapshot row
+is found, and cold replay always produces correct state.
+
+Reading does not, by itself, repair the snapshot table, though. `Get` writes
+an auto-snapshot only as a side effect of upcasting — when an event's
+`SchemaVersion` is older than the current one — not merely because it took
+the cold path. For an aggregate with no pending schema upcast, `Get` keeps
+cold-replaying on every call until something else writes a snapshot.
+
+The snapshot row is (re)written the next time either of these happens:
+
+- A **command** runs against the aggregate whose `ShouldSnapshot()` returns
+  `true` (`EventStore.Write` writes a snapshot after appending the event).
+- A **`Get`** replays at least one event that needs upcasting to the current
+  schema version.
+
+So the practical impact depends on how often each aggregate's commands set
+`ShouldSnapshot()` to `true`. An aggregate that snapshots on every command (or
+frequently) regains its snapshot on the very next write, with at most one
+extra cold replay in between. One that snapshots rarely (or never sets
+`ShouldSnapshot() == true`) will keep paying the cold-replay cost on every
+`Get` until it does. Correctness is unaffected either way — only read cost.
 
 ---
 
