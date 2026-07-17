@@ -249,7 +249,9 @@ Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error)
 ```
 
 **Purpose**
-Returns the number of entries at or after `fromVersion`, without transferring the entries themselves. The writer uses this to compute the next version to append at: it reads the trusted version from the latest snapshot (0 if none), then calls `Count(ctx, aggregateID, snapVersion+1)` and adds the result to get `nextVersion` — cheaper than reading and unmarshalling every delta blob just to count them.
+Returns the number of entries at or after `fromVersion`, without transferring the entries themselves.
+
+> **Note:** Asynx does not currently call `Count` on the write path. It used to: the writer derived the next version by reading the latest snapshot's version and counting the deltas after it. Since optimistic concurrency landed, `Reader.Load` returns the version alongside the state and the writer appends at `expectedVersion+1`, so no counting is needed. `Count` remains part of the `Store` contract for stores that want to expose it and for future use.
 
 **Parameters**
 - `ctx` — context for cancellation and timeouts

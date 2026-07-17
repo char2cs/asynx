@@ -463,7 +463,7 @@ Asynx owns stream naming, serialization, and all knowledge of what lives inside 
 
 **`ReadRange`** — returns up to `count` entries starting at `fromVersion`, inclusive, in strict ascending version order. Useful for bounded reads where the caller knows exactly how many entries it needs — e.g. `Exists()` calls `ReadRange(fromVersion=1, count=1)`.
 
-**`Count`** — returns the number of entries at or after `fromVersion` without transferring them. The writer uses it to compute the next version cheaply (native `COUNT(*)` rather than reading and discarding blobs).
+**`Count`** — returns the number of entries at or after `fromVersion` without transferring them (native `COUNT(*)` rather than reading and discarding blobs). Not called on the write path since optimistic concurrency landed: `Reader.Load` now returns the version with the state, so the writer no longer counts deltas to derive it.
 
 **`Delete`** — removes every entry for an aggregate. The one non-append-only method; it exists solely to back `Forget` (GDPR-style erasure). Must be idempotent.
 
