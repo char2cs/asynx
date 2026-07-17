@@ -30,16 +30,27 @@ type SnapshotStore interface {
 	// That guard is optional. Asynx tolerates last-write-wins: an older
 	// snapshot overwriting a newer one is safe, because the reader replays
 	// delta events from the stored version onward. It only costs extra replay.
-	Put(ctx context.Context, aggregateID string, version int64, data []byte) error
+	Put(
+		ctx context.Context,
+		aggregateID string,
+		version int64,
+		data []byte,
+	) error
 
 	// Get returns the stored snapshot for aggregateID.
 	//
 	// found is false when no snapshot exists. That is not an error — it is the
 	// normal state of an aggregate that has never been snapshotted, and callers
 	// respond by replaying from version 1.
-	Get(ctx context.Context, aggregateID string) (data []byte, found bool, err error)
+	Get(
+		ctx context.Context,
+		aggregateID string,
+	) (data []byte, found bool, err error)
 
 	// Delete removes the snapshot for aggregateID.
 	// Idempotent — deleting a non-existent aggregateID is not an error.
-	Delete(ctx context.Context, aggregateID string) error
+	Delete(
+		ctx context.Context,
+		aggregateID string,
+	) error
 }
