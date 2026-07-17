@@ -18,12 +18,12 @@ import (
 // Writer is stateless and safe for concurrent use.
 type Writer[T any] struct {
 	eventStore           asynxmd.Store
-	snapshotStore        asynxmd.Store
+	snapshotStore        asynxmd.SnapshotStore
 	currentSchemaVersion int
 }
 
 // New constructs a Writer.
-func New[T any](es, ss asynxmd.Store, schemaVersion int) *Writer[T] {
+func New[T any](es asynxmd.Store, ss asynxmd.SnapshotStore, schemaVersion int) *Writer[T] {
 	return &Writer[T]{
 		eventStore:           es,
 		snapshotStore:        ss,
@@ -113,7 +113,7 @@ func (w *Writer[T]) EventStore() asynxmd.Store {
 }
 
 // SnapshotStore returns the backing snapshot store.
-func (w *Writer[T]) SnapshotStore() asynxmd.Store {
+func (w *Writer[T]) SnapshotStore() asynxmd.SnapshotStore {
 	return w.snapshotStore
 }
 
@@ -127,5 +127,5 @@ func (w *Writer[T]) writeSnapshot(ctx context.Context, aggregateID string, versi
 	if err != nil {
 		return err
 	}
-	return w.snapshotStore.Append(ctx, "snapshots:"+aggregateID, version, snapJSON)
+	return w.snapshotStore.Put(ctx, aggregateID, version, snapJSON)
 }

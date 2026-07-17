@@ -62,10 +62,10 @@ func BenchmarkGet_WarmPath(b *testing.B) {
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			es := store.New()
-			ss := store.New()
+			ss := store.NewSnapshots()
 			ctx := context.Background()
 
-			if err := ss.Append(ctx, "snapshots:agg1", 1, benchSnapshotBlob(1, order{ID: "1", Status: "Pending", Total: 50})); err != nil {
+			if err := ss.Put(ctx, "agg1", 1, benchSnapshotBlob(1, order{ID: "1", Status: "Pending", Total: 50})); err != nil {
 				b.Fatal(err)
 			}
 
@@ -96,7 +96,7 @@ func BenchmarkGet_ColdPath(b *testing.B) {
 			es := store.New()
 			ctx := context.Background()
 			populateEvents(b, es, 1, tc.events)
-			r := newTestReader(es, store.New())
+			r := newTestReader(es, store.NewSnapshots())
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {

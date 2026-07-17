@@ -7,6 +7,10 @@
 //
 // All operations are stateless (no in-memory cache). Storage is the single
 // source of truth; operators may layer caching (Redis, Memcached) on top.
+//
+// Events and snapshots use different contracts: models.Store is an append-only
+// versioned stream, models.SnapshotStore is a single upserted cell per
+// aggregate holding only the newest snapshot.
 package eventstore
 
 import (
@@ -33,7 +37,7 @@ type EventStore[T any] struct {
 // silently fall back to the cold replay path.
 func New[T any](
 	eventStore asynxmd.Store,
-	snapshotStore asynxmd.Store,
+	snapshotStore asynxmd.SnapshotStore,
 	upcasters map[int]asynxmd.Upcaster,
 	schemaVersion int,
 	onCorruption func(error),
@@ -135,7 +139,7 @@ func (es *EventStore[T]) Delete(
 	if err := es.writer.EventStore().Delete(ctx, "events:"+aggregateID); err != nil {
 		return err
 	}
-	return es.writer.SnapshotStore().Delete(ctx, "snapshots:"+aggregateID)
+	return es.writer.SnapshotStore().Delete(ctx, aggregateID)
 }
 
 // Replay iterates events in version order, upcasting each to the current

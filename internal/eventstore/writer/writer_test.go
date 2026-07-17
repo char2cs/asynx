@@ -9,8 +9,8 @@ import (
 
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
 	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/store"
 	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/store"
 )
 
 type order = mocks.Order
@@ -19,7 +19,7 @@ var storageErr = errors.New("storage failure")
 
 // --- Helpers ---
 
-func newTestWriter(es, ss asynxmd.Store) *Writer[order] {
+func newTestWriter(es asynxmd.Store, ss asynxmd.SnapshotStore) *Writer[order] {
 	return New[order](es, ss, 1)
 }
 
@@ -27,7 +27,7 @@ func newTestWriter(es, ss asynxmd.Store) *Writer[order] {
 
 func TestWrite_AppendsEventAndReturnsPublicEvent(t *testing.T) {
 	es := store.New()
-	w := newTestWriter(es, store.New())
+	w := newTestWriter(es, store.NewSnapshots())
 
 	prev := order{Status: "Pending", Total: 50}
 	next := order{Status: "Shipped", Total: 50}
@@ -56,7 +56,7 @@ func TestWrite_AppendsEventAndReturnsPublicEvent(t *testing.T) {
 
 func TestWrite_PatchRecordsOnlyDiff(t *testing.T) {
 	es := store.New()
-	w := newTestWriter(es, store.New())
+	w := newTestWriter(es, store.NewSnapshots())
 
 	_, err := w.Write(context.Background(), "agg1", "Updated", 0,
 		order{Status: "Pending", Total: 50},
@@ -87,7 +87,7 @@ func TestWrite_PatchRecordsOnlyDiff(t *testing.T) {
 
 func TestWrite_VersionIncrements(t *testing.T) {
 	es := store.New()
-	w := newTestWriter(es, store.New())
+	w := newTestWriter(es, store.NewSnapshots())
 	ctx := context.Background()
 
 	for i := int64(1); i <= 3; i++ {
@@ -102,7 +102,7 @@ func TestWrite_VersionIncrements(t *testing.T) {
 }
 
 func TestWrite_AppendsAtExpectedVersionPlusOne(t *testing.T) {
-	w := newTestWriter(store.New(), store.New())
+	w := newTestWriter(store.New(), store.NewSnapshots())
 	ctx := context.Background()
 
 	// The writer no longer derives the version from storage; it appends at
@@ -118,7 +118,7 @@ func TestWrite_AppendsAtExpectedVersionPlusOne(t *testing.T) {
 
 func TestWrite_WritesSnapshot_WhenRequested(t *testing.T) {
 	es := store.New()
-	ss := store.New()
+	ss := store.NewSnapshots()
 	w := newTestWriter(es, ss)
 
 	_, err := w.Write(context.Background(), "agg1", "Created", 0, order{}, order{Status: "Active"}, true)
@@ -126,13 +126,13 @@ func TestWrite_WritesSnapshot_WhenRequested(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	snapBlobs, _ := ss.ReadFrom(context.Background(), "snapshots:agg1", 0)
-	if len(snapBlobs) == 0 {
+	snapBlob, found, _ := ss.Get(context.Background(), "agg1")
+	if !found {
 		t.Fatal("expected snapshot to be written")
 	}
 
 	var snap esmodels.SnapshotBlob[order]
-	if err := json.Unmarshal(snapBlobs[len(snapBlobs)-1], &snap); err != nil {
+	if err := json.Unmarshal(snapBlob, &snap); err != nil {
 		t.Fatalf("unmarshal snapshot: %v", err)
 	}
 	if snap.State.Status != "Active" {
@@ -141,7 +141,7 @@ func TestWrite_WritesSnapshot_WhenRequested(t *testing.T) {
 }
 
 func TestWrite_NoSnapshot_WhenNotRequested(t *testing.T) {
-	ss := store.New()
+	ss := store.NewSnapshots()
 	w := newTestWriter(store.New(), ss)
 
 	_, err := w.Write(context.Background(), "agg1", "Created", 0, order{}, order{}, false)
@@ -149,14 +149,14 @@ func TestWrite_NoSnapshot_WhenNotRequested(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	blobs, _ := ss.ReadFrom(context.Background(), "snapshots:agg1", 0)
-	if len(blobs) != 0 {
-		t.Errorf("expected no snapshot, got %d", len(blobs))
+	_, found, _ := ss.Get(context.Background(), "agg1")
+	if found {
+		t.Error("expected no snapshot, got one")
 	}
 }
 
 func TestWrite_EventStoreError_ReturnsError(t *testing.T) {
-	w := newTestWriter(&mocks.ErrStore{Err: storageErr}, store.New())
+	w := newTestWriter(&mocks.ErrStore{Err: storageErr}, store.NewSnapshots())
 
 	_, err := w.Write(context.Background(), "agg1", "Evt", 0, order{}, order{}, false)
 	if !errors.Is(err, storageErr) {
@@ -168,7 +168,7 @@ func TestWrite_EventStoreAppendError(t *testing.T) {
 	es := store.New()
 	es.SetError("events:agg1", storageErr)
 
-	w := newTestWriter(es, store.New())
+	w := newTestWriter(es, store.NewSnapshots())
 
 	_, err := w.Write(context.Background(), "agg1", "Evt", 0, order{}, order{Status: "x"}, false)
 	if !errors.Is(err, storageErr) {
@@ -177,8 +177,8 @@ func TestWrite_EventStoreAppendError(t *testing.T) {
 }
 
 func TestWrite_SnapshotStoreError_ReturnsError(t *testing.T) {
-	ss := store.New()
-	ss.SetError("snapshots:agg1", storageErr)
+	ss := store.NewSnapshots()
+	ss.SetError("agg1", storageErr)
 	w := newTestWriter(store.New(), ss)
 
 	_, err := w.Write(context.Background(), "agg1", "Evt", 0, order{}, order{}, true)
@@ -188,7 +188,7 @@ func TestWrite_SnapshotStoreError_ReturnsError(t *testing.T) {
 }
 
 func TestWrite_MarshalPreviousStateError(t *testing.T) {
-	w := New[mocks.ErrMarshal](store.New(), store.New(), 1)
+	w := New[mocks.ErrMarshal](store.New(), store.NewSnapshots(), 1)
 
 	_, err := w.Write(context.Background(), "agg1", "Evt", 0, mocks.ErrMarshal{}, mocks.ErrMarshal{}, false)
 	if err == nil {
@@ -197,7 +197,7 @@ func TestWrite_MarshalPreviousStateError(t *testing.T) {
 }
 
 func TestWrite_MarshalNewStateError(t *testing.T) {
-	w := New[*mocks.CountedMarshal](store.New(), store.New(), 1)
+	w := New[*mocks.CountedMarshal](store.New(), store.NewSnapshots(), 1)
 
 	cm := &mocks.CountedMarshal{FailAt: 2}
 	_, err := w.Write(context.Background(), "agg1", "Evt", 0, cm, cm, false)
@@ -209,7 +209,7 @@ func TestWrite_MarshalNewStateError(t *testing.T) {
 func TestWriteSnapshot_MarshalStateError(t *testing.T) {
 	// call 1+2: jsondiff.Compare marshals previousState and newState internally.
 	// call 3: json.Marshal(SnapshotBlob[T]{State: newState}) inside writeSnapshot.
-	w := New[*mocks.CountedMarshal](store.New(), store.New(), 1)
+	w := New[*mocks.CountedMarshal](store.New(), store.NewSnapshots(), 1)
 
 	cm := &mocks.CountedMarshal{FailAt: 3}
 	_, err := w.Write(context.Background(), "agg1", "Evt", 0, cm, cm, true)
@@ -220,7 +220,7 @@ func TestWriteSnapshot_MarshalStateError(t *testing.T) {
 
 func TestWriter_EventStore_ReturnsBacking(t *testing.T) {
 	es := store.New()
-	ss := store.New()
+	ss := store.NewSnapshots()
 	w := New[order](es, ss, 1)
 	if w.EventStore() != es {
 		t.Error("EventStore() did not return the event store passed to New")
@@ -229,9 +229,55 @@ func TestWriter_EventStore_ReturnsBacking(t *testing.T) {
 
 func TestWriter_SnapshotStore_ReturnsBacking(t *testing.T) {
 	es := store.New()
-	ss := store.New()
+	ss := store.NewSnapshots()
 	w := New[order](es, ss, 1)
 	if w.SnapshotStore() != ss {
 		t.Error("SnapshotStore() did not return the snapshot store passed to New")
 	}
 }
+
+// --- SnapshotStore: upsert semantics, version recovery ---
+
+func TestWriter_SnapshotIsUpsertedNotAccumulated(t *testing.T) {
+	ctx := context.Background()
+	events := store.New()
+	snaps := store.NewSnapshots()
+	w := New[order](events, snaps, 1)
+
+	prev := order{}
+	for i := range 20 {
+		next := order{ID: "agg-1", Total: float64(i), Status: "Pending"}
+		// expectedVersion is the version the state was loaded at; iteration i
+		// writes version i+1, so it validated against version i.
+		if _, err := w.Write(ctx, "agg-1", "OrderUpdated", int64(i), prev, next, true); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		prev = next
+	}
+
+	blob, found, err := snaps.Get(ctx, "agg-1")
+	if err != nil || !found {
+		t.Fatalf("get: found=%v err=%v", found, err)
+	}
+
+	var snap esmodels.SnapshotBlob[order]
+	if err := json.Unmarshal(blob, &snap); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if snap.Version != 20 {
+		t.Errorf("snapshot version = %d, want 20 — Put must hold only the newest", snap.Version)
+	}
+	if snap.State.Total != 19 {
+		t.Errorf("Total = %v, want 19", snap.State.Total)
+	}
+}
+
+// failingSnapshots returns err from every operation. Used where store.SnapshotMemory
+// cannot simulate a Get failure (SetError only schedules a one-shot Put failure).
+type failingSnapshots struct{ err error }
+
+func (f *failingSnapshots) Put(context.Context, string, int64, []byte) error { return f.err }
+func (f *failingSnapshots) Get(context.Context, string) ([]byte, bool, error) {
+	return nil, false, f.err
+}
+func (f *failingSnapshots) Delete(context.Context, string) error { return f.err }

@@ -50,7 +50,7 @@ func (c gatedCancel) EmitEvent(current *order) order {
 // B gets ErrPipelineFailed and exactly one cancel survives.
 func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(t *testing.T) {
 	s := store.New()
-	es := New[order](s, s, nil, 1, nil)
+	es := New[order](s, store.NewSnapshots(), nil, 1, nil)
 	ctx := context.Background()
 
 	if _, err := es.Write(ctx, mocks.CreateOrderCmd{ID: "X", Total: 100}); err != nil {
