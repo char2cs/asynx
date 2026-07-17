@@ -171,11 +171,18 @@ Guidelines proven out by SQL-backed implementations:
   is a nice-to-have, not a correctness requirement.** Asynx tolerates
   last-write-wins on snapshots — an older snapshot overwriting a newer one
   just costs extra replay on the next read, never incorrect state.
-- **Losing data is safe; corrupting data is not.** A `SnapshotStore` may be
+- **Losing data is safe; being unreachable is not.** A `SnapshotStore` may be
   backed by something without durability guarantees (Redis without
   persistence, an LRU cache) — every snapshot is rebuildable from the event
-  stream. What must not happen is `Get` returning a snapshot for the wrong
-  aggregate or a truncated blob without an error.
+  stream, so an empty or evicted store is fine: `Get` just reports
+  `found == false` and the reader cold-replays. But `Get`/`Put` returning an
+  *error* is a different story — asynx does not degrade that into cold
+  replay, it fails the whole `Get`/`Write` call (fails closed, so this is an
+  availability cost, not a correctness risk). So the snapshot store needs to
+  be as available as the event store, even though it doesn't need to be
+  durable. Separately, what must never happen regardless of backend is `Get`
+  returning a snapshot for the wrong aggregate or a truncated blob without an
+  error.
 
 ## Testing with a real asynx instance
 

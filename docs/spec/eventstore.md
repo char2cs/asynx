@@ -369,7 +369,11 @@ Commits a command's state transition to the eventstore and optionally to the sna
    - Return error
    - Caller retries or fails
    - For event stream: event may or may not have been written (depends on when failure occurred)
-   - For the snapshot store: less critical (snapshot is optional)
+   - For the snapshot store: only reached when `shouldSnapshot=true` — the
+     *write* is optional (not every command triggers one), but the
+     `SnapshotStore` itself is a required dependency, not optional
+     infrastructure, and a failed `Put` here still returns an error (see
+     case 2 above), it does not fail silently
 
 5. **JSON serialization error** — aggregate is not JSON-serializable
    - This is a programming error (aggregate struct is malformed)

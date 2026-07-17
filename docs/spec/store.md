@@ -596,6 +596,8 @@ type SnapshotStore interface {
 
 **Snapshots are a cache, not a source of truth.** Every snapshot can be rebuilt by replaying the aggregate's event stream from version 1. A `SnapshotStore` may therefore lose or discard data without affecting correctness — the only cost is a slower read next time. This is why `Get`'s `found == false` is a normal outcome, not an error: it just means the reader falls back to a full replay.
 
+This is a durability exemption, not an availability one. `Get`/`Put` returning an *error* is not the same as `found == false` — asynx does not treat a snapshot error as "no snapshot," it fails the whole `Get`/`Write` call outright (see [reader.go](../../internal/eventstore/reader/reader.go) and [writer.go](../../internal/eventstore/writer/writer.go)). So a `SnapshotStore` can be non-durable (evicted, wiped on restart) but must be as *available* as the event store — an outage there fails closed, costing availability, not correctness.
+
 **The optional monotonicity guard.** `version` is the aggregate version the snapshot represents. Asynx never reads it back through this interface — it exists so an implementation can persist it as a column for observability, or guard the upsert against writing an older snapshot over a newer one:
 
 ```sql
