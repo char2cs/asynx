@@ -272,12 +272,3 @@ func TestWriter_SnapshotIsUpsertedNotAccumulated(t *testing.T) {
 	}
 }
 
-// failingSnapshots returns err from every operation. Used where store.SnapshotMemory
-// cannot simulate a Get failure (SetError only schedules a one-shot Put failure).
-type failingSnapshots struct{ err error }
-
-func (f *failingSnapshots) Put(context.Context, string, int64, []byte) error { return f.err }
-func (f *failingSnapshots) Get(context.Context, string) ([]byte, bool, error) {
-	return nil, false, f.err
-}
-func (f *failingSnapshots) Delete(context.Context, string) error { return f.err }
