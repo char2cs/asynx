@@ -4,9 +4,9 @@
 
 The `models` package defines two independent persistence contracts: `Store` — the append-only **event** stream contract — and `SnapshotStore` — a single upserted cache cell per aggregate. This document covers `Store`. See [SnapshotStore](#snapshotstore) below for the other.
 
-`Store` accepts five operations: append a blob to a stream, read all entries from a version, read a bounded range, count entries from a version, and delete every entry for an aggregate.
+`Store` accepts four operations: append a blob to a stream, read all entries from a version, read a bounded range, and delete every entry for an aggregate.
 
-The Store interface is intentionally minimal — five methods, raw bytes, no opinions about serialization or schema. Asynx owns what goes into the blobs (RFC 6902 diffs); the developer owns how and where they are stored. Developers implement Store for whatever infrastructure they have: SQLite, Postgres, Redis, DynamoDB, cloud storage, etc.
+The Store interface is intentionally minimal — four methods, raw bytes, no opinions about serialization or schema. Asynx owns what goes into the blobs (RFC 6902 diffs); the developer owns how and where they are stored. Developers implement Store for whatever infrastructure they have: SQLite, Postgres, Redis, DynamoDB, cloud storage, etc.
 
 The critical responsibility is enforcing the `(aggregateID, version)` uniqueness constraint — this is the only coordination mechanism needed for multi-node consistency.
 
@@ -14,7 +14,7 @@ The critical responsibility is enforcing the `(aggregateID, version)` uniqueness
 
 ### `Store` Interface
 
-The event stream persistence contract. Append-only semantics for `Append`/`ReadFrom`/`ReadRange`/`Count`; `Delete` is the sole exception, added for forget-as-a-service (see [Known Limitations](#known-limitations)).
+The event stream persistence contract. Append-only semantics for `Append`/`ReadFrom`/`ReadRange`; `Delete` is the sole exception, added for forget-as-a-service (see [Known Limitations](#known-limitations)).
 
 ```go
 type Store interface {
@@ -26,9 +26,6 @@ type Store interface {
 
     // ReadRange returns up to count entries from the stream starting at fromVersion.
     ReadRange(ctx context.Context, aggregateID string, fromVersion int64, count int64) ([][]byte, error)
-
-    // Count returns the number of entries with version >= fromVersion.
-    Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error)
 
     // Delete removes all records for the given aggregateID.
     // Idempotent — deleting a non-existent aggregateID is not an error.
@@ -241,51 +238,6 @@ entries, _ := store.ReadRange(ctx, "order_123", 201, 100)
 
 ---
 
-### Method: `Count`
-
-**Signature**
-```go
-Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error)
-```
-
-**Purpose**
-Returns the number of entries at or after `fromVersion`, without transferring the entries themselves.
-
-> **Note:** Asynx does not currently call `Count` on the write path. It used to: the writer derived the next version by reading the latest snapshot's version and counting the deltas after it. Since optimistic concurrency landed, `Reader.Load` returns the version alongside the state and the writer appends at `expectedVersion+1`, so no counting is needed. `Count` remains part of the `Store` contract for stores that want to expose it and for future use.
-
-**Parameters**
-- `ctx` — context for cancellation and timeouts
-- `aggregateID` — the aggregate to count entries for (non-empty string)
-- `fromVersion` — inclusive starting version (>= 0)
-
-**Return Values**
-- `int64` — number of entries with version >= fromVersion (0 if the aggregate has no entries in that range)
-- `error` — non-nil if the count failed
-
-**Invariants**
-- **Equivalent to `len(ReadFrom(ctx, aggregateID, fromVersion))`** without materializing the blobs — implementations should use a native count query (`SELECT COUNT(*) ...`) rather than reading and discarding data
-- **No entries is not an error** — returns `(0, nil)`
-
-**Side Effects**
-- None — pure read operation
-
-**Error Handling**
-- Storage unavailable → return error
-- Context cancelled → return context error
-
-**Example**
-```go
-// SQL implementation:
-func (s *SQLStore) Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error) {
-    const query = `SELECT COUNT(*) FROM events WHERE aggregate_id = $1 AND version >= $2`
-    var n int64
-    err := s.db.QueryRowContext(ctx, query, aggregateID, fromVersion).Scan(&n)
-    return n, err
-}
-```
-
----
-
 ### Method: `Delete`
 
 **Signature**
@@ -329,7 +281,7 @@ func (s *SQLStore) Delete(ctx context.Context, aggregateID string) error {
 
 ## Stream Naming Convention
 
-Asynx owns stream naming. The developer's `Store` implementation receives `aggregateID` as-is for `Append`/`ReadFrom`/`ReadRange`/`Count`/`Delete` — but every call is prefixed by Asynx before it reaches the store:
+Asynx owns stream naming. The developer's `Store` implementation receives `aggregateID` as-is for `Append`/`ReadFrom`/`ReadRange`/`Delete` — but every call is prefixed by Asynx before it reaches the store:
 
 ```
 events:{aggregateID}  → append-only stream of RFC 6902 patches
@@ -389,7 +341,7 @@ The Store implementation must NOT:
 
 ### Error Semantics
 
-The Store returns `error` for all five methods. The caller (eventstore, processor) interprets specific errors:
+The Store returns `error` for all four methods. The caller (eventstore, processor) interprets specific errors:
 
 - Uniqueness violation on Append → `ErrPipelineFailed` (retry from scratch)
 - Context cancelled → `ErrContextCancelled`
@@ -413,7 +365,7 @@ Developers implementing a custom Store should provide their own in-memory test d
 
 ### Context Handling
 
-All five methods receive `ctx context.Context`. Implementations must:
+All four methods receive `ctx context.Context`. Implementations must:
 
 - Respect context cancellation — if `ctx.Done()` fires, stop the operation and return the context error
 - Respect context deadlines — if approaching deadline, return deadline exceeded error
@@ -524,13 +476,6 @@ func (s *SQLStore) ReadRange(ctx context.Context, aggregateID string, fromVersio
     }
 
     return results, rows.Err()
-}
-
-func (s *SQLStore) Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error) {
-    const query = `SELECT COUNT(*) FROM events WHERE aggregate_id = $1 AND version >= $2`
-    var n int64
-    err := s.db.QueryRowContext(ctx, query, aggregateID, fromVersion).Scan(&n)
-    return n, err
 }
 
 func (s *SQLStore) Delete(ctx context.Context, aggregateID string) error {
@@ -690,6 +635,11 @@ frequently) regains its snapshot on the very next write, with at most one
 extra cold replay in between. One that snapshots rarely (or never sets
 `ShouldSnapshot() == true`) will keep paying the cold-replay cost on every
 `Get` until it does. Correctness is unaffected either way — only read cost.
+
+`Count` is also removed from `models.Store` in this release — it was dead
+API, unused since optimistic concurrency replaced the version-counting write
+path. Delete your implementation's `Count` method; no data migration is
+needed, since it was read-only and never persisted anything.
 
 ---
 

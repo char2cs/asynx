@@ -373,9 +373,6 @@ type Store interface {
 	// ReadRange returns up to count events starting from version
 	ReadRange(ctx context.Context, aggregateID string, fromVersion int64, count int64) ([][]byte, error)
 
-	// Count returns number of events since version
-	Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error)
-
 	// Delete removes all records for the aggregate (used by Forget).
 	// Must be idempotent — deleting a missing aggregate is not an error.
 	Delete(ctx context.Context, aggregateID string) error
@@ -494,6 +491,8 @@ See [docs/spec/store.md](./docs/spec/store.md) for the full `Store` and `Snapsho
 ## Breaking changes in v0.8.0
 
 `WithSnapshotStore` now takes a `models.SnapshotStore`, not a `models.Store`, and is **required** — `Build()` returns `models.ErrMissingSnapshotStore` if it's not set. It no longer defaults to the event store.
+
+`Count` is removed from `models.Store` — it was dead API, unused since optimistic concurrency replaced the version-counting write path. Implementers should just delete their `Count` method. No data migration is needed: `Count` was read-only, so nothing stored changes; this is a compile-time-only update.
 
 Snapshots are a derived cache, so there is nothing to migrate: implement `models.SnapshotStore` against a table keyed by `aggregate_id` alone, drop the old snapshot table (or leave it orphaned), and pass the new store to `WithSnapshotStore`. After the switch, `Get` cold-replays correctly with no snapshot present — reading alone never writes one. The snapshot row reappears on the next command whose `ShouldSnapshot()` returns true (or a `Get` that triggers schema upcasting). Full details: [docs/spec/store.md § Migrating from v0.7.x](./docs/spec/store.md#migrating-from-v07x).
 

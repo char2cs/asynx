@@ -450,7 +450,6 @@ type Store interface {
     Append(ctx context.Context, aggregateID string, version int64, data []byte) error
     ReadFrom(ctx context.Context, aggregateID string, fromVersion int64) ([][]byte, error)
     ReadRange(ctx context.Context, aggregateID string, fromVersion int64, count int64) ([][]byte, error)
-    Count(ctx context.Context, aggregateID string, fromVersion int64) (int64, error)
     Delete(ctx context.Context, aggregateID string) error
 }
 ```
@@ -462,8 +461,6 @@ Asynx owns stream naming, serialization, and all knowledge of what lives inside 
 **`ReadFrom`** — returns all entries in the named stream starting at `fromVersion`, inclusive, through to the latest entry. Entries must be returned in strict ascending version order. Asynx derives each entry's version by incrementing from `fromVersion` — there must be no gaps.
 
 **`ReadRange`** — returns up to `count` entries starting at `fromVersion`, inclusive, in strict ascending version order. Useful for bounded reads where the caller knows exactly how many entries it needs — e.g. `Exists()` calls `ReadRange(fromVersion=1, count=1)`.
-
-**`Count`** — returns the number of entries at or after `fromVersion` without transferring them (native `COUNT(*)` rather than reading and discarding blobs). Not called on the write path since optimistic concurrency landed: `Reader.Load` now returns the version with the state, so the writer no longer counts deltas to derive it.
 
 **`Delete`** — removes every entry for an aggregate. The one non-append-only method; it exists solely to back `Forget` (GDPR-style erasure). Must be idempotent.
 

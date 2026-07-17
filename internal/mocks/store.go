@@ -37,10 +37,6 @@ func (s *Store) ReadRange(
 	return nil, nil
 }
 
-func (s *Store) Count(_ context.Context, _ string, _ int64) (int64, error) {
-	return 0, nil
-}
-
 func (s *Store) Delete(_ context.Context, _ string) error {
 	return nil
 }
@@ -58,10 +54,6 @@ func (e *ErrStore) ReadFrom(_ context.Context, _ string, _ int64) ([][]byte, err
 
 func (e *ErrStore) ReadRange(_ context.Context, _ string, _ int64, _ int64) ([][]byte, error) {
 	return nil, e.Err
-}
-
-func (e *ErrStore) Count(_ context.Context, _ string, _ int64) (int64, error) {
-	return 0, e.Err
 }
 
 func (e *ErrStore) Delete(_ context.Context, _ string) error {
@@ -83,10 +75,6 @@ func (c *CorruptBlobStore) ReadFrom(_ context.Context, _ string, _ int64) ([][]b
 
 func (c *CorruptBlobStore) ReadRange(_ context.Context, _ string, _ int64, _ int64) ([][]byte, error) {
 	return [][]byte{[]byte("!!!invalid")}, nil
-}
-
-func (c *CorruptBlobStore) Count(_ context.Context, _ string, _ int64) (int64, error) {
-	return 1, nil
 }
 
 func (c *CorruptBlobStore) Delete(_ context.Context, _ string) error {
