@@ -2,7 +2,7 @@
 //
 // CommandEnvelope[T] and CommandJob[T] are simple wrappers with no embedded logic.
 //   - CommandEnvelope[T] — Command + context + result channel; sender creates, waits on result
-//   - CommandJob[T]      — Envelope + version number; dispatcher creates, worker consumes
+//   - CommandJob[T]      — Wraps an envelope for the worker pool; dispatcher creates, worker consumes
 //
 // ResultChan is buffered size 1 to ensure non-blocking sends; slow readers are ignored.
 // All fields are immutable after creation.
