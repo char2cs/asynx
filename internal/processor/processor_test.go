@@ -21,7 +21,7 @@ type order = mocks.Order
 func newProcessor(t *testing.T, opts ...processor.ProcessorOpt[order]) *processor.Processor[order] {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
-	es := eventstore.New[order](memStore, memStore, nil, 1, nil)
+	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 	p := processor.New(es, channelBus, opts...)
 
@@ -274,7 +274,7 @@ func TestProcessor_AlreadyShuttingDown(t *testing.T) {
 func TestProcessor_EventPublishedToRealBus(t *testing.T) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
-	es := eventstore.New[order](memStore, memStore, nil, 1, nil)
+	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 	p := processor.New(es, channelBus)
 	defer p.Shutdown(context.Background())
@@ -307,7 +307,7 @@ func TestProcessor_EventPublishedToRealBus(t *testing.T) {
 func TestProcessor_PublishUsesDetachedContext(t *testing.T) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
-	es := eventstore.New[order](memStore, memStore, nil, 1, nil)
+	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 	p := processor.New(es, channelBus)
 	defer p.Shutdown(context.Background())
@@ -341,7 +341,7 @@ func TestProcessor_PublishUsesDetachedContext(t *testing.T) {
 func TestProcessor_WithWorkersPerShard(t *testing.T) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
-	es := eventstore.New[order](memStore, memStore, nil, 1, nil)
+	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 	p := processor.New(
 		es,
@@ -363,7 +363,7 @@ func TestProcessor_WithWorkersPerShard(t *testing.T) {
 func TestProcessor_WithQueueDepth(t *testing.T) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
-	es := eventstore.New[order](memStore, memStore, nil, 1, nil)
+	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 	p := processor.New(
 		es,
@@ -384,7 +384,7 @@ func TestProcessor_WithQueueDepth(t *testing.T) {
 func TestProcessor_NegativeOptionsIgnored(t *testing.T) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
-	es := eventstore.New[order](memStore, memStore, nil, 1, nil)
+	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 	// Negative values should be ignored, using defaults
 	p := processor.New(
@@ -435,7 +435,7 @@ func TestProcessor_SendContextCancelledDuringWait(t *testing.T) {
 func TestProcessor_ShutdownWithBus(t *testing.T) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
-	es := eventstore.New[order](memStore, memStore, nil, 1, nil)
+	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 	p := processor.New(es, channelBus)
 
@@ -472,7 +472,7 @@ func TestProcessor_SendToMultipleShards(t *testing.T) {
 
 func TestProcessor_ShutdownWithoutBus(t *testing.T) {
 	memStore := store.New()
-	es := eventstore.New[order](memStore, memStore, nil, 1, nil)
+	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 	p := processor.New(es, nil) // No bus
 
@@ -509,7 +509,7 @@ func TestProcessor_ContextCancelledEarlyCheck(t *testing.T) {
 func TestProcessor_AllSendBranches(t *testing.T) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
-	es := eventstore.New[order](memStore, memStore, nil, 1, nil)
+	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 	p := processor.New(es, channelBus, processor.WithShards[order](8), processor.WithQueueDepth[order](100))
 	defer p.Shutdown(context.Background())
@@ -552,7 +552,7 @@ func TestProcessor_AllSendBranches(t *testing.T) {
 func TestProcessor_ShutdownClosesPool(t *testing.T) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
-	es := eventstore.New[order](memStore, memStore, nil, 1, nil)
+	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 	p := processor.New(es, channelBus)
 
@@ -600,7 +600,7 @@ func TestProcessor_SendWait_Success(t *testing.T) {
 func TestProcessor_SendWait_HandlersCompleteBeforeReturn(t *testing.T) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
-	es := eventstore.New[order](memStore, memStore, nil, 1, nil)
+	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 	p := processor.New(es, channelBus)
 	defer p.Shutdown(context.Background())
@@ -679,7 +679,7 @@ func TestWithPublishErrorHandler_IsInvokedOnPublishError(t *testing.T) {
 	}
 
 	proc := processor.New(
-		eventstore.New[mocks.Order](s, s, nil, 1, nil),
+		eventstore.New[mocks.Order](s, store.NewSnapshots(), nil, 1, nil),
 		&mocks.ErrBus[mocks.Order]{Err: errors.New("bus down")},
 		processor.WithPublishErrorHandler[mocks.Order](handler),
 	)
@@ -728,7 +728,7 @@ func TestProcessor_SendWait_ContextCancelledWhileWaiting(t *testing.T) {
 	memStore := store.New()
 	unblockCh := make(chan struct{})
 	bb := &blockingTestBus[order]{unblockCh: unblockCh}
-	es := eventstore.New[order](memStore, memStore, nil, 1, nil)
+	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 	p := processor.New(es, bb, processor.WithShards[order](1))
 	t.Cleanup(func() {

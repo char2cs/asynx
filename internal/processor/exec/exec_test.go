@@ -19,7 +19,7 @@ type order = mocks.Order
 
 func TestExecute_SuccessNewAggregate(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
 	ctx := context.Background()
@@ -41,7 +41,7 @@ func TestExecute_SuccessNewAggregate(t *testing.T) {
 
 func TestExecute_SuccessExistingAggregate(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
 	ctx := context.Background()
@@ -72,7 +72,7 @@ func TestExecute_SuccessExistingAggregate(t *testing.T) {
 
 func TestExecute_ValidationFailure(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
 	ctx := context.Background()
@@ -91,7 +91,7 @@ func TestExecute_ValidationFailure(t *testing.T) {
 
 func TestExecute_ValidationFailureNoWrite(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
 	ctx := context.Background()
@@ -114,7 +114,7 @@ func TestExecute_ValidationFailureNoWrite(t *testing.T) {
 
 func TestExecute_GetStorageError(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
 	ctx := context.Background()
@@ -131,7 +131,7 @@ func TestExecute_GetStorageError(t *testing.T) {
 
 func TestExecute_WriteStorageError(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
 	ctx := context.Background()
@@ -148,7 +148,7 @@ func TestExecute_WriteStorageError(t *testing.T) {
 
 func TestExecute_NilDispatcherNoPanic(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
 	ctx := context.Background()
@@ -162,7 +162,7 @@ func TestExecute_NilDispatcherNoPanic(t *testing.T) {
 
 func TestExecute_DispatchCalledAsync(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 
 	trackBus := &recordingBus[order]{}
 	d := dispatcher.New[order](trackBus)
@@ -189,7 +189,7 @@ func TestExecute_DispatchCalledAsync(t *testing.T) {
 
 func TestExecute_ContextAlreadyCancelled(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -205,7 +205,7 @@ func TestExecute_ContextAlreadyCancelled(t *testing.T) {
 
 func TestExecute_AggregateStatePreserved(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
 	ctx := context.Background()
@@ -242,7 +242,7 @@ func TestExecute_AggregateStatePreserved(t *testing.T) {
 
 func TestExecute_ReturnsEvent(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
 	ctx := context.Background()
@@ -262,7 +262,7 @@ func TestExecute_ReturnsEvent(t *testing.T) {
 
 func TestExecute_WaitHandlersTrue_HandlersDoneBeforeReturn(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 
 	var handlerDone atomic.Bool
 	callbackBus := &recordingBus[order]{
@@ -290,7 +290,7 @@ func TestExecute_WaitHandlersTrue_HandlersDoneBeforeReturn(t *testing.T) {
 
 func TestExecute_WaitHandlersFalse_DispatchCalled(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	trackBus := &recordingBus[order]{}
 	d := dispatcher.New[order](trackBus)
 	t.Cleanup(func() { d.Close(context.Background()) })
@@ -316,7 +316,7 @@ func TestExecute_WaitHandlersFalse_DispatchCalled(t *testing.T) {
 
 func TestExecute_WaitHandlers_NilDispatcherNoPanic(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
 	ctx := context.Background()
@@ -333,7 +333,7 @@ func TestExecute_WaitHandlers_NilDispatcherNoPanic(t *testing.T) {
 
 func TestPublishErrorHandler_CalledOnPublishError(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 
 	publishErr := errors.New("bus error")
 	errBus := &recordingBus[order]{
@@ -379,7 +379,7 @@ func TestPublishErrorHandler_CalledOnPublishError(t *testing.T) {
 
 func TestPublishErrorHandler_NotCalledOnSuccess(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 
 	successBus := &recordingBus[order]{}
 
@@ -406,7 +406,7 @@ func TestPublishErrorHandler_NotCalledOnSuccess(t *testing.T) {
 
 func TestPublishErrorHandler_NilHandlerDoesNotPanic(t *testing.T) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 
 	errBus := &recordingBus[order]{
 		publishSyncErr: errors.New("bus error"),

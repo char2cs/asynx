@@ -25,7 +25,7 @@ func run(ctx context.Context) error {
 
 	ax, err := asynx.New[domain.Order]().
 		WithEventStore(memoryStore).
-		WithSnapshotStore(memoryStore).
+		WithSnapshotStore(store.NewSnapshots()).
 		WithShardingOpts(asynx.ShardingOpts{
 			Shards: 4,
 		}).

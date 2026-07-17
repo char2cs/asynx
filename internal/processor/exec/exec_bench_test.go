@@ -11,7 +11,7 @@ import (
 
 func BenchmarkExecute_CreateNew(b *testing.B) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
 	ctx := context.Background()
@@ -31,7 +31,7 @@ func BenchmarkExecute_CreateNew(b *testing.B) {
 
 func BenchmarkExecute_UpdateExisting(b *testing.B) {
 	s := store.New()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
 	ctx := context.Background()

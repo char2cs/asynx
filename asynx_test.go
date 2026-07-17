@@ -30,6 +30,7 @@ func newInstance(t *testing.T) asynx.Asynx[mocks.Order] {
 	s := store.New()
 	instance, err := asynx.New[mocks.Order]().
 		WithEventStore(s).
+		WithSnapshotStore(store.NewSnapshots()).
 		WithShardingOpts(asynx.ShardingOpts{Shards: 8, QueueDepth: 1000}).
 		Build()
 	if err != nil {
@@ -278,6 +279,7 @@ func TestShardingOpts_CustomShards(t *testing.T) {
 	s := store.New()
 	instance, err := asynx.New[mocks.Order]().
 		WithEventStore(s).
+		WithSnapshotStore(store.NewSnapshots()).
 		WithShardingOpts(asynx.ShardingOpts{Shards: 16, QueueDepth: 100}).
 		Build()
 	if err != nil {
@@ -676,7 +678,7 @@ func TestForget_CallsOnForgetHandler_WithLastState(t *testing.T) {
 
 func TestForget_AfterShutdown_ReturnsErrShuttingDown(t *testing.T) {
 	s := store.New()
-	instance, err := asynx.New[mocks.Order]().WithEventStore(s).Build()
+	instance, err := asynx.New[mocks.Order]().WithEventStore(s).WithSnapshotStore(store.NewSnapshots()).Build()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -736,6 +738,7 @@ func TestForget_DeleteFails_ReturnsErrForgetFailed(t *testing.T) {
 
 	instance, err := asynx.New[mocks.Order]().
 		WithEventStore(backing).
+		WithSnapshotStore(store.NewSnapshots()).
 		WithShardingOpts(asynx.ShardingOpts{Shards: 8, QueueDepth: 1000}).
 		Build()
 	if err != nil {
@@ -1096,7 +1099,7 @@ func TestListen_SubscribeError_ReturnsError(t *testing.T) {
 	// If the bus is closed (after Shutdown), Subscribe returns ErrBusClosed.
 	// Listen must propagate that error and return nil channel.
 	s := store.New()
-	instance, err := asynx.New[mocks.Order]().WithEventStore(s).Build()
+	instance, err := asynx.New[mocks.Order]().WithEventStore(s).WithSnapshotStore(store.NewSnapshots()).Build()
 	if err != nil {
 		t.Fatal(err)
 	}
