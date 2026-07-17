@@ -34,6 +34,11 @@ func TestSnapshotReadDoesNotScaleWithHistory(t *testing.T) {
 	if snaps.GetCalls != 1 {
 		t.Errorf("Get calls = %d, want 1", snaps.GetCalls)
 	}
+	// 512 is a backstop, not a precise contract: a single order snapshot blob
+	// is ~88 bytes, so this leaves ~5.8x headroom for mocks.Order (a fixture
+	// shared across this package) to grow a field or two without tripping the
+	// guard. An O(n) regression re-reads all n=500 snapshots and would
+	// overshoot this ceiling by ~500x, so headroom this size never masks it.
 	if snaps.GetBytes > 512 {
 		t.Errorf("bytes read = %d after %d snapshots, want one blob — read must not scale with history", snaps.GetBytes, n)
 	}
@@ -67,6 +72,20 @@ func TestWritePaysConstantSnapshotCost(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
+	// EventStore.Write reads the snapshot store exactly twice: once via
+	// es.Get -> Reader.Get, once via Writer.nextVersion. Assert the count
+	// directly (size-independent) rather than relying on the byte ceiling
+	// alone, so this guard can't pass or fail for reasons unrelated to the
+	// bug it targets.
+	if snaps.GetCalls != 2 {
+		t.Errorf("Get calls = %d, want 2", snaps.GetCalls)
+	}
+	// 1024 is a backstop, not a precise contract: two order snapshot blobs
+	// read here are ~88 bytes each (~176 total), leaving ~5.8x headroom for
+	// mocks.Order (a fixture shared across this package) to grow a field or
+	// two without tripping the guard. An O(n) regression re-reads all n=500
+	// snapshots per Get call and would overshoot this ceiling by orders of
+	// magnitude, so headroom this size never masks it.
 	if snaps.GetBytes > 1024 {
 		t.Errorf("bytes read = %d on one Write after %d snapshots, want ~2 blobs", snaps.GetBytes, n)
 	}
