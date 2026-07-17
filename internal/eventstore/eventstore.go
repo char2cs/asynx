@@ -30,8 +30,9 @@ type EventStore[T any] struct {
 	replayer *replayer.Replayer[T]
 }
 
-// New builds a fully-configured EventStore. eventStore and snapshotStore may
-// be the same Store instance. upcasters maps SchemaVersion → migration func;
+// New builds a fully-configured EventStore. eventStore and snapshotStore use
+// different contracts (models.Store vs models.SnapshotStore) and cannot be
+// the same instance. upcasters maps SchemaVersion → migration func;
 // schemaVersion is the current (target) schema version for all new events.
 // onCorruption is called when a snapshot cannot be deserialized; pass nil to
 // silently fall back to the cold replay path.

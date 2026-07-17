@@ -570,6 +570,42 @@ func TestReader_SnapshotStoreErrorPropagates(t *testing.T) {
 	}
 }
 
+func TestReader_StaleSnapshotStillHydratesCorrectState(t *testing.T) {
+	ctx := context.Background()
+	events := store.New()
+	snaps := store.NewSnapshots()
+	rep := replayer.New[order](events, nil, 1, order{})
+	r := New[order](events, snaps, rep, 1, order{}, nil)
+
+	// Write events 1..5, each advancing Total and the last advancing Status.
+	writeEvent(t, events, "agg-1", 1, order{ID: "agg-1", Total: 1, Status: "Pending"})
+	writeEvent(t, events, "agg-1", 2, order{ID: "agg-1", Total: 2, Status: "Pending"})
+	writeEvent(t, events, "agg-1", 3, order{ID: "agg-1", Total: 3, Status: "Pending"})
+	writeEvent(t, events, "agg-1", 4, order{ID: "agg-1", Total: 4, Status: "Pending"})
+	writeEvent(t, events, "agg-1", 5, order{ID: "agg-1", Total: 5, Status: "Shipped"})
+
+	// Simulate last-write-wins landing a STALE snapshot (v2) after newer
+	// events already exist — impossible under the old append-only Store
+	// design (reading all and taking the last always got the highest
+	// version), but explicitly tolerated by models.SnapshotStore.Put.
+	stale := makeSnapshotBlob(t, 2, 1, order{ID: "agg-1", Total: 2, Status: "Pending"})
+	if err := snaps.Put(ctx, "agg-1", 2, stale); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	got, err := r.Get(ctx, "agg-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	// The reader must replay events 3, 4, 5 on top of the stale v2 snapshot
+	// state to reach the CURRENT state, not return the stale v2 state.
+	want := order{ID: "agg-1", Total: 5, Status: "Shipped"}
+	if got != want {
+		t.Errorf("Get with stale snapshot = %+v, want %+v (current state, not stale v2 snapshot)", got, want)
+	}
+}
+
 // failingSnapshots returns err from Get.
 type failingSnapshots struct{ err error }
 
