@@ -20,12 +20,13 @@ func run(ctx context.Context) error {
 	fmt.Println("Step 1: Building asynx instance...")
 
 	// Create using the public asynx.Builder API
-	// Use asynx's built-in in-memory store for this example
-	memoryStore := store.New()
+	// Use asynx's built-in in-memory stores for this example
+	eventStore := store.New()
+	snapshotStore := store.NewSnapshots()
 
 	ax, err := asynx.New[domain.Order]().
-		WithEventStore(memoryStore).
-		WithSnapshotStore(store.NewSnapshots()).
+		WithEventStore(eventStore).
+		WithSnapshotStore(snapshotStore).
 		WithShardingOpts(asynx.ShardingOpts{
 			Shards: 4,
 		}).
