@@ -15,6 +15,7 @@ func newBenchInstance(b *testing.B) asynx.Asynx[mocks.Order] {
 	s := store.New()
 	instance, err := asynx.New[mocks.Order]().
 		WithEventStore(s).
+		WithSnapshotStore(store.NewSnapshots()).
 		WithShardingOpts(asynx.ShardingOpts{Shards: 8, QueueDepth: 10000}).
 		Build()
 	if err != nil {

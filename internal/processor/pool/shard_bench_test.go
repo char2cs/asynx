@@ -17,7 +17,7 @@ import (
 func BenchmarkShard_SingleWorker(b *testing.B) {
 	s := store.New()
 	bu := bus.NewChannelBus[order]()
-	es := eventstore.New[order](s, s, nil, 1, nil)
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	d := dispatcher.New[order](bu)
 	defer d.Close(context.Background())
 	executor := exec.New(es, d)
@@ -48,7 +48,7 @@ func BenchmarkShard_MultipleWorkers(b *testing.B) {
 		b.Run("workers="+string(rune('0'+workers)), func(b *testing.B) {
 			s := store.New()
 			bu := bus.NewChannelBus[order]()
-			es := eventstore.New[order](s, s, nil, 1, nil)
+			es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 			d := dispatcher.New[order](bu)
 			defer d.Close(context.Background())
 			executor := exec.New(es, d)

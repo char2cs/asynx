@@ -1,44 +1,34 @@
 // Package pool implements shard-based concurrent command execution.
 //
 // Shard[T] encapsulates dispatcher and worker coordination for a subset of aggregates.
-// The dispatcher (dispatchCommands) is the sole owner of versionMap and decides
-// command dispatch order. Workers (workerLoop) execute commands in parallel.
-//   - incrementVersion   — Called by dispatcher during dispatch; always increments
-//   - decrementVersion   — Called by dispatcher on corrections; only when workersPerShard == 1
-//   - executeJob         — Called by workers; sends corrections only when workersPerShard == 1
-//   - sendResult         — Non-blocking result send; drops if receiver gone
+// The dispatcher (dispatchCommands) reads envelopes off commandChan and hands
+// them to the worker pool via jobQueue. Workers (workerLoop) execute commands.
+//   - executeJob   — Called by workers; runs the command and sends the result
+//   - sendResult   — Non-blocking result send; drops if receiver gone
 //
 // Consistent hashing at the router routes each aggregate to a fixed shard and
-// dispatcher, so versions are assigned in arrival order. Execution is serial per
-// aggregate only when workersPerShard is 1; with more workers the dispatched
-// commands run in parallel across the shard's worker pool.
+// dispatcher, so commands for one aggregate are dispatched in arrival order.
+// Execution is serial per aggregate only when workersPerShard is 1; with more
+// workers the dispatched commands run in parallel across the shard's worker
+// pool. The event version is assigned by the event store on write (optimistic
+// concurrency), not by the shard.
 package pool
 
 import (
-	"errors"
 	"sync"
 
 	"github.com/char2cs/asynx/internal/processor/exec"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
 )
 
 type Shard[T any] struct {
-	id              int
-	commandChan     chan *models.CommandEnvelope[T]
-	jobQueue        chan *models.CommandJob[T]
-	stopChan        chan struct{}
-	stopMu          sync.Mutex
-	stopClosed      bool
-	versionMap      map[string]int64
-	versionMutex    sync.Mutex
-	correctionChan  chan *versionCorrection
-	workersPerShard int
-	onDispatched    func()
-}
-
-type versionCorrection struct {
-	aggregateID string
+	id           int
+	commandChan  chan *models.CommandEnvelope[T]
+	jobQueue     chan *models.CommandJob[T]
+	stopChan     chan struct{}
+	stopMu       sync.Mutex
+	stopClosed   bool
+	onDispatched func()
 }
 
 func newShard[T any](
@@ -47,13 +37,10 @@ func newShard[T any](
 	workersPerShard int,
 ) *Shard[T] {
 	return &Shard[T]{
-		id:              id,
-		commandChan:     make(chan *models.CommandEnvelope[T], queueDepth),
-		jobQueue:        make(chan *models.CommandJob[T], max(workersPerShard, queueDepth)),
-		stopChan:        make(chan struct{}),
-		versionMap:      make(map[string]int64),
-		correctionChan:  make(chan *versionCorrection, 1),
-		workersPerShard: workersPerShard,
+		id:          id,
+		commandChan: make(chan *models.CommandEnvelope[T], queueDepth),
+		jobQueue:    make(chan *models.CommandJob[T], max(workersPerShard, queueDepth)),
+		stopChan:    make(chan struct{}),
 	}
 }
 
@@ -88,11 +75,6 @@ func (s *Shard[T]) handleDispatch() bool {
 		if s.onDispatched != nil {
 			s.onDispatched()
 		}
-
-	case correction := <-s.correctionChan:
-		if s.workersPerShard == 1 {
-			s.decrementVersion(correction.aggregateID)
-		}
 	}
 
 	return false
@@ -101,34 +83,9 @@ func (s *Shard[T]) handleDispatch() bool {
 func (s *Shard[T]) dispatchJob(
 	envelope *models.CommandEnvelope[T],
 ) {
-	aggregateID := envelope.Cmd.AggregateID()
-	nextVersion := s.incrementVersion(aggregateID)
-
 	s.jobQueue <- &models.CommandJob[T]{
-		Envelope:    envelope,
-		NextVersion: nextVersion,
+		Envelope: envelope,
 	}
-}
-
-func (s *Shard[T]) incrementVersion(
-	aggregateID string,
-) int64 {
-	s.versionMutex.Lock()
-	defer s.versionMutex.Unlock()
-
-	nextVersion := s.versionMap[aggregateID] + 1
-	s.versionMap[aggregateID] = nextVersion
-
-	return nextVersion
-}
-
-func (s *Shard[T]) decrementVersion(
-	aggregateID string,
-) {
-	s.versionMutex.Lock()
-	defer s.versionMutex.Unlock()
-
-	s.versionMap[aggregateID]--
 }
 
 func (s *Shard[T]) workerLoop(
@@ -152,29 +109,13 @@ func (s *Shard[T]) executeJob(
 	event, err := executor.Execute(
 		job.Envelope.Ctx,
 		job.Envelope.Cmd,
-		job.NextVersion,
 		job.Envelope.WaitHandlers,
 	)
-
-	if errors.Is(err, asynxmd.ErrValidation) && s.workersPerShard == 1 {
-		s.sendCorrection(
-			job.Envelope.Cmd.AggregateID(),
-		)
-	}
 
 	s.sendResult(
 		job.Envelope.ResultChan,
 		models.CommandResult[T]{Event: event, Err: err},
 	)
-}
-
-func (s *Shard[T]) sendCorrection(
-	aggregateID string,
-) {
-	select {
-	case s.correctionChan <- &versionCorrection{aggregateID: aggregateID}:
-	default:
-	}
 }
 
 func (s *Shard[T]) sendResult(

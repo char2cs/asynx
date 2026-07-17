@@ -36,7 +36,6 @@ func New[T any](
 func (e *CommandExecutor[T]) Execute(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
-	nextVersion int64, // reserved for future optimistic-locking enforcement
 	waitHandlers bool,
 ) (asynxmd.Event[T], error) {
 	event, err := e.es.Write(ctx, cmd)

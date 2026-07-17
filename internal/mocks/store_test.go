@@ -34,14 +34,6 @@ func TestStore_ReadRange_ReturnsNilNil(t *testing.T) {
 	}
 }
 
-func TestStore_Count_ReturnsZeroNil(t *testing.T) {
-	s := &Store{}
-	n, err := s.Count(context.Background(), "agg1", 1)
-	if err != nil || n != 0 {
-		t.Errorf("Count = (%d, %v), want (0, nil)", n, err)
-	}
-}
-
 // --- ErrStore ---
 
 func TestErrStore_Append_ReturnsErr(t *testing.T) {
@@ -67,15 +59,6 @@ func TestErrStore_ReadRange_ReturnsErr(t *testing.T) {
 	_, err := es.ReadRange(context.Background(), "agg1", 1, 10)
 	if !errors.Is(err, sentinel) {
 		t.Errorf("ReadRange = %v, want sentinel", err)
-	}
-}
-
-func TestErrStore_Count_ReturnsErr(t *testing.T) {
-	sentinel := errors.New("fail")
-	es := &ErrStore{Err: sentinel}
-	_, err := es.Count(context.Background(), "agg1", 1)
-	if !errors.Is(err, sentinel) {
-		t.Errorf("Count = %v, want sentinel", err)
 	}
 }
 
@@ -117,17 +100,98 @@ func TestCorruptBlobStore_ReadRange_ReturnsCorruptBlob(t *testing.T) {
 	}
 }
 
-func TestCorruptBlobStore_Count_ReturnsOne(t *testing.T) {
-	c := &CorruptBlobStore{}
-	n, err := c.Count(context.Background(), "agg1", 1)
-	if err != nil {
-		t.Fatalf("Count error: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("Count = %d, want 1 (presence signal)", n)
-	}
-}
-
 func TestCorruptBlobStore_ImplementsStore(t *testing.T) {
 	var _ asynxmd.Store = &CorruptBlobStore{}
 }
+
+// --- SnapshotStore (no-op) ---
+
+func TestSnapshotStore_Put_ReturnsNil(t *testing.T) {
+	s := &SnapshotStore{}
+	if err := s.Put(context.Background(), "agg1", 1, []byte("data")); err != nil {
+		t.Errorf("Put = %v, want nil", err)
+	}
+}
+
+func TestSnapshotStore_Get_ReturnsNotFound(t *testing.T) {
+	s := &SnapshotStore{}
+	data, found, err := s.Get(context.Background(), "agg1")
+	if data != nil || found || err != nil {
+		t.Errorf("Get = (%v, %v, %v), want (nil, false, nil)", data, found, err)
+	}
+}
+
+func TestSnapshotStore_Delete_ReturnsNil(t *testing.T) {
+	s := &SnapshotStore{}
+	if err := s.Delete(context.Background(), "agg1"); err != nil {
+		t.Errorf("Delete = %v, want nil", err)
+	}
+}
+
+func TestSnapshotStore_ImplementsSnapshotStore(t *testing.T) {
+	var _ asynxmd.SnapshotStore = &SnapshotStore{}
+}
+
+// --- CountingSnapshotStore ---
+
+func TestCountingSnapshotStore_CountsGetCallsAndBytes(t *testing.T) {
+	ctx := context.Background()
+	c := &CountingSnapshotStore{Inner: &SnapshotStore{}}
+
+	if err := c.Put(ctx, "agg1", 1, []byte("data")); err != nil {
+		t.Fatalf("Put = %v, want nil", err)
+	}
+	if _, _, err := c.Get(ctx, "agg1"); err != nil {
+		t.Fatalf("Get = %v, want nil", err)
+	}
+	if err := c.Delete(ctx, "agg1"); err != nil {
+		t.Fatalf("Delete = %v, want nil", err)
+	}
+
+	// The no-op inner returns no data, so bytes stay 0 but the call is counted.
+	if c.GetCalls != 1 {
+		t.Errorf("GetCalls = %d, want 1", c.GetCalls)
+	}
+	if c.GetBytes != 0 {
+		t.Errorf("GetBytes = %d, want 0 (no-op inner returns no data)", c.GetBytes)
+	}
+}
+
+func TestCountingSnapshotStore_GetBytesTracksReturnedData(t *testing.T) {
+	ctx := context.Background()
+	inner := &recordingSnapshotStore{blob: []byte("hello")}
+	c := &CountingSnapshotStore{Inner: inner}
+
+	if _, _, err := c.Get(ctx, "agg1"); err != nil {
+		t.Fatalf("Get = %v", err)
+	}
+	if c.GetBytes != 5 {
+		t.Errorf("GetBytes = %d, want 5", c.GetBytes)
+	}
+}
+
+func TestCountingSnapshotStore_Reset(t *testing.T) {
+	ctx := context.Background()
+	c := &CountingSnapshotStore{Inner: &recordingSnapshotStore{blob: []byte("x")}}
+
+	_, _, _ = c.Get(ctx, "agg1")
+	c.Reset()
+
+	if c.GetCalls != 0 || c.GetBytes != 0 {
+		t.Errorf("after Reset: GetCalls=%d GetBytes=%d, want 0 0", c.GetCalls, c.GetBytes)
+	}
+}
+
+func TestCountingSnapshotStore_ImplementsSnapshotStore(t *testing.T) {
+	var _ asynxmd.SnapshotStore = &CountingSnapshotStore{}
+}
+
+// recordingSnapshotStore is a minimal SnapshotStore whose Get returns a fixed
+// blob, so CountingSnapshotStore's byte tallying can be exercised.
+type recordingSnapshotStore struct{ blob []byte }
+
+func (r *recordingSnapshotStore) Put(context.Context, string, int64, []byte) error { return nil }
+func (r *recordingSnapshotStore) Get(context.Context, string) ([]byte, bool, error) {
+	return r.blob, true, nil
+}
+func (r *recordingSnapshotStore) Delete(context.Context, string) error { return nil }

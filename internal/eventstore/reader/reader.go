@@ -17,7 +17,7 @@ import (
 // Reader is stateless and safe for concurrent use.
 type Reader[T any] struct {
 	eventStore           asynxmd.Store
-	snapshotStore        asynxmd.Store
+	snapshotStore        asynxmd.SnapshotStore
 	replayer             *replayer.Replayer[T]
 	stateZeroValue       T
 	onCorruption         func(error)
@@ -27,7 +27,8 @@ type Reader[T any] struct {
 // New constructs a Reader. onCorruption is called when a snapshot cannot be
 // deserialized; pass nil to silently fall back to the cold path.
 func New[T any](
-	es, ss asynxmd.Store,
+	es asynxmd.Store,
+	ss asynxmd.SnapshotStore,
 	rep *replayer.Replayer[T],
 	schemaVersion int,
 	zeroValue T,
@@ -69,17 +70,17 @@ func (r *Reader[T]) Load(
 	ctx context.Context,
 	aggregateID string,
 ) (T, int64, error) {
-	snapshotBlobs, err := r.snapshotStore.ReadFrom(ctx, "snapshots:"+aggregateID, 0)
+	snapBlob, found, err := r.snapshotStore.Get(ctx, aggregateID)
 	if err != nil {
 		return r.stateZeroValue, 0, err
 	}
 
-	if len(snapshotBlobs) == 0 {
+	if !found {
 		return r.coldPath(ctx, aggregateID)
 	}
 
 	var snap esmodels.SnapshotBlob[T]
-	if err := json.Unmarshal(snapshotBlobs[len(snapshotBlobs)-1], &snap); err != nil {
+	if err := json.Unmarshal(snapBlob, &snap); err != nil {
 		if r.onCorruption != nil {
 			r.onCorruption(err)
 		}
@@ -166,7 +167,7 @@ func (r *Reader[T]) writeAutoSnapshot(
 	if err != nil {
 		return err
 	}
-	return r.snapshotStore.Append(ctx, "snapshots:"+aggregateID, version, snapJSON)
+	return r.snapshotStore.Put(ctx, aggregateID, version, snapJSON)
 }
 
 // Exists returns true if the aggregate has at least one event.
