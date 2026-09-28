@@ -930,6 +930,44 @@ func TestListen_CountAutoCloses(t *testing.T) {
 	}
 }
 
+// Regression: unsub() called by the consumer the moment it receives the last
+// event must not double-close the channel while the handler is still inside
+// its critical section (between the send and its own close).
+func TestListen_UnsubRightAfterLastEventDoesNotDoubleClose(t *testing.T) {
+	instance := newInstance(t)
+
+	const workers, iterations = 8, 250
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for n := 0; n < iterations; n++ {
+				ch, unsub, err := instance.Listen("OrderCreated", 1)
+				if err != nil {
+					t.Errorf("Listen: %v", err)
+					return
+				}
+				id := fmt.Sprintf("listen-race-%d-%d", w, n)
+				if _, err := instance.Send(context.Background(), mocks.CreateOrderCmd{ID: id, Total: 10}); err != nil {
+					t.Errorf("Send: %v", err)
+					unsub()
+					return
+				}
+				select {
+				case <-ch:
+					unsub() // consumer returns immediately, like SubscribeWait's defer
+				case <-time.After(5 * time.Second):
+					t.Error("timed out waiting for event")
+					unsub()
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+}
+
 func TestListen_BufferedChannelPreservesEvent(t *testing.T) {
 	instance := newInstance(t)
 
