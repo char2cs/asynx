@@ -196,9 +196,17 @@ func (i *asynxImpl[T]) Listen(
 		delivered int64 // protected by sendMu; counts actual sends so close fires after exactly count deliveries
 		closed    atomic.Bool
 		// sendMu serialises send+close in bounded mode so close(ch) never races with ch<-evt.
-		sendMu sync.Mutex
-		subID  string
+		sendMu   sync.Mutex
+		chClosed bool // protected by sendMu; closed means "unsubbed or finished", chClosed means ch itself is closed
+		subID    string
 	)
+	// closeCh closes ch exactly once. Caller must hold sendMu.
+	closeCh := func() {
+		if !chClosed {
+			chClosed = true
+			close(ch)
+		}
+	}
 	done := make(chan struct{})       // signals unbounded-mode handlers to abort on unsub
 	subIDReady := make(chan struct{}) // closed once subID is written; gates auto-unsub goroutine
 
@@ -236,7 +244,7 @@ func (i *asynxImpl[T]) Listen(
 		isLast := delivered == int64(count)
 		if isLast {
 			closed.Store(true)
-			close(ch)
+			closeCh()
 		}
 		sendMu.Unlock()
 
@@ -269,7 +277,7 @@ func (i *asynxImpl[T]) Listen(
 		// past the fast-path closed.Load() check cannot send to a closed channel.
 		if count > 0 {
 			sendMu.Lock()
-			close(ch)
+			closeCh()
 			sendMu.Unlock()
 		}
 	}
