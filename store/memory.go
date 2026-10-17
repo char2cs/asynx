@@ -73,25 +73,39 @@ func New() Memory {
 	}
 }
 
-func (s *memory) SetError(streamID string, err error) {
+func (s *memory) SetError(
+	streamID string,
+	err error,
+) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.errOn[streamID] = err
 }
 
-func (s *memory) Append(ctx context.Context, streamID string, version int64, data []byte) error {
+func (s *memory) Append(
+	ctx context.Context,
+	streamID string,
+	version int64,
+	data []byte,
+) error {
 	return s.Atomically(ctx, func(tx models.Tx) error {
 		return tx.Append(ctx, streamID, version, data)
 	})
 }
 
-func (s *memory) Delete(ctx context.Context, streamID string) error {
+func (s *memory) Delete(
+	ctx context.Context,
+	streamID string,
+) error {
 	return s.Atomically(ctx, func(tx models.Tx) error {
 		return tx.DeleteStream(ctx, streamID)
 	})
 }
 
-func (s *memory) Atomically(ctx context.Context, fn func(tx models.Tx) error) (err error) {
+func (s *memory) Atomically(
+	ctx context.Context,
+	fn func(tx models.Tx) error,
+) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -114,7 +128,11 @@ func (s *memory) Atomically(ctx context.Context, fn func(tx models.Tx) error) (e
 	return nil
 }
 
-func (s *memory) ReadFrom(ctx context.Context, streamID string, fromVersion int64) ([][]byte, error) {
+func (s *memory) ReadFrom(
+	ctx context.Context,
+	streamID string,
+	fromVersion int64,
+) ([][]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -125,7 +143,12 @@ func (s *memory) ReadFrom(ctx context.Context, streamID string, fromVersion int6
 	return toBlobs(s.entriesFrom(streamID, fromVersion)), nil
 }
 
-func (s *memory) ReadRange(ctx context.Context, streamID string, fromVersion, count int64) ([][]byte, error) {
+func (s *memory) ReadRange(
+	ctx context.Context,
+	streamID string,
+	fromVersion int64,
+	count int64,
+) ([][]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -141,7 +164,10 @@ func (s *memory) ReadRange(ctx context.Context, streamID string, fromVersion, co
 	return toBlobs(entries), nil
 }
 
-func (s *memory) GetReceipt(ctx context.Context, commandID string) (models.Receipt, bool, error) {
+func (s *memory) GetReceipt(
+	ctx context.Context,
+	commandID string,
+) (models.Receipt, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return models.Receipt{}, false, err
 	}
@@ -153,7 +179,10 @@ func (s *memory) GetReceipt(ctx context.Context, commandID string) (models.Recei
 	return r, ok, nil
 }
 
-func (s *memory) PendingDeliveries(ctx context.Context, limit int) ([]models.Delivery, error) {
+func (s *memory) PendingDeliveries(
+	ctx context.Context,
+	limit int,
+) ([]models.Delivery, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -165,7 +194,11 @@ func (s *memory) PendingDeliveries(ctx context.Context, limit int) ([]models.Del
 	return slices.Clone(s.deliveries[:n]), nil
 }
 
-func (s *memory) AckDelivery(ctx context.Context, aggregateID string, version int64) error {
+func (s *memory) AckDelivery(
+	ctx context.Context,
+	aggregateID string,
+	version int64,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -182,7 +215,10 @@ func (s *memory) AckDelivery(ctx context.Context, aggregateID string, version in
 	return nil
 }
 
-func (s *memory) entriesFrom(streamID string, fromVersion int64) []entry {
+func (s *memory) entriesFrom(
+	streamID string,
+	fromVersion int64,
+) []entry {
 	entries := s.streams[streamID]
 	if len(entries) == 0 {
 		return nil
@@ -218,7 +254,12 @@ func (t *memoryTx) rollback() {
 
 func (t *memoryTx) Native() any { return nil }
 
-func (t *memoryTx) Append(ctx context.Context, streamID string, version int64, data []byte) error {
+func (t *memoryTx) Append(
+	ctx context.Context,
+	streamID string,
+	version int64,
+	data []byte,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -252,7 +293,10 @@ func (t *memoryTx) Append(ctx context.Context, streamID string, version int64, d
 	return nil
 }
 
-func (t *memoryTx) DeleteStream(ctx context.Context, streamID string) error {
+func (t *memoryTx) DeleteStream(
+	ctx context.Context,
+	streamID string,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -269,7 +313,10 @@ func (t *memoryTx) DeleteStream(ctx context.Context, streamID string) error {
 	return nil
 }
 
-func (t *memoryTx) DropDeliveries(ctx context.Context, aggregateID string) error {
+func (t *memoryTx) DropDeliveries(
+	ctx context.Context,
+	aggregateID string,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -286,7 +333,11 @@ func (t *memoryTx) DropDeliveries(ctx context.Context, aggregateID string) error
 	return nil
 }
 
-func (t *memoryTx) PutReceipt(ctx context.Context, commandID string, r models.Receipt) error {
+func (t *memoryTx) PutReceipt(
+	ctx context.Context,
+	commandID string,
+	r models.Receipt,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -303,7 +354,11 @@ func (t *memoryTx) PutReceipt(ctx context.Context, commandID string, r models.Re
 	return nil
 }
 
-func (t *memoryTx) EnqueueDelivery(ctx context.Context, aggregateID string, version int64) error {
+func (t *memoryTx) EnqueueDelivery(
+	ctx context.Context,
+	aggregateID string,
+	version int64,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

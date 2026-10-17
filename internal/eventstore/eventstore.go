@@ -175,7 +175,10 @@ func (es *EventStore[T]) WriteTx(
 }
 
 // Snapshot upserts the snapshot for evt.Aggregate at evt.Version.
-func (es *EventStore[T]) Snapshot(ctx context.Context, evt asynxmd.Event[T]) error {
+func (es *EventStore[T]) Snapshot(
+	ctx context.Context,
+	evt asynxmd.Event[T],
+) error {
 	return es.writer.Snapshot(ctx, evt)
 }
 
@@ -185,7 +188,10 @@ func (es *EventStore[T]) Store() asynxmd.Store {
 }
 
 // DeleteSnapshot removes the aggregate's snapshot. Idempotent.
-func (es *EventStore[T]) DeleteSnapshot(ctx context.Context, aggregateID string) error {
+func (es *EventStore[T]) DeleteSnapshot(
+	ctx context.Context,
+	aggregateID string,
+) error {
 	return es.writer.SnapshotStore().Delete(ctx, aggregateID)
 }
 

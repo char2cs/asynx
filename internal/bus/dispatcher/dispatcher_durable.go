@@ -40,7 +40,10 @@ func WithDeliveryPanicHandler[T any](fn asynxmd.PanicHandler[T]) Opt[T] {
 
 // WithRetryBackoff sets the delay before a failed durable delivery is retried:
 // it starts at initial and doubles up to max. Non-positive values are ignored.
-func WithRetryBackoff[T any](initial, max time.Duration) Opt[T] {
+func WithRetryBackoff[T any](
+	initial time.Duration,
+	max time.Duration,
+) Opt[T] {
 	return func(d *Dispatcher[T]) {
 		if initial > 0 {
 			d.retryInitial = initial
@@ -167,30 +170,22 @@ func (d *Dispatcher[T]) isHalted(agg string) bool {
 // returns nil on success. Otherwise the delivery stays pending and the error
 // says why it stopped: ErrDispatcherClosed (interrupted), or ErrDeliveryParked
 // (attempts exhausted, or the aggregate was parked meanwhile).
-func (d *Dispatcher[T]) deliverDurable(agg string, q *aggregateQueue[T], halt <-chan struct{}, job *dispatchJob[T]) error {
-	var pending []DurableSub[T]
-	for _, sub := range d.durable {
-		if job.forget || sub.Match(job.event.EventName) {
-			pending = append(pending, sub)
-		}
-	}
+func (d *Dispatcher[T]) deliverDurable(
+	agg string,
+	q *aggregateQueue[T],
+	halt <-chan struct{},
+	job *dispatchJob[T],
+) error {
+	pending := d.subscribersFor(job)
 
-	// Parked or superseded while the live subscribers ran: nothing is attempted.
-	if job.ack != nil && closed(halt) {
+	isAlreadyHalted := job.ack != nil && closed(halt)
+	if isAlreadyHalted {
 		return asynxmd.ErrDeliveryParked
 	}
 
 	backoff := d.retryInitial
 	for attempt := 1; len(pending) > 0; attempt++ {
-		var failed []DurableSub[T]
-		var lastErr error
-		for _, sub := range pending {
-			if err := d.runDurable(job, sub, attempt); err != nil {
-				d.reportDeliveryError(job, err, attempt)
-				failed = append(failed, sub)
-				lastErr = err
-			}
-		}
+		failed, lastErr := d.attempt(job, pending, attempt)
 		if attempt == 1 {
 			job.markSettled()
 		}
@@ -204,8 +199,6 @@ func (d *Dispatcher[T]) deliverDurable(agg string, q *aggregateQueue[T], halt <-
 
 		select {
 		case <-d.quit:
-			// Parking the aggregate keeps its later durable events from being
-			// delivered past this one while the dispatcher drains.
 			d.parkIfCurrent(agg, q, halt, job)
 			return asynxmd.ErrDispatcherClosed
 		case <-halt:
@@ -215,6 +208,37 @@ func (d *Dispatcher[T]) deliverDurable(agg string, q *aggregateQueue[T], halt <-
 		backoff = min(backoff*2, d.retryMax)
 	}
 	return nil
+}
+
+// subscribersFor lists the durable subscribers that receive the job: all of
+// them for a deletion marker, the matching ones otherwise.
+func (d *Dispatcher[T]) subscribersFor(job *dispatchJob[T]) (subs []DurableSub[T]) {
+	for _, sub := range d.durable {
+		receives := job.forget || sub.Match(job.event.EventName)
+		if receives {
+			subs = append(subs, sub)
+		}
+	}
+	return subs
+}
+
+// attempt runs each pending subscriber once and returns the ones that failed,
+// with the last error.
+func (d *Dispatcher[T]) attempt(
+	job *dispatchJob[T],
+	pending []DurableSub[T],
+	attempt int,
+) (failed []DurableSub[T], lastErr error) {
+	for _, sub := range pending {
+		err := d.runDurable(job, sub, attempt)
+		if err == nil {
+			continue
+		}
+		d.reportDeliveryError(job, err, attempt)
+		failed = append(failed, sub)
+		lastErr = err
+	}
+	return failed, lastErr
 }
 
 // giveUp ends a delivery whose attempts ran out. A dead-letter handler may
@@ -228,15 +252,11 @@ func (d *Dispatcher[T]) giveUp(
 	last error,
 	attempt int,
 ) error {
-	// A park or supersede since the first attempt already decided this
-	// delivery's fate; parking again would outlive the erase that ended it.
 	select {
 	case <-halt:
 		return asynxmd.ErrDeliveryParked
 	default:
 	}
-	// A deletion marker is never dead-lettered: Forget must not erase until
-	// every subscriber has really taken it.
 	if job.ack != nil && !job.forget && d.deadLetter != nil {
 		err := d.callDeadLetter(job, last)
 		if err == nil {
@@ -255,7 +275,12 @@ func (d *Dispatcher[T]) giveUp(
 // parkIfCurrent parks the aggregate of a durable job, unless the halt it started
 // under has been closed since: then someone else has already settled the
 // aggregate's fate (a Forget superseded the delivery, a Resume lifted the park).
-func (d *Dispatcher[T]) parkIfCurrent(agg string, q *aggregateQueue[T], halt <-chan struct{}, job *dispatchJob[T]) {
+func (d *Dispatcher[T]) parkIfCurrent(
+	agg string,
+	q *aggregateQueue[T],
+	halt <-chan struct{},
+	job *dispatchJob[T],
+) {
 	if job.ack == nil {
 		return
 	}
@@ -269,7 +294,10 @@ func (d *Dispatcher[T]) parkIfCurrent(agg string, q *aggregateQueue[T], halt <-c
 	d.haltLocked(agg)
 }
 
-func (d *Dispatcher[T]) callDeadLetter(job *dispatchJob[T], last error) (err error) {
+func (d *Dispatcher[T]) callDeadLetter(
+	job *dispatchJob[T],
+	last error,
+) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("%w: %v", asynxmd.ErrHandlerPanic, r)
@@ -281,7 +309,11 @@ func (d *Dispatcher[T]) callDeadLetter(job *dispatchJob[T], last error) (err err
 // reportDeliveryError calls the delivery error handler. A panic in it is
 // swallowed: it must not abandon the delivery, which would release the hold on
 // the aggregate's later events.
-func (d *Dispatcher[T]) reportDeliveryError(job *dispatchJob[T], err error, attempt int) {
+func (d *Dispatcher[T]) reportDeliveryError(
+	job *dispatchJob[T],
+	err error,
+	attempt int,
+) {
 	if d.onDeliveryError == nil {
 		return
 	}
@@ -289,18 +321,29 @@ func (d *Dispatcher[T]) reportDeliveryError(job *dispatchJob[T], err error, atte
 	d.onDeliveryError(job.ctx, job.event, err, attempt)
 }
 
+// notifyPanic calls the panic handler, whose own panic is swallowed.
+func (d *Dispatcher[T]) notifyPanic(
+	job *dispatchJob[T],
+	recovered any,
+) {
+	if d.onPanic == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	d.onPanic(job.ctx, job.event, recovered)
+}
+
 // runDurable runs one durable handler, turning a panic into an error. A slow
 // handler is reported once as timed out and still waited for.
-func (d *Dispatcher[T]) runDurable(job *dispatchJob[T], sub DurableSub[T], attempt int) error {
+func (d *Dispatcher[T]) runDurable(
+	job *dispatchJob[T],
+	sub DurableSub[T],
+	attempt int,
+) error {
 	call := func() (err error) {
 		defer func() {
 			if r := recover(); r != nil {
-				if d.onPanic != nil {
-					func() {
-						defer func() { _ = recover() }()
-						d.onPanic(job.ctx, job.event, r)
-					}()
-				}
+				d.notifyPanic(job, r)
 				err = fmt.Errorf("%w: %v", asynxmd.ErrHandlerPanic, r)
 			}
 		}()

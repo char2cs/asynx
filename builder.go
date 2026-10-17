@@ -222,7 +222,10 @@ func (b *Builder[T]) WithDeliveryErrorHandler(fn models.DeliveryErrorHandler[T])
 // WithDeliveryRetry sets the retry backoff of failed durable deliveries: the
 // first retry waits initial, then the delay doubles up to max. Defaults: 100ms
 // and 30s.
-func (b *Builder[T]) WithDeliveryRetry(initial, max time.Duration) *Builder[T] {
+func (b *Builder[T]) WithDeliveryRetry(
+	initial time.Duration,
+	max time.Duration,
+) *Builder[T] {
 	b.retryInitial, b.retryMax = initial, max
 	return b
 }
@@ -338,7 +341,6 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 		bus:  activeBus,
 	}
 
-	// Past this point a failure must not leave the processor's goroutines running.
 	built := false
 	defer func() {
 		if !built {

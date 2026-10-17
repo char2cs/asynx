@@ -21,7 +21,10 @@ type Factory func(t *testing.T) models.Store
 var errBoom = errors.New("storetest: boom")
 
 // Run executes the full conformance suite against stores built by newStore.
-func Run(t *testing.T, newStore Factory) {
+func Run(
+	t *testing.T,
+	newStore Factory,
+) {
 	t.Helper()
 
 	tests := map[string]func(*testing.T, models.Store){
@@ -51,14 +54,21 @@ func Run(t *testing.T, newStore Factory) {
 	}
 }
 
-func mustAtomically(t *testing.T, s models.Store, fn func(models.Tx) error) {
+func mustAtomically(
+	t *testing.T,
+	s models.Store,
+	fn func(models.Tx) error,
+) {
 	t.Helper()
 	if err := s.Atomically(context.Background(), fn); err != nil {
 		t.Fatalf("Atomically: %v", err)
 	}
 }
 
-func appendCommitsAndReads(t *testing.T, s models.Store) {
+func appendCommitsAndReads(
+	t *testing.T,
+	s models.Store,
+) {
 	ctx := context.Background()
 	mustAtomically(t, s, func(tx models.Tx) error {
 		for v, d := range []string{"a", "b", "c"} {
@@ -78,7 +88,10 @@ func appendCommitsAndReads(t *testing.T, s models.Store) {
 	}
 }
 
-func readRangeLimits(t *testing.T, s models.Store) {
+func readRangeLimits(
+	t *testing.T,
+	s models.Store,
+) {
 	ctx := context.Background()
 	mustAtomically(t, s, func(tx models.Tx) error {
 		for v := int64(1); v <= 4; v++ {
@@ -98,7 +111,10 @@ func readRangeLimits(t *testing.T, s models.Store) {
 	}
 }
 
-func duplicateVersionRollsBack(t *testing.T, s models.Store) {
+func duplicateVersionRollsBack(
+	t *testing.T,
+	s models.Store,
+) {
 	ctx := context.Background()
 	mustAtomically(t, s, func(tx models.Tx) error { return tx.Append(ctx, "s1", 1, []byte("first")) })
 
@@ -122,7 +138,10 @@ func duplicateVersionRollsBack(t *testing.T, s models.Store) {
 	}
 }
 
-func errorRollsBackEverything(t *testing.T, s models.Store) {
+func errorRollsBackEverything(
+	t *testing.T,
+	s models.Store,
+) {
 	ctx := context.Background()
 	err := s.Atomically(ctx, func(tx models.Tx) error {
 		_ = tx.Append(ctx, "s1", 1, []byte("x"))
@@ -145,7 +164,10 @@ func errorRollsBackEverything(t *testing.T, s models.Store) {
 	}
 }
 
-func receiptsDuplicates(t *testing.T, s models.Store) {
+func receiptsDuplicates(
+	t *testing.T,
+	s models.Store,
+) {
 	ctx := context.Background()
 	want := models.Receipt{Accepted: true, EventID: "e1", Version: 3}
 	mustAtomically(t, s, func(tx models.Tx) error { return tx.PutReceipt(ctx, "cmd-1", want) })
@@ -167,7 +189,10 @@ func receiptsDuplicates(t *testing.T, s models.Store) {
 	}
 }
 
-func deliveriesOrderAndAck(t *testing.T, s models.Store) {
+func deliveriesOrderAndAck(
+	t *testing.T,
+	s models.Store,
+) {
 	ctx := context.Background()
 	mustAtomically(t, s, func(tx models.Tx) error {
 		for _, d := range []models.Delivery{{AggregateID: "a", Version: 1}, {AggregateID: "b", Version: 1}, {AggregateID: "a", Version: 2}} {
@@ -201,7 +226,10 @@ func deliveriesOrderAndAck(t *testing.T, s models.Store) {
 	}
 }
 
-func dropDeliveries(t *testing.T, s models.Store) {
+func dropDeliveries(
+	t *testing.T,
+	s models.Store,
+) {
 	ctx := context.Background()
 	mustAtomically(t, s, func(tx models.Tx) error {
 		_ = tx.EnqueueDelivery(ctx, "a", 1)
@@ -216,7 +244,10 @@ func dropDeliveries(t *testing.T, s models.Store) {
 	}
 }
 
-func deleteStream(t *testing.T, s models.Store) {
+func deleteStream(
+	t *testing.T,
+	s models.Store,
+) {
 	ctx := context.Background()
 	mustAtomically(t, s, func(tx models.Tx) error {
 		_ = tx.Append(ctx, "s1", 1, []byte("a"))
@@ -238,14 +269,21 @@ func deleteStream(t *testing.T, s models.Store) {
 	mustAtomically(t, s, func(tx models.Tx) error { return tx.Append(ctx, "s1", 1, []byte("again")) })
 }
 
-func ackUnknown(t *testing.T, s models.Store) {
+func ackUnknown(
+	t *testing.T,
+	s models.Store,
+) {
 	if err := s.AckDelivery(context.Background(), "ghost", 7); err != nil {
 		t.Fatalf("AckDelivery(unknown) = %v, want nil", err)
 	}
 }
 
 // wantPending fails the test unless the pending deliveries are exactly want.
-func wantPending(t *testing.T, s models.Store, want ...models.Delivery) {
+func wantPending(
+	t *testing.T,
+	s models.Store,
+	want ...models.Delivery,
+) {
 	t.Helper()
 	pending, err := s.PendingDeliveries(context.Background(), 100)
 	if err != nil || !slices.Equal(pending, want) {
@@ -254,7 +292,11 @@ func wantPending(t *testing.T, s models.Store, want ...models.Delivery) {
 }
 
 // enqueueIn runs fn on a transaction, failing the test if it does not commit.
-func enqueueIn(t *testing.T, s models.Store, fn func(ctx context.Context, tx models.Tx) error) {
+func enqueueIn(
+	t *testing.T,
+	s models.Store,
+	fn func(ctx context.Context, tx models.Tx) error,
+) {
 	t.Helper()
 	ctx := context.Background()
 	mustAtomically(t, s, func(tx models.Tx) error { return fn(ctx, tx) })
@@ -262,7 +304,10 @@ func enqueueIn(t *testing.T, s models.Store, fn func(ctx context.Context, tx mod
 
 // Forget drops an aggregate's entries and records its tombstone in one
 // transaction; the new entry must survive the drop and sort after the others.
-func dropThenEnqueue(t *testing.T, s models.Store) {
+func dropThenEnqueue(
+	t *testing.T,
+	s models.Store,
+) {
 	enqueueIn(t, s, func(ctx context.Context, tx models.Tx) error {
 		return errors.Join(tx.EnqueueDelivery(ctx, "a", 1), tx.EnqueueDelivery(ctx, "b", 1))
 	})
@@ -272,7 +317,10 @@ func dropThenEnqueue(t *testing.T, s models.Store) {
 	wantPending(t, s, models.Delivery{AggregateID: "b", Version: 1}, models.Delivery{AggregateID: "a", Version: 2})
 }
 
-func rollbackRestoresDrop(t *testing.T, s models.Store) {
+func rollbackRestoresDrop(
+	t *testing.T,
+	s models.Store,
+) {
 	enqueueIn(t, s, func(ctx context.Context, tx models.Tx) error { return tx.EnqueueDelivery(ctx, "a", 1) })
 	err := s.Atomically(context.Background(), func(tx models.Tx) error {
 		return errors.Join(tx.DropDeliveries(context.Background(), "a"), errBoom)
@@ -284,7 +332,10 @@ func rollbackRestoresDrop(t *testing.T, s models.Store) {
 }
 
 // A forgotten aggregate starts again at version 1: its keys are reused.
-func reEnqueueAfterAckOrDrop(t *testing.T, s models.Store) {
+func reEnqueueAfterAckOrDrop(
+	t *testing.T,
+	s models.Store,
+) {
 	a1 := models.Delivery{AggregateID: "a", Version: 1}
 	enqueue := func() {
 		enqueueIn(t, s, func(ctx context.Context, tx models.Tx) error { return tx.EnqueueDelivery(ctx, "a", 1) })
@@ -301,7 +352,10 @@ func reEnqueueAfterAckOrDrop(t *testing.T, s models.Store) {
 }
 
 // A delivery can be acknowledged after the erase dropped its entry.
-func ackAfterDrop(t *testing.T, s models.Store) {
+func ackAfterDrop(
+	t *testing.T,
+	s models.Store,
+) {
 	enqueueIn(t, s, func(ctx context.Context, tx models.Tx) error {
 		return errors.Join(tx.EnqueueDelivery(ctx, "a", 1), tx.DropDeliveries(ctx, "a"))
 	})
@@ -310,14 +364,20 @@ func ackAfterDrop(t *testing.T, s models.Store) {
 	}
 }
 
-func nativeCallable(t *testing.T, s models.Store) {
+func nativeCallable(
+	t *testing.T,
+	s models.Store,
+) {
 	mustAtomically(t, s, func(tx models.Tx) error {
 		_ = tx.Native()
 		return nil
 	})
 }
 
-func readsOfUnknown(t *testing.T, s models.Store) {
+func readsOfUnknown(
+	t *testing.T,
+	s models.Store,
+) {
 	ctx := context.Background()
 	if blobs, err := s.ReadFrom(ctx, "nope", 1); err != nil || len(blobs) != 0 {
 		t.Errorf("ReadFrom(unknown) = %q, %v", blobs, err)
@@ -327,7 +387,10 @@ func readsOfUnknown(t *testing.T, s models.Store) {
 	}
 }
 
-func pendingLimit(t *testing.T, s models.Store) {
+func pendingLimit(
+	t *testing.T,
+	s models.Store,
+) {
 	ctx := context.Background()
 	mustAtomically(t, s, func(tx models.Tx) error {
 		for v := int64(1); v <= 5; v++ {
@@ -343,7 +406,10 @@ func pendingLimit(t *testing.T, s models.Store) {
 	}
 }
 
-func committedVisible(t *testing.T, s models.Store) {
+func committedVisible(
+	t *testing.T,
+	s models.Store,
+) {
 	ctx := context.Background()
 	mustAtomically(t, s, func(tx models.Tx) error {
 		return tx.Append(ctx, "s1", 1, []byte("a"))

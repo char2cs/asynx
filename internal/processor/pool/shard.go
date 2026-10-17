@@ -123,8 +123,6 @@ func (s *Shard[T]) executeJob(
 	executor *exec.CommandExecutor[T],
 	job *models.CommandJob[T],
 ) {
-	// The worker is released once the event is committed; waiting for handlers
-	// is the sender's job, so a slow or failing handler never holds a worker.
 	event, wait, err := executor.ExecuteAsync(
 		job.Envelope.Ctx,
 		job.Envelope.Cmd,

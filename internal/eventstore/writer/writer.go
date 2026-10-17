@@ -128,7 +128,10 @@ func (w *Writer[T]) AppendTx(
 }
 
 // Snapshot upserts the snapshot of evt.Aggregate at evt.Version.
-func (w *Writer[T]) Snapshot(ctx context.Context, evt asynxmd.Event[T]) error {
+func (w *Writer[T]) Snapshot(
+	ctx context.Context,
+	evt asynxmd.Event[T],
+) error {
 	return w.writeSnapshot(ctx, evt.AggregateID, evt.Version, evt.Aggregate)
 }
 

@@ -20,46 +20,59 @@ func (e *CommandExecutor[T]) writeFailed(
 		return event, false, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 
 	case commandID != "" && errors.Is(err, asynxmd.ErrDuplicateReceipt):
-		// Another aggregate already used this command id: answer from its receipt.
 		if event, handled, err := e.answerFromReceipt(ctx, commandID); handled {
 			return event, true, err
 		}
 		return event, false, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 
 	case errors.Is(err, asynxmd.ErrValidation):
-		if commandID == "" {
-			return event, false, err
-		}
-		// The rejection must be durable before the caller hears about it, or a
-		// retry of the same id could pass validation later and succeed.
-		recErr := e.recordRejection(ctx, commandID, err)
-		switch {
-		case recErr == nil:
-			return event, false, err
-		case errors.Is(recErr, asynxmd.ErrDuplicateReceipt):
-			// Someone already decided this id: answer from their receipt.
-			if event, handled, aerr := e.answerFromReceipt(ctx, commandID); handled {
-				return event, true, aerr
-			}
-		}
-		return event, false, fmt.Errorf("%w: recording rejection: %w", asynxmd.ErrPipelineFailed, recErr)
+		return e.validationFailed(ctx, commandID, err)
 
 	default:
 		return event, false, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 	}
 }
 
+// validationFailed makes a rejection final before it is reported: it is
+// recorded, or answered from the receipt someone else recorded first.
+func (e *CommandExecutor[T]) validationFailed(
+	ctx context.Context,
+	commandID string,
+	rejection error,
+) (event asynxmd.Event[T], handled bool, err error) {
+	if commandID == "" {
+		return event, false, rejection
+	}
+	recErr := e.recordRejection(ctx, commandID, rejection)
+	if recErr == nil {
+		return event, false, rejection
+	}
+	lostRaceToAnotherDecision := errors.Is(recErr, asynxmd.ErrDuplicateReceipt)
+	if lostRaceToAnotherDecision {
+		if event, handled, aerr := e.answerFromReceipt(ctx, commandID); handled {
+			return event, true, aerr
+		}
+	}
+	return event, false, fmt.Errorf("%w: recording rejection: %w", asynxmd.ErrPipelineFailed, recErr)
+}
+
 // recordRejection stores a rejected receipt so a retry of the same command id
 // stays rejected. Failing to store it fails the command with ErrPipelineFailed
 // instead of reporting a rejection that could later be overturned; the caller
 // retries and re-validates.
-func (e *CommandExecutor[T]) recordRejection(ctx context.Context, commandID string, cause error) error {
+func (e *CommandExecutor[T]) recordRejection(
+	ctx context.Context,
+	commandID string,
+	cause error,
+) error {
 	return e.es.Store().Atomically(ctx, func(tx asynxmd.Tx) error {
 		return tx.PutReceipt(ctx, commandID, asynxmd.Receipt{Rejection: cause.Error()})
 	})
 }
 
-// answerFromReceipt answers a retry of an already-decided command.
+// answerFromReceipt answers a retry of an already-decided command. The stored
+// event is matched by ID as well as version, so an aggregate re-created after a
+// Forget, whose versions coincide, is never mistaken for the original.
 func (e *CommandExecutor[T]) answerFromReceipt(
 	ctx context.Context,
 	commandID string,
@@ -80,11 +93,8 @@ func (e *CommandExecutor[T]) answerFromReceipt(
 		AggregateID: receipt.AggregateID,
 		Version:     receipt.Version,
 	}
-	// Rebuild the full event when its stream still exists.
 	_ = e.es.Replay(ctx, receipt.AggregateID, receipt.Version, receipt.Version,
 		func(_ context.Context, evt asynxmd.Event[T]) {
-			// The ID check keeps an aggregate re-created after a Forget, whose
-			// version may coincide, from being mistaken for the original event.
 			if evt.Version == receipt.Version && evt.ID == receipt.EventID {
 				event = evt
 			}

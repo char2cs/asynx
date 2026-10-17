@@ -122,7 +122,11 @@ func (e *CommandExecutor[T]) ExecuteAsync(
 }
 
 // WithLock runs fn holding the aggregate's command lock.
-func (e *CommandExecutor[T]) WithLock(ctx context.Context, id string, fn func() error) error {
+func (e *CommandExecutor[T]) WithLock(
+	ctx context.Context,
+	id string,
+	fn func() error,
+) error {
 	unlock, err := e.locks.Lock(ctx, id)
 	if err != nil {
 		return fmt.Errorf("%w: %w", asynxmd.ErrContextCancelled, err)
@@ -160,8 +164,6 @@ func (e *CommandExecutor[T]) run(
 
 	wait, err := e.enqueue(ctx, event)
 	if err != nil {
-		// Committed but not queued: its delivery entry is pending, so keep the
-		// aggregate's later events from being delivered ahead of it.
 		if e.isDurable(event.EventName) {
 			e.dispatcher.Park(event.AggregateID)
 		}
@@ -171,7 +173,9 @@ func (e *CommandExecutor[T]) run(
 }
 
 // enqueue hands the event to the dispatcher. With durable delivery on, the
-// delivery entry is acked once its handlers finish.
+// delivery entry is acked once its handlers finish. When the enqueue fails
+// after the commit the delivery entry is pending, so run parks the aggregate:
+// its later events must not be delivered ahead of it.
 func (e *CommandExecutor[T]) enqueue(
 	ctx context.Context,
 	event asynxmd.Event[T],
@@ -210,6 +214,25 @@ func (e *CommandExecutor[T]) ackFor(event asynxmd.Event[T]) func(context.Context
 	}
 }
 
+// runSyncProjections runs, in order, the projections that match the event,
+// inside its transaction. A failure wraps ErrSyncProjection.
+func (e *CommandExecutor[T]) runSyncProjections(
+	ctx context.Context,
+	tx asynxmd.Tx,
+	evt asynxmd.Event[T],
+) error {
+	for _, p := range e.syncs {
+		matches := p.Match(evt.EventName)
+		if !matches {
+			continue
+		}
+		if err := p.Fn(ctx, tx, evt); err != nil {
+			return fmt.Errorf("%w: %w", asynxmd.ErrSyncProjection, err)
+		}
+	}
+	return nil
+}
+
 // txHook returns the work that must commit atomically with the event, or nil
 // when there is none.
 func (e *CommandExecutor[T]) txHook(commandID string) eventstore.TxHook[T] {
@@ -218,13 +241,8 @@ func (e *CommandExecutor[T]) txHook(commandID string) eventstore.TxHook[T] {
 	}
 
 	return func(ctx context.Context, tx asynxmd.Tx, evt asynxmd.Event[T]) error {
-		for _, p := range e.syncs {
-			if !p.Match(evt.EventName) {
-				continue
-			}
-			if err := p.Fn(ctx, tx, evt); err != nil {
-				return fmt.Errorf("%w: %w", asynxmd.ErrSyncProjection, err)
-			}
+		if err := e.runSyncProjections(ctx, tx, evt); err != nil {
+			return err
 		}
 
 		if commandID != "" {

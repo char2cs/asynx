@@ -101,7 +101,10 @@ func WithDeadLetterHandler[T any](fn asynxmd.DeadLetterHandler[T]) ProcessorOpt[
 }
 
 // WithDeliveryRetry sets the retry backoff of failed durable deliveries.
-func WithDeliveryRetry[T any](initial, max time.Duration) ProcessorOpt[T] {
+func WithDeliveryRetry[T any](
+	initial time.Duration,
+	max time.Duration,
+) ProcessorOpt[T] {
 	return func(cfg *processorConfig[T]) {
 		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithRetryBackoff[T](initial, max))
 	}
@@ -243,8 +246,6 @@ func (p *Processor[T]) SendWait(
 	}
 	defer p.sends.Done()
 
-	// Waiting for the handlers of a command to the aggregate whose handler is
-	// calling would wait on that handler itself.
 	if p.dispatcher != nil && p.dispatcher.InHandler(ctx, cmd.AggregateID()) {
 		return asynxmd.Event[T]{}, asynxmd.ErrSendWaitFromHandler
 	}
@@ -306,10 +307,8 @@ func (p *Processor[T]) sendAndWait(
 		if result.Err != nil || result.Wait == nil {
 			return result.Event, result.Err
 		}
-		// The event is committed whatever the wait says.
 		if err := result.Wait(ctx); err != nil {
 			if errors.Is(err, asynxmd.ErrContextCancelled) {
-				// The exact sentinel, like every other cancelled wait.
 				return result.Event, asynxmd.ErrContextCancelled
 			}
 			return result.Event, err
@@ -334,8 +333,6 @@ func (p *Processor[T]) Shutdown(ctx context.Context) error {
 }
 
 func (p *Processor[T]) runShutdown(ctx context.Context) error {
-	// Release anything waiting on a failing delivery before draining: such a
-	// delivery would otherwise hold the wait, and with it the shutdown, open.
 	if p.dispatcher != nil {
 		p.dispatcher.Interrupt()
 	}
@@ -381,7 +378,10 @@ func (p *Processor[T]) endShutdown(err error) {
 }
 
 // waitGroup waits for wg, or for ctx.
-func waitGroup(ctx context.Context, wg *sync.WaitGroup) error {
+func waitGroup(
+	ctx context.Context,
+	wg *sync.WaitGroup,
+) error {
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
 	select {

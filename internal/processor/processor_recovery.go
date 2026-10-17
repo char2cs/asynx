@@ -26,7 +26,10 @@ func (p *Processor[T]) Paused() []string {
 //
 // An aggregate that cannot be redelivered stays parked and the others are still
 // resumed; the errors are joined.
-func (p *Processor[T]) Resume(ctx context.Context, batch int) error {
+func (p *Processor[T]) Resume(
+	ctx context.Context,
+	batch int,
+) error {
 	if p.dispatcher == nil {
 		return nil
 	}
@@ -36,30 +39,43 @@ func (p *Processor[T]) Resume(ctx context.Context, batch int) error {
 	var errs []error
 	for _, agg := range p.dispatcher.Halted() {
 		err := p.executor.WithLock(ctx, agg, func() error {
-			if !p.dispatcher.Resume(agg) {
-				return nil // a concurrent Resume got here first
-			}
-			err := p.scanPending(ctx, batch, func(d asynxmd.Delivery) error {
-				if d.AggregateID != agg {
-					return nil
-				}
-				return p.redeliver(ctx, d)
-			})
-			if err != nil {
-				// Leave it parked: its entries are not all queued, and a
-				// lifted park would hide that from the next Resume.
-				p.dispatcher.Park(agg)
-			}
-			return err
+			return p.resumeAggregate(ctx, batch, agg)
 		})
-		if err != nil {
-			errs = append(errs, fmt.Errorf("asynx: resume %s: %w", agg, err))
-			if ctx.Err() != nil {
-				break
-			}
+		if err == nil {
+			continue
+		}
+		errs = append(errs, fmt.Errorf("asynx: resume %s: %w", agg, err))
+		if ctx.Err() != nil {
+			break
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// resumeAggregate lifts the aggregate's park and redelivers its pending
+// entries, leaving it parked when they cannot all be queued: a lifted park would
+// hide that from the next Resume. It does nothing if a concurrent Resume lifted
+// the park first. The caller holds the aggregate's command lock.
+func (p *Processor[T]) resumeAggregate(
+	ctx context.Context,
+	batch int,
+	agg string,
+) error {
+	wasParked := p.dispatcher.Resume(agg)
+	if !wasParked {
+		return nil
+	}
+	err := p.scanPending(ctx, batch, func(d asynxmd.Delivery) error {
+		isOtherAggregate := d.AggregateID != agg
+		if isOtherAggregate {
+			return nil
+		}
+		return p.redeliver(ctx, d)
+	})
+	if err != nil {
+		p.dispatcher.Park(agg)
+	}
+	return err
 }
 
 // Recover re-enqueues every unacknowledged delivery, in enqueue order, on the
@@ -77,7 +93,10 @@ func (p *Processor[T]) Resume(ctx context.Context, batch int) error {
 // aggregates are recovered regardless; ResumeDeliveries retries it. Delivery is
 // at-least-once: an event whose handlers finished but whose ack was lost to a
 // crash is delivered again.
-func (p *Processor[T]) Recover(ctx context.Context, batch int) error {
+func (p *Processor[T]) Recover(
+	ctx context.Context,
+	batch int,
+) error {
 	if p.dispatcher == nil {
 		return nil
 	}
@@ -108,7 +127,11 @@ func (p *Processor[T]) Recover(ctx context.Context, batch int) error {
 // reads the log in growing prefixes, so the total work stays linear. Entries
 // are acknowledged while it runs, which shifts the prefix, so what has been
 // visited is tracked by key rather than by position.
-func (p *Processor[T]) scanPending(ctx context.Context, batch int, visit func(asynxmd.Delivery) error) error {
+func (p *Processor[T]) scanPending(
+	ctx context.Context,
+	batch int,
+	visit func(asynxmd.Delivery) error,
+) error {
 	store := p.es.Store()
 	seen := make(map[asynxmd.Delivery]struct{})
 	for limit := batch; ; limit *= 2 {
@@ -133,7 +156,10 @@ func (p *Processor[T]) scanPending(ctx context.Context, batch int, visit func(as
 
 // redeliver rebuilds the event behind d and enqueues it. When the event no
 // longer exists the delivery is acknowledged instead.
-func (p *Processor[T]) redeliver(ctx context.Context, d asynxmd.Delivery) error {
+func (p *Processor[T]) redeliver(
+	ctx context.Context,
+	d asynxmd.Delivery,
+) error {
 	store := p.es.Store()
 
 	var event asynxmd.Event[T]
