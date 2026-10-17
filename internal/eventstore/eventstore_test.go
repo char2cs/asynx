@@ -498,3 +498,85 @@ func TestEventStore_DeleteRemovesSnapshotWithoutPrefix(t *testing.T) {
 		t.Error("snapshot still present after Delete")
 	}
 }
+
+// --- WriteTx / Snapshot / Store ---
+
+func TestWriteTx_HookRunsInsideTheAppendTransaction(t *testing.T) {
+	s := store.New()
+	es := New[order](s, store.NewSnapshots(), nil, 1, nil)
+	ctx := context.Background()
+
+	var sawVersion int64
+	evt, err := es.WriteTx(ctx, cmd(order{ID: "agg1", Total: 3}), func(_ context.Context, tx asynxmd.Tx, e asynxmd.Event[order]) error {
+		sawVersion = e.Version
+		return tx.EnqueueDelivery(ctx, e.AggregateID, e.Version)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sawVersion != 1 || evt.Version != 1 {
+		t.Fatalf("hook saw v%d, event v%d; want 1", sawVersion, evt.Version)
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 1 {
+		t.Fatalf("hook's delivery not committed: %v", pending)
+	}
+}
+
+func TestWriteTx_HookErrorRollsBackTheEvent(t *testing.T) {
+	s := store.New()
+	es := New[order](s, store.NewSnapshots(), nil, 1, nil)
+	ctx := context.Background()
+	boom := errors.New("hook failed")
+
+	_, err := es.WriteTx(ctx, cmd(order{ID: "agg1"}), func(context.Context, asynxmd.Tx, asynxmd.Event[order]) error { return boom })
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want hook error", err)
+	}
+	if ok, _ := es.Exists(ctx, "agg1"); ok {
+		t.Fatal("event survived a failing hook")
+	}
+}
+
+func TestWriteTx_NeverWritesASnapshot(t *testing.T) {
+	ss := store.NewSnapshots()
+	es := New[order](store.New(), ss, nil, 1, nil)
+	ctx := context.Background()
+	if _, err := es.WriteTx(ctx, cmdSnap(order{ID: "agg1"}), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _ := ss.Get(ctx, "agg1"); found {
+		t.Fatal("WriteTx wrote a snapshot")
+	}
+}
+
+func TestSnapshot_UpsertsTheEventState(t *testing.T) {
+	ss := store.NewSnapshots()
+	es := New[order](store.New(), ss, nil, 1, nil)
+	ctx := context.Background()
+	evt, _ := es.WriteTx(ctx, cmd(order{ID: "agg1", Total: 9}), nil)
+
+	if err := es.Snapshot(ctx, evt); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _ := ss.Get(ctx, "agg1"); !found {
+		t.Fatal("snapshot missing")
+	}
+}
+
+func TestStore_ReturnsTheBackingEventStore(t *testing.T) {
+	s := store.New()
+	es := New[order](s, store.NewSnapshots(), nil, 1, nil)
+	if es.Store() != asynxmd.Store(s) {
+		t.Fatal("Store() is not the backing event store")
+	}
+}
+
+func TestWrite_SnapshotFailureAfterCommitIsReturned(t *testing.T) {
+	ss := store.NewSnapshots()
+	es := New[order](store.New(), ss, nil, 1, nil)
+	ss.SetError("agg1", errors.New("snapshot down"))
+
+	if _, err := es.Write(context.Background(), cmdSnap(order{ID: "agg1"})); err == nil {
+		t.Fatal("Write hid a snapshot failure")
+	}
+}

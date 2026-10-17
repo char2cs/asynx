@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
 	asynxmd "github.com/char2cs/asynx/models"
 	"github.com/char2cs/asynx/store"
@@ -165,4 +166,71 @@ type getReceiptErrStore struct{ store.Memory }
 
 func (getReceiptErrStore) GetReceipt(context.Context, string) (asynxmd.Receipt, bool, error) {
 	return asynxmd.Receipt{}, false, errors.New("receipt store down")
+}
+
+// A duplicate-receipt failure whose receipt cannot then be found must not be
+// mistaken for a retry answer: it is a pipeline failure.
+type phantomDuplicateStore struct{ store.Memory }
+
+func (s phantomDuplicateStore) Atomically(ctx context.Context, fn func(asynxmd.Tx) error) error {
+	return s.Memory.Atomically(ctx, func(tx asynxmd.Tx) error { return fn(phantomTx{tx}) })
+}
+
+type phantomTx struct{ asynxmd.Tx }
+
+func (phantomTx) PutReceipt(context.Context, string, asynxmd.Receipt) error {
+	return asynxmd.ErrDuplicateReceipt
+}
+
+func TestExecute_Idempotent_UnresolvableDuplicateReceiptFailsPipeline(t *testing.T) {
+	ex, _, _, _, _ := newEnvOn(t, phantomDuplicateStore{store.New()})
+	_, err := ex.Execute(context.Background(), idemUpdate{UpdateOrderCmd: update("agg", 1), Cmd: "c1"}, false)
+	if !errors.Is(err, asynxmd.ErrPipelineFailed) || !errors.Is(err, asynxmd.ErrDuplicateReceipt) {
+		t.Fatalf("err = %v, want ErrPipelineFailed + ErrDuplicateReceipt", err)
+	}
+}
+
+func TestExecute_Idempotent_AcceptedReceiptForErasedAggregateStillAnswers(t *testing.T) {
+	ex, _, _, _, _ := newEnv(t)
+	ctx := context.Background()
+	cmd := idemUpdate{UpdateOrderCmd: update("agg", 1), Cmd: "c1"}
+	first, err := ex.Execute(ctx, cmd, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.Forget(ctx, "agg"); err != nil {
+		t.Fatal(err)
+	}
+
+	retry, err := ex.Execute(ctx, cmd, false)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if retry.ID != first.ID || retry.Version != first.Version {
+		t.Fatalf("retry = %+v, want id/version of %+v", retry, first)
+	}
+}
+
+func TestExecute_AfterDispatcherClosedFailsPipelineButKeepsTheCommit(t *testing.T) {
+	ex, s, _, d, _ := newEnv(t)
+	d.Close(context.Background())
+	evt, err := ex.Execute(context.Background(), update("agg", 1), false)
+	if !errors.Is(err, asynxmd.ErrPipelineFailed) {
+		t.Fatalf("err = %v, want ErrPipelineFailed", err)
+	}
+	if evt.Version != 1 || streamLen(t, s, "agg") != 1 {
+		t.Fatalf("committed event not reported: %+v", evt)
+	}
+}
+
+func TestExecute_WithoutDispatcherCommitsAndReturns(t *testing.T) {
+	s := store.New()
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	ex := New[order](es, nil, WithDurableDelivery[order](true))
+	if _, err := ex.Execute(context.Background(), update("agg", 1), true); err != nil {
+		t.Fatal(err)
+	}
+	if pending, _ := s.PendingDeliveries(context.Background(), 10); len(pending) != 0 {
+		t.Fatalf("delivery enqueued with nobody to deliver to: %v", pending)
+	}
 }

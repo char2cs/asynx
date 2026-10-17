@@ -259,3 +259,35 @@ func TestShard_NilEnvelopeClosesJobQueue(t *testing.T) {
 		t.Fatalf("Drain after nil envelope failed: %v", err)
 	}
 }
+
+func TestShard_ForgetEnvelopeRunsTheForgetJob(t *testing.T) {
+	s := store.New()
+	b := bus.NewChannelBus[order]()
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	d := dispatcher.New[order](b)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	executor := exec.New(es, d)
+
+	p := pool.New(executor, 1, 0, 1)
+	defer p.Drain(context.Background())
+
+	ctx := context.Background()
+	if _, err := executor.Execute(ctx, mocks.CreateOrderCmd{ID: "order1", Total: 1}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	envelope := &models.CommandEnvelope[order]{
+		Cmd:        mocks.CreateOrderCmd{ID: "order1"},
+		Ctx:        ctx,
+		ResultChan: make(chan models.CommandResult[order], 1),
+		Forget:     true,
+	}
+	p.Shards()[0].CommandChan() <- envelope
+
+	if result := <-envelope.ResultChan; result.Err != nil {
+		t.Fatalf("forget job failed: %v", result.Err)
+	}
+	if ok, _ := es.Exists(ctx, "order1"); ok {
+		t.Fatal("aggregate still exists after the forget job")
+	}
+}

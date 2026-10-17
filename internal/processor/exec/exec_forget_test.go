@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/char2cs/asynx/internal/eventstore"
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
 	"github.com/char2cs/asynx/internal/mocks"
 	asynxmd "github.com/char2cs/asynx/models"
@@ -141,5 +142,97 @@ func TestForget_ConcurrentWithUpdatesNeverLeavesAGappedStream(t *testing.T) {
 				t.Fatalf("stream has version %d at position %d: history is gapped", evt.Version, i+1)
 			}
 		}
+	}
+}
+
+func TestForget_RunsSyncProjectionsForTheTombstone(t *testing.T) {
+	var names []string
+	ex, _, _, _, _ := newEnv(t, WithSyncProjections[order]([]SyncProjection[order]{{
+		Match: func(name string) bool { return name == "asynx.aggregate.forget" },
+		Fn: func(_ context.Context, _ asynxmd.Tx, e asynxmd.Event[order]) error {
+			names = append(names, e.EventName)
+			return nil
+		},
+	}, {
+		Match: func(string) bool { return false },
+		Fn:    func(context.Context, asynxmd.Tx, asynxmd.Event[order]) error { return errors.New("never") },
+	}}))
+	ctx := context.Background()
+	if _, err := ex.Execute(ctx, update("agg", 1), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.Forget(ctx, "agg"); err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 || names[0] != "asynx.aggregate.forget" {
+		t.Fatalf("projection saw %v, want the tombstone only", names)
+	}
+}
+
+func TestForget_SyncProjectionFailureAbortsBeforeErasing(t *testing.T) {
+	failing := false
+	ex, s, _, _, _ := newEnv(t, syncAll(func(context.Context, asynxmd.Tx, asynxmd.Event[order]) error {
+		if failing {
+			return errors.New("read model down")
+		}
+		return nil
+	}))
+	ctx := context.Background()
+	if _, err := ex.Execute(ctx, update("agg", 1), false); err != nil {
+		t.Fatal(err)
+	}
+
+	failing = true
+	err := ex.Forget(ctx, "agg")
+	if !errors.Is(err, asynxmd.ErrPipelineFailed) || !errors.Is(err, asynxmd.ErrSyncProjection) {
+		t.Fatalf("err = %v, want ErrPipelineFailed + ErrSyncProjection", err)
+	}
+	if n := streamLen(t, s, "agg"); n != 1 {
+		t.Fatalf("stream length = %d, want 1 (nothing erased, tombstone rolled back)", n)
+	}
+}
+
+func TestForget_WithoutDispatcherStillErases(t *testing.T) {
+	s := store.New()
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	ex := New[order](es, nil)
+	ctx := context.Background()
+	if _, err := ex.Execute(ctx, update("agg", 1), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.Forget(ctx, "agg"); err != nil {
+		t.Fatal(err)
+	}
+	if n := streamLen(t, s, "agg"); n != 0 {
+		t.Fatalf("stream length = %d, want 0", n)
+	}
+}
+
+func TestForget_AfterDispatcherClosedFailsPipeline(t *testing.T) {
+	ex, _, _, d, _ := newEnv(t)
+	ctx := context.Background()
+	if _, err := ex.Execute(ctx, update("agg", 1), false); err != nil {
+		t.Fatal(err)
+	}
+	d.Close(ctx)
+	if err := ex.Forget(ctx, "agg"); !errors.Is(err, asynxmd.ErrPipelineFailed) {
+		t.Fatalf("err = %v, want ErrPipelineFailed", err)
+	}
+}
+
+type snapshotDeleteFailStore struct{ asynxmd.SnapshotStore }
+
+func (snapshotDeleteFailStore) Delete(context.Context, string) error { return errors.New("snap gone") }
+
+func TestForget_SnapshotDeleteFailureReturnsErrForgetFailed(t *testing.T) {
+	s := store.New()
+	es := eventstore.New[order](s, snapshotDeleteFailStore{store.NewSnapshots()}, nil, 1, nil)
+	ex := New[order](es, nil)
+	ctx := context.Background()
+	if _, err := ex.Execute(ctx, update("agg", 1), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.Forget(ctx, "agg"); !errors.Is(err, asynxmd.ErrForgetFailed) {
+		t.Fatalf("err = %v, want ErrForgetFailed", err)
 	}
 }
