@@ -216,10 +216,22 @@ func (e *CommandExecutor[T]) writeFailed(
 		return event, false, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 
 	case errors.Is(err, asynxmd.ErrValidation):
-		if commandID != "" {
-			e.recordRejection(ctx, commandID, err)
+		if commandID == "" {
+			return event, false, err
 		}
-		return event, false, err
+		// The rejection must be durable before the caller hears about it, or a
+		// retry of the same id could pass validation later and succeed.
+		recErr := e.recordRejection(ctx, commandID, err)
+		switch {
+		case recErr == nil:
+			return event, false, err
+		case errors.Is(recErr, asynxmd.ErrDuplicateReceipt):
+			// Someone already decided this id: answer from their receipt.
+			if event, handled, aerr := e.answerFromReceipt(ctx, commandID); handled {
+				return event, true, aerr
+			}
+		}
+		return event, false, fmt.Errorf("%w: recording rejection: %w", asynxmd.ErrPipelineFailed, recErr)
 
 	default:
 		return event, false, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
@@ -227,10 +239,11 @@ func (e *CommandExecutor[T]) writeFailed(
 }
 
 // recordRejection stores a rejected receipt so a retry of the same command id
-// stays rejected. It is best-effort: if it cannot be written the command is
-// still reported as rejected, and a retry simply validates again.
-func (e *CommandExecutor[T]) recordRejection(ctx context.Context, commandID string, cause error) {
-	_ = e.es.Store().Atomically(ctx, func(tx asynxmd.Tx) error {
+// stays rejected. Failing to store it fails the command with ErrPipelineFailed
+// instead of reporting a rejection that could later be overturned; the caller
+// retries and re-validates.
+func (e *CommandExecutor[T]) recordRejection(ctx context.Context, commandID string, cause error) error {
+	return e.es.Store().Atomically(ctx, func(tx asynxmd.Tx) error {
 		return tx.PutReceipt(ctx, commandID, asynxmd.Receipt{Rejection: cause.Error()})
 	})
 }

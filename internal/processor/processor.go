@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/commands"
@@ -46,6 +47,36 @@ type processorConfig[T any] struct {
 	workersPerShard     int
 	publishErrorHandler asynxmd.PublishErrorHandler[T]
 	executorOpts        []exec.Opt[T]
+	dispatcherOpts      []dispatcher.Opt[T]
+}
+
+// WithDurableSubscribers registers the durable subscribers the dispatcher runs,
+// with retry, for durable deliveries.
+func WithDurableSubscribers[T any](subs []dispatcher.DurableSub[T]) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithDurableSubs(subs))
+	}
+}
+
+// WithDeliveryErrorHandler observes failed durable delivery attempts.
+func WithDeliveryErrorHandler[T any](fn asynxmd.DeliveryErrorHandler[T]) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithDeliveryErrorHandler(fn))
+	}
+}
+
+// WithDeliveryPanicHandler is called when a durable handler panics.
+func WithDeliveryPanicHandler[T any](fn asynxmd.PanicHandler[T]) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithDeliveryPanicHandler(fn))
+	}
+}
+
+// WithDeliveryRetry sets the retry backoff of failed durable deliveries.
+func WithDeliveryRetry[T any](initial, max time.Duration) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithRetryBackoff[T](initial, max))
+	}
 }
 
 // WithSyncProjections registers projections that run inside each event's
@@ -121,7 +152,7 @@ func New[T any](
 		cfg.queueDepth = cfg.workersPerShard
 	}
 
-	var dispatcherOpts []dispatcher.Opt[T]
+	dispatcherOpts := cfg.dispatcherOpts
 	if cfg.publishErrorHandler != nil {
 		dispatcherOpts = append(dispatcherOpts, dispatcher.WithPublishErrorHandler[T](cfg.publishErrorHandler))
 	}
@@ -307,12 +338,14 @@ func (p *Processor[T]) Forget(
 	return err
 }
 
-// Recover redelivers every unacknowledged delivery, in enqueue order, through
-// the per-aggregate dispatcher and returns once all of them have been handled
-// and acknowledged. Call it before accepting commands so a live event can never
-// overtake an older undelivered one. Deliveries whose event no longer exists
-// are acknowledged and skipped.
+// Recover re-enqueues every unacknowledged delivery, in enqueue order, on the
+// per-aggregate dispatcher. It returns once they are all queued, not once they
+// are handled: a handler that keeps failing must not stop the process from
+// starting. Ordering against live commands is still guaranteed, because a live
+// event enqueues behind the recovered events of its aggregate in the same FIFO.
+// Handlers run, retry on failure and acknowledge exactly as for live events.
 //
+// Deliveries whose event no longer exists are acknowledged and skipped.
 // Delivery is at-least-once: an event whose handlers finished but whose ack was
 // lost to a crash is delivered again.
 func (p *Processor[T]) Recover(ctx context.Context, batch int) error {
@@ -324,46 +357,37 @@ func (p *Processor[T]) Recover(ctx context.Context, batch int) error {
 	}
 
 	store := p.es.Store()
-	delivered := make(map[asynxmd.Delivery]struct{})
+	queued := make(map[asynxmd.Delivery]struct{})
 
 	for {
-		pending, err := store.PendingDeliveries(ctx, batch)
+		// Entries already queued sit at the front (the log is in enqueue
+		// order), so asking for that many plus a batch always reaches new ones.
+		pending, err := store.PendingDeliveries(ctx, len(queued)+batch)
 		if err != nil {
 			return fmt.Errorf("asynx: recovery: %w", err)
 		}
-		if len(pending) == 0 {
-			return nil
-		}
 
-		dones := make([]<-chan struct{}, 0, len(pending))
+		fresh := 0
 		for _, d := range pending {
-			if _, again := delivered[d]; again {
-				return fmt.Errorf("asynx: recovery: delivery %s@v%d was not acknowledged", d.AggregateID, d.Version)
+			if _, again := queued[d]; again {
+				continue
 			}
-			delivered[d] = struct{}{}
+			queued[d] = struct{}{}
+			fresh++
 
-			done, err := p.redeliver(ctx, d)
-			if err != nil {
+			if err := p.redeliver(ctx, d); err != nil {
 				return fmt.Errorf("asynx: recovery: %w", err)
 			}
-			if done != nil {
-				dones = append(dones, done)
-			}
 		}
-
-		for _, done := range dones {
-			select {
-			case <-done:
-			case <-ctx.Done():
-				return fmt.Errorf("asynx: recovery: %w", ctx.Err())
-			}
+		if fresh == 0 {
+			return nil
 		}
 	}
 }
 
-// redeliver rebuilds the event behind d and enqueues it. The returned channel
-// is nil when the event no longer exists and the delivery was acknowledged.
-func (p *Processor[T]) redeliver(ctx context.Context, d asynxmd.Delivery) (<-chan struct{}, error) {
+// redeliver rebuilds the event behind d and enqueues it. When the event no
+// longer exists the delivery is acknowledged instead.
+func (p *Processor[T]) redeliver(ctx context.Context, d asynxmd.Delivery) error {
 	store := p.es.Store()
 
 	var event asynxmd.Event[T]
@@ -375,14 +399,15 @@ func (p *Processor[T]) redeliver(ctx context.Context, d asynxmd.Delivery) (<-cha
 			}
 		})
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if !found {
-		return nil, store.AckDelivery(ctx, d.AggregateID, d.Version)
+		return store.AckDelivery(ctx, d.AggregateID, d.Version)
 	}
 
-	return p.dispatcher.Enqueue(ctx, event, func(ctx context.Context) error {
+	_, err = p.dispatcher.Enqueue(ctx, event, func(ctx context.Context) error {
 		return store.AckDelivery(ctx, d.AggregateID, d.Version)
 	})
+	return err
 }

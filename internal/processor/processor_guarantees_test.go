@@ -5,8 +5,10 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/char2cs/asynx/internal/bus"
+	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor"
@@ -128,6 +130,7 @@ func TestProcessor_Recover_RedeliversEveryPendingEventAndAcksIt(t *testing.T) {
 	if err := p.Recover(context.Background(), 2); err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
+	p.WaitPublish()
 	if got.Load() != 3 {
 		t.Errorf("redelivered %d events, want 3", got.Load())
 	}
@@ -172,7 +175,7 @@ func TestProcessor_Recover_ReportsReadAndReplayFailures(t *testing.T) {
 	}
 }
 
-func TestProcessor_Recover_HonoursContextWhileWaiting(t *testing.T) {
+func TestProcessor_Recover_ReturnsWithoutWaitingForHandlers(t *testing.T) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	seedPending(t, s, es, "a")
@@ -183,10 +186,15 @@ func TestProcessor_Recover_HonoursContextWhileWaiting(t *testing.T) {
 	p := processor.New(es, b)
 	t.Cleanup(func() { close(release); p.Shutdown(context.Background()) })
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() { cancel() }()
-	if err := p.Recover(ctx, 10); err == nil {
-		t.Fatal("Recover ignored a cancelled context")
+	returned := make(chan error, 1)
+	go func() { returned <- p.Recover(context.Background(), 10) }()
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Recover waited for a blocked handler")
 	}
 }
 
@@ -207,20 +215,38 @@ func TestProcessor_Recover_SurfacesAckFailureForVanishedEvent(t *testing.T) {
 	}
 }
 
-type noAckStore struct{ store.Memory }
+func TestProcessor_DurableDeliveryOptions_RetryReportAndPanicHandling(t *testing.T) {
+	var attempts, reports, panics atomic.Int32
+	s := store.New()
+	f := newFixture(t, s,
+		processor.WithDurableDelivery[order](func(name string) bool { return name == "OrderUpdated" }),
+		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+			Match: func(string) bool { return true },
+			Handler: func(context.Context, asynxmd.Event[order]) error {
+				switch attempts.Add(1) {
+				case 1:
+					return errors.New("transient")
+				case 2:
+					panic("boom")
+				}
+				return nil
+			},
+		}}),
+		processor.WithDeliveryErrorHandler(func(context.Context, asynxmd.Event[order], error, int) { reports.Add(1) }),
+		processor.WithDeliveryPanicHandler(func(context.Context, asynxmd.Event[order], any) { panics.Add(1) }),
+		processor.WithDeliveryRetry[order](time.Millisecond, 2*time.Millisecond),
+	)
 
-func (noAckStore) AckDelivery(context.Context, string, int64) error { return nil }
+	ctx := context.Background()
+	if _, err := f.p.Send(ctx, mocks.UpdateOrderCmd{ID: "o1", NewState: order{ID: "o1", Total: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	f.p.WaitPublish()
 
-func TestProcessor_Recover_FailsWhenAcknowledgementsDoNotStick(t *testing.T) {
-	s := noAckStore{store.New()}
-	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	seedPending(t, s.Memory, es, "a")
-
-	b := bus.NewChannelBus[order]()
-	p := processor.New(es, b)
-	t.Cleanup(func() { p.Shutdown(context.Background()) })
-
-	if err := p.Recover(context.Background(), 10); err == nil {
-		t.Fatal("Recover looped or succeeded although the ack never stuck")
+	if attempts.Load() != 3 || reports.Load() != 2 || panics.Load() != 1 {
+		t.Fatalf("attempts=%d reports=%d panics=%d; want 3, 2, 1", attempts.Load(), reports.Load(), panics.Load())
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 0 {
+		t.Fatalf("pending = %v, want none after the retry succeeded", pending)
 	}
 }

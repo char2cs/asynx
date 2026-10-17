@@ -305,7 +305,8 @@ func upcastOrderV1toV2(ctx context.Context, eventName string, patches []byte) ([
 | `WithPublishErrorHandler(fn)` | Observe async publish errors | Silently dropped | No |
 | `WithForgetHandler(fn)` | Register forget handler at build time | — | No |
 | `WithSyncProjection(pattern, fn)` | Projection that commits in the event's transaction | — | No |
-| `WithSubscriber(pattern, handler, opts...)` | Durable, crash-safe subscriber (at-least-once) | — | No |
+| `WithSubscriber(pattern, handler, opts...)` | Durable subscriber; handler returns `error`, failures retry with backoff (at-least-once) | — | No |
+| `WithDeliveryErrorHandler(fn)` / `WithDeliveryRetry(initial, max)` | Observe failed durable deliveries / tune retry backoff | silent / 100ms→30s | No |
 | `WithSnapshotErrorHandler(fn)` | Observe failed (non-fatal) snapshot writes | Silently dropped | No |
 
 **Configure concurrency:**
@@ -516,7 +517,7 @@ For every command, in a single process, asynx guarantees — for any `WorkersPer
 
 - **One writer per aggregate**, with that aggregate's events delivered to handlers in version order.
 - **One transaction**: the event, your synchronous projections (`WithSyncProjection`), the command receipt and the delivery entry commit together or not at all.
-- **Crash-safe delivery**: durable subscribers (`WithSubscriber`) are redelivered on restart, at-least-once and in order. Dedupe on `(AggregateID, Version)`.
+- **Crash- and failure-safe delivery**: durable subscribers (`WithSubscriber`, handlers return `error`) are redelivered on restart and retried on failure, at-least-once and in order — a failing event holds back only its own aggregate. Dedupe on `(AggregateID, Version)`.
 - **Idempotent commands**: implement `CommandID() string` and a retry is a no-op; a rejection stays rejected.
 - **Fenced `Forget`**: it cannot interleave with a command on the same aggregate.
 

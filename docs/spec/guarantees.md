@@ -9,7 +9,7 @@ Asynx guarantees the following about every command, by construction rather than 
 | 1 | **One writer per aggregate.** Commands for the same aggregate never run at the same time. | A per-aggregate lock held from load to enqueue. |
 | 2 | **Ordered delivery.** Handlers see an aggregate's events in version order. | The event is enqueued to the per-aggregate dispatcher while the lock is held. |
 | 3 | **One transaction.** The event, the synchronous read-model updates, the command receipt and the delivery entry commit together or not at all. | `Store.Atomically` is the only write path. |
-| 4 | **Nothing durable is left undelivered.** A crash after commit never loses delivery to durable subscribers. | Delivery log plus recovery in `Build()`. |
+| 4 | **Nothing durable is left undelivered.** Neither a crash after commit nor a failing durable handler loses a delivery. | Delivery log, retry with backoff, recovery in `Build()`. |
 | 5 | **Idempotent commands.** A retry of a command id is a no-op, and a rejection stays rejected. | Receipts written in the event's transaction. |
 | 6 | **Fenced delete.** `Forget` cannot interleave with a command on the same aggregate. | `Forget` runs under the aggregate lock. |
 
@@ -99,15 +99,22 @@ Projections match like `Subscribe` (exact event name, or a regular expression wh
 ## Durable Delivery
 
 ```go
-b.WithSubscriber("Order.*", handler)   // registered at build time
+b.WithSubscriber("Order.*", func(ctx context.Context, evt models.Event[Order]) error {
+    return readModel.Apply(ctx, evt)   // return an error to have the delivery retried
+})
 ```
 
-- A delivery entry is written in the event's transaction and acknowledged after every handler for that event has returned. Handler panics go to the `PanicHandler` and still count as handled.
-- `Build()` redelivers every unacknowledged entry before it returns, in enqueue order through the normal per-aggregate dispatcher, so a live command can never overtake an older undelivered event. Events are rebuilt from the stream (upcasters apply). An entry whose event no longer exists is acknowledged and skipped. If acknowledgements do not stick, `Build()` fails rather than loop.
-- **Semantics are at-least-once.** If the process dies after handlers finish but before the acknowledgement, the event is delivered again. Dedupe on `(AggregateID, Version)`.
-- Only events that at least one durable subscriber's pattern matches get a delivery entry.
-- `Subscribe` and `Listen` remain live-only: they never see events committed while the process was down. No delivery entries are written when no durable subscriber exists.
-- `Shutdown` leaves undelivered entries pending; the next `Build()` recovers them.
+A durable handler returns an `error`. It is *not* registered on the bus: the dispatcher runs it itself so it can see failure.
+
+- A delivery entry is written in the event's transaction. It is acknowledged only after **every** durable handler matching the event has returned nil. Only events at least one durable pattern matches get an entry.
+- **Failure holds the line.** A handler that returns an error, panics, or fails after exceeding its timeout leaves the delivery pending. The dispatcher retries just the failed handlers with exponential backoff (default 100 ms doubling to 30 s; `WithDeliveryRetry`) until they succeed. That aggregate's later events wait behind it, so version 6 is never delivered before version 5 succeeded. Other aggregates are unaffected. Observe every failed attempt with `WithDeliveryErrorHandler(func(ctx, evt, err, attempt))`; a panic also reaches `WithPanicHandler`. A permanently failing ("poison") event therefore blocks its aggregate until it is fixed or the handler is — by design, and visible through the error handler. Shutting down stops the retries and leaves the delivery pending.
+- **Timeouts are alarms.** `WithHandlerTimeout` reports a slow handler (`ErrHandlerTimeout` to the delivery error handler; the timeout handler for bus subscribers) but the handler is still waited for, so the aggregate's next event never overlaps it and a delivery is never acknowledged while its handler is still running. This applies to every handler the dispatcher runs, durable or not.
+- `WithFallback` is not supported for durable subscribers (`Build` returns `ErrFallbackUnsupported`): a fallback has no way to report failure.
+- **Recovery.** `Build()` re-enqueues every unacknowledged delivery on the per-aggregate dispatcher, in enqueue order, before it returns. It does not wait for them to be handled, so a poison event cannot stop the process from starting; a command sent right after `Build` enqueues behind the recovered events of its aggregate in the same FIFO. Events are rebuilt from the stream (upcasters apply). An entry whose event no longer exists is acknowledged and skipped. Acknowledgement failures go to `WithPublishErrorHandler`; the delivery stays pending and is redelivered next start.
+- **At-least-once.** After a crash, or when a sibling handler of the same event failed, a handler can see an event again. Make handlers idempotent (dedupe on `(AggregateID, Version)`).
+- `SendWait` returns once every handler has been **attempted** once; it does not wait for retries, and a failing durable handler does not fail the command.
+- `Subscribe` and `Listen` remain live-only and fire-and-forget: they never see events committed while the process was down and cannot report failure. They do not influence acknowledgement.
+- Each aggregate's dispatcher queue is **unbounded**, so enqueueing never blocks under the aggregate lock. A permanently slow or failing subscriber therefore lets its aggregate's queue grow in memory, with no back-pressure on writers. Watch the delivery error handler and `PendingDeliveries` size; this is intended for moderate event volumes.
 
 ### Reactions and re-entrancy
 
@@ -125,11 +132,11 @@ For a non-empty id, under the aggregate lock:
 
 1. If a receipt exists: accepted → return the original event (rebuilt from its stream) with a nil error and write nothing; rejected → return an error wrapping `ErrValidation` with the stored text, even if the command would now pass.
 2. On success the accepted receipt is written in the event's transaction.
-3. On `ErrValidation` a rejected receipt is written in its own transaction (best-effort).
+3. On `ErrValidation` a rejected receipt is written in its own transaction **before** the rejection is reported. If that write fails the command fails with `ErrPipelineFailed` instead (a rejection that could be overturned by a retry is never reported); the caller retries and re-validates.
 4. Infrastructure errors, version conflicts and sync-projection failures write no receipt, so a retry runs fresh.
 5. The same id used on a different aggregate is answered from the original receipt; no second write happens.
 
-Receipts are kept as long as your store keeps them. Prune them according to your retry window.
+Receipts are kept as long as your store keeps them. Prune them according to your retry window. A receipt outlives `Forget`: retrying an accepted command for an erased aggregate still answers "already done" with a minimal event (`ID`, `AggregateID`, `Version`, no state) rather than running the command again and resurrecting the aggregate.
 
 ## Snapshots
 
@@ -146,5 +153,6 @@ This release changes the `Store` contract and is a compile-time break for store 
 - Replace `Append` and `Delete` on `Store` with `Atomically` and the `Tx` methods above. Keep your existing `events` table and the `events:` stream-ID prefix; no data migration is needed.
 - Add `receipts` and `deliveries` tables (see the schema above) and implement `GetReceipt`, `PendingDeliveries`, `AckDelivery`.
 - Run `storetest.Run` against the new store.
+- `WithSubscriber` handlers now return an `error` (durable handlers are retried until they succeed).
 - Behavior changes: snapshot write failures no longer fail `Send`; same-aggregate commands no longer fail with `ErrPipelineFailed` under concurrency within one process; `Forget` runs on the shard worker.
 - `store.Memory` keeps `Append` and `Delete` as helpers for seeding test data.

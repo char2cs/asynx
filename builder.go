@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"time"
 
 	"github.com/char2cs/asynx/internal/bus"
+	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/bus/utils"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/processor"
@@ -46,6 +48,9 @@ type Builder[T any] struct {
 	syncProjections     []syncProjectionDef[T]
 	subscribers         []subscriberDef[T]
 	snapshotErrHandler  func(context.Context, models.Event[T], error)
+	deliveryErrHandler  models.DeliveryErrorHandler[T]
+	retryInitial        time.Duration
+	retryMax            time.Duration
 }
 
 type syncProjectionDef[T any] struct {
@@ -55,7 +60,7 @@ type syncProjectionDef[T any] struct {
 
 type subscriberDef[T any] struct {
 	pattern string
-	handler models.ProjectionHandler[T]
+	handler models.DurableHandler[T]
 	opts    []models.SubscriptionOpt[T]
 }
 
@@ -166,19 +171,52 @@ func (b *Builder[T]) WithSyncProjection(
 
 // WithSubscriber registers a durable subscriber at build time. Unlike
 // Subscribe, whose handlers only see events published while the process is
-// alive, a durable subscriber is guaranteed every committed event: each event
-// is recorded in the same transaction that commits it and acknowledged once
-// every handler has finished, and Build redelivers anything left unacknowledged
-// by a crash before it returns, in per-aggregate order.
+// alive and cannot report failure, a durable subscriber is guaranteed every
+// committed event it matches:
 //
-// Delivery is at-least-once. After a crash a handler can see an event twice;
-// dedupe on (AggregateID, Version).
+//   - Each event is recorded in the same transaction that commits it, and
+//     acknowledged only after every matching durable handler returned nil.
+//     Build redelivers anything left unacknowledged by a crash before it
+//     returns, in per-aggregate order.
+//   - A handler that returns an error, panics, or fails after exceeding its
+//     timeout leaves the delivery pending and is retried with backoff
+//     (WithDeliveryRetry) until it succeeds. The aggregate's later events wait
+//     behind it, so version 6 is never delivered before version 5 succeeded.
+//     Other aggregates are unaffected. Observe failures with
+//     WithDeliveryErrorHandler.
+//   - A timeout (WithHandlerTimeout) is an alarm: it is reported but the handler
+//     is still waited for. WithFallback is not supported and makes Build fail
+//     with ErrFallbackUnsupported.
+//
+// Delivery is at-least-once: after a crash, or when a sibling handler of the
+// same event failed, a handler can see an event again. Make it idempotent
+// (dedupe on AggregateID and Version). SendWait returns once every handler has
+// been attempted once; it does not wait for retries.
+//
+// pattern follows Subscribe: an exact event name, or a regular expression when
+// it contains metacharacters.
 func (b *Builder[T]) WithSubscriber(
 	pattern string,
-	handler models.ProjectionHandler[T],
+	handler models.DurableHandler[T],
 	opts ...models.SubscriptionOpt[T],
 ) *Builder[T] {
 	b.subscribers = append(b.subscribers, subscriberDef[T]{pattern: pattern, handler: handler, opts: opts})
+	return b
+}
+
+// WithDeliveryErrorHandler sets a callback invoked for every failed attempt of
+// a durable delivery (handler error, panic or timeout), with the attempt number
+// of the current failing streak. When not set, failures are retried silently.
+func (b *Builder[T]) WithDeliveryErrorHandler(fn models.DeliveryErrorHandler[T]) *Builder[T] {
+	b.deliveryErrHandler = fn
+	return b
+}
+
+// WithDeliveryRetry sets the retry backoff of failed durable deliveries: the
+// first retry waits initial, then the delay doubles up to max. Defaults: 100ms
+// and 30s.
+func (b *Builder[T]) WithDeliveryRetry(initial, max time.Duration) *Builder[T] {
+	b.retryInitial, b.retryMax = initial, max
 	return b
 }
 
@@ -234,12 +272,22 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 	if len(syncs) > 0 {
 		procOpts = append(procOpts, processor.WithSyncProjections(syncs))
 	}
-	durable, err := b.compileDurableMatch()
+	durableSubs, durableMatch, err := b.compileDurable()
 	if err != nil {
 		return nil, err
 	}
-	if durable != nil {
-		procOpts = append(procOpts, processor.WithDurableDelivery[T](durable))
+	if durableMatch != nil {
+		procOpts = append(procOpts,
+			processor.WithDurableDelivery[T](durableMatch),
+			processor.WithDurableSubscribers(durableSubs),
+		)
+		if b.deliveryErrHandler != nil {
+			procOpts = append(procOpts, processor.WithDeliveryErrorHandler(b.deliveryErrHandler))
+		}
+		if b.panicHandler != nil {
+			procOpts = append(procOpts, processor.WithDeliveryPanicHandler(b.panicHandler))
+		}
+		procOpts = append(procOpts, processor.WithDeliveryRetry[T](b.retryInitial, b.retryMax))
 	}
 	if b.snapshotErrHandler != nil {
 		procOpts = append(procOpts, processor.WithSnapshotErrorHandler(b.snapshotErrHandler))
@@ -265,12 +313,6 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 
 	for _, fn := range b.forgetHandlers {
 		if _, err := instance.OnForget(fn); err != nil {
-			return nil, err
-		}
-	}
-
-	for _, sub := range b.subscribers {
-		if _, err := activeBus.Subscribe(sub.pattern, sub.handler, sub.opts...); err != nil {
 			return nil, err
 		}
 	}
@@ -307,29 +349,41 @@ func (b *Builder[T]) compileSyncProjections() ([]exec.SyncProjection[T], error) 
 	return out, nil
 }
 
-// compileDurableMatch returns a predicate that accepts the events at least one
-// durable subscriber is interested in, or nil when there are no subscribers.
-// Events nobody durable listens to get no delivery entry.
-func (b *Builder[T]) compileDurableMatch() (func(string) bool, error) {
+// compileDurable validates the durable subscribers and returns them with a
+// predicate accepting the events at least one of them wants (nil when there are
+// none). Events nobody durable listens to get no delivery entry.
+func (b *Builder[T]) compileDurable() ([]dispatcher.DurableSub[T], func(string) bool, error) {
 	if len(b.subscribers) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
-	matchers := make([]func(string) bool, 0, len(b.subscribers))
-	for _, sub := range b.subscribers {
-		if sub.pattern == "" {
-			return nil, models.ErrEmptyPattern
+	subs := make([]dispatcher.DurableSub[T], 0, len(b.subscribers))
+	for _, def := range b.subscribers {
+		if def.pattern == "" {
+			return nil, nil, models.ErrEmptyPattern
 		}
-		m, err := matcher(sub.pattern)
+		if def.handler == nil {
+			return nil, nil, models.ErrNilHandler
+		}
+
+		cfg := &models.SubscriptionConfig[T]{}
+		for _, opt := range def.opts {
+			opt(cfg)
+		}
+		if cfg.Fallback != nil {
+			return nil, nil, models.ErrFallbackUnsupported
+		}
+
+		m, err := matcher(def.pattern)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		matchers = append(matchers, m)
+		subs = append(subs, dispatcher.DurableSub[T]{Match: m, Handler: def.handler, Timeout: cfg.Timeout})
 	}
 
-	return func(name string) bool {
-		for _, m := range matchers {
-			if m(name) {
+	return subs, func(name string) bool {
+		for _, sub := range subs {
+			if sub.Match(name) {
 				return true
 			}
 		}

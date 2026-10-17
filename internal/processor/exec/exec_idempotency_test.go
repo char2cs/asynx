@@ -264,3 +264,55 @@ func TestExecute_Idempotent_LosingTheReceiptRaceAnswersWithTheWinner(t *testing.
 		t.Fatalf("event = %+v, want the winner's", evt)
 	}
 }
+
+// A rejection that cannot be recorded must not be reported as a rejection: a
+// retry could pass validation later and succeed.
+type putReceiptFailStore struct{ store.Memory }
+
+func (s putReceiptFailStore) Atomically(ctx context.Context, fn func(asynxmd.Tx) error) error {
+	return s.Memory.Atomically(ctx, func(tx asynxmd.Tx) error { return fn(failingReceiptTx{tx}) })
+}
+
+type failingReceiptTx struct{ asynxmd.Tx }
+
+func (failingReceiptTx) PutReceipt(context.Context, string, asynxmd.Receipt) error {
+	return errors.New("receipt table locked")
+}
+
+func TestExecute_Idempotent_UnrecordableRejectionFailsThePipeline(t *testing.T) {
+	ex, _, _, _, _ := newEnvOn(t, putReceiptFailStore{store.New()})
+	bad := idemCreate{CreateOrderCmd: mocks.CreateOrderCmd{ID: "agg", Total: -1}, Cmd: "c1"}
+
+	_, err := ex.Execute(context.Background(), bad, false)
+	if !errors.Is(err, asynxmd.ErrPipelineFailed) || errors.Is(err, asynxmd.ErrValidation) {
+		t.Fatalf("err = %v, want ErrPipelineFailed and not a (non-durable) rejection", err)
+	}
+}
+
+// Two commands with one id race: the loser's rejection hits the winner's receipt.
+type rejectionRaceStore struct {
+	store.Memory
+	reads int
+}
+
+func (s *rejectionRaceStore) GetReceipt(context.Context, string) (asynxmd.Receipt, bool, error) {
+	s.reads++
+	if s.reads == 1 {
+		return asynxmd.Receipt{}, false, nil
+	}
+	return asynxmd.Receipt{Rejection: "decided elsewhere"}, true, nil
+}
+
+func (s *rejectionRaceStore) Atomically(ctx context.Context, fn func(asynxmd.Tx) error) error {
+	return s.Memory.Atomically(ctx, func(tx asynxmd.Tx) error { return fn(phantomTx{tx}) })
+}
+
+func TestExecute_Idempotent_RejectionRaceAnswersFromTheExistingReceipt(t *testing.T) {
+	ex, _, _, _, _ := newEnvOn(t, &rejectionRaceStore{Memory: store.New()})
+	bad := idemCreate{CreateOrderCmd: mocks.CreateOrderCmd{ID: "agg", Total: -1}, Cmd: "c1"}
+
+	_, err := ex.Execute(context.Background(), bad, false)
+	if !errors.Is(err, asynxmd.ErrValidation) || !strings.Contains(err.Error(), "decided elsewhere") {
+		t.Fatalf("err = %v, want the existing rejection", err)
+	}
+}

@@ -19,4 +19,7 @@ var (
 	ErrDispatcherClosed     = errors.New("asynx: dispatcher closed")
 	ErrDuplicateReceipt     = errors.New("asynx: duplicate command receipt")
 	ErrSyncProjection       = errors.New("asynx: sync projection failed")
+	ErrHandlerPanic         = errors.New("asynx: durable handler panicked")
+	ErrHandlerTimeout       = errors.New("asynx: durable handler timed out")
+	ErrFallbackUnsupported  = errors.New("asynx: durable subscribers do not support WithFallback")
 )

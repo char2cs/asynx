@@ -224,11 +224,18 @@ func (b *ChannelBus[T]) PublishSync(
 	}
 	b.publishMu.RUnlock()
 
+	// PublishSync promises that every handler has finished when it returns, so
+	// a timed-out handler is reported but still waited for.
+	syncJob := func(sub *models.Subscription[T]) *exec.HandlerJob[T] {
+		job := utils.MakeJob(sub, event, ctx, b.onPanic, b.onTimeout)
+		job.WaitAfterTimeout = true
+		return job
+	}
 	for _, sub := range exactMatches {
-		go exec.ExecuteHandler(&localWg, utils.MakeJob(sub, event, ctx, b.onPanic, b.onTimeout))
+		go exec.ExecuteHandler(&localWg, syncJob(sub))
 	}
 	for _, sub := range regexMatches {
-		go exec.ExecuteHandler(&localWg, utils.MakeJob(sub, event, ctx, b.onPanic, b.onTimeout))
+		go exec.ExecuteHandler(&localWg, syncJob(sub))
 	}
 
 	localWg.Wait()

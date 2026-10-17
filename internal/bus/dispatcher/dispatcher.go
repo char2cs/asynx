@@ -2,13 +2,18 @@ package dispatcher
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-const defaultIdleTimeout = 5 * time.Second
+const (
+	defaultIdleTimeout  = 5 * time.Second
+	defaultRetryInitial = 100 * time.Millisecond
+	defaultRetryMax     = 30 * time.Second
+)
 
 // Opt is a functional option for configuring a Dispatcher.
 type Opt[T any] func(*Dispatcher[T])
@@ -17,6 +22,50 @@ type Opt[T any] func(*Dispatcher[T])
 // returns a non-nil error. When nil (the default), errors are silently dropped.
 func WithPublishErrorHandler[T any](fn asynxmd.PublishErrorHandler[T]) Opt[T] {
 	return func(d *Dispatcher[T]) { d.onPublishError = fn }
+}
+
+// DurableSub is a durable subscriber the dispatcher runs itself, with retry,
+// instead of publishing through the bus.
+type DurableSub[T any] struct {
+	// Match reports whether the subscriber wants an event name.
+	Match func(eventName string) bool
+	// Handler delivers an event. A non-nil error, a panic, or a timeout then
+	// error keeps the delivery pending and retries.
+	Handler asynxmd.DurableHandler[T]
+	// Timeout, when positive, reports a slow handler as timed out. The handler
+	// is still waited for.
+	Timeout time.Duration
+}
+
+// WithDurableSubs registers the durable subscribers run for jobs enqueued with
+// an ack (durable deliveries).
+func WithDurableSubs[T any](subs []DurableSub[T]) Opt[T] {
+	return func(d *Dispatcher[T]) { d.durable = subs }
+}
+
+// WithDeliveryErrorHandler sets the callback invoked for each failed durable
+// delivery attempt.
+func WithDeliveryErrorHandler[T any](fn asynxmd.DeliveryErrorHandler[T]) Opt[T] {
+	return func(d *Dispatcher[T]) { d.onDeliveryError = fn }
+}
+
+// WithDeliveryPanicHandler sets the callback invoked when a durable handler
+// panics, in addition to the failure being reported and retried.
+func WithDeliveryPanicHandler[T any](fn asynxmd.PanicHandler[T]) Opt[T] {
+	return func(d *Dispatcher[T]) { d.onPanic = fn }
+}
+
+// WithRetryBackoff sets the delay before a failed durable delivery is retried:
+// it starts at initial and doubles up to max. Non-positive values are ignored.
+func WithRetryBackoff[T any](initial, max time.Duration) Opt[T] {
+	return func(d *Dispatcher[T]) {
+		if initial > 0 {
+			d.retryInitial = initial
+		}
+		if max > 0 {
+			d.retryMax = max
+		}
+	}
 }
 
 // WithIdleTimeout sets how long a per-aggregate worker goroutine waits for new
@@ -44,6 +93,12 @@ type Dispatcher[T any] struct {
 	jobsWg         sync.WaitGroup // tracks in-flight jobs (for WaitIdle)
 	onPublishError asynxmd.PublishErrorHandler[T]
 	idleTimeout    time.Duration
+
+	durable         []DurableSub[T]
+	onDeliveryError asynxmd.DeliveryErrorHandler[T]
+	onPanic         asynxmd.PanicHandler[T]
+	retryInitial    time.Duration
+	retryMax        time.Duration
 }
 
 // aggregateQueue is an unbounded FIFO of one aggregate's jobs. It is unbounded
@@ -58,17 +113,27 @@ type aggregateQueue[T any] struct {
 type dispatchJob[T any] struct {
 	event asynxmd.Event[T]
 	ctx   context.Context
-	done  chan struct{}
-	ack   func(context.Context) error
+	// done closes once the event has been handled at least once: every handler
+	// ran and, if all succeeded, the ack ran. A failing durable handler keeps
+	// retrying after done closes.
+	done   chan struct{}
+	settle sync.Once
+	// ack, when non-nil, marks a durable delivery: durable subscribers run and
+	// ack is called once they have all succeeded.
+	ack func(context.Context) error
 }
+
+func (j *dispatchJob[T]) markSettled() { j.settle.Do(func() { close(j.done) }) }
 
 // New creates a Dispatcher that publishes events through bus.
 func New[T any](bus asynxmd.Bus[T], opts ...Opt[T]) *Dispatcher[T] {
 	d := &Dispatcher[T]{
-		bus:         bus,
-		queues:      make(map[string]*aggregateQueue[T]),
-		stopCh:      make(chan struct{}),
-		idleTimeout: defaultIdleTimeout,
+		bus:          bus,
+		queues:       make(map[string]*aggregateQueue[T]),
+		stopCh:       make(chan struct{}),
+		idleTimeout:  defaultIdleTimeout,
+		retryInitial: defaultRetryInitial,
+		retryMax:     defaultRetryMax,
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -91,13 +156,14 @@ func (d *Dispatcher[T]) Dispatch(ctx context.Context, event asynxmd.Event[T], wa
 }
 
 // Enqueue puts an event on its aggregate's queue and returns a channel that is
-// closed once every handler for the event has finished. Enqueue order is
+// closed once every handler for the event has been run at least once. Enqueue order is
 // delivery order, so callers that must keep versions ordered enqueue while
 // holding their per-aggregate lock and wait on the channel afterwards.
 //
-// ack, when non-nil, runs after the handlers finished successfully (the bus
-// accepted the event). An ack error is reported to the publish error handler.
-// If the bus rejects the event, ack is not called.
+// ack, when non-nil, marks a durable delivery: the durable subscribers matching
+// the event run (with retry, holding back the aggregate's later events until
+// they succeed) and ack runs once they all have. An ack error is reported to the
+// publish error handler. If the bus rejects the event, ack is not called.
 func (d *Dispatcher[T]) Enqueue(
 	ctx context.Context,
 	event asynxmd.Event[T],
@@ -244,31 +310,120 @@ func (d *Dispatcher[T]) pop(q *aggregateQueue[T]) (*dispatchJob[T], bool) {
 	return job, true
 }
 
-// handle runs bus.PublishSync with panic recovery for resilience. A panicking
-// handler will not crash the worker goroutine — subsequent events continue to
-// be delivered.
+// handle delivers one job: ephemeral subscribers through the bus, then (for a
+// durable delivery) the durable subscribers, retrying the failed ones until they
+// succeed or the dispatcher closes. A panic in the dispatcher itself never kills
+// the worker; it is reported to the publish error handler.
 func (d *Dispatcher[T]) handle(job *dispatchJob[T]) {
 	defer d.jobsWg.Done()
-	defer close(job.done)
+	defer job.markSettled()
 	defer func() {
 		if r := recover(); r != nil {
-			// Worker survives — recovered defensively so subsequent events
-			// still deliver.
+			d.reportPublishError(job, fmt.Errorf("asynx: dispatcher panic: %v", r))
 		}
 	}()
-	if d.bus == nil {
+
+	if d.bus != nil {
+		if err := d.bus.PublishSync(job.ctx, job.event); err != nil {
+			d.reportPublishError(job, err)
+			return
+		}
+	}
+
+	if job.ack == nil {
 		return
 	}
-	err := d.bus.PublishSync(job.ctx, job.event)
-	if err != nil {
-		if d.onPublishError != nil {
-			d.onPublishError(job.ctx, job.event, err)
-		}
+	if !d.deliverDurable(job) {
 		return
 	}
-	if job.ack != nil {
-		if err := job.ack(job.ctx); err != nil && d.onPublishError != nil {
-			d.onPublishError(job.ctx, job.event, err)
+	if err := job.ack(job.ctx); err != nil {
+		d.reportPublishError(job, err)
+	}
+}
+
+func (d *Dispatcher[T]) reportPublishError(job *dispatchJob[T], err error) {
+	if d.onPublishError != nil {
+		d.onPublishError(job.ctx, job.event, err)
+	}
+}
+
+// deliverDurable runs the matching durable subscribers until all succeed. It
+// returns false when the dispatcher closed first; the delivery then stays
+// pending for the next start's recovery.
+func (d *Dispatcher[T]) deliverDurable(job *dispatchJob[T]) bool {
+	var pending []DurableSub[T]
+	for _, sub := range d.durable {
+		if sub.Match(job.event.EventName) {
+			pending = append(pending, sub)
 		}
+	}
+
+	backoff := d.retryInitial
+	for attempt := 1; len(pending) > 0; attempt++ {
+		var failed []DurableSub[T]
+		for _, sub := range pending {
+			if err := d.runDurable(job, sub, attempt); err != nil {
+				d.reportDeliveryError(job, err, attempt)
+				failed = append(failed, sub)
+			}
+		}
+		if attempt == 1 {
+			job.markSettled()
+		}
+		pending = failed
+		if len(pending) == 0 {
+			break
+		}
+
+		select {
+		case <-d.stopCh:
+			return false
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, d.retryMax)
+	}
+	return true
+}
+
+func (d *Dispatcher[T]) reportDeliveryError(job *dispatchJob[T], err error, attempt int) {
+	if d.onDeliveryError != nil {
+		d.onDeliveryError(job.ctx, job.event, err, attempt)
+	}
+}
+
+// runDurable runs one durable handler, turning a panic into an error. A slow
+// handler is reported once as timed out and still waited for.
+func (d *Dispatcher[T]) runDurable(job *dispatchJob[T], sub DurableSub[T], attempt int) error {
+	call := func() (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				if d.onPanic != nil {
+					func() {
+						defer func() { _ = recover() }()
+						d.onPanic(job.ctx, job.event, r)
+					}()
+				}
+				err = fmt.Errorf("%w: %v", asynxmd.ErrHandlerPanic, r)
+			}
+		}()
+		return sub.Handler(job.ctx, job.event)
+	}
+
+	if sub.Timeout <= 0 {
+		return call()
+	}
+
+	result := make(chan error, 1)
+	go func() { result <- call() }()
+
+	timer := time.NewTimer(sub.Timeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-result:
+		return err
+	case <-timer.C:
+		d.reportDeliveryError(job, fmt.Errorf("%w after %v", asynxmd.ErrHandlerTimeout, sub.Timeout), attempt)
+		return <-result
 	}
 }

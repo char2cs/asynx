@@ -3,7 +3,6 @@ package asynx_test
 import (
 	"context"
 	"errors"
-	"regexp"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -96,8 +95,9 @@ func TestGuarantee_DurableSubscriberRecoversAfterCrash(t *testing.T) {
 	ctx := context.Background()
 
 	stuck := make(chan struct{})
-	first := build(t, eight(s).WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) {
+	first := build(t, eight(s).WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error {
 		<-stuck // the "process" dies while handling v1
+		return nil
 	}))
 	t.Cleanup(func() { close(stuck) })
 	for i := range 3 {
@@ -108,31 +108,27 @@ func TestGuarantee_DurableSubscriberRecoversAfterCrash(t *testing.T) {
 
 	var mu sync.Mutex
 	var versions []int64
-	second := build(t, eight(s).WithSubscriber("OrderUpdated", func(_ context.Context, e models.Event[mocks.Order]) {
+	second := build(t, eight(s).WithSubscriber("OrderUpdated", func(_ context.Context, e models.Event[mocks.Order]) error {
 		mu.Lock()
 		versions = append(versions, e.Version)
 		mu.Unlock()
+		return nil
 	}))
 
-	// Build has returned, so recovery has already finished.
+	// Recovery is queued before Build returns, so a command sent right away is
+	// delivered after the recovered events of its aggregate.
+	if _, err := second.Send(ctx, upd("agg", 4)); err != nil {
+		t.Fatal(err)
+	}
+	waitPublish(t, second)
+
 	mu.Lock()
-	got := append([]int64(nil), versions...)
-	mu.Unlock()
-	if len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
-		t.Fatalf("recovered versions = %v, want [1 2 3]", got)
+	defer mu.Unlock()
+	if len(versions) != 4 || versions[0] != 1 || versions[1] != 2 || versions[2] != 3 || versions[3] != 4 {
+		t.Fatalf("delivered versions = %v, want [1 2 3 4]", versions)
 	}
 	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 0 {
 		t.Fatalf("pending after recovery = %v, want none", pending)
-	}
-
-	// A new command after recovery is delivered after the recovered ones.
-	if _, err := second.SendWait(ctx, upd("agg", 4)); err != nil {
-		t.Fatal(err)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(versions) != 4 || versions[3] != 4 {
-		t.Fatalf("versions = %v, want [1 2 3 4]", versions)
 	}
 }
 
@@ -142,7 +138,7 @@ func TestGuarantee_RecoverySkipsDeliveriesWhoseEventIsGone(t *testing.T) {
 	s.Atomically(ctx, func(tx models.Tx) error { return tx.EnqueueDelivery(ctx, "ghost", 1) })
 
 	var calls atomic.Int32
-	build(t, eight(s).WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) { calls.Add(1) }))
+	build(t, eight(s).WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error { calls.Add(1); return nil }))
 
 	if calls.Load() != 0 {
 		t.Fatalf("handler called %d times for a vanished event", calls.Load())
@@ -152,24 +148,29 @@ func TestGuarantee_RecoverySkipsDeliveriesWhoseEventIsGone(t *testing.T) {
 	}
 }
 
-type noAckStore struct{ store.Memory }
+type ackErrStore struct{ store.Memory }
 
-func (noAckStore) AckDelivery(context.Context, string, int64) error { return nil }
+func (ackErrStore) AckDelivery(context.Context, string, int64) error { return errors.New("ack failed") }
 
-func TestGuarantee_RecoveryFailsLoudlyWhenAcksDoNotStick(t *testing.T) {
+func TestGuarantee_AckFailuresAreReportedAndTheDeliveryStaysPending(t *testing.T) {
 	s := store.New()
 	ctx := context.Background()
-	s.Atomically(ctx, func(tx models.Tx) error {
-		_ = tx.Append(ctx, "events:agg", 1, []byte(`{"id":"e1","eventName":"OrderUpdated","version":1,"schemaVersion":1,"patches":[]}`))
-		return tx.EnqueueDelivery(ctx, "agg", 1)
-	})
+	var reported atomic.Int32
+	inst := build(t, eight(nil).
+		WithEventStore(ackErrStore{s}).
+		WithPublishErrorHandler(func(context.Context, models.Event[mocks.Order], error) { reported.Add(1) }).
+		WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error { return nil }))
 
-	_, err := eight(nil).
-		WithEventStore(noAckStore{s}).
-		WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) {}).
-		Build()
-	if err == nil || !regexp.MustCompile("not acknowledged").MatchString(err.Error()) {
-		t.Fatalf("Build err = %v, want a 'not acknowledged' recovery error", err)
+	if _, err := inst.SendWait(ctx, upd("agg", 1)); err != nil {
+		t.Fatal(err)
+	}
+	waitPublish(t, inst)
+
+	if reported.Load() != 1 {
+		t.Fatalf("ack failures reported = %d, want 1", reported.Load())
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 1 {
+		t.Fatalf("pending = %v, want the unacked delivery to stay for the next start", pending)
 	}
 }
 
@@ -182,7 +183,7 @@ func (pendingErrStore) PendingDeliveries(context.Context, int) ([]models.Deliver
 func TestGuarantee_RecoveryReadFailureFailsBuild(t *testing.T) {
 	_, err := eight(nil).
 		WithEventStore(pendingErrStore{store.New()}).
-		WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) {}).
+		WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error { return nil }).
 		Build()
 	if err == nil {
 		t.Fatal("Build succeeded with an unreadable delivery log")
@@ -209,7 +210,7 @@ func TestGuarantee_SyncProjectionFailureRollsEverythingBack(t *testing.T) {
 		WithSyncProjection("OrderUpdated", func(context.Context, models.Tx, models.Event[mocks.Order]) error {
 			return errors.New("read model write failed")
 		}).
-		WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) { calls.Add(1) }))
+		WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error { calls.Add(1); return nil }))
 
 	_, err := inst.Send(context.Background(), idemCmd{UpdateOrderCmd: upd("agg", 1), Cmd: "c1"})
 	if !errors.Is(err, models.ErrPipelineFailed) || !errors.Is(err, models.ErrSyncProjection) {
@@ -271,7 +272,7 @@ func TestGuarantee_BuildRejectsBadProjectionsAndSubscribers(t *testing.T) {
 	}{
 		"empty projection pattern": {eight(store.New()).WithSyncProjection("", noop), models.ErrEmptyPattern},
 		"nil projection fn":        {eight(store.New()).WithSyncProjection("X", nil), models.ErrNilHandler},
-		"empty subscriber pattern": {eight(store.New()).WithSubscriber("", func(context.Context, models.Event[mocks.Order]) {}), models.ErrEmptyPattern},
+		"empty subscriber pattern": {eight(store.New()).WithSubscriber("", func(context.Context, models.Event[mocks.Order]) error { return nil }), models.ErrEmptyPattern},
 		"nil subscriber handler":   {eight(store.New()).WithSubscriber("X", nil), models.ErrNilHandler},
 	}
 	for name, tc := range cases {
@@ -285,7 +286,7 @@ func TestGuarantee_BuildRejectsBadProjectionsAndSubscribers(t *testing.T) {
 	if _, err := eight(store.New()).WithSyncProjection("(unclosed", noop).Build(); err == nil {
 		t.Fatal("invalid regexp pattern was accepted")
 	}
-	if _, err := eight(store.New()).WithSubscriber("(unclosed", func(context.Context, models.Event[mocks.Order]) {}).Build(); err == nil {
+	if _, err := eight(store.New()).WithSubscriber("(unclosed", func(context.Context, models.Event[mocks.Order]) error { return nil }).Build(); err == nil {
 		t.Fatal("invalid subscriber pattern was accepted")
 	}
 }
@@ -342,7 +343,7 @@ func TestGuarantee_SnapshotFailureIsReportedNotFatal(t *testing.T) {
 // Review focus 5: Forget racing commands, plus pending deliveries.
 func TestGuarantee_ForgetFencedAgainstCommands(t *testing.T) {
 	s := store.New()
-	inst := build(t, eight(s).WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) {}))
+	inst := build(t, eight(s).WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error { return nil }))
 	ctx := context.Background()
 	if _, err := inst.Send(ctx, upd("agg", 1)); err != nil {
 		t.Fatal(err)
@@ -376,7 +377,7 @@ func TestGuarantee_ForgetFencedAgainstCommands(t *testing.T) {
 func TestGuarantee_EventsNoDurableSubscriberWantsGetNoDeliveryEntry(t *testing.T) {
 	s := store.New()
 	release := make(chan struct{})
-	inst := build(t, eight(s).WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) { <-release }))
+	inst := build(t, eight(s).WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error { <-release; return nil }))
 	t.Cleanup(func() { close(release) })
 	ctx := context.Background()
 
@@ -389,19 +390,12 @@ func TestGuarantee_EventsNoDurableSubscriberWantsGetNoDeliveryEntry(t *testing.T
 }
 
 func TestGuarantee_FailedBuildShutsTheProcessorDown(t *testing.T) {
-	s := store.New()
-	ctx := context.Background()
-	s.Atomically(ctx, func(tx models.Tx) error {
-		_ = tx.Append(ctx, "events:agg", 1, []byte(`{"id":"e1","eventName":"OrderUpdated","version":1,"schemaVersion":1,"patches":[]}`))
-		return tx.EnqueueDelivery(ctx, "agg", 1)
-	})
-
 	before := runtime.NumGoroutine()
 	for range 5 {
-		// Recovery fails (acks never stick) after the processor is running.
+		// Recovery fails (the delivery log is unreadable) after the processor is running.
 		_, err := eight(nil).
-			WithEventStore(noAckStore{s}).
-			WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) {}).
+			WithEventStore(pendingErrStore{store.New()}).
+			WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error { return nil }).
 			Build()
 		if err == nil {
 			t.Fatal("Build should fail")
@@ -410,5 +404,164 @@ func TestGuarantee_FailedBuildShutsTheProcessorDown(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if after := runtime.NumGoroutine(); after > before+5 {
 		t.Fatalf("goroutines grew from %d to %d across failed builds", before, after)
+	}
+}
+
+// Durable subscribers can fail: the delivery stays pending, retries, and holds
+// back the aggregate's later events.
+func TestGuarantee_DurableSubscriberFailureRetriesAndKeepsOrder(t *testing.T) {
+	s := store.New()
+	ctx := context.Background()
+
+	var mu sync.Mutex
+	var seen []int64
+	var failures atomic.Int32
+	var reported atomic.Int32
+	inst := build(t, eight(s).
+		WithDeliveryRetry(time.Millisecond, 5*time.Millisecond).
+		WithDeliveryErrorHandler(func(context.Context, models.Event[mocks.Order], error, int) { reported.Add(1) }).
+		WithSubscriber("OrderUpdated", func(_ context.Context, e models.Event[mocks.Order]) error {
+			if e.Version == 1 && failures.Add(1) <= 2 {
+				return errors.New("read model unavailable")
+			}
+			mu.Lock()
+			seen = append(seen, e.Version)
+			mu.Unlock()
+			return nil
+		}))
+
+	for i := range 3 {
+		if _, err := inst.Send(ctx, upd("agg", float64(i+1))); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		pending, _ := s.PendingDeliveries(ctx, 10)
+		if len(pending) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("deliveries never completed: %v", pending)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 3 || seen[0] != 1 || seen[1] != 2 || seen[2] != 3 {
+		t.Fatalf("delivered versions = %v, want [1 2 3] (v2 must wait for v1)", seen)
+	}
+	if reported.Load() != 2 {
+		t.Fatalf("failures reported = %d, want 2", reported.Load())
+	}
+}
+
+func TestGuarantee_SendWaitReturnsAfterTheFirstAttemptEvenIfTheHandlerFails(t *testing.T) {
+	var attempts atomic.Int32
+	inst := build(t, eight(store.New()).
+		WithDeliveryRetry(time.Hour, time.Hour).
+		WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error {
+			attempts.Add(1)
+			return errors.New("down")
+		}))
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := inst.SendWait(context.Background(), upd("agg", 1))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SendWait: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SendWait blocked on a failing durable handler's retries")
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts.Load())
+	}
+}
+
+func TestGuarantee_BuildDoesNotHangOnAPoisonDelivery(t *testing.T) {
+	s := store.New()
+	ctx := context.Background()
+	dies := make(chan struct{})
+	first := build(t, eight(s).WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error {
+		<-dies // never finishes during the test: the "process" dies
+		return nil
+	}))
+	t.Cleanup(func() { close(dies) })
+	if _, err := first.Send(ctx, upd("agg", 1)); err != nil {
+		t.Fatal(err)
+	}
+
+	var attempts atomic.Int32
+	built := make(chan struct{})
+	go func() {
+		build(t, eight(s).
+			WithDeliveryRetry(time.Hour, time.Hour).
+			WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error {
+				attempts.Add(1)
+				return errors.New("poison")
+			}))
+		close(built)
+	}()
+	select {
+	case <-built:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Build hung on a poison delivery")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for attempts.Load() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the recovered delivery was never attempted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 1 {
+		t.Fatalf("pending = %v, want the poison delivery to stay pending", pending)
+	}
+}
+
+func TestGuarantee_DurableFallbackIsRejectedAtBuild(t *testing.T) {
+	_, err := eight(store.New()).
+		WithSubscriber("OrderUpdated",
+			func(context.Context, models.Event[mocks.Order]) error { return nil },
+			models.WithFallback(func(context.Context, models.Event[mocks.Order]) {})).
+		Build()
+	if !errors.Is(err, models.ErrFallbackUnsupported) {
+		t.Fatalf("Build err = %v, want ErrFallbackUnsupported", err)
+	}
+}
+
+func TestGuarantee_DurablePanicIsAFailureNotADelivery(t *testing.T) {
+	var attempts atomic.Int32
+	var panics atomic.Int32
+	s := store.New()
+	inst := build(t, eight(s).
+		WithDeliveryRetry(time.Millisecond, 2*time.Millisecond).
+		WithPanicHandler(func(context.Context, models.Event[mocks.Order], any) { panics.Add(1) }).
+		WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error {
+			if attempts.Add(1) == 1 {
+				panic("boom")
+			}
+			return nil
+		}, models.WithHandlerTimeout[mocks.Order](time.Second)))
+
+	if _, err := inst.Send(context.Background(), upd("agg", 1)); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for attempts.Load() < 2 || func() bool { p, _ := s.PendingDeliveries(context.Background(), 1); return len(p) > 0 }() {
+		if time.Now().After(deadline) {
+			t.Fatalf("attempts = %d; delivery never completed after the panic", attempts.Load())
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if panics.Load() != 1 {
+		t.Fatalf("panic handler calls = %d, want 1", panics.Load())
 	}
 }
