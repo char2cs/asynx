@@ -146,6 +146,8 @@ Same signature as `ProjectionHandler[T]`. The tombstone event provides the final
 
 ---
 
+> **v0.9.0:** `Forget` now runs on the aggregate's shard worker under its lock and erases through `Store.Atomically` (`DeleteStream` + `DropDeliveries`). See [Write-Path Guarantees](guarantees.md#forget).
+
 ## `models.Store` Interface — New Method
 
 ```go

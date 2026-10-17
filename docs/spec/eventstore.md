@@ -325,9 +325,9 @@ Commits a command's state transition to the eventstore and optionally to the sna
    - Aggregate: newState
    - PreviousAggregate: oldState
 5. Serialize Event[T] to JSON
-6. Append to event stream (events:aggregateID) via Store.Append()
+6. Append to event stream (events:aggregateID) via Tx.Append(), inside Store.Atomically together with synchronous projections, the receipt and the delivery entry (see [Write-Path Guarantees](guarantees.md#pipeline))
    - **Save point** ← event is now durable
-7. If shouldSnapshot, upsert the snapshot for aggregateID:
+7. After the commit, if shouldSnapshot, upsert the snapshot for aggregateID (best-effort: a failure is reported to the snapshot error handler and never fails the command):
    - Serialize full newState to JSON
    - Include version and schemaVersion in snapshot metadata
    - Write via SnapshotStore.Put() — replaces any prior snapshot for this aggregate, never appends

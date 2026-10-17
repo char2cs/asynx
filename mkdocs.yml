@@ -24,6 +24,7 @@ nav:
   - Home: index.md
   - Specification:
     - Overview: spec/overview.md
+    - Write-Path Guarantees: spec/guarantees.md
 
 plugins:
   - search

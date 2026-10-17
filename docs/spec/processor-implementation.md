@@ -1579,6 +1579,8 @@ type ShardingOpts struct {
 }
 ```
 
+**Note (v0.9.0):** `WorkersPerShard` only tunes throughput. A per-aggregate lock in the executor keeps same-aggregate commands serial and ordered at any value (see [Write-Path Guarantees](guarantees.md)).
+
 **Recommendation:** Start with `WorkersPerShard=1`. Each worker processes commands sequentially for that shard. If a single shard's commands are I/O-bound (waiting on storage), multiple workers per shard can help. For CPU-bound commands, 1 per shard is usually sufficient.
 
 ---
