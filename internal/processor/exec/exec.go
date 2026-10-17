@@ -273,38 +273,40 @@ func idempotencyKey[T any](cmd asynxmd.Command[T]) string {
 	return ""
 }
 
-// Forget erases an aggregate under its lock, so no command on it can
-// interleave: it writes a tombstone (running synchronous projections), lets the
-// forget handlers observe the tombstone and the aggregate's last state, then
-// deletes the stream, its pending deliveries and its snapshot.
+// Forget erases an aggregate. The tombstone is written (running synchronous
+// projections) and enqueued under the aggregate's lock; the lock is then
+// released while the forget handlers observe the tombstone and the aggregate's
+// last state — handlers queued ahead of it may legitimately send commands to
+// this aggregate, which need the lock. The lock is retaken to erase the stream,
+// its pending deliveries and its snapshot, so the erase is atomic with respect
+// to every command: a command that slipped in after the tombstone is erased
+// with the rest, and one that follows starts a new aggregate at version 1.
 //
-// A crash between the tombstone and the delete leaves the aggregate in place;
+// A crash between the tombstone and the erase leaves the aggregate in place;
 // retrying Forget runs the handlers again (at-least-once).
 func (e *CommandExecutor[T]) Forget(ctx context.Context, aggregateID string) error {
-	unlock, err := e.locks.Lock(ctx, aggregateID)
+	done, err := e.writeTombstone(ctx, aggregateID)
 	if err != nil {
-		return fmt.Errorf("%w: %w", asynxmd.ErrContextCancelled, err)
+		return err
 	}
-	defer unlock()
-
-	tombstone, err := e.es.WriteTx(ctx, commands.NewForgetCommand[T](aggregateID), e.tombstoneHook())
-	if err != nil {
-		if errors.Is(err, asynxmd.ErrValidation) && !errors.Is(err, asynxmd.ErrSyncProjection) {
-			return err
-		}
-		return fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
-	}
-
-	if e.dispatcher != nil {
-		done, err := e.dispatcher.Enqueue(ctx, tombstone, nil)
-		if err != nil {
-			return fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
-		}
+	if done != nil {
 		<-done
 	}
 
 	// The erase must finish even if the caller gives up.
 	eraseCtx := context.WithoutCancel(ctx)
+	unlock, err := e.locks.Lock(eraseCtx, aggregateID)
+	if err != nil {
+		return fmt.Errorf("%w: %w", asynxmd.ErrForgetFailed, err)
+	}
+	defer unlock()
+
+	// Snapshot first: if the stream erase then fails, the aggregate is intact
+	// and readable by cold replay; the other order could leave a stale snapshot
+	// that resurrects erased state.
+	if err := e.es.DeleteSnapshot(eraseCtx, aggregateID); err != nil {
+		return fmt.Errorf("%w: %w", asynxmd.ErrForgetFailed, err)
+	}
 	erase := func(tx asynxmd.Tx) error {
 		if err := tx.DeleteStream(eraseCtx, "events:"+aggregateID); err != nil {
 			return err
@@ -314,10 +316,35 @@ func (e *CommandExecutor[T]) Forget(ctx context.Context, aggregateID string) err
 	if err := e.es.Store().Atomically(eraseCtx, erase); err != nil {
 		return fmt.Errorf("%w: %w", asynxmd.ErrForgetFailed, err)
 	}
-	if err := e.es.DeleteSnapshot(eraseCtx, aggregateID); err != nil {
-		return fmt.Errorf("%w: %w", asynxmd.ErrForgetFailed, err)
-	}
 	return nil
+}
+
+// writeTombstone commits the tombstone and enqueues it for the forget
+// handlers, under the aggregate's lock. The returned channel closes when the
+// handlers have finished (nil without a dispatcher).
+func (e *CommandExecutor[T]) writeTombstone(ctx context.Context, aggregateID string) (<-chan struct{}, error) {
+	unlock, err := e.locks.Lock(ctx, aggregateID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", asynxmd.ErrContextCancelled, err)
+	}
+	defer unlock()
+
+	tombstone, err := e.es.WriteTx(ctx, commands.NewForgetCommand[T](aggregateID), e.tombstoneHook())
+	if err != nil {
+		if errors.Is(err, asynxmd.ErrValidation) && !errors.Is(err, asynxmd.ErrSyncProjection) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
+	}
+
+	if e.dispatcher == nil {
+		return nil, nil
+	}
+	done, err := e.dispatcher.Enqueue(ctx, tombstone, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
+	}
+	return done, nil
 }
 
 // tombstoneHook runs synchronous projections for the tombstone. It enqueues no

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -384,5 +385,30 @@ func TestGuarantee_EventsNoDurableSubscriberWantsGetNoDeliveryEntry(t *testing.T
 	}
 	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 0 {
 		t.Fatalf("OrderCreated got a delivery entry: %v", pending)
+	}
+}
+
+func TestGuarantee_FailedBuildShutsTheProcessorDown(t *testing.T) {
+	s := store.New()
+	ctx := context.Background()
+	s.Atomically(ctx, func(tx models.Tx) error {
+		_ = tx.Append(ctx, "events:agg", 1, []byte(`{"id":"e1","eventName":"OrderUpdated","version":1,"schemaVersion":1,"patches":[]}`))
+		return tx.EnqueueDelivery(ctx, "agg", 1)
+	})
+
+	before := runtime.NumGoroutine()
+	for range 5 {
+		// Recovery fails (acks never stick) after the processor is running.
+		_, err := eight(nil).
+			WithEventStore(noAckStore{s}).
+			WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) {}).
+			Build()
+		if err == nil {
+			t.Fatal("Build should fail")
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	if after := runtime.NumGoroutine(); after > before+5 {
+		t.Fatalf("goroutines grew from %d to %d across failed builds", before, after)
 	}
 }

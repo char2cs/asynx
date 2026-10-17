@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/char2cs/asynx/internal/eventstore"
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
@@ -234,5 +235,62 @@ func TestForget_SnapshotDeleteFailureReturnsErrForgetFailed(t *testing.T) {
 	}
 	if err := ex.Forget(ctx, "agg"); !errors.Is(err, asynxmd.ErrForgetFailed) {
 		t.Fatalf("err = %v, want ErrForgetFailed", err)
+	}
+}
+
+// A reaction queued ahead of the tombstone may send commands back to the
+// aggregate; Forget must not hold the lock the reaction needs.
+func TestForget_DoesNotDeadlockWithAReactionToItsOwnAggregate(t *testing.T) {
+	ex, s, _, _, b := newEnv(t)
+	ctx := context.Background()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	b.Subscribe("OrderUpdated", func(hctx context.Context, e asynxmd.Event[order]) {
+		if e.Version != 1 {
+			return
+		}
+		close(started)
+		<-release
+		ex.Execute(hctx, update("agg", 99), false) // needs the aggregate lock
+	})
+
+	if _, err := ex.Execute(ctx, update("agg", 1), false); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+
+	forgot := make(chan error, 1)
+	go func() { forgot <- ex.Forget(ctx, "agg") }()
+	time.Sleep(30 * time.Millisecond) // tombstone is now queued behind the reaction
+	close(release)
+
+	select {
+	case err := <-forgot:
+		if err != nil {
+			t.Fatalf("Forget: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Forget deadlocked against a reaction to its own aggregate")
+	}
+	if n := streamLen(t, s, "agg"); n != 0 {
+		t.Fatalf("stream length = %d, want 0", n)
+	}
+}
+
+func TestForget_SnapshotIsDeletedBeforeTheStream(t *testing.T) {
+	s := store.New()
+	es := eventstore.New[order](deleteFailStore{s}, snapshotDeleteFailStore{store.NewSnapshots()}, nil, 1, nil)
+	ex := New[order](es, nil)
+	ctx := context.Background()
+	if _, err := ex.Execute(ctx, update("agg", 1), false); err != nil {
+		t.Fatal(err)
+	}
+	// Snapshot delete fails first, so the stream is never touched.
+	if err := ex.Forget(ctx, "agg"); !errors.Is(err, asynxmd.ErrForgetFailed) {
+		t.Fatalf("err = %v, want ErrForgetFailed", err)
+	}
+	if n := streamLen(t, s, "agg"); n == 0 {
+		t.Fatal("stream was erased although the snapshot could not be deleted")
 	}
 }

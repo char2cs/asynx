@@ -111,7 +111,7 @@ b.WithSubscriber("Order.*", handler)   // registered at build time
 
 ### Reactions and re-entrancy
 
-Enqueueing never blocks (each aggregate's dispatcher queue is unbounded), and the aggregate lock is released before `SendWait` waits for handlers. A handler may therefore send commands back to its own aggregate. `Forget` is the exception: it holds the aggregate lock while the forget handlers run, so a forget handler must not send commands to the aggregate being forgotten. A handler must also not `SendWait` to its own aggregate (it would wait on itself behind the dispatcher queue) — that restriction is unchanged from earlier versions.
+Enqueueing never blocks (each aggregate's dispatcher queue is unbounded), and the aggregate lock is released before `SendWait` waits for handlers. A handler may therefore send commands back to its own aggregate. `Forget` writes its tombstone under the lock but releases it while the forget handlers run, so reactions queued ahead of the tombstone can still send commands to the aggregate (they are erased with it). A handler must also not `SendWait` to its own aggregate (it would wait on itself behind the dispatcher queue) — that restriction is unchanged from earlier versions.
 
 ## Idempotent Commands
 
@@ -137,7 +137,7 @@ Snapshots are a derived cache. They are written after the event commits, outside
 
 ## Forget
 
-`Forget` runs on the aggregate's shard worker under the aggregate lock: tombstone append (with synchronous projections), then the forget handlers observe the tombstone and the last state, then `Atomically{DeleteStream; DropDeliveries}`, then the snapshot is deleted. No command on that aggregate can interleave, so the aggregate cannot be resurrected on top of erased history. A crash between the tombstone and the erase leaves the aggregate in place; retrying `Forget` runs the handlers again.
+`Forget` runs on the aggregate's shard worker. Under the aggregate lock it appends the tombstone (with synchronous projections) and enqueues it; the lock is released while the forget handlers observe the tombstone and the last state; it is then retaken to delete the snapshot and run `Atomically{DeleteStream; DropDeliveries}`. The erase is atomic with respect to every command, so the aggregate cannot be resurrected on top of erased history; a command that slipped in after the tombstone is erased with the rest. The snapshot is deleted before the stream so a half-failed erase can never leave a stale snapshot behind. A crash between the tombstone and the erase leaves the aggregate in place; retrying `Forget` runs the handlers again.
 
 ## Migration from v0.8.x
 

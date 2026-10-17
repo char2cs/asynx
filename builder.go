@@ -255,6 +255,14 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 		bus:  activeBus,
 	}
 
+	// Past this point a failure must not leave the processor's goroutines running.
+	built := false
+	defer func() {
+		if !built {
+			_ = proc.Shutdown(context.Background())
+		}
+	}()
+
 	for _, fn := range b.forgetHandlers {
 		if _, err := instance.OnForget(fn); err != nil {
 			return nil, err
@@ -273,6 +281,7 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 		}
 	}
 
+	built = true
 	return instance, nil
 }
 
