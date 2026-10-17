@@ -234,8 +234,12 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 	if len(syncs) > 0 {
 		procOpts = append(procOpts, processor.WithSyncProjections(syncs))
 	}
-	if len(b.subscribers) > 0 {
-		procOpts = append(procOpts, processor.WithDurableDelivery[T](true))
+	durable, err := b.compileDurableMatch()
+	if err != nil {
+		return nil, err
+	}
+	if durable != nil {
+		procOpts = append(procOpts, processor.WithDurableDelivery[T](durable))
 	}
 	if b.snapshotErrHandler != nil {
 		procOpts = append(procOpts, processor.WithSnapshotErrorHandler(b.snapshotErrHandler))
@@ -294,6 +298,36 @@ func (b *Builder[T]) compileSyncProjections() ([]exec.SyncProjection[T], error) 
 	return out, nil
 }
 
+// compileDurableMatch returns a predicate that accepts the events at least one
+// durable subscriber is interested in, or nil when there are no subscribers.
+// Events nobody durable listens to get no delivery entry.
+func (b *Builder[T]) compileDurableMatch() (func(string) bool, error) {
+	if len(b.subscribers) == 0 {
+		return nil, nil
+	}
+
+	matchers := make([]func(string) bool, 0, len(b.subscribers))
+	for _, sub := range b.subscribers {
+		if sub.pattern == "" {
+			return nil, models.ErrEmptyPattern
+		}
+		m, err := matcher(sub.pattern)
+		if err != nil {
+			return nil, err
+		}
+		matchers = append(matchers, m)
+	}
+
+	return func(name string) bool {
+		for _, m := range matchers {
+			if m(name) {
+				return true
+			}
+		}
+		return false
+	}, nil
+}
+
 // matcher mirrors the bus's pattern rule: an exact event name, or an
 // (unanchored) regular expression when the pattern has metacharacters.
 func matcher(pattern string) (func(string) bool, error) {
@@ -302,7 +336,7 @@ func matcher(pattern string) (func(string) bool, error) {
 	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
-		return nil, fmt.Errorf("asynx: invalid sync projection pattern %q: %w", pattern, err)
+		return nil, fmt.Errorf("asynx: invalid pattern %q: %w", pattern, err)
 	}
 	return re.MatchString, nil
 }

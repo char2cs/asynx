@@ -284,6 +284,9 @@ func TestGuarantee_BuildRejectsBadProjectionsAndSubscribers(t *testing.T) {
 	if _, err := eight(store.New()).WithSyncProjection("(unclosed", noop).Build(); err == nil {
 		t.Fatal("invalid regexp pattern was accepted")
 	}
+	if _, err := eight(store.New()).WithSubscriber("(unclosed", func(context.Context, models.Event[mocks.Order]) {}).Build(); err == nil {
+		t.Fatal("invalid subscriber pattern was accepted")
+	}
 }
 
 // Review focus 4 and 6 through the public API.
@@ -366,5 +369,20 @@ func TestGuarantee_ForgetFencedAgainstCommands(t *testing.T) {
 		if _, err := inst.Get(ctx, "agg"); err != nil {
 			t.Fatalf("surviving aggregate is unreadable: %v", err)
 		}
+	}
+}
+
+func TestGuarantee_EventsNoDurableSubscriberWantsGetNoDeliveryEntry(t *testing.T) {
+	s := store.New()
+	release := make(chan struct{})
+	inst := build(t, eight(s).WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) { <-release }))
+	t.Cleanup(func() { close(release) })
+	ctx := context.Background()
+
+	if _, err := inst.Send(ctx, mocks.CreateOrderCmd{ID: "a", Total: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 0 {
+		t.Fatalf("OrderCreated got a delivery entry: %v", pending)
 	}
 }

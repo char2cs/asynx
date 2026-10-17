@@ -56,11 +56,11 @@ func WithSyncProjections[T any](p []exec.SyncProjection[T]) ProcessorOpt[T] {
 	}
 }
 
-// WithDurableDelivery records a delivery entry per event and acknowledges it
-// once handlers finish; see Processor.Recover.
-func WithDurableDelivery[T any](on bool) ProcessorOpt[T] {
+// WithDurableDelivery records a delivery entry for every event whose name
+// match accepts and acknowledges it once handlers finish; see Processor.Recover.
+func WithDurableDelivery[T any](match func(eventName string) bool) ProcessorOpt[T] {
 	return func(cfg *processorConfig[T]) {
-		cfg.executorOpts = append(cfg.executorOpts, exec.WithDurableDelivery[T](on))
+		cfg.executorOpts = append(cfg.executorOpts, exec.WithDurableDelivery[T](match))
 	}
 }
 

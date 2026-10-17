@@ -105,8 +105,13 @@ b.WithSubscriber("Order.*", handler)   // registered at build time
 - A delivery entry is written in the event's transaction and acknowledged after every handler for that event has returned. Handler panics go to the `PanicHandler` and still count as handled.
 - `Build()` redelivers every unacknowledged entry before it returns, in enqueue order through the normal per-aggregate dispatcher, so a live command can never overtake an older undelivered event. Events are rebuilt from the stream (upcasters apply). An entry whose event no longer exists is acknowledged and skipped. If acknowledgements do not stick, `Build()` fails rather than loop.
 - **Semantics are at-least-once.** If the process dies after handlers finish but before the acknowledgement, the event is delivered again. Dedupe on `(AggregateID, Version)`.
+- Only events that at least one durable subscriber's pattern matches get a delivery entry.
 - `Subscribe` and `Listen` remain live-only: they never see events committed while the process was down. No delivery entries are written when no durable subscriber exists.
 - `Shutdown` leaves undelivered entries pending; the next `Build()` recovers them.
+
+### Reactions and re-entrancy
+
+Enqueueing never blocks (each aggregate's dispatcher queue is unbounded), and the aggregate lock is released before `SendWait` waits for handlers. A handler may therefore send commands back to its own aggregate. `Forget` is the exception: it holds the aggregate lock while the forget handlers run, so a forget handler must not send commands to the aggregate being forgotten. A handler must also not `SendWait` to its own aggregate (it would wait on itself behind the dispatcher queue) — that restriction is unchanged from earlier versions.
 
 ## Idempotent Commands
 

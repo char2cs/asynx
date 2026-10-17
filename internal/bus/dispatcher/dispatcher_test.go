@@ -551,3 +551,80 @@ func TestEnqueue_NeverStrandedByIdleWorkerRetirement(t *testing.T) {
 		}
 	}
 }
+
+// Enqueue must never block on a slow handler: callers enqueue while holding
+// their per-aggregate command lock.
+func TestEnqueue_NeverBlocksBehindASlowHandler(t *testing.T) {
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var seen []int64
+	bus := &callbackBus{fn: func(_ context.Context, e asynxmd.Event[int]) error {
+		<-release
+		mu.Lock()
+		seen = append(seen, e.Version)
+		mu.Unlock()
+		return nil
+	}}
+	d := New[int](bus)
+	defer d.Close(context.Background())
+
+	const n = 200
+	enqueued := make(chan struct{})
+	go func() {
+		for i := int64(1); i <= n; i++ {
+			if _, err := d.Enqueue(context.Background(), makeEvent("a", i), nil); err != nil {
+				t.Errorf("Enqueue: %v", err)
+			}
+		}
+		close(enqueued)
+	}()
+
+	select {
+	case <-enqueued:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Enqueue blocked behind a slow handler")
+	}
+
+	close(release)
+	d.WaitIdle()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != n {
+		t.Fatalf("handled %d events, want %d", len(seen), n)
+	}
+	for i, v := range seen {
+		if v != int64(i+1) {
+			t.Fatalf("order broken at %d: %v", i, v)
+		}
+	}
+}
+
+func TestClose_DrainsJobsQueuedBehindASlowHandler(t *testing.T) {
+	release := make(chan struct{})
+	var handled atomic.Int32
+	bus := &callbackBus{fn: func(context.Context, asynxmd.Event[int]) error {
+		<-release
+		handled.Add(1)
+		return nil
+	}}
+	d := New[int](bus)
+
+	for i := int64(1); i <= 3; i++ {
+		if _, err := d.Enqueue(context.Background(), makeEvent("a", i), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- d.Close(context.Background()) }()
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+
+	if err := <-closed; err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if handled.Load() != 3 {
+		t.Fatalf("handled %d jobs, want 3 (Close must drain)", handled.Load())
+	}
+}

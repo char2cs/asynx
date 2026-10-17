@@ -82,7 +82,7 @@ func TestProcessor_Options_SyncProjectionsDurableDeliverySnapshotErrors(t *testi
 				return nil
 			},
 		}}),
-		processor.WithDurableDelivery[order](true),
+		processor.WithDurableDelivery[order](func(string) bool { return true }),
 		processor.WithSnapshotErrorHandler(func(context.Context, asynxmd.Event[order], error) { snapErrs.Add(1) }),
 	)
 	f.snap.SetError("o1", errors.New("snapshot down"))
@@ -204,5 +204,23 @@ func TestProcessor_Recover_SurfacesAckFailureForVanishedEvent(t *testing.T) {
 
 	if err := p.Recover(ctx, 10); err == nil {
 		t.Fatal("Recover hid an ack failure")
+	}
+}
+
+type noAckStore struct{ store.Memory }
+
+func (noAckStore) AckDelivery(context.Context, string, int64) error { return nil }
+
+func TestProcessor_Recover_FailsWhenAcknowledgementsDoNotStick(t *testing.T) {
+	s := noAckStore{store.New()}
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	seedPending(t, s.Memory, es, "a")
+
+	b := bus.NewChannelBus[order]()
+	p := processor.New(es, b)
+	t.Cleanup(func() { p.Shutdown(context.Background()) })
+
+	if err := p.Recover(context.Background(), 10); err == nil {
+		t.Fatal("Recover looped or succeeded although the ack never stuck")
 	}
 }

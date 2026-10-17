@@ -8,10 +8,7 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-const (
-	defaultBufferSize = 16
-	defaultIdleTimeout = 5 * time.Second
-)
+const defaultIdleTimeout = 5 * time.Second
 
 // Opt is a functional option for configuring a Dispatcher.
 type Opt[T any] func(*Dispatcher[T])
@@ -41,20 +38,21 @@ type Dispatcher[T any] struct {
 	mu             sync.Mutex
 	queues         map[string]*aggregateQueue[T]
 	closed         bool
-	waiting        bool // prevents new Dispatch calls during WaitIdle
-	stopCh         chan struct{} // closed on Close to signal workers to drain and exit
+	waiting        bool           // prevents new Dispatch calls during WaitIdle
+	stopCh         chan struct{}  // closed on Close to signal workers to drain and exit
 	wg             sync.WaitGroup // tracks goroutine lifetime (for Close)
 	jobsWg         sync.WaitGroup // tracks in-flight jobs (for WaitIdle)
 	onPublishError asynxmd.PublishErrorHandler[T]
 	idleTimeout    time.Duration
 }
 
+// aggregateQueue is an unbounded FIFO of one aggregate's jobs. It is unbounded
+// on purpose: Enqueue must never block, because callers enqueue while holding
+// the aggregate's command lock, and a handler that sends a command back to its
+// own aggregate would otherwise deadlock against a full queue.
 type aggregateQueue[T any] struct {
-	ch chan *dispatchJob[T]
-	// senders counts Enqueue calls that picked this queue but have not yet put
-	// their job on ch. Protected by Dispatcher.mu. The idle worker must not
-	// retire the queue while it is non-zero, or that job would be stranded.
-	senders int
+	jobs []*dispatchJob[T] // protected by Dispatcher.mu
+	wake chan struct{}     // capacity 1: signals the worker that jobs is non-empty
 }
 
 type dispatchJob[T any] struct {
@@ -133,19 +131,19 @@ func (d *Dispatcher[T]) Enqueue(
 
 	q, exists := d.queues[event.AggregateID]
 	if !exists {
-		q = &aggregateQueue[T]{ch: make(chan *dispatchJob[T], defaultBufferSize)}
+		q = &aggregateQueue[T]{wake: make(chan struct{}, 1)}
 		d.queues[event.AggregateID] = q
 		d.wg.Add(1)
 		go d.worker(event.AggregateID, q)
 	}
 
-	q.senders++
-	d.mu.Unlock()
-
-	q.ch <- job
-
-	d.mu.Lock()
-	q.senders--
+	// Appending under d.mu makes "queue is empty" exact for the idle worker, so
+	// it can never retire a queue that has a job in flight.
+	q.jobs = append(q.jobs, job)
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
 	d.mu.Unlock()
 
 	return job.done, nil
@@ -162,7 +160,7 @@ func (d *Dispatcher[T]) Close(ctx context.Context) error {
 	}
 	d.closed = true
 	d.waiting = false // allow any remaining Dispatch calls to fail cleanly
-	close(d.stopCh) // signal all workers to drain and exit
+	close(d.stopCh)   // signal all workers to drain and exit
 	d.mu.Unlock()
 
 	done := make(chan struct{})
@@ -200,22 +198,29 @@ func (d *Dispatcher[T]) waitWorkers() { d.wg.Wait() }
 func (d *Dispatcher[T]) worker(aggregateID string, q *aggregateQueue[T]) {
 	defer d.wg.Done()
 	for {
-		select {
-		case job := <-q.ch:
+		// Run everything already queued, in order.
+		for {
+			job, ok := d.pop(q)
+			if !ok {
+				break
+			}
 			d.handle(job)
+		}
+
+		select {
+		case <-q.wake:
 		case <-d.stopCh:
-			// Drain remaining jobs before exiting.
+			// Drain jobs enqueued before Close, then exit.
 			for {
-				select {
-				case job := <-q.ch:
-					d.handle(job)
-				default:
+				job, ok := d.pop(q)
+				if !ok {
 					return
 				}
+				d.handle(job)
 			}
 		case <-time.After(d.idleTimeout):
 			d.mu.Lock()
-			if len(q.ch) > 0 || q.senders > 0 {
+			if len(q.jobs) > 0 {
 				d.mu.Unlock()
 				continue
 			}
@@ -224,6 +229,19 @@ func (d *Dispatcher[T]) worker(aggregateID string, q *aggregateQueue[T]) {
 			return
 		}
 	}
+}
+
+// pop removes and returns the oldest queued job.
+func (d *Dispatcher[T]) pop(q *aggregateQueue[T]) (*dispatchJob[T], bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(q.jobs) == 0 {
+		return nil, false
+	}
+	job := q.jobs[0]
+	q.jobs[0] = nil
+	q.jobs = q.jobs[1:]
+	return job, true
 }
 
 // handle runs bus.PublishSync with panic recovery for resilience. A panicking

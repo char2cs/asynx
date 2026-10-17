@@ -43,10 +43,11 @@ func WithSyncProjections[T any](p []SyncProjection[T]) Opt[T] {
 	return func(e *CommandExecutor[T]) { e.syncs = p }
 }
 
-// WithDurableDelivery makes the executor record a delivery entry in each
-// event's transaction and acknowledge it once the event's handlers finish.
-func WithDurableDelivery[T any](on bool) Opt[T] {
-	return func(e *CommandExecutor[T]) { e.durable = on }
+// WithDurableDelivery makes the executor record a delivery entry in the
+// transaction of every event whose name match accepts, and acknowledge it once
+// the event's handlers finish. A nil match disables durable delivery.
+func WithDurableDelivery[T any](match func(eventName string) bool) Opt[T] {
+	return func(e *CommandExecutor[T]) { e.durableMatch = match }
 }
 
 // WithSnapshotErrorHandler sets the callback invoked when a post-commit
@@ -60,7 +61,7 @@ type CommandExecutor[T any] struct {
 	dispatcher      *dispatcher.Dispatcher[T]
 	locks           KeyedLock
 	syncs           []SyncProjection[T]
-	durable         bool
+	durableMatch    func(eventName string) bool
 	onSnapshotError func(context.Context, asynxmd.Event[T], error)
 }
 
@@ -146,8 +147,13 @@ func (e *CommandExecutor[T]) enqueue(
 	return e.dispatcher.Enqueue(ctx, event, e.ackFor(event))
 }
 
+// isDurable reports whether the event gets a delivery entry.
+func (e *CommandExecutor[T]) isDurable(eventName string) bool {
+	return e.durableMatch != nil && e.dispatcher != nil && e.durableMatch(eventName)
+}
+
 func (e *CommandExecutor[T]) ackFor(event asynxmd.Event[T]) func(context.Context) error {
-	if !e.durable {
+	if !e.isDurable(event.EventName) {
 		return nil
 	}
 	return func(ctx context.Context) error {
@@ -158,8 +164,7 @@ func (e *CommandExecutor[T]) ackFor(event asynxmd.Event[T]) func(context.Context
 // txHook returns the work that must commit atomically with the event, or nil
 // when there is none.
 func (e *CommandExecutor[T]) txHook(commandID string) eventstore.TxHook[T] {
-	durable := e.durable && e.dispatcher != nil
-	if len(e.syncs) == 0 && !durable && commandID == "" {
+	if len(e.syncs) == 0 && e.durableMatch == nil && commandID == "" {
 		return nil
 	}
 
@@ -185,7 +190,7 @@ func (e *CommandExecutor[T]) txHook(commandID string) eventstore.TxHook[T] {
 			}
 		}
 
-		if durable {
+		if e.isDurable(evt.EventName) {
 			return tx.EnqueueDelivery(ctx, evt.AggregateID, evt.Version)
 		}
 		return nil

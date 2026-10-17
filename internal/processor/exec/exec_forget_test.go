@@ -15,7 +15,7 @@ import (
 )
 
 func TestForget_ErasesStreamSnapshotAndPendingDeliveries(t *testing.T) {
-	ex, s, ss, d, _ := newEnv(t, WithDurableDelivery[order](true))
+	ex, s, ss, d, _ := newEnv(t, WithDurableDelivery[order](func(string) bool { return true }))
 	ctx := context.Background()
 
 	cmd := mocks.UpdateOrderCmd{ID: "agg", NewState: order{ID: "agg", Total: 1}, Snapshot: true}

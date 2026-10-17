@@ -248,7 +248,7 @@ func TestExecute_SyncProjectionSeesTxAndEvent_OnlyForMatchingEvents(t *testing.T
 }
 
 func TestExecute_DurableDeliveryIsPendingUntilHandlersFinish(t *testing.T) {
-	ex, s, _, d, b := newEnv(t, WithDurableDelivery[order](true))
+	ex, s, _, d, b := newEnv(t, WithDurableDelivery[order](func(string) bool { return true }))
 	release := make(chan struct{})
 	entered := make(chan struct{}, 1)
 	b.Subscribe("OrderUpdated", func(context.Context, asynxmd.Event[order]) {
@@ -293,5 +293,74 @@ func TestExecute_ValidationErrorPassesThroughUnwrapped(t *testing.T) {
 	}
 	if strings.Contains(fmt.Sprint(err), "pipeline") {
 		t.Fatalf("validation error was wrapped: %v", err)
+	}
+}
+
+// A reaction handler that sends commands back to its own aggregate must not
+// deadlock against commands queued behind a slow handler.
+func TestExecute_ReactionToOwnAggregateDoesNotDeadlockUnderBacklog(t *testing.T) {
+	ex, _, _, d, b := newEnv(t)
+
+	release := make(chan struct{})
+	reacted := make(chan struct{})
+	b.Subscribe("OrderUpdated", func(ctx context.Context, e asynxmd.Event[order]) {
+		if e.Version == 1 {
+			<-release
+			// React: send a follow-up command to the same aggregate.
+			if _, err := ex.Execute(ctx, update("agg", 999), false); err != nil {
+				t.Errorf("reaction Execute: %v", err)
+			}
+			close(reacted)
+		}
+	})
+
+	if _, err := ex.Execute(context.Background(), update("agg", 1), false); err != nil {
+		t.Fatal(err)
+	}
+
+	flooded := make(chan struct{})
+	go func() {
+		for i := range 60 { // far more than any queue bound
+			if _, err := ex.Execute(context.Background(), update("agg", float64(i+2)), false); err != nil {
+				t.Errorf("Execute: %v", err)
+			}
+		}
+		close(flooded)
+	}()
+
+	select {
+	case <-flooded:
+	case <-time.After(5 * time.Second):
+		t.Fatal("commands deadlocked behind a slow handler")
+	}
+
+	close(release)
+	select {
+	case <-reacted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reaction never completed")
+	}
+	d.WaitIdle()
+}
+
+func TestExecute_DurableDeliveryOnlyForEventsADurableSubscriberWants(t *testing.T) {
+	ex, s, _, _, b := newEnv(t, WithDurableDelivery[order](func(name string) bool { return name == "OrderUpdated" }))
+	release := make(chan struct{})
+	b.Subscribe("OrderUpdated", func(context.Context, asynxmd.Event[order]) { <-release })
+	t.Cleanup(func() { close(release) })
+	ctx := context.Background()
+
+	if _, err := ex.Execute(ctx, mocks.CreateOrderCmd{ID: "a", Total: 1}, false); err != nil {
+		t.Fatal(err)
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 0 {
+		t.Fatalf("unwanted event got a delivery entry: %v", pending)
+	}
+
+	if _, err := ex.Execute(ctx, update("a", 2), false); err != nil {
+		t.Fatal(err)
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 1 {
+		t.Fatalf("wanted event pending = %v, want 1 entry", pending)
 	}
 }

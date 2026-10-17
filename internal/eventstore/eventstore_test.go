@@ -580,3 +580,16 @@ func TestWrite_SnapshotFailureAfterCommitIsReturned(t *testing.T) {
 		t.Fatal("Write hid a snapshot failure")
 	}
 }
+
+func TestWriteTx_ValidationFailureWritesNothingAndSkipsTheHook(t *testing.T) {
+	es := New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
+	called := false
+	_, err := es.WriteTx(context.Background(), mocks.CreateOrderCmd{ID: "agg1", Total: -1},
+		func(context.Context, asynxmd.Tx, asynxmd.Event[order]) error { called = true; return nil })
+	if !errors.Is(err, asynxmd.ErrValidation) || called {
+		t.Fatalf("err = %v, hook called = %v; want ErrValidation and no hook", err, called)
+	}
+	if ok, _ := es.Exists(context.Background(), "agg1"); ok {
+		t.Fatal("rejected command wrote an event")
+	}
+}

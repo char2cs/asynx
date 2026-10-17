@@ -226,11 +226,41 @@ func TestExecute_AfterDispatcherClosedFailsPipelineButKeepsTheCommit(t *testing.
 func TestExecute_WithoutDispatcherCommitsAndReturns(t *testing.T) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	ex := New[order](es, nil, WithDurableDelivery[order](true))
+	ex := New[order](es, nil, WithDurableDelivery[order](func(string) bool { return true }))
 	if _, err := ex.Execute(context.Background(), update("agg", 1), true); err != nil {
 		t.Fatal(err)
 	}
 	if pending, _ := s.PendingDeliveries(context.Background(), 10); len(pending) != 0 {
 		t.Fatalf("delivery enqueued with nobody to deliver to: %v", pending)
+	}
+}
+
+// Simulates losing the race for a command id between the receipt check and the
+// commit: the transaction reports a duplicate and the receipt is then found.
+type raceLostStore struct {
+	store.Memory
+	reads int
+}
+
+func (s *raceLostStore) GetReceipt(ctx context.Context, id string) (asynxmd.Receipt, bool, error) {
+	s.reads++
+	if s.reads == 1 {
+		return asynxmd.Receipt{}, false, nil
+	}
+	return asynxmd.Receipt{Accepted: true, AggregateID: "winner", EventID: "e-win", Version: 4}, true, nil
+}
+
+func (s *raceLostStore) Atomically(ctx context.Context, fn func(asynxmd.Tx) error) error {
+	return s.Memory.Atomically(ctx, func(tx asynxmd.Tx) error { return fn(phantomTx{tx}) })
+}
+
+func TestExecute_Idempotent_LosingTheReceiptRaceAnswersWithTheWinner(t *testing.T) {
+	ex, _, _, _, _ := newEnvOn(t, &raceLostStore{Memory: store.New()})
+	evt, err := ex.Execute(context.Background(), idemUpdate{UpdateOrderCmd: update("agg", 1), Cmd: "c1"}, false)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if evt.ID != "e-win" || evt.AggregateID != "winner" || evt.Version != 4 {
+		t.Fatalf("event = %+v, want the winner's", evt)
 	}
 }
