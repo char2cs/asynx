@@ -61,7 +61,7 @@ func (e *CommandExecutor[T]) clearForgetting(id string) {
 // A handler cannot Forget the aggregate it is handling: the marker queues
 // behind that very handler. That fails with ErrForgetFromHandler.
 func (e *CommandExecutor[T]) Forget(ctx context.Context, aggregateID string) (err error) {
-	if dispatcher.InHandler(ctx, aggregateID) {
+	if e.dispatcher != nil && e.dispatcher.InHandler(ctx, aggregateID) {
 		return fmt.Errorf("%w: %s", asynxmd.ErrForgetFromHandler, aggregateID)
 	}
 	ticket, err := e.writeTombstone(ctx, aggregateID)

@@ -1155,3 +1155,34 @@ func TestProcessor_Shutdown_WaitsForASendInFlightUntilItsContextEnds(t *testing.
 		t.Fatal("Shutdown returned while a Send was in flight")
 	}
 }
+
+// Applications use one aggregate ID across several instances (an arrow and its
+// runtime): a handler of one instance may Forget or SendWait on the other.
+func TestProcessor_HandlerMayWaitOnAnotherInstanceUnderTheSameID(t *testing.T) {
+	a := newFixture(t, store.New())
+	b := newFixture(t, store.New())
+	ctx := context.Background()
+	if _, err := b.p.Send(ctx, updateCmd("ns", 1)); err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(chan error, 2)
+	a.b.Subscribe("OrderUpdated", func(hctx context.Context, e asynxmd.Event[order]) {
+		_, err := b.p.SendWait(hctx, updateCmd(e.AggregateID, 2))
+		got <- err
+		got <- b.p.Forget(hctx, e.AggregateID)
+	})
+	if _, err := a.p.Send(ctx, updateCmd("ns", 1)); err != nil {
+		t.Fatal(err)
+	}
+	for _, what := range []string{"SendWait", "Forget"} {
+		select {
+		case err := <-got:
+			if err != nil {
+				t.Fatalf("%s on the other instance from a handler: %v", what, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s on the other instance from a handler hung", what)
+		}
+	}
+}

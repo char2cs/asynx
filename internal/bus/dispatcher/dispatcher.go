@@ -260,7 +260,7 @@ func (d *Dispatcher[T]) enqueue(
 
 	// Handlers outlive the caller's context but not their own delivery: the
 	// context is cancelled when the delivery ends, and when Close gives up.
-	jobCtx, cancel := context.WithCancel(context.WithValue(context.WithoutCancel(ctx), inHandlerKey{}, event.AggregateID))
+	jobCtx, cancel := context.WithCancel(context.WithValue(context.WithoutCancel(ctx), inHandlerKey[T]{d}, event.AggregateID))
 	stop := context.AfterFunc(d.base, cancel)
 	job := &dispatchJob[T]{
 		event:    event,
@@ -501,12 +501,15 @@ func (d *Dispatcher[T]) reportPublishError(job *dispatchJob[T], err error) {
 	d.onPublishError(job.ctx, job.event, err)
 }
 
-type inHandlerKey struct{}
+// inHandlerKey keys the context value by dispatcher: applications commonly use
+// one aggregate ID across several instances (an arrow and its runtime), and a
+// handler of one waiting on another is no deadlock.
+type inHandlerKey[T any] struct{ d *Dispatcher[T] }
 
-// InHandler reports whether ctx belongs to a handler running for aggregate agg.
-// Waiting on that aggregate's deliveries from there would wait on the handler
-// itself.
-func InHandler(ctx context.Context, agg string) bool {
-	id, ok := ctx.Value(inHandlerKey{}).(string)
+// InHandler reports whether ctx belongs to a handler this dispatcher is running
+// for aggregate agg. Waiting on that aggregate's deliveries from there would
+// wait on the handler itself.
+func (d *Dispatcher[T]) InHandler(ctx context.Context, agg string) bool {
+	id, ok := ctx.Value(inHandlerKey[T]{d}).(string)
 	return ok && id == agg
 }

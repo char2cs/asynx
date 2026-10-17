@@ -980,19 +980,24 @@ func TestPublishErrorHandlerPanicDoesNotCrashTheWorker(t *testing.T) {
 
 func TestHandlerContext_MarksItsAggregateAndEndsWithTheDelivery(t *testing.T) {
 	var got context.Context
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(ctx context.Context, e asynxmd.Event[int]) error {
+	var d, other *Dispatcher[int]
+	d = newDurable(t, []DurableSub[int]{{Match: always, Handler: func(ctx context.Context, e asynxmd.Event[int]) error {
 		got = ctx
-		if !InHandler(ctx, "a") || InHandler(ctx, "b") {
-			t.Errorf("InHandler(a)=%v InHandler(b)=%v", InHandler(ctx, "a"), InHandler(ctx, "b"))
+		if other.InHandler(ctx, "a") {
+			t.Error("another dispatcher's InHandler is true for this handler's context: same ID, different instance")
+		}
+		if !d.InHandler(ctx, "a") || d.InHandler(ctx, "b") {
+			t.Errorf("InHandler(a)=%v InHandler(b)=%v", d.InHandler(ctx, "a"), d.InHandler(ctx, "b"))
 		}
 		return nil
 	}}})
+	other = newDurable(t, nil)
 	tk, _ := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
 	final(t, tk, "final")
 	if got.Err() == nil {
 		t.Fatal("handler context still live after the delivery ended")
 	}
-	if InHandler(context.Background(), "a") {
+	if d.InHandler(context.Background(), "a") {
 		t.Fatal("InHandler true for a plain context")
 	}
 }

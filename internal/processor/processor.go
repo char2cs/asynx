@@ -245,7 +245,7 @@ func (p *Processor[T]) SendWait(
 
 	// Waiting for the handlers of a command to the aggregate whose handler is
 	// calling would wait on that handler itself.
-	if dispatcher.InHandler(ctx, cmd.AggregateID()) {
+	if p.dispatcher != nil && p.dispatcher.InHandler(ctx, cmd.AggregateID()) {
 		return asynxmd.Event[T]{}, asynxmd.ErrSendWaitFromHandler
 	}
 
