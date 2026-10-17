@@ -62,19 +62,6 @@ func WithMaxAttempts[T any](n int) Opt[T] {
 	}
 }
 
-// WithMaxQueued bounds how many jobs the dispatcher holds in memory per
-// aggregate. A durable event arriving beyond it parks the aggregate: the event
-// is already in the store's delivery log, so nothing is lost, and
-// Dispatcher.Resume plus a redelivery brings it back. Non-positive values are
-// ignored.
-func WithMaxQueued[T any](n int) Opt[T] {
-	return func(d *Dispatcher[T]) {
-		if n > 0 {
-			d.maxQueued = n
-		}
-	}
-}
-
 // WithDeadLetterHandler sets the handler for deliveries that exhausted their
 // attempts.
 func WithDeadLetterHandler[T any](fn asynxmd.DeadLetterHandler[T]) Opt[T] {
@@ -102,7 +89,7 @@ func (d *Dispatcher[T]) haltLocked(agg string) {
 			kept = append(kept, j)
 			continue
 		}
-		j.markSettled()
+		j.markUnrun(asynxmd.ErrDeliveryParked)
 		j.complete(asynxmd.ErrDeliveryParked)
 		d.jobsWg.Done()
 	}
@@ -262,10 +249,15 @@ func (d *Dispatcher[T]) callDeadLetter(job *dispatchJob[T], last error) (err err
 	return d.deadLetter(job.ctx, job.event, last)
 }
 
+// reportDeliveryError calls the delivery error handler. A panic in it is
+// swallowed: it must not abandon the delivery, which would release the hold on
+// the aggregate's later events.
 func (d *Dispatcher[T]) reportDeliveryError(job *dispatchJob[T], err error, attempt int) {
-	if d.onDeliveryError != nil {
-		d.onDeliveryError(job.ctx, job.event, err, attempt)
+	if d.onDeliveryError == nil {
+		return
 	}
+	defer func() { _ = recover() }()
+	d.onDeliveryError(job.ctx, job.event, err, attempt)
 }
 
 // runDurable runs one durable handler, turning a panic into an error. A slow

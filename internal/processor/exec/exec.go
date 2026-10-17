@@ -86,35 +86,29 @@ func (e *CommandExecutor[T]) Execute(
 	cmd asynxmd.Command[T],
 	waitHandlers bool,
 ) (asynxmd.Event[T], error) {
-	event, done, err := e.ExecuteAsync(ctx, cmd)
+	event, wait, err := e.ExecuteAsync(ctx, cmd)
 	if err != nil {
 		return event, err
 	}
-	if waitHandlers && done != nil {
-		return event, WaitDone(ctx, done)
+	if waitHandlers && wait != nil {
+		return event, wait(ctx)
 	}
 	return event, nil
 }
 
-// WaitDone waits for done, or for ctx. A cancelled wait does not undo the
-// command, which is already committed.
-func WaitDone(ctx context.Context, done <-chan struct{}) error {
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return fmt.Errorf("%w: waiting for handlers: %w", asynxmd.ErrContextCancelled, ctx.Err())
-	}
-}
+// Wait blocks until an event's handlers have run once. It gives up when ctx is
+// done (the command is already committed, so that does not undo it) and fails
+// with ErrDeliveryParked when the event's aggregate is parked, which means no
+// handler ran.
+type Wait func(ctx context.Context) error
 
 // ExecuteAsync runs the pipeline and returns once the event is committed and
-// queued. The channel closes when its handlers have run once (nil when there is
-// no dispatcher or the command was answered from a receipt), so the caller, not
-// a worker, does the waiting.
+// queued. The returned Wait (nil when there is no dispatcher or the command was
+// answered from a receipt) lets the caller, not a worker, do the waiting.
 func (e *CommandExecutor[T]) ExecuteAsync(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
-) (asynxmd.Event[T], <-chan struct{}, error) {
+) (asynxmd.Event[T], Wait, error) {
 	unlock, err := e.locks.Lock(ctx, cmd.AggregateID())
 	if err != nil {
 		return asynxmd.Event[T]{}, nil, fmt.Errorf("%w: %w", asynxmd.ErrContextCancelled, err)
@@ -141,7 +135,7 @@ func (e *CommandExecutor[T]) WithLock(ctx context.Context, id string, fn func() 
 func (e *CommandExecutor[T]) run(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
-) (asynxmd.Event[T], <-chan struct{}, error) {
+) (asynxmd.Event[T], Wait, error) {
 	commandID := idempotencyKey(cmd)
 	if commandID != "" {
 		if event, handled, err := e.answerFromReceipt(ctx, commandID); handled {
@@ -164,24 +158,37 @@ func (e *CommandExecutor[T]) run(
 		}
 	}
 
-	done, err := e.enqueue(ctx, event)
+	wait, err := e.enqueue(ctx, event)
 	if err != nil {
 		return event, nil, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 	}
-	return event, done, nil
+	return event, wait, nil
 }
 
-// enqueue hands the event to the dispatcher; the returned channel closes when
-// its handlers finish. With durable delivery on, the delivery entry is acked
-// at that point.
+// enqueue hands the event to the dispatcher. With durable delivery on, the
+// delivery entry is acked once its handlers finish.
 func (e *CommandExecutor[T]) enqueue(
 	ctx context.Context,
 	event asynxmd.Event[T],
-) (<-chan struct{}, error) {
+) (Wait, error) {
 	if e.dispatcher == nil {
 		return nil, nil
 	}
-	return e.dispatcher.Enqueue(ctx, event, e.ackFor(event))
+	t, err := e.dispatcher.EnqueueTicket(ctx, event, e.ackFor(event))
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context) error {
+		select {
+		case <-t.Settled:
+			if err := t.Unrun(); err != nil {
+				return fmt.Errorf("%w: event %s v%d is pending, no handler ran", err, event.AggregateID, event.Version)
+			}
+			return nil
+		case <-ctx.Done():
+			return fmt.Errorf("%w: waiting for handlers: %w", asynxmd.ErrContextCancelled, ctx.Err())
+		}
+	}, nil
 }
 
 // isDurable reports whether the event gets a delivery entry.

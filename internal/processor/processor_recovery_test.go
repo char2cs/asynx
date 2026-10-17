@@ -234,3 +234,39 @@ func TestProcessor_Resume_ReportsAFailureReadingTheLogAndStaysParked(t *testing.
 		t.Fatal("Resume with a cancelled context should fail taking the aggregate lock")
 	}
 }
+
+func TestProcessor_Paused_ListsParkedAggregatesAndSendWaitSaysSo(t *testing.T) {
+	var healthy atomic.Bool
+	parked := make(chan struct{}, 4)
+	f := newFixture(t, store.New(), parkingOpts(&healthy,
+		processor.WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+			if errors.Is(err, asynxmd.ErrDeliveryParked) {
+				parked <- struct{}{}
+			}
+		}))...)
+	ctx := context.Background()
+	if got := f.p.Paused(); len(got) != 0 {
+		t.Fatalf("Paused = %v before anything failed", got)
+	}
+
+	if _, err := f.p.Send(ctx, updateCmd("o1", 1)); err != nil {
+		t.Fatal(err)
+	}
+	<-parked
+	if got := f.p.Paused(); len(got) != 1 || got[0] != "o1" {
+		t.Fatalf("Paused = %v, want [o1]", got)
+	}
+	evt, err := f.p.SendWait(ctx, updateCmd("o1", 2))
+	if !errors.Is(err, asynxmd.ErrDeliveryParked) || evt.Version != 2 {
+		t.Fatalf("SendWait = v%d, %v; want the committed v2 with ErrDeliveryParked", evt.Version, err)
+	}
+}
+
+func TestProcessor_Paused_WithoutDispatcherIsEmpty(t *testing.T) {
+	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
+	p := processor.New[order](es, nil)
+	t.Cleanup(func() { p.Shutdown(context.Background()) })
+	if got := p.Paused(); got != nil {
+		t.Fatalf("Paused = %v", got)
+	}
+}

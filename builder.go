@@ -52,7 +52,6 @@ type Builder[T any] struct {
 	retryInitial        time.Duration
 	retryMax            time.Duration
 	maxAttempts         int
-	maxQueued           int
 	deadLetter          models.DeadLetterHandler[T]
 }
 
@@ -179,8 +178,8 @@ func (b *Builder[T]) WithSyncProjection(
 //
 //   - Each event is recorded in the same transaction that commits it, and
 //     acknowledged only after every matching durable handler returned nil.
-//     Build redelivers anything left unacknowledged by a crash before it
-//     returns, in per-aggregate order.
+//     Build queues anything left unacknowledged by a crash for redelivery,
+//     in per-aggregate order, and returns without waiting for the handlers.
 //   - A handler that returns an error, panics, or fails after exceeding its
 //     timeout leaves the delivery pending and is retried with backoff
 //     (WithDeliveryRetry) up to WithDeliveryMaxAttempts times. The aggregate's
@@ -233,20 +232,11 @@ func (b *Builder[T]) WithDeliveryRetry(initial, max time.Duration) *Builder[T] {
 // cap is reached the delivery goes to the dead-letter handler
 // (WithDeadLetterHandler) if one accepts it; otherwise the aggregate is parked:
 // its failed event and every later one stay pending in the store, nothing more
-// is delivered or held in memory for it, and the failure is reported to the
+// is delivered for it, and the failure is reported to the
 // delivery error handler with ErrDeliveryParked. Other aggregates are
 // unaffected. ResumeDeliveries (or a restart) redelivers a parked aggregate.
 func (b *Builder[T]) WithDeliveryMaxAttempts(n int) *Builder[T] {
 	b.maxAttempts = n
-	return b
-}
-
-// WithDeliveryMaxQueued bounds how many events the dispatcher holds in memory
-// per aggregate behind a failing delivery (default 10000). A durable event
-// beyond it parks the aggregate like an exhausted delivery; the event is
-// already in the store's delivery log, so nothing is lost.
-func (b *Builder[T]) WithDeliveryMaxQueued(n int) *Builder[T] {
-	b.maxQueued = n
 	return b
 }
 
@@ -329,9 +319,6 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 		procOpts = append(procOpts, processor.WithDeliveryRetry[T](b.retryInitial, b.retryMax))
 		if b.maxAttempts > 0 {
 			procOpts = append(procOpts, processor.WithDeliveryMaxAttempts[T](b.maxAttempts))
-		}
-		if b.maxQueued > 0 {
-			procOpts = append(procOpts, processor.WithDeliveryMaxQueued[T](b.maxQueued))
 		}
 		if b.deadLetter != nil {
 			procOpts = append(procOpts, processor.WithDeadLetterHandler(b.deadLetter))

@@ -10,7 +10,7 @@ The operation performs three steps in sequence:
 2. Publishes the tombstone synchronously, waiting for all `ForgetHandler` callbacks to complete
 3. Deletes all events, snapshots, and cached state for the aggregate from the store
 
-Forget is routed through the same shard as any other command for that aggregate, so it is naturally serialized against in-flight commands — no command races ahead of a Forget that has been dispatched.
+Forget runs under the aggregate's command lock for the tombstone and again for the erase, and fences the aggregate in between: commands for it fail with `ErrForgetInProgress`, so none can race in. It does not occupy a shard worker while waiting for handlers. The full flow, including how a failed Forget leaves the aggregate parked, is in [guarantees.md § Forget](./guarantees.md#forget).
 
 The `asynx.*` event name namespace is reserved for internal Asynx processes. Callers never subscribe to `"asynx.aggregate.forget"` directly — they register via `OnForget` or `WithForgetHandler`.
 
@@ -30,7 +30,7 @@ Forget(ctx context.Context, aggregateID string) error
 Erases all stored state for the given aggregate. Notifies all registered `ForgetHandler` callbacks before deletion so they can clean up downstream read models.
 
 **Parameters**
-- `ctx` — context for cancellation and timeouts; passed through shard routing and tombstone publication
+- `ctx` — context for cancellation and timeouts; Forget waits for the handlers up to it
 - `aggregateID` — the ID of the aggregate to erase; must be non-empty
 
 **Return Values**
@@ -38,7 +38,8 @@ Erases all stored state for the given aggregate. Notifies all registered `Forget
 
 **Invariants**
 - **Aggregate must exist** — returns `ErrValidation` if the aggregate has no recorded events
-- **Shard-serialized** — Forget is routed through the same aggregate shard as `Send`/`SendWait`; it queues behind any in-flight commands for that aggregate
+- **Fenced** — from the tombstone until the erase, commands for the aggregate fail with `ErrForgetInProgress`; a second `Forget` fails the same way
+- **Not from its own handler** — a handler cannot `Forget` the aggregate it is handling (`ErrForgetFromHandler`); the marker would queue behind the handler itself
 - **Handlers complete before deletion** — all `ForgetHandler` callbacks run to completion before store deletion begins
 - **Deletion is total** — all events, snapshots, and in-memory cache for the aggregate are removed; `Get` returns not-found after Forget returns nil
 
@@ -54,12 +55,13 @@ Erases all stored state for the given aggregate. Notifies all registered `Forget
 |---|---|
 | `ErrValidation` | Aggregate does not exist |
 | `ErrShuttingDown` | `Forget` called during shutdown |
-| `ErrContextCancelled` | Context cancelled before shard picks up the command |
-| `ErrQueueFull` | Shard queue full at dispatch time |
+| `ErrContextCancelled` | Context cancelled before Forget took the aggregate's lock |
+| `ErrForgetInProgress` | Another Forget of the aggregate is running |
+| `ErrForgetFromHandler` | Called from a handler of the same aggregate |
 | `ErrPipelineFailed` | Tombstone write to store failed |
-| `ErrForgetFailed` | Tombstone published and handlers ran, but store deletion failed |
+| `ErrForgetFailed` | The erase did not happen: context ended while waiting for handlers, a durable subscriber could not take the marker, or store deletion failed |
 
-`ErrForgetFailed` signals a partially-erased state: the tombstone has been published and all `ForgetHandler` callbacks have completed, but the store deletion failed. Callers should treat this as a retriable store error.
+`ErrForgetFailed` signals a partially-forgotten state: the tombstone is written and the aggregate is parked, but it has not been erased. Callers should call `Forget` again.
 
 **Example**
 ```go

@@ -14,6 +14,7 @@ package processor
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -77,13 +78,6 @@ func WithDeliveryPanicHandler[T any](fn asynxmd.PanicHandler[T]) ProcessorOpt[T]
 func WithDeliveryMaxAttempts[T any](n int) ProcessorOpt[T] {
 	return func(cfg *processorConfig[T]) {
 		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithMaxAttempts[T](n))
-	}
-}
-
-// WithDeliveryMaxQueued bounds the jobs held in memory per aggregate.
-func WithDeliveryMaxQueued[T any](n int) ProcessorOpt[T] {
-	return func(cfg *processorConfig[T]) {
-		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithMaxQueued[T](n))
 	}
 }
 
@@ -276,12 +270,16 @@ func (p *Processor[T]) sendAndWait(
 
 	select {
 	case result := <-envelope.ResultChan:
-		if result.Err != nil || result.Done == nil {
+		if result.Err != nil || result.Wait == nil {
 			return result.Event, result.Err
 		}
-		if err := exec.WaitDone(ctx, result.Done); err != nil {
-			// Same sentinel as every other cancelled wait; the event is committed.
-			return result.Event, asynxmd.ErrContextCancelled
+		// The event is committed whatever the wait says.
+		if err := result.Wait(ctx); err != nil {
+			if errors.Is(err, asynxmd.ErrContextCancelled) {
+				// The exact sentinel, like every other cancelled wait.
+				return result.Event, asynxmd.ErrContextCancelled
+			}
+			return result.Event, err
 		}
 		return result.Event, nil
 	case <-ctx.Done():

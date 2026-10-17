@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -428,6 +429,54 @@ func TestForget_DoesNotEraseWhenADurableSubscriberCannotTakeTheTombstone(t *test
 	}
 	if n := streamLen(t, ex.es.Store().(store.Memory), "agg"); n == 0 {
 		t.Fatal("aggregate erased although a durable subscriber never took the tombstone")
+	}
+	if got := ex.dispatcher.Halted(); !slices.Equal(got, []string{"agg"}) {
+		t.Fatalf("halted = %v, want [agg]: later events must wait behind the marker", got)
+	}
+	// The tombstone's transaction dropped the superseded deliveries.
+	if pending, _ := ex.es.Store().PendingDeliveries(ctx, 10); len(pending) != 0 {
+		t.Fatalf("pending = %v, want none", pending)
+	}
+}
+
+func TestForget_FromAHandlerOfTheSameAggregateFailsFast(t *testing.T) {
+	var ex *CommandExecutor[order]
+	got := make(chan error, 1)
+	ex = durableEnv(t, func(ctx context.Context, e asynxmd.Event[order]) error {
+		if e.EventName != asynxmd.ForgetEventName {
+			got <- ex.Forget(ctx, e.AggregateID)
+		}
+		return nil
+	})
+	if _, err := ex.Execute(context.Background(), update("agg", 1), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-got; !errors.Is(err, asynxmd.ErrForgetFromHandler) {
+		t.Fatalf("err = %v, want ErrForgetFromHandler", err)
+	}
+	if ex.isForgetting("agg") {
+		t.Fatal("aggregate left fenced by the refused Forget")
+	}
+}
+
+func TestForget_FromAHandlerOfAnotherAggregateIsAllowed(t *testing.T) {
+	var ex *CommandExecutor[order]
+	got := make(chan error, 1)
+	ex = durableEnv(t, func(ctx context.Context, e asynxmd.Event[order]) error {
+		if e.EventName != asynxmd.ForgetEventName && e.AggregateID == "a" {
+			got <- ex.Forget(ctx, "b")
+		}
+		return nil
+	})
+	ctx := context.Background()
+	if _, err := ex.Execute(ctx, update("b", 1), true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ex.Execute(ctx, update("a", 1), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-got; err != nil {
+		t.Fatalf("Forget(b) from a's handler: %v", err)
 	}
 }
 

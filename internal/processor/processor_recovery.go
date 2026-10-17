@@ -7,8 +7,16 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-// Resume redelivers the aggregates parked after a delivery gave up (see
-// ErrDeliveryParked) or overflowed its queue. For each it lifts the park and
+// Paused lists the aggregates whose durable delivery is parked: a delivery gave
+// up (see ErrDeliveryParked), or a Forget could not deliver its marker.
+func (p *Processor[T]) Paused() []string {
+	if p.dispatcher == nil {
+		return nil
+	}
+	return p.dispatcher.Halted()
+}
+
+// Resume redelivers the parked aggregates. For each it lifts the park and
 // re-enqueues the aggregate's pending deliveries, in order, under the
 // aggregate's command lock so no live event overtakes them. Call it once the
 // cause (a bad handler, a downstream outage) is fixed.
@@ -22,7 +30,7 @@ func (p *Processor[T]) Resume(ctx context.Context, batch int) error {
 	for _, agg := range p.dispatcher.Halted() {
 		err := p.executor.WithLock(ctx, agg, func() error {
 			p.dispatcher.Resume(agg)
-			if err := p.redeliverPending(ctx, batch, agg); err != nil {
+			if err := p.redeliverPending(ctx, batch, agg, false); err != nil {
 				// Leave it parked: its entries are not all queued, and a
 				// lifted park would hide that from the next Resume.
 				p.dispatcher.Park(agg)
@@ -54,12 +62,15 @@ func (p *Processor[T]) Recover(ctx context.Context, batch int) error {
 	if batch <= 0 {
 		batch = 100
 	}
-	return p.redeliverPending(ctx, batch, "")
+	return p.redeliverPending(ctx, batch, "", true)
 }
 
 // redeliverPending re-enqueues pending deliveries in enqueue order: all of
-// them, or only those of aggregateID when it is not empty.
-func (p *Processor[T]) redeliverPending(ctx context.Context, batch int, aggregateID string) error {
+// them, or only those of aggregateID when it is not empty. live says whether the
+// live subscribers get them too: they do after a restart, but not on Resume,
+// where they have already seen (or skipped) the events and a replay would
+// reorder their stream.
+func (p *Processor[T]) redeliverPending(ctx context.Context, batch int, aggregateID string, live bool) error {
 	store := p.es.Store()
 	seen := make(map[asynxmd.Delivery]struct{})
 
@@ -82,7 +93,7 @@ func (p *Processor[T]) redeliverPending(ctx context.Context, batch int, aggregat
 			if aggregateID != "" && d.AggregateID != aggregateID {
 				continue
 			}
-			if err := p.redeliver(ctx, d); err != nil {
+			if err := p.redeliver(ctx, d, live); err != nil {
 				return fmt.Errorf("asynx: recovery: %w", err)
 			}
 		}
@@ -94,7 +105,7 @@ func (p *Processor[T]) redeliverPending(ctx context.Context, batch int, aggregat
 
 // redeliver rebuilds the event behind d and enqueues it. When the event no
 // longer exists the delivery is acknowledged instead.
-func (p *Processor[T]) redeliver(ctx context.Context, d asynxmd.Delivery) error {
+func (p *Processor[T]) redeliver(ctx context.Context, d asynxmd.Delivery, live bool) error {
 	store := p.es.Store()
 
 	var event asynxmd.Event[T]
@@ -113,8 +124,8 @@ func (p *Processor[T]) redeliver(ctx context.Context, d asynxmd.Delivery) error 
 		return store.AckDelivery(ctx, d.AggregateID, d.Version)
 	}
 
-	_, err = p.dispatcher.EnqueueRecovered(ctx, event, func(ctx context.Context) error {
+	_, err = p.dispatcher.EnqueueRedelivery(ctx, event, func(ctx context.Context) error {
 		return store.AckDelivery(ctx, d.AggregateID, d.Version)
-	})
+	}, live)
 	return err
 }

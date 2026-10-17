@@ -942,20 +942,6 @@ func TestExecute_WithoutDispatcherCommitsAndReturns(t *testing.T) {
 
 
 
-func TestWaitDone_ReturnsWhenDoneClosesOrContextEnds(t *testing.T) {
-	done := make(chan struct{})
-	close(done)
-	if err := WaitDone(context.Background(), done); err != nil {
-		t.Fatalf("closed done: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := WaitDone(ctx, make(chan struct{})); !errors.Is(err, asynxmd.ErrContextCancelled) {
-		t.Fatalf("cancelled: err = %v, want ErrContextCancelled", err)
-	}
-}
-
 func TestExecute_WaitingForHandlersGivesUpWithTheCommittedEvent(t *testing.T) {
 	ex, _, _, _, b := newEnv(t)
 	entered := make(chan struct{})
@@ -997,3 +983,17 @@ func TestExecute_WaitingForHandlersGivesUpWithTheCommittedEvent(t *testing.T) {
 
 
 
+
+func TestExecute_WaitingOnAParkedAggregateReportsNoHandlerRan(t *testing.T) {
+	ex := durableEnv(t, func(context.Context, asynxmd.Event[order]) error { return nil })
+	ex.dispatcher.Park("agg")
+
+	evt, err := ex.Execute(context.Background(), update("agg", 1), true)
+	if !errors.Is(err, asynxmd.ErrDeliveryParked) || evt.Version != 1 {
+		t.Fatalf("Execute = v%d, %v; want the committed v1 with ErrDeliveryParked", evt.Version, err)
+	}
+	// Without waiting the command simply commits.
+	if _, err := ex.Execute(context.Background(), update("agg", 2), false); err != nil {
+		t.Fatalf("Execute without waiting: %v", err)
+	}
+}

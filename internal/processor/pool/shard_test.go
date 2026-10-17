@@ -2,6 +2,7 @@ package pool_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -291,13 +292,13 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(t *testing.T) {
 	first := send("order1")
 	select {
 	case res := <-first.ResultChan:
-		if res.Err != nil || res.Done == nil {
-			t.Fatalf("result = %+v, want committed with a Done channel", res)
+		if res.Err != nil || res.Wait == nil {
+			t.Fatalf("result = %+v, want committed with a Wait", res)
 		}
-		select {
-		case <-res.Done:
-			t.Fatal("Done closed while the handler is still blocked")
-		default:
+		short, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		if err := res.Wait(short); !errors.Is(err, asynxmd.ErrContextCancelled) {
+			t.Fatalf("Wait returned %v while the handler is still blocked", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("worker is held by a blocked handler: first result never arrived")

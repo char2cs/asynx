@@ -34,17 +34,27 @@ type Asynx[T any] interface {
 	// erases all events, pending deliveries and snapshots. From the tombstone
 	// until the erase finishes, commands for the aggregate are rejected with
 	// ErrForgetInProgress, so none can slip in. Returns ErrValidation if the
-	// aggregate does not exist. If Forget fails before the erase (ctx done, a
-	// durable subscriber parked) the aggregate keeps its tombstone; call Forget
-	// again, which delivers the handlers' notifications again.
+	// aggregate does not exist. The tombstone's transaction also drops the
+	// aggregate's pending deliveries: the deletion supersedes them. If Forget
+	// fails before the erase (ctx done, a durable subscriber parked) the
+	// aggregate keeps its tombstone and is parked (see PausedAggregates); call
+	// Forget again, which delivers the handlers' notifications again. A handler
+	// cannot Forget the aggregate it is handling (ErrForgetFromHandler).
 	Forget(
 		ctx context.Context,
 		aggregateID string,
 	) error
 
-	// ResumeDeliveries redelivers the aggregates whose durable delivery was parked
-	// (attempts exhausted or queue bound hit; see Builder.WithDeliveryMaxAttempts),
-	// in order, ahead of any live event. Call it once the cause is fixed.
+	// PausedAggregates lists the aggregates whose durable delivery is parked:
+	// attempts ran out (see Builder.WithDeliveryMaxAttempts) or a Forget could
+	// not deliver its marker. Their durable events stay pending in the store and
+	// SendWait on them returns ErrDeliveryParked. Parking lasts until
+	// ResumeDeliveries or a restart; it never lifts by itself.
+	PausedAggregates() []string
+
+	// ResumeDeliveries redelivers the paused aggregates' pending events, in
+	// order, ahead of any live event, to the durable subscribers only (live
+	// subscribers do not replay). Call it once the cause is fixed.
 	ResumeDeliveries(ctx context.Context) error
 
 	// OnForget registers a handler invoked when any aggregate is forgotten.
@@ -332,6 +342,10 @@ func (i *asynxImpl[T]) WaitPublish() {
 
 func (i *asynxImpl[T]) Forget(ctx context.Context, aggregateID string) error {
 	return i.proc.Forget(ctx, aggregateID)
+}
+
+func (i *asynxImpl[T]) PausedAggregates() []string {
+	return i.proc.Paused()
 }
 
 func (i *asynxImpl[T]) ResumeDeliveries(ctx context.Context) error {

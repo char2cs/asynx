@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1927,9 +1928,13 @@ func TestFailure_RetriesStopAndTheAggregateIsParkedUntilResumed(t *testing.T) {
 	if _, err := inst.SendWait(ctx, upd("other", 1)); err != nil {
 		t.Fatalf("another aggregate: %v", err)
 	}
-	// A new event of the parked aggregate commits but is not delivered.
-	if _, err := inst.SendWait(ctx, upd("bad", 3)); err != nil {
-		t.Fatalf("Send to a parked aggregate: %v", err)
+	// A new event of the parked aggregate commits but is not delivered, and
+	// SendWait says so instead of reporting success.
+	if evt, err := inst.SendWait(ctx, upd("bad", 3)); !errors.Is(err, models.ErrDeliveryParked) || evt.Version != 3 {
+		t.Fatalf("SendWait to a parked aggregate = v%d, %v; want the committed v3 with ErrDeliveryParked", evt.Version, err)
+	}
+	if got := inst.PausedAggregates(); !slices.Equal(got, []string{"bad"}) {
+		t.Fatalf("PausedAggregates = %v, want [bad]", got)
 	}
 	if got := seen.list(); len(got) != 0 {
 		t.Fatalf("parked aggregate delivered %v", got)
@@ -2127,9 +2132,10 @@ func TestFailure_ForgetFailsWhenADurableSubscriberCannotTakeTheMarker(t *testing
 	if err := inst.Forget(ctx, "agg"); !errors.Is(err, models.ErrForgetFailed) {
 		t.Fatalf("Forget err = %v, want ErrForgetFailed", err)
 	}
-	// Forget aborted before erasing; commands are accepted again.
-	if _, err := inst.SendWait(ctx, upd("agg", 2)); err != nil {
-		t.Fatalf("Send after a failed Forget: %v", err)
+	// Forget aborted before erasing; commands are accepted again, but the
+	// aggregate stays paused so their events wait behind the marker.
+	if _, err := inst.SendWait(ctx, upd("agg", 2)); !errors.Is(err, models.ErrDeliveryParked) {
+		t.Fatalf("SendWait after a failed Forget = %v, want ErrDeliveryParked", err)
 	}
 
 	mu.Lock()
@@ -2178,58 +2184,142 @@ func TestFailure_LiveBusErrorDoesNotSkipDurableDelivery(t *testing.T) {
 	within(t, reported, "bus error report")
 }
 
-// Events piling up behind a stuck delivery are bounded in memory: past the
-// bound the aggregate is parked, the events stay in the store's delivery log,
-// and ResumeDeliveries brings them back in order.
-func TestFailure_QueueBoundParksInsteadOfGrowing(t *testing.T) {
+// A failed Forget supersedes the aggregate's pending deliveries for good and
+// keeps later events behind the deletion marker until the aggregate is resumed.
+func TestFailure_FailedForgetDoesNotLetLaterEventsOvertakeTheMarker(t *testing.T) {
 	s := store.New()
 	ctx := context.Background()
-
-	gate := make(chan struct{})
-	started := make(chan struct{}, 1)
-	parked := make(chan error, 4)
-	var seen versions
+	var mu sync.Mutex
+	healthy := false
+	var delivered []string
 	inst := build(t, eight(s).
-		WithDeliveryMaxQueued(2).
-		WithDeliveryErrorHandler(func(_ context.Context, _ models.Event[mocks.Order], err error, _ int) {
-			if errors.Is(err, models.ErrDeliveryParked) {
-				parked <- err
-			}
-		}).
+		WithDeliveryRetry(time.Millisecond, 2*time.Millisecond).
+		WithDeliveryMaxAttempts(100000).
 		WithSubscriber("OrderUpdated", func(_ context.Context, e models.Event[mocks.Order]) error {
-			if e.Version == 1 {
-				started <- struct{}{}
-				<-gate
+			mu.Lock()
+			defer mu.Unlock()
+			if !healthy {
+				return errors.New("down")
 			}
-			seen.add(e.Version)
+			delivered = append(delivered, fmt.Sprintf("%s/%d", e.EventName, e.Version))
 			return nil
 		}))
 
 	if _, err := inst.Send(ctx, upd("agg", 1)); err != nil {
 		t.Fatal(err)
 	}
-	within(t, started, "v1 running")
-	for i := 2; i <= 5; i++ {
-		if _, err := inst.Send(ctx, upd("agg", float64(i))); err != nil {
-			t.Fatal(err)
-		}
+	short, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	if err := inst.Forget(short, "agg"); !errors.Is(err, models.ErrForgetFailed) {
+		t.Fatalf("Forget = %v, want ErrForgetFailed", err)
 	}
-	within(t, parked, "park report")
+	if got := inst.PausedAggregates(); !slices.Equal(got, []string{"agg"}) {
+		t.Fatalf("PausedAggregates = %v, want [agg]", got)
+	}
+	// The tombstone's transaction dropped the superseded v1 entry: a restart
+	// cannot deliver it after the marker.
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 0 {
+		t.Fatalf("pending after the tombstone = %v, want none", pending)
+	}
 
-	close(gate)
-	waitPublish(t, inst)
-	if got := seen.list(); !equalVersions(got, []int64{1}) {
-		t.Fatalf("delivered %v while parked, want only v1", got)
+	if _, err := inst.SendWait(ctx, upd("agg", 3)); !errors.Is(err, models.ErrDeliveryParked) {
+		t.Fatalf("SendWait = %v, want ErrDeliveryParked", err)
 	}
-	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 4 {
-		t.Fatalf("pending = %v, want v2..v5 kept in the log", pending)
+	mu.Lock()
+	healthy = true
+	if len(delivered) != 0 {
+		t.Fatalf("delivered %v while the marker was undelivered", delivered)
 	}
+	mu.Unlock()
 
 	if err := inst.ResumeDeliveries(ctx); err != nil {
 		t.Fatal(err)
 	}
 	waitPublish(t, inst)
-	if got := seen.list(); !equalVersions(got, []int64{1, 2, 3, 4, 5}) {
-		t.Fatalf("after resume delivered %v, want [1 2 3 4 5]", got)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(delivered) != 1 || delivered[0] != "OrderUpdated/3" {
+		t.Fatalf("after resume delivered %v, want only the event after the tombstone", delivered)
+	}
+	if len(inst.PausedAggregates()) != 0 {
+		t.Fatalf("still paused: %v", inst.PausedAggregates())
+	}
+}
+
+// Live-only events of a paused aggregate are not replayed when it resumes.
+func TestFailure_ResumeDoesNotReplayLiveSubscribers(t *testing.T) {
+	s := store.New()
+	ctx := context.Background()
+	var mu sync.Mutex
+	healthy := false
+	var live, cancelled versions
+	inst := build(t, eight(s).
+		WithDeliveryRetry(time.Millisecond, 2*time.Millisecond).
+		WithDeliveryMaxAttempts(2).
+		WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if !healthy {
+				return errors.New("down")
+			}
+			return nil
+		}))
+	if _, err := inst.Subscribe("OrderUpdated", func(_ context.Context, e models.Event[mocks.Order]) { live.add(e.Version) }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inst.Subscribe("OrderCancelled", func(_ context.Context, e models.Event[mocks.Order]) { cancelled.add(e.Version) }); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := inst.Send(ctx, upd("agg", 1)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "aggregate paused", func() bool { return len(inst.PausedAggregates()) == 1 })
+	if _, err := inst.SendWait(ctx, mocks.CancelOrderCmd{ID: "agg"}); err != nil {
+		t.Fatalf("live-only event on a paused aggregate: %v", err)
+	}
+	if _, err := inst.SendWait(ctx, upd("agg", 3)); !errors.Is(err, models.ErrDeliveryParked) {
+		t.Fatalf("SendWait = %v, want ErrDeliveryParked", err)
+	}
+
+	mu.Lock()
+	healthy = true
+	mu.Unlock()
+	if err := inst.ResumeDeliveries(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitPublish(t, inst)
+	if got := live.list(); !equalVersions(got, []int64{1}) {
+		t.Fatalf("live OrderUpdated versions = %v, want [1]: nothing replayed", got)
+	}
+	if got := cancelled.list(); !equalVersions(got, []int64{2}) {
+		t.Fatalf("live OrderCancelled versions = %v, want [2] once", got)
+	}
+}
+
+// A handler cannot forget the aggregate it is handling, but the failed attempt
+// leaves the aggregate usable and shutdown clean.
+func TestFailure_HandlerForgettingItsOwnAggregateFailsFast(t *testing.T) {
+	ctx := context.Background()
+	var inst asynx.Asynx[mocks.Order]
+	got := make(chan error, 1)
+	inst = build(t, eight(store.New()).
+		WithSubscriber("OrderUpdated", func(ctx context.Context, e models.Event[mocks.Order]) error {
+			got <- inst.Forget(ctx, e.AggregateID)
+			return nil
+		}))
+	if _, err := inst.SendWait(ctx, upd("agg", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := within(t, got, "Forget from the handler"); !errors.Is(err, models.ErrForgetFromHandler) {
+		t.Fatalf("Forget from a handler = %v, want ErrForgetFromHandler", err)
+	}
+	if _, err := inst.SendWait(ctx, upd("agg", 2)); err != nil {
+		t.Fatalf("the aggregate is frozen after the refused Forget: %v", err)
+	}
+	sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := inst.Shutdown(sctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
 	}
 }

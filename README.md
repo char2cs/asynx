@@ -308,7 +308,6 @@ func upcastOrderV1toV2(ctx context.Context, eventName string, patches []byte) ([
 | `WithSubscriber(pattern, handler, opts...)` | Durable subscriber; handler returns `error`, failures retry with backoff (at-least-once) | — | No |
 | `WithDeliveryErrorHandler(fn)` / `WithDeliveryRetry(initial, max)` | Observe failed durable deliveries / tune retry backoff | silent / 100ms→30s | No |
 | `WithDeliveryMaxAttempts(n)` / `WithDeadLetterHandler(fn)` | Stop retrying after `n` attempts; dead-letter or park the aggregate | 20 / park | No |
-| `WithDeliveryMaxQueued(n)` | Bound the events held in memory per aggregate behind a failing delivery | 10000 | No |
 | `WithSnapshotErrorHandler(fn)` | Observe failed (non-fatal) snapshot writes | Silently dropped | No |
 
 **Configure concurrency:**
@@ -519,7 +518,7 @@ For every command, in a single process, asynx guarantees — for any `WorkersPer
 
 - **One writer per aggregate**, with that aggregate's events delivered to handlers in version order.
 - **One transaction**: the event, your synchronous projections (`WithSyncProjection`), the command receipt and the delivery entry commit together or not at all.
-- **Crash- and failure-safe delivery**: durable subscribers (`WithSubscriber`, handlers return `error`) are redelivered on restart and retried on failure, at-least-once and in order — also across a shutdown mid-retry. A failing event holds back its own aggregate (for all durable subscribers), never others. Retries are capped: after `WithDeliveryMaxAttempts` the event is dead-lettered or the aggregate is parked (its events stay pending; `ResumeDeliveries` brings them back), and memory per aggregate is bounded. Dedupe on `(AggregateID, Version)` and clear that state on the deletion marker (`models.ForgetEventName`), which every durable subscriber receives.
+- **Crash- and failure-safe delivery**: durable subscribers (`WithSubscriber`, handlers return `error`) are redelivered on restart and retried on failure, at-least-once and in order — also across a shutdown mid-retry. A failing event holds back its own aggregate (for all durable subscribers), never others. Retries are capped: after `WithDeliveryMaxAttempts` the event is dead-lettered or the aggregate is parked (its events stay pending; `PausedAggregates` lists it, `SendWait` on it returns `ErrDeliveryParked`, and `ResumeDeliveries` brings the events back to the durable subscribers). Dedupe on `(AggregateID, Version)` and clear that state on the deletion marker (`models.ForgetEventName`), which every durable subscriber receives.
 - **Idempotent commands**: implement `CommandID() string` and a retry is a no-op; a rejection stays rejected.
 - **Fenced `Forget`**: from the tombstone until the erase completes, commands for the aggregate are rejected with `ErrForgetInProgress`, so none can commit in between.
 - **A slow or failing handler never occupies a shard worker**: `SendWait` and `Forget` wait in the caller's goroutine and honor its context, and `Shutdown` interrupts retries.
@@ -528,7 +527,7 @@ Details, semantics and limits: [docs/spec/guarantees.md](./docs/spec/guarantees.
 
 ## Breaking changes in v0.9.0
 
-`models.Store` has a single transactional write path. `Append` and `Delete` moved onto the `Tx` passed to `Store.Atomically`, and `Store` gained `GetReceipt`, `PendingDeliveries` and `AckDelivery` (receipts and the delivery log). Keep your existing events table and the `events:` stream-ID prefix — no data migration — add `receipts` and `deliveries` tables, and run `storetest.Run` against your store. Snapshot failures no longer fail `Send`, and same-aggregate commands no longer race into `ErrPipelineFailed` within one process. `WithSubscriber` handlers return an `error`. Commands for an aggregate being forgotten now fail with `ErrForgetInProgress`; `Forget` waits for durable subscribers (they receive `models.ForgetEventName`) and returns `ErrForgetFailed` if its context ends first; `SendWait` that gives up waiting returns the committed event with `ErrContextCancelled`; `Build()` queues recovery without waiting for handlers; the `Asynx` interface gained `ResumeDeliveries`. Full migration notes: [docs/spec/guarantees.md § Migration from v0.8.x](./docs/spec/guarantees.md#migration-from-v08x).
+`models.Store` has a single transactional write path. `Append` and `Delete` moved onto the `Tx` passed to `Store.Atomically`, and `Store` gained `GetReceipt`, `PendingDeliveries` and `AckDelivery` (receipts and the delivery log). Keep your existing events table and the `events:` stream-ID prefix — no data migration — add `receipts` and `deliveries` tables, and run `storetest.Run` against your store. Snapshot failures no longer fail `Send`, and same-aggregate commands no longer race into `ErrPipelineFailed` within one process. `WithSubscriber` handlers return an `error`. Commands for an aggregate being forgotten now fail with `ErrForgetInProgress`; `Forget` waits for durable subscribers (they receive `models.ForgetEventName`), drops the aggregate's older pending deliveries in the tombstone's transaction, parks the aggregate and returns `ErrForgetFailed` if it cannot finish, and fails with `ErrForgetFromHandler` when called from the aggregate's own handler; `SendWait` on a parked aggregate returns `ErrDeliveryParked`; `SendWait` that gives up waiting returns the committed event with `ErrContextCancelled`; `Build()` queues recovery without waiting for handlers; the `Asynx` interface gained `ResumeDeliveries` and `PausedAggregates`. Full migration notes: [docs/spec/guarantees.md § Migration from v0.8.x](./docs/spec/guarantees.md#migration-from-v08x).
 
 ## Breaking changes in v0.8.0
 
@@ -555,7 +554,8 @@ All errors are sentinel values in the `models` package — match them with `erro
 | `ErrMissingSnapshotStore` | `Build()` without `WithSnapshotStore()` | Provide a snapshot store |
 | `ErrForgetFailed` | `Forget()` tombstoned the aggregate but did not finish (deletion failed, context ended, a durable subscriber could not take the marker) | Retry `Forget` |
 | `ErrForgetInProgress` | A command (or second `Forget`) hit an aggregate being forgotten | Retry once `Forget` returns; the aggregate restarts at version 1 |
-| `ErrDeliveryParked` | (delivery error handler) a durable delivery gave up or hit the queue bound; its aggregate is parked | Fix the handler, then `ResumeDeliveries` |
+| `ErrDeliveryParked` | A durable delivery gave up, or a `Forget` could not deliver its marker: the aggregate is parked. Seen by the delivery error handler, and returned by `SendWait` (event committed, no handler ran) | Fix the handler, then `ResumeDeliveries`; list parked aggregates with `PausedAggregates` |
+| `ErrForgetFromHandler` | `Forget` called from a handler of the aggregate it names | Forget from outside the handler |
 | `ErrEmptyPattern` | `Listen()`/`SubscribeWait()` with empty pattern | Provide a pattern |
 | `ErrNilHandler` | `Subscribe()` with nil handler | Provide a handler |
 | `ErrBusClosed` | Subscribe/publish after bus shutdown | Rebuild or stop using the instance |

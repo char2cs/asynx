@@ -50,25 +50,32 @@ func (e *CommandExecutor[T]) clearForgetting(id string) {
 // subscriber, each of which must succeed. Only then does it erase the snapshot,
 // the stream and the delivery entries, atomically, under the lock again.
 //
+// The tombstone's transaction also drops the aggregate's delivery entries: the
+// older events are superseded by the deletion, durably, so no restart can
+// deliver one after the marker.
+//
 // If Forget fails before the erase (ctx done, a durable subscriber parked, the
-// dispatcher closing) the aggregate keeps its tombstone and its abandoned
-// deliveries stay pending until the next recovery; call Forget again.
+// dispatcher closing) the aggregate keeps its tombstone and is parked, so
+// commands that arrive meanwhile are accepted but their durable events wait
+// behind the marker (ResumeDeliveries releases them). Call Forget again.
+//
+// A handler cannot Forget the aggregate it is handling: the marker queues
+// behind that very handler. That fails with ErrForgetFromHandler.
 func (e *CommandExecutor[T]) Forget(ctx context.Context, aggregateID string) error {
+	if dispatcher.InHandler(ctx, aggregateID) {
+		return fmt.Errorf("%w: %s", asynxmd.ErrForgetFromHandler, aggregateID)
+	}
 	ticket, err := e.writeTombstone(ctx, aggregateID)
 	if err != nil {
 		return err
 	}
 	defer e.clearForgetting(aggregateID)
 
-	if ticket.Final != nil {
-		select {
-		case err := <-ticket.Final:
-			if err != nil {
-				return fmt.Errorf("%w: tombstone delivery: %w", asynxmd.ErrForgetFailed, err)
-			}
-		case <-ctx.Done():
-			return fmt.Errorf("%w: waiting for handlers: %w", asynxmd.ErrForgetFailed, ctx.Err())
+	if err := e.awaitTombstone(ctx, ticket); err != nil {
+		if e.dispatcher != nil {
+			e.dispatcher.Park(aggregateID)
 		}
+		return err
 	}
 
 	// The erase must finish even if the caller gives up.
@@ -95,6 +102,22 @@ func (e *CommandExecutor[T]) Forget(ctx context.Context, aggregateID string) err
 		return fmt.Errorf("%w: %w", asynxmd.ErrForgetFailed, err)
 	}
 	return nil
+}
+
+// awaitTombstone waits for the marker to reach every subscriber.
+func (e *CommandExecutor[T]) awaitTombstone(ctx context.Context, t dispatcher.Ticket) error {
+	if t.Final == nil {
+		return nil
+	}
+	select {
+	case <-t.Final:
+		if err := t.Err(); err != nil {
+			return fmt.Errorf("%w: tombstone delivery: %w", asynxmd.ErrForgetFailed, err)
+		}
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("%w: waiting for handlers: %w", asynxmd.ErrForgetFailed, ctx.Err())
+	}
 }
 
 // writeTombstone marks the aggregate as being forgotten, commits the tombstone
@@ -141,14 +164,15 @@ func (e *CommandExecutor[T]) commitTombstone(ctx context.Context, aggregateID st
 	return ticket, nil
 }
 
-// tombstoneHook runs synchronous projections for the tombstone. It enqueues no
-// delivery: the tombstone is delivered synchronously to the forget handlers and
-// the stream is erased right after.
+// tombstoneHook runs synchronous projections for the tombstone and drops the
+// aggregate's pending deliveries, which the deletion supersedes. It enqueues no
+// delivery of its own: the tombstone is delivered to every subscriber through
+// the dispatcher and the stream is erased right after.
 func (e *CommandExecutor[T]) tombstoneHook() eventstore.TxHook[T] {
-	if len(e.syncs) == 0 {
-		return nil
-	}
 	return func(ctx context.Context, tx asynxmd.Tx, evt asynxmd.Event[T]) error {
+		if err := tx.DropDeliveries(ctx, evt.AggregateID); err != nil {
+			return err
+		}
 		for _, p := range e.syncs {
 			if !p.Match(evt.EventName) {
 				continue

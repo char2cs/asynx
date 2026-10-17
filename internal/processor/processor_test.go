@@ -930,11 +930,10 @@ func always(string) bool { return true }
 
 
 
-func TestProcessor_Options_MaxQueuedAndDeadLetter(t *testing.T) {
+func TestProcessor_Options_DeadLetter(t *testing.T) {
 	var healthy atomic.Bool
 	dead := make(chan int64, 4)
 	f := newFixture(t, store.New(), parkingOpts(&healthy,
-		processor.WithDeliveryMaxQueued[order](100),
 		processor.WithDeadLetterHandler(func(_ context.Context, e asynxmd.Event[order], _ error) error {
 			dead <- e.Version
 			return nil

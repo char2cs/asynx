@@ -21,7 +21,7 @@ func NewForgetCommand[T any](aggregateID string) *ForgetCommand[T] {
 	return &ForgetCommand[T]{id: aggregateID}
 }
 
-func (c *ForgetCommand[T]) AggregateID() string { return c.id }
+func (c *ForgetCommand[T]) AggregateID() string  { return c.id }
 func (c *ForgetCommand[T]) EventName() string    { return models.ForgetEventName }
 func (c *ForgetCommand[T]) ShouldSnapshot() bool { return false }
 
