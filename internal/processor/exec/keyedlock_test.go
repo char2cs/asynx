@@ -1,8 +1,8 @@
 package exec
 
 import (
-	"runtime"
 	"context"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
