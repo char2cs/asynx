@@ -717,19 +717,31 @@ func TestForget_SerializedAfterSend(t *testing.T) {
 	}
 }
 
-// deleteErrStore wraps store.Memory and injects a one-shot error on the next Delete call.
+// deleteErrStore wraps store.Memory and injects a one-shot error on the next
+// DeleteStream call made inside a transaction.
 type deleteErrStore struct {
 	store.Memory
 	deleteErr error
 }
 
-func (s *deleteErrStore) Delete(ctx context.Context, aggregateID string) error {
-	if s.deleteErr != nil {
-		err := s.deleteErr
-		s.deleteErr = nil
+func (s *deleteErrStore) Atomically(ctx context.Context, fn func(models.Tx) error) error {
+	return s.Memory.Atomically(ctx, func(tx models.Tx) error {
+		return fn(&deleteErrTx{Tx: tx, owner: s})
+	})
+}
+
+type deleteErrTx struct {
+	models.Tx
+	owner *deleteErrStore
+}
+
+func (t *deleteErrTx) DeleteStream(ctx context.Context, streamID string) error {
+	if t.owner.deleteErr != nil {
+		err := t.owner.deleteErr
+		t.owner.deleteErr = nil
 		return err
 	}
-	return s.Memory.Delete(ctx, aggregateID)
+	return t.Tx.DeleteStream(ctx, streamID)
 }
 
 func TestForget_DeleteFails_ReturnsErrForgetFailed(t *testing.T) {

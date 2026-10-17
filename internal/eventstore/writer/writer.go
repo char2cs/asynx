@@ -38,16 +38,11 @@ func New[T any](es asynxmd.Store, ss asynxmd.SnapshotStore, schemaVersion int) *
 // writers that validated against the same state target the same version, so one
 // wins and the other gets ErrPipelineFailed.
 //
-// It computes the RFC 6902 diff from previousState to newState, serializes it as
-// an InternalEvent, and appends it to the event stream. A snapshot is written if
-// shouldSnapshot is true.
-//
-// The event stream append is the save point: once it succeeds, the event is
-// durable in the store. If snapshot write fails, the append is not rolled back
-// (snapshot failures don't prevent durability of the event), but the error is
-// still returned to the caller.
-//
-// Returns the public Event[T] (for bus publish) or an error.
+// The append runs in its own transaction; a snapshot is written afterwards if
+// shouldSnapshot is true. If the snapshot write fails, the append is not rolled
+// back (the event is durable) but the error is returned to the caller. The
+// command executor does not use this method: it composes AppendTx and Snapshot
+// itself so it can enlist projections and treat snapshot failures as non-fatal.
 func (w *Writer[T]) Write(
 	ctx context.Context,
 	aggregateID string,
@@ -56,6 +51,37 @@ func (w *Writer[T]) Write(
 	previousState T,
 	newState T,
 	shouldSnapshot bool,
+) (asynxmd.Event[T], error) {
+	var evt asynxmd.Event[T]
+	err := w.eventStore.Atomically(ctx, func(tx asynxmd.Tx) error {
+		var err error
+		evt, err = w.AppendTx(ctx, tx, aggregateID, eventName, expectedVersion, previousState, newState)
+		return err
+	})
+	if err != nil {
+		return asynxmd.Event[T]{}, err
+	}
+
+	if shouldSnapshot {
+		if err := w.Snapshot(ctx, evt); err != nil {
+			return asynxmd.Event[T]{}, err
+		}
+	}
+
+	return evt, nil
+}
+
+// AppendTx computes the RFC 6902 diff from previousState to newState,
+// serializes it as an InternalEvent and appends it at expectedVersion+1 inside
+// tx. It returns the public Event[T].
+func (w *Writer[T]) AppendTx(
+	ctx context.Context,
+	tx asynxmd.Tx,
+	aggregateID string,
+	eventName string,
+	expectedVersion int64,
+	previousState T,
+	newState T,
 ) (asynxmd.Event[T], error) {
 	version := expectedVersion + 1
 
@@ -85,14 +111,8 @@ func (w *Writer[T]) Write(
 	if err != nil {
 		return asynxmd.Event[T]{}, err
 	}
-	if err := w.eventStore.Append(ctx, "events:"+aggregateID, version, evtJSON); err != nil {
+	if err := tx.Append(ctx, "events:"+aggregateID, version, evtJSON); err != nil {
 		return asynxmd.Event[T]{}, err
-	}
-
-	if shouldSnapshot {
-		if err := w.writeSnapshot(ctx, aggregateID, version, newState); err != nil {
-			return asynxmd.Event[T]{}, err
-		}
 	}
 
 	return asynxmd.Event[T]{
@@ -105,6 +125,11 @@ func (w *Writer[T]) Write(
 		Aggregate:         newState,
 		PreviousAggregate: previousState,
 	}, nil
+}
+
+// Snapshot upserts the snapshot of evt.Aggregate at evt.Version.
+func (w *Writer[T]) Snapshot(ctx context.Context, evt asynxmd.Event[T]) error {
+	return w.writeSnapshot(ctx, evt.AggregateID, evt.Version, evt.Aggregate)
 }
 
 // EventStore returns the backing event store.

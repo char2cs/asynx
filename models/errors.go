@@ -17,4 +17,6 @@ var (
 	ErrMissingSnapshotStore = errors.New("asynx: snapshot store is required")
 	ErrForgetFailed         = errors.New("asynx: forget failed")
 	ErrDispatcherClosed     = errors.New("asynx: dispatcher closed")
+	ErrDuplicateReceipt     = errors.New("asynx: duplicate command receipt")
+	ErrSyncProjection       = errors.New("asynx: sync projection failed")
 )
