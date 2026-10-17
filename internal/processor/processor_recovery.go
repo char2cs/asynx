@@ -36,7 +36,9 @@ func (p *Processor[T]) Resume(ctx context.Context, batch int) error {
 	var errs []error
 	for _, agg := range p.dispatcher.Halted() {
 		err := p.executor.WithLock(ctx, agg, func() error {
-			p.dispatcher.Resume(agg)
+			if !p.dispatcher.Resume(agg) {
+				return nil // a concurrent Resume got here first
+			}
 			err := p.scanPending(ctx, batch, func(d asynxmd.Delivery) error {
 				if d.AggregateID != agg {
 					return nil

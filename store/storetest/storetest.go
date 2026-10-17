@@ -9,6 +9,7 @@ package storetest
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/char2cs/asynx/models"
@@ -33,6 +34,10 @@ func Run(t *testing.T, newStore Factory) {
 		"DropDeliveriesOnlyAffectsThatAggregate":    dropDeliveries,
 		"DeleteStreamIsIdempotentAndScoped":         deleteStream,
 		"AckOfUnknownDeliveryIsNotAnError":          ackUnknown,
+		"DropThenEnqueueInOneTxKeepsTheNewEntry":    dropThenEnqueue,
+		"RollbackRestoresDroppedDeliveries":         rollbackRestoresDrop,
+		"DeliveryKeyCanBeEnqueuedAgain":             reEnqueueAfterAckOrDrop,
+		"AckAfterDropIsNotAnError":                  ackAfterDrop,
 		"NativeIsCallable":                          nativeCallable,
 		"ReadsOfUnknownStreamAreEmpty":              readsOfUnknown,
 		"PendingDeliveriesHonoursLimit":             pendingLimit,
@@ -236,6 +241,72 @@ func deleteStream(t *testing.T, s models.Store) {
 func ackUnknown(t *testing.T, s models.Store) {
 	if err := s.AckDelivery(context.Background(), "ghost", 7); err != nil {
 		t.Fatalf("AckDelivery(unknown) = %v, want nil", err)
+	}
+}
+
+// wantPending fails the test unless the pending deliveries are exactly want.
+func wantPending(t *testing.T, s models.Store, want ...models.Delivery) {
+	t.Helper()
+	pending, err := s.PendingDeliveries(context.Background(), 100)
+	if err != nil || !slices.Equal(pending, want) {
+		t.Fatalf("pending = %v (err %v), want %v", pending, err, want)
+	}
+}
+
+// enqueueIn runs fn on a transaction, failing the test if it does not commit.
+func enqueueIn(t *testing.T, s models.Store, fn func(ctx context.Context, tx models.Tx) error) {
+	t.Helper()
+	ctx := context.Background()
+	mustAtomically(t, s, func(tx models.Tx) error { return fn(ctx, tx) })
+}
+
+// Forget drops an aggregate's entries and records its tombstone in one
+// transaction; the new entry must survive the drop and sort after the others.
+func dropThenEnqueue(t *testing.T, s models.Store) {
+	enqueueIn(t, s, func(ctx context.Context, tx models.Tx) error {
+		return errors.Join(tx.EnqueueDelivery(ctx, "a", 1), tx.EnqueueDelivery(ctx, "b", 1))
+	})
+	enqueueIn(t, s, func(ctx context.Context, tx models.Tx) error {
+		return errors.Join(tx.DropDeliveries(ctx, "a"), tx.EnqueueDelivery(ctx, "a", 2))
+	})
+	wantPending(t, s, models.Delivery{AggregateID: "b", Version: 1}, models.Delivery{AggregateID: "a", Version: 2})
+}
+
+func rollbackRestoresDrop(t *testing.T, s models.Store) {
+	enqueueIn(t, s, func(ctx context.Context, tx models.Tx) error { return tx.EnqueueDelivery(ctx, "a", 1) })
+	err := s.Atomically(context.Background(), func(tx models.Tx) error {
+		return errors.Join(tx.DropDeliveries(context.Background(), "a"), errBoom)
+	})
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("Atomically = %v, want the callback's error", err)
+	}
+	wantPending(t, s, models.Delivery{AggregateID: "a", Version: 1})
+}
+
+// A forgotten aggregate starts again at version 1: its keys are reused.
+func reEnqueueAfterAckOrDrop(t *testing.T, s models.Store) {
+	a1 := models.Delivery{AggregateID: "a", Version: 1}
+	enqueue := func() {
+		enqueueIn(t, s, func(ctx context.Context, tx models.Tx) error { return tx.EnqueueDelivery(ctx, "a", 1) })
+	}
+	enqueue()
+	if err := s.AckDelivery(context.Background(), "a", 1); err != nil {
+		t.Fatal(err)
+	}
+	enqueue()
+	wantPending(t, s, a1)
+	enqueueIn(t, s, func(ctx context.Context, tx models.Tx) error { return tx.DropDeliveries(ctx, "a") })
+	enqueue()
+	wantPending(t, s, a1)
+}
+
+// A delivery can be acknowledged after the erase dropped its entry.
+func ackAfterDrop(t *testing.T, s models.Store) {
+	enqueueIn(t, s, func(ctx context.Context, tx models.Tx) error {
+		return errors.Join(tx.EnqueueDelivery(ctx, "a", 1), tx.DropDeliveries(ctx, "a"))
+	})
+	if err := s.AckDelivery(context.Background(), "a", 1); err != nil {
+		t.Fatalf("AckDelivery after drop = %v, want nil", err)
 	}
 }
 

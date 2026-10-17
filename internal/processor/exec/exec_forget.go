@@ -68,11 +68,17 @@ func (e *CommandExecutor[T]) Forget(ctx context.Context, aggregateID string) (er
 	if err != nil {
 		return err
 	}
-	defer e.clearForgetting(aggregateID)
+	// On success erase has lifted the fence under the lock. On failure it stays
+	// up until the aggregate is parked; each path clears it exactly once, so a
+	// later Forget's fence is never removed by this one.
 	defer func() {
-		if err != nil && e.dispatcher != nil {
+		if err == nil {
+			return
+		}
+		if e.dispatcher != nil {
 			e.dispatcher.Park(aggregateID)
 		}
+		e.clearForgetting(aggregateID)
 	}()
 
 	if err := e.awaitTombstone(ctx, ticket); err != nil {
@@ -183,7 +189,7 @@ func (e *CommandExecutor[T]) commitTombstone(ctx context.Context, aggregateID st
 // of anything that follows it.
 func (e *CommandExecutor[T]) tombstoneHook() eventstore.TxHook[T] {
 	return func(ctx context.Context, tx asynxmd.Tx, evt asynxmd.Event[T]) error {
-		if e.dispatcher != nil {
+		if e.durableMatch != nil && e.dispatcher != nil {
 			if err := tx.DropDeliveries(ctx, evt.AggregateID); err != nil {
 				return err
 			}

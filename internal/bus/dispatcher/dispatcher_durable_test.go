@@ -1014,3 +1014,67 @@ func TestClose_GivingUpCancelsRunningHandlers(t *testing.T) {
 	}
 	recv(t, hctx.Done(), "handler context cancelled")
 }
+
+// gateBus blocks the first PublishSync until released, holding the worker with
+// a job already popped.
+type gateBus struct {
+	recordingBus
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *gateBus) PublishSync(ctx context.Context, e asynxmd.Event[int]) error {
+	b.once.Do(func() {
+		close(b.entered)
+		<-b.release
+	})
+	return nil
+}
+
+// A job popped just before a Forget supersedes its aggregate belongs to the old
+// generation: it must not run its retry loop ahead of the marker.
+func TestSupersede_AfterThePopStillSkipsTheSupersededJob(t *testing.T) {
+	bus := &gateBus{entered: make(chan struct{}), release: make(chan struct{})}
+	var oldRuns atomic.Int32
+	d := New[int](bus, WithDurableSubs([]DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
+		if e.EventName != asynxmd.ForgetEventName {
+			oldRuns.Add(1)
+			return errors.New("down")
+		}
+		return nil
+	}}}), WithRetryBackoff[int](50*time.Millisecond, 50*time.Millisecond), WithMaxAttempts[int](5))
+	t.Cleanup(func() { d.Close(context.Background()) })
+
+	ctx := context.Background()
+	d.EnqueueTicket(ctx, makeEvent("a", 1), func(context.Context) error { return nil })
+	recv(t, bus.entered, "v1 popped and publishing")
+
+	d.Supersede("a")
+	marker := makeEvent("a", 2)
+	marker.EventName = asynxmd.ForgetEventName
+	tk, _ := d.EnqueueForget(ctx, marker, func(context.Context) error { return nil })
+	close(bus.release)
+
+	start := time.Now()
+	if err := final(t, tk, "marker"); err != nil {
+		t.Fatalf("marker = %v", err)
+	}
+	if time.Since(start) > 40*time.Millisecond || oldRuns.Load() != 0 {
+		t.Fatalf("the superseded job ran %d attempts and held the marker back %v", oldRuns.Load(), time.Since(start))
+	}
+	if got := d.Halted(); len(got) != 0 {
+		t.Fatalf("halted = %v", got)
+	}
+}
+
+func TestResume_ReportsWhetherItLiftedAPark(t *testing.T) {
+	d := newDurable(t, nil)
+	if d.Resume("a") {
+		t.Fatal("Resume of an aggregate that is not parked reported a lift")
+	}
+	d.Park("a")
+	if !d.Resume("a") || d.Resume("a") {
+		t.Fatal("Resume must report the lift once")
+	}
+}

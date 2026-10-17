@@ -236,7 +236,7 @@ func TestForget_WithoutDispatcherStillErases(t *testing.T) {
 }
 
 func TestForget_AfterDispatcherClosedFailsPipeline(t *testing.T) {
-	ex, _, _, d, _ := newEnv(t)
+	ex, _, _, d, _ := newEnv(t, WithDurableDelivery[order](func(string) bool { return true }))
 	ctx := context.Background()
 	if _, err := ex.Execute(ctx, update("agg", 1), false); err != nil {
 		t.Fatal(err)
@@ -252,6 +252,22 @@ func TestForget_AfterDispatcherClosedFailsPipeline(t *testing.T) {
 	}
 	if pending, _ := ex.es.Store().PendingDeliveries(ctx, 10); len(pending) != 1 {
 		t.Fatalf("pending = %v, want the marker", pending)
+	}
+}
+
+// Without durable delivery there is no delivery log to record the marker in.
+func TestForget_WithoutDurableDeliveryWritesNoMarkerEntry(t *testing.T) {
+	ex, s, _, d, _ := newEnv(t)
+	ctx := context.Background()
+	if _, err := ex.Execute(ctx, update("agg", 1), false); err != nil {
+		t.Fatal(err)
+	}
+	d.Close(ctx)
+	if err := ex.Forget(ctx, "agg"); !errors.Is(err, asynxmd.ErrPipelineFailed) {
+		t.Fatalf("err = %v", err)
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 0 {
+		t.Fatalf("pending = %v, want none", pending)
 	}
 }
 
@@ -613,7 +629,7 @@ func TestForget_DeliveryLogFailureInTheTombstoneTransactionAbortsIt(t *testing.T
 		"enqueue": {Memory: store.New(), enqueue: true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			ex, _, _, _, _ := newEnvOn(t, s)
+			ex, _, _, _, _ := newEnvOn(t, s, WithDurableDelivery[order](func(string) bool { return true }))
 			ctx := context.Background()
 			// Seed through the plain store: the executor's own writes go through the failing tx.
 			if _, err := eventstore.New[order](s.Memory, store.NewSnapshots(), nil, 1, nil).

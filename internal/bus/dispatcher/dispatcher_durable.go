@@ -129,13 +129,16 @@ func (d *Dispatcher[T]) Halted() []string {
 	return out
 }
 
-// Resume lifts an aggregate's park. The caller then redelivers its pending
-// entries, holding the aggregate's command lock across both so no live event
-// slips ahead of them.
-func (d *Dispatcher[T]) Resume(agg string) {
+// Resume lifts an aggregate's park and reports whether it was parked. The caller
+// then redelivers its pending entries, holding the aggregate's command lock
+// across both so no live event slips ahead of them; when it was not parked,
+// someone else has done that already and redelivering would repeat it.
+func (d *Dispatcher[T]) Resume(agg string) bool {
 	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, parked := d.halted[agg]
 	d.resumeLocked(agg)
-	d.mu.Unlock()
+	return parked
 }
 
 // Park halts an aggregate's durable delivery, as exhausting its attempts does.
@@ -164,7 +167,7 @@ func (d *Dispatcher[T]) isHalted(agg string) bool {
 // returns nil on success. Otherwise the delivery stays pending and the error
 // says why it stopped: ErrDispatcherClosed (interrupted), or ErrDeliveryParked
 // (attempts exhausted, or the aggregate was parked meanwhile).
-func (d *Dispatcher[T]) deliverDurable(agg string, q *aggregateQueue[T], job *dispatchJob[T]) error {
+func (d *Dispatcher[T]) deliverDurable(agg string, q *aggregateQueue[T], halt <-chan struct{}, job *dispatchJob[T]) error {
 	var pending []DurableSub[T]
 	for _, sub := range d.durable {
 		if job.forget || sub.Match(job.event.EventName) {
@@ -172,9 +175,10 @@ func (d *Dispatcher[T]) deliverDurable(agg string, q *aggregateQueue[T], job *di
 		}
 	}
 
-	d.mu.Lock()
-	var halt <-chan struct{} = q.halt
-	d.mu.Unlock()
+	// Parked or superseded while the live subscribers ran: nothing is attempted.
+	if job.ack != nil && closed(halt) {
+		return asynxmd.ErrDeliveryParked
+	}
 
 	backoff := d.retryInitial
 	for attempt := 1; len(pending) > 0; attempt++ {

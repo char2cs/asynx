@@ -997,3 +997,18 @@ func TestExecute_WaitingOnAParkedAggregateReportsNoHandlerRan(t *testing.T) {
 		t.Fatalf("Execute without waiting: %v", err)
 	}
 }
+
+// A command committed but not queued must not let the next one be delivered
+// ahead of it.
+func TestExecute_EnqueueFailureAfterCommitParksTheAggregate(t *testing.T) {
+	ex, _, _, d, _ := newEnv(t, WithDurableDelivery[order](func(string) bool { return true }))
+	d.Close(context.Background())
+
+	evt, err := ex.Execute(context.Background(), update("agg", 1), false)
+	if !errors.Is(err, asynxmd.ErrPipelineFailed) || evt.Version != 1 {
+		t.Fatalf("Execute = v%d, %v; want the committed v1 with ErrPipelineFailed", evt.Version, err)
+	}
+	if got := d.Halted(); len(got) != 1 || got[0] != "agg" {
+		t.Fatalf("halted = %v, want [agg]", got)
+	}
+}

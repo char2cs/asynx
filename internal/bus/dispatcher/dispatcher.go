@@ -372,11 +372,11 @@ func (d *Dispatcher[T]) worker(aggregateID string, q *aggregateQueue[T]) {
 	for {
 		// Run everything already queued, in order.
 		for {
-			job, ok := d.pop(q)
+			job, halt, ok := d.pop(q)
 			if !ok {
 				break
 			}
-			d.handle(aggregateID, q, job)
+			d.handle(aggregateID, q, halt, job)
 		}
 
 		select {
@@ -384,11 +384,11 @@ func (d *Dispatcher[T]) worker(aggregateID string, q *aggregateQueue[T]) {
 		case <-d.stopCh:
 			// Drain jobs enqueued before Close, then exit.
 			for {
-				job, ok := d.pop(q)
+				job, halt, ok := d.pop(q)
 				if !ok {
 					return
 				}
-				d.handle(aggregateID, q, job)
+				d.handle(aggregateID, q, halt, job)
 			}
 		case <-time.After(d.idleTimeout):
 			d.mu.Lock()
@@ -403,17 +403,20 @@ func (d *Dispatcher[T]) worker(aggregateID string, q *aggregateQueue[T]) {
 	}
 }
 
-// pop removes and returns the oldest queued job.
-func (d *Dispatcher[T]) pop(q *aggregateQueue[T]) (*dispatchJob[T], bool) {
+// pop removes and returns the oldest queued job together with the halt
+// generation it is delivered under. Reading both under one hold of d.mu is what
+// lets a park or supersede that follows be recognised as concerning this job:
+// a halt channel read later could already be the next generation's.
+func (d *Dispatcher[T]) pop(q *aggregateQueue[T]) (*dispatchJob[T], <-chan struct{}, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if len(q.jobs) == 0 {
-		return nil, false
+		return nil, nil, false
 	}
 	job := q.jobs[0]
 	q.jobs[0] = nil
 	q.jobs = q.jobs[1:]
-	return job, true
+	return job, q.halt, true
 }
 
 // handle delivers one job: live subscribers through the bus, then (for a
@@ -421,7 +424,7 @@ func (d *Dispatcher[T]) pop(q *aggregateQueue[T]) (*dispatchJob[T], bool) {
 // succeed, the attempt cap is reached, or the dispatcher is interrupted. A panic
 // in the dispatcher itself never kills the worker; it is reported to the
 // publish error handler.
-func (d *Dispatcher[T]) handle(agg string, q *aggregateQueue[T], job *dispatchJob[T]) {
+func (d *Dispatcher[T]) handle(agg string, q *aggregateQueue[T], halt <-chan struct{}, job *dispatchJob[T]) {
 	defer d.jobsWg.Done()
 	var outcome error
 	defer func() {
@@ -437,7 +440,7 @@ func (d *Dispatcher[T]) handle(agg string, q *aggregateQueue[T], job *dispatchJo
 	}()
 
 	// Popped just before its aggregate was parked: leave it pending.
-	if job.ack != nil && d.isHalted(agg) {
+	if job.ack != nil && (d.isHalted(agg) || closed(halt)) {
 		outcome = asynxmd.ErrDeliveryParked
 		job.markUnrun(outcome)
 		return
@@ -454,7 +457,7 @@ func (d *Dispatcher[T]) handle(agg string, q *aggregateQueue[T], job *dispatchJo
 	if !job.durable() {
 		return
 	}
-	if outcome = d.deliverDurable(agg, q, job); outcome != nil {
+	if outcome = d.deliverDurable(agg, q, halt, job); outcome != nil {
 		return
 	}
 	if job.ack != nil {
@@ -476,6 +479,15 @@ func (d *Dispatcher[T]) publishLive(job *dispatchJob[T]) (err error) {
 		}
 	}()
 	return d.bus.PublishSync(job.ctx, job.event)
+}
+
+func closed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *Dispatcher[T]) reportPublishError(job *dispatchJob[T], err error) {

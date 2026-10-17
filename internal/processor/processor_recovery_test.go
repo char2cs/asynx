@@ -3,6 +3,8 @@ package processor_test
 import (
 	"context"
 	"errors"
+	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -367,5 +369,57 @@ func TestProcessor_Resume_StopsWhenItsContextEnds(t *testing.T) {
 	}
 	if got := f.p.Paused(); len(got) != 2 {
 		t.Fatalf("Paused = %v, want both still parked", got)
+	}
+}
+
+// Two Resumes must not both redeliver: the second would queue the same entries
+// behind the first's and invert their order.
+func TestProcessor_Resume_ConcurrentCallsRedeliverOnce(t *testing.T) {
+	var healthy atomic.Bool
+	var mu sync.Mutex
+	var delivered []int64
+	parked := make(chan struct{}, 4)
+	f := newFixture(t, store.New(),
+		processor.WithDurableDelivery[order](func(name string) bool { return name == "OrderUpdated" }),
+		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+			Match: always,
+			Handler: func(_ context.Context, e asynxmd.Event[order]) error {
+				if !healthy.Load() {
+					return errors.New("down")
+				}
+				time.Sleep(5 * time.Millisecond)
+				mu.Lock()
+				delivered = append(delivered, e.Version)
+				mu.Unlock()
+				return nil
+			},
+		}}),
+		processor.WithDeliveryRetry[order](time.Millisecond, 2*time.Millisecond),
+		processor.WithDeliveryMaxAttempts[order](2),
+		processor.WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+			if errors.Is(err, asynxmd.ErrDeliveryParked) {
+				parked <- struct{}{}
+			}
+		}))
+	ctx := context.Background()
+	for i := range 3 {
+		if _, err := f.p.Send(ctx, updateCmd("o1", float64(i+1))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	<-parked
+	healthy.Store(true)
+
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() { defer wg.Done(); f.p.Resume(ctx, 10) }()
+	}
+	wg.Wait()
+	f.p.WaitPublish()
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(delivered, []int64{1, 2, 3}) {
+		t.Fatalf("delivered %v, want [1 2 3] exactly once", delivered)
 	}
 }

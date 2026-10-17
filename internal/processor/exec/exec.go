@@ -160,6 +160,11 @@ func (e *CommandExecutor[T]) run(
 
 	wait, err := e.enqueue(ctx, event)
 	if err != nil {
+		// Committed but not queued: its delivery entry is pending, so keep the
+		// aggregate's later events from being delivered ahead of it.
+		if e.isDurable(event.EventName) {
+			e.dispatcher.Park(event.AggregateID)
+		}
 		return event, nil, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 	}
 	return event, wait, nil
