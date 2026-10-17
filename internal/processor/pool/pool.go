@@ -1,9 +1,9 @@
 // Package pool implements shard-based concurrent command execution.
 //
-// ShardPool[T] spawns one dispatcher and workersPerShard workers per shard. A
-// shard serializes commands targeting the same aggregate only when
-// workersPerShard is 1; with more workers (the default 8) a shard drains its
-// queue in parallel, so two commands on the same aggregate may run concurrently.
+// ShardPool[T] spawns one dispatcher and workersPerShard workers per shard. With
+// more than one worker a shard drains its queue in parallel; the executor's
+// per-aggregate lock keeps commands on one aggregate serial and ordered, so
+// workersPerShard only tunes throughput.
 //   - Shard.dispatchCommands — Reads envelopes off commandChan and hands them
 //     to the worker pool via jobQueue
 //   - Shard.workerLoop       — Executes commands; sends results on completion

@@ -133,7 +133,7 @@ ax.Subscribe("Order.*", func(ctx context.Context, event models.Event[Order]) {
 ```
 
 ### Store
-Persistent event backend (`models.Store`). Bring your own (PostgreSQL, SQLite, DynamoDB) or use the bundled in-memory `store` package for testing. A separate `models.SnapshotStore` — one upserted row per aggregate, holding only the newest snapshot — is also required; see [Bring Your Own Store](#bring-your-own-store).
+Persistent event backend (`models.Store`) — event streams, command receipts and the delivery log behind one transactional write path. Bring your own (PostgreSQL, SQLite, DynamoDB) and prove it with `store/storetest`, or use the bundled in-memory `store` package for testing. A separate `models.SnapshotStore` — one upserted row per aggregate, holding only the newest snapshot — is also required; see [Bring Your Own Store](#bring-your-own-store).
 
 ### Bus
 Event publication after durably writing to store. In-process by default; can be replaced.
@@ -304,6 +304,11 @@ func upcastOrderV1toV2(ctx context.Context, eventName string, patches []byte) ([
 | `WithCorruptionHook(fn)` | Snapshot corruption hook | Log and replay | No |
 | `WithPublishErrorHandler(fn)` | Observe async publish errors | Silently dropped | No |
 | `WithForgetHandler(fn)` | Register forget handler at build time | — | No |
+| `WithSyncProjection(pattern, fn)` | Projection that commits in the event's transaction | — | No |
+| `WithSubscriber(pattern, handler, opts...)` | Durable subscriber; handler returns `error`, failures retry with backoff (at-least-once) | — | No |
+| `WithDeliveryErrorHandler(fn)` / `WithDeliveryRetry(initial, max)` | Observe failed durable deliveries / tune retry backoff | silent / 100ms→30s | No |
+| `WithDeliveryMaxAttempts(n)` / `WithDeadLetterHandler(fn)` | Stop retrying after `n` attempts; dead-letter or park the aggregate | 20 / park | No |
+| `WithSnapshotErrorHandler(fn)` | Observe failed (non-fatal) snapshot writes | Silently dropped | No |
 
 **Configure concurrency:**
 ```go
@@ -360,22 +365,36 @@ ax, _ := asynx.New[Order]().
 
 Two independent, required interfaces: `Store` for the event stream, and `SnapshotStore` for a single cached snapshot per aggregate. They are not interchangeable — `SnapshotStore` is not a second `Store` instance, and `WithSnapshotStore` does not default to the event store.
 
-**`Store`** — implement for any persistent backend (PostgreSQL, SQLite, DynamoDB, etc.):
+**`Store`** — implement for any persistent backend (PostgreSQL, SQLite, DynamoDB, etc.). Every write goes through one transactional entry point, so an event can never commit without the read-model updates, receipt and delivery entry that belong to it:
 ```go
 type Store interface {
-	// Append must enforce (aggregateID, version) uniqueness
-	// This is the only synchronization needed for correctness
-	Append(ctx context.Context, aggregateID string, version int64, data []byte) error
+	ReadFrom(ctx context.Context, streamID string, fromVersion int64) ([][]byte, error)
+	ReadRange(ctx context.Context, streamID string, fromVersion, count int64) ([][]byte, error)
+	GetReceipt(ctx context.Context, commandID string) (Receipt, bool, error)
+	PendingDeliveries(ctx context.Context, limit int) ([]Delivery, error) // enqueue order
+	AckDelivery(ctx context.Context, aggregateID string, version int64) error
 
-	// ReadFrom returns all events starting from version
-	ReadFrom(ctx context.Context, aggregateID string, fromVersion int64) ([][]byte, error)
+	// Atomically commits when fn returns nil and rolls everything back otherwise.
+	Atomically(ctx context.Context, fn func(tx Tx) error) error
+}
 
-	// ReadRange returns up to count events starting from version
-	ReadRange(ctx context.Context, aggregateID string, fromVersion int64, count int64) ([][]byte, error)
+type Tx interface {
+	// Append must enforce (streamID, version) uniqueness and return an error
+	// wrapping ErrPipelineFailed on conflict. This is the only synchronization
+	// needed for correctness.
+	Append(ctx context.Context, streamID string, version int64, data []byte) error
+	DeleteStream(ctx context.Context, streamID string) error     // idempotent
+	DropDeliveries(ctx context.Context, aggregateID string) error // idempotent
+	PutReceipt(ctx context.Context, commandID string, r Receipt) error // dup => ErrDuplicateReceipt
+	EnqueueDelivery(ctx context.Context, aggregateID string, version int64) error
+	Native() any // e.g. *sql.Tx, for synchronous projections
+}
+```
 
-	// Delete removes all records for the aggregate (used by Forget).
-	// Must be idempotent — deleting a missing aggregate is not an error.
-	Delete(ctx context.Context, aggregateID string) error
+Run the conformance suite against your implementation:
+```go
+func TestConformance(t *testing.T) {
+	storetest.Run(t, func(t *testing.T) models.Store { return newMyStore(t) })
 }
 ```
 
@@ -396,37 +415,42 @@ type SnapshotStore interface {
 }
 ```
 
-**Implement `Store` for PostgreSQL:**
+**Implement `Store` for PostgreSQL** (sketch — see [Write-Path Guarantees](docs/spec/guarantees.md#store-contract) for the schema):
 ```go
-type PostgresStore struct {
-	db *sql.DB
+type PostgresStore struct{ db *sql.DB }
+
+func (s *PostgresStore) Atomically(ctx context.Context, fn func(models.Tx) error) error {
+	sqlTx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := fn(&pgTx{tx: sqlTx}); err != nil {
+		sqlTx.Rollback()
+		return err
+	}
+	return sqlTx.Commit()
 }
 
-func (s *PostgresStore) Append(ctx context.Context, aggID string, v int64, data []byte) error {
-	_, err := s.db.ExecContext(ctx,
-		"INSERT INTO events (aggregate_id, version, data) VALUES ($1, $2, $3)",
-		aggID, v, data,
+type pgTx struct{ tx *sql.Tx }
+
+func (t *pgTx) Native() any { return t.tx }
+
+func (t *pgTx) Append(ctx context.Context, streamID string, v int64, data []byte) error {
+	_, err := t.tx.ExecContext(ctx,
+		"INSERT INTO events (stream_id, version, data) VALUES ($1, $2, $3)",
+		streamID, v, data,
 	)
 	if isUniqueViolation(err) {
-		// Postgres UNIQUE(aggregate_id, version) detects concurrent writers.
-		// Map conflicts to ErrPipelineFailed so callers can retry (see Patterns).
+		// UNIQUE(stream_id, version) detects concurrent writers.
 		return fmt.Errorf("%w: version conflict", models.ErrPipelineFailed)
 	}
 	return err
 }
 
-func (s *PostgresStore) ReadFrom(ctx context.Context, aggID string, fromV int64) ([][]byte, error) {
-	rows, _ := s.db.QueryContext(ctx,
-		"SELECT data FROM events WHERE aggregate_id=$1 AND version>=$2 ORDER BY version",
-		aggID, fromV,
-	)
-	// ... scan and return patches
-}
-
-func (s *PostgresStore) Delete(ctx context.Context, aggID string) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM events WHERE aggregate_id=$1", aggID)
-	return err
-}
+// ReadFrom, ReadRange, GetReceipt, PendingDeliveries and AckDelivery read
+// events / receipts / deliveries ORDER BY version / seq.
+// DeleteStream, DropDeliveries, PutReceipt and EnqueueDelivery are plain
+// DELETE / INSERT statements on t.tx.
 ```
 
 **Implement `SnapshotStore` for PostgreSQL** — note the `ON CONFLICT` upsert, keyed on `aggregate_id` alone:
@@ -484,9 +508,26 @@ ax, _ := asynx.New[Order]().
 	Build()
 ```
 
-Both in-memory stores also support one-shot failure injection for tests via `SetError(aggregateID, err)`.
+Both in-memory stores also support one-shot failure injection for tests via `SetError(id, err)`. The in-memory event store additionally offers `Append`/`Delete` helpers for seeding test data.
 
-See [docs/spec/store.md](./docs/spec/store.md) for the full `Store` and `SnapshotStore` contracts, including the SQL schema and error semantics.
+See [docs/spec/guarantees.md](./docs/spec/guarantees.md#store-contract) for the `Store` contract and SQL schema, and [docs/spec/store.md](./docs/spec/store.md) for stream semantics and the `SnapshotStore` contract.
+
+## Guarantees
+
+For every command, in a single process, asynx guarantees — for any `WorkersPerShard`:
+
+- **One writer per aggregate**, with that aggregate's events delivered to handlers in version order.
+- **One transaction**: the event, your synchronous projections (`WithSyncProjection`), the command receipt and the delivery entry commit together or not at all.
+- **Crash- and failure-safe delivery**: durable subscribers (`WithSubscriber`, handlers return `error`) are redelivered on restart and retried on failure, at-least-once and in order — also across a shutdown mid-retry. A failing event holds back its own aggregate (for all durable subscribers), never others. Retries are capped: after `WithDeliveryMaxAttempts` the event is dead-lettered or the aggregate is parked (its events stay pending; `PausedAggregates` lists it, `SendWait` on it returns `ErrDeliveryParked`, and `ResumeDeliveries` brings the events back to the durable subscribers). Dedupe on `(AggregateID, Version)` and clear that state on the deletion marker (`models.ForgetEventName`), which every durable subscriber receives.
+- **Idempotent commands**: implement `CommandID() string` and a retry is a no-op; a rejection stays rejected.
+- **Fenced `Forget`**: from the tombstone until the erase completes, commands for the aggregate are rejected with `ErrForgetInProgress`, so none can commit in between.
+- **A slow or failing handler never occupies a shard worker**: `SendWait` and `Forget` wait in the caller's goroutine and honor its context, and `Shutdown` interrupts retries.
+
+Details, semantics and limits: [docs/spec/guarantees.md](./docs/spec/guarantees.md).
+
+## Breaking changes in v0.9.0
+
+`models.Store` has a single transactional write path. `Append` and `Delete` moved onto the `Tx` passed to `Store.Atomically`, and `Store` gained `GetReceipt`, `PendingDeliveries` and `AckDelivery` (receipts and the delivery log). Keep your existing events table and the `events:` stream-ID prefix — no data migration — add `receipts` and `deliveries` tables, and run `storetest.Run` against your store. Snapshot failures no longer fail `Send`, and same-aggregate commands no longer race into `ErrPipelineFailed` within one process. `WithSubscriber` handlers return an `error`. Commands for an aggregate being forgotten now fail with `ErrForgetInProgress`; `Forget` waits for durable subscribers (they receive `models.ForgetEventName`), drops the aggregate's older pending deliveries in the tombstone's transaction, parks the aggregate and returns `ErrForgetFailed` if it cannot finish, and fails with `ErrForgetFromHandler` when called from the aggregate's own handler; `SendWait` on a parked aggregate returns `ErrDeliveryParked`; `SendWait` that gives up waiting returns the committed event with `ErrContextCancelled`; `Build()` queues recovery for the durable subscribers without waiting for handlers (live subscribers never see recovered events), and `Shutdown` can be retried when its context ended; the `Asynx` interface gained `ResumeDeliveries` and `PausedAggregates`. Full migration notes: [docs/spec/guarantees.md § Migration from v0.8.x](./docs/spec/guarantees.md#migration-from-v08x).
 
 ## Breaking changes in v0.8.0
 
@@ -511,7 +552,11 @@ All errors are sentinel values in the `models` package — match them with `erro
 | `ErrContextCancelled` | Context cancelled during operation | Check caller context |
 | `ErrMissingEventStore` | `Build()` without `WithEventStore()` | Provide an event store |
 | `ErrMissingSnapshotStore` | `Build()` without `WithSnapshotStore()` | Provide a snapshot store |
-| `ErrForgetFailed` | `Forget()` tombstoned the aggregate but deletion failed | Retry `Forget` |
+| `ErrForgetFailed` | `Forget()` tombstoned the aggregate but did not finish (deletion failed, context ended, a durable subscriber could not take the marker) | Retry `Forget` |
+| `ErrForgetInProgress` | A command (or second `Forget`) hit an aggregate being forgotten | Retry once `Forget` returns; the aggregate restarts at version 1 |
+| `ErrDeliveryParked` | A durable delivery gave up, or a `Forget` could not deliver its marker: the aggregate is parked. Seen by the delivery error handler, and returned by `SendWait` (event committed, no handler ran) | Fix the handler, then `ResumeDeliveries`; list parked aggregates with `PausedAggregates` |
+| `ErrSendWaitFromHandler` | `SendWait` called from a handler of the aggregate it names | Use `Send`, or send from outside the handler |
+| `ErrForgetFromHandler` | `Forget` called from a handler of the aggregate it names | Forget from outside the handler |
 | `ErrEmptyPattern` | `Listen()`/`SubscribeWait()` with empty pattern | Provide a pattern |
 | `ErrNilHandler` | `Subscribe()` with nil handler | Provide a handler |
 | `ErrBusClosed` | Subscribe/publish after bus shutdown | Rebuild or stop using the instance |

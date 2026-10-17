@@ -5,9 +5,10 @@ generic `Order` aggregate; adapt names to your domain.
 
 ## Retrying on optimistic-concurrency conflicts
 
-`Store.Append` enforces `(aggregateID, version)` uniqueness. When two writers
-race on the same aggregate, the loser's append fails and asynx surfaces
-`models.ErrPipelineFailed`. This is not a bug — it is the optimistic
+`Tx.Append` enforces `(streamID, version)` uniqueness. Within one process, asynx
+serializes commands per aggregate, so this only happens when several processes
+share a store. When two writers race on the same aggregate, the loser's append
+fails and asynx surfaces `models.ErrPipelineFailed`. This is not a bug — it is the optimistic
 concurrency control signal, and the correct response is to retry: the command
 re-reads current state, re-validates, and appends at the new version.
 

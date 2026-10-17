@@ -2,11 +2,9 @@ package asynx
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
-	"github.com/char2cs/asynx/internal/commands"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/processor"
 	"github.com/char2cs/asynx/models"
@@ -31,13 +29,35 @@ type Asynx[T any] interface {
 		cmd models.Command[T],
 	) (models.Event[T], error)
 
-	// Forget writes a tombstone event for the aggregate, notifies all ForgetHandlers
-	// synchronously, then erases all events, snapshots, and cached state.
-	// Returns ErrValidation if the aggregate does not exist.
+	// Forget writes a tombstone event for the aggregate, delivers it to all
+	// ForgetHandlers and to every durable subscriber (each must succeed), then
+	// erases all events, pending deliveries and snapshots. From the tombstone
+	// until the erase finishes, commands for the aggregate are rejected with
+	// ErrForgetInProgress, so none can slip in. Returns ErrValidation if the
+	// aggregate does not exist. The tombstone's transaction also drops the
+	// aggregate's pending deliveries: the deletion supersedes them. If Forget
+	// fails before the erase (ctx done, a durable subscriber parked) the
+	// aggregate keeps its tombstone and is parked (see PausedAggregates); call
+	// Forget again, which delivers the handlers' notifications again. The
+	// tombstone also stays in the delivery log until acknowledged, so
+	// ResumeDeliveries or a restart delivers it ahead of anything newer. A handler
+	// cannot Forget the aggregate it is handling (ErrForgetFromHandler).
 	Forget(
 		ctx context.Context,
 		aggregateID string,
 	) error
+
+	// PausedAggregates lists the aggregates whose durable delivery is parked:
+	// attempts ran out (see Builder.WithDeliveryMaxAttempts) or a Forget could
+	// not deliver its marker. Their durable events stay pending in the store and
+	// SendWait on them returns ErrDeliveryParked. Parking lasts until
+	// ResumeDeliveries or a restart; it never lifts by itself.
+	PausedAggregates() []string
+
+	// ResumeDeliveries redelivers the paused aggregates' pending events, in
+	// order, ahead of any live event, to the durable subscribers only (live
+	// subscribers do not replay). Call it once the cause is fixed.
+	ResumeDeliveries(ctx context.Context) error
 
 	// OnForget registers a handler invoked when any aggregate is forgotten.
 	// The handler receives the tombstone event; Event.Aggregate holds the last known state.
@@ -115,6 +135,10 @@ type Asynx[T any] interface {
 		fn models.ProjectionHandler[T],
 	) error
 
+	// WaitPublish blocks until every queued event has been handled. It is for
+	// tests: while it waits, commands are refused by the dispatcher, so one that
+	// commits meanwhile fails with ErrPipelineFailed and parks its aggregate until
+	// ResumeDeliveries. Do not call it under live traffic.
 	WaitPublish()
 }
 
@@ -323,15 +347,15 @@ func (i *asynxImpl[T]) WaitPublish() {
 }
 
 func (i *asynxImpl[T]) Forget(ctx context.Context, aggregateID string) error {
-	_, err := i.proc.SendWait(ctx, commands.NewForgetCommand[T](aggregateID))
-	if err != nil {
-		return err
-	}
-	deleteCtx := context.WithoutCancel(ctx)
-	if err := i.es.Delete(deleteCtx, aggregateID); err != nil {
-		return fmt.Errorf("%w: %w", models.ErrForgetFailed, err)
-	}
-	return nil
+	return i.proc.Forget(ctx, aggregateID)
+}
+
+func (i *asynxImpl[T]) PausedAggregates() []string {
+	return i.proc.Paused()
+}
+
+func (i *asynxImpl[T]) ResumeDeliveries(ctx context.Context) error {
+	return i.proc.Resume(ctx, recoveryBatch)
 }
 
 func (i *asynxImpl[T]) OnForget(fn models.ForgetHandler[T]) (string, error) {

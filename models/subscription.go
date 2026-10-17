@@ -18,7 +18,10 @@ func WithFallback[T any](
 	}
 }
 
-// WithHandlerTimeout sets the maximum duration a subscription handler may run.
+// WithHandlerTimeout sets the duration after which a subscription handler is
+// reported as timed out. On the dispatcher path (every event committed through
+// asynx) the handler is still waited for, so the aggregate's next event never
+// overlaps it; the timeout is an alarm, not a cancellation.
 func WithHandlerTimeout[T any](
 	d time.Duration,
 ) SubscriptionOpt[T] {

@@ -83,18 +83,45 @@ func (es *EventStore[T]) Preload(
 	return es.reader.Preload(ctx, aggregateID)
 }
 
+// TxHook runs inside the append's transaction, after the event is appended.
+// Returning an error rolls the transaction back, discarding the event.
+type TxHook[T any] func(ctx context.Context, tx asynxmd.Tx, evt asynxmd.Event[T]) error
+
 // Write loads the aggregate state, validates the command, computes the new state
 // via cmd.EmitEvent, and durably appends the event. It writes a snapshot if
-// cmd.ShouldSnapshot() returns true.
+// cmd.ShouldSnapshot() returns true and returns the snapshot error if that
+// fails; the command executor uses WriteTx and Snapshot instead.
 //
 // Returns ErrValidation if the command fails validation against the current state.
 //
-// If a concurrent writer already appended at the same version, Store.Append
-// returns an error which Write propagates to the caller (ErrPipelineFailed
-// semantics — the caller should re-read state and retry).
+// If a concurrent writer already appended at the same version, the append
+// fails with ErrPipelineFailed semantics — the caller should re-read state
+// and retry.
 func (es *EventStore[T]) Write(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
+) (asynxmd.Event[T], error) {
+	evt, err := es.WriteTx(ctx, cmd, nil)
+	if err != nil {
+		return asynxmd.Event[T]{}, err
+	}
+
+	if cmd.ShouldSnapshot() {
+		if err := es.Snapshot(ctx, evt); err != nil {
+			return asynxmd.Event[T]{}, err
+		}
+	}
+
+	return evt, nil
+}
+
+// WriteTx loads the aggregate state, validates the command, and in one
+// transaction appends the resulting event and runs hook (when non-nil). It
+// never writes a snapshot.
+func (es *EventStore[T]) WriteTx(
+	ctx context.Context,
+	cmd asynxmd.Command[T],
+	hook TxHook[T],
 ) (asynxmd.Event[T], error) {
 	// Load state and its version together so the command is validated and the
 	// event is appended against the same version. ErrNotFound yields version 0,
@@ -120,15 +147,52 @@ func (es *EventStore[T]) Write(
 		previousState = *currentPtr
 	}
 
-	return es.writer.Write(
-		ctx,
-		cmd.AggregateID(),
-		cmd.EventName(),
-		loadedVersion,
-		previousState,
-		newState,
-		cmd.ShouldSnapshot(),
-	)
+	var evt asynxmd.Event[T]
+	err = es.writer.EventStore().Atomically(ctx, func(tx asynxmd.Tx) error {
+		var err error
+		evt, err = es.writer.AppendTx(
+			ctx,
+			tx,
+			cmd.AggregateID(),
+			cmd.EventName(),
+			loadedVersion,
+			previousState,
+			newState,
+		)
+		if err != nil {
+			return err
+		}
+		if hook != nil {
+			return hook(ctx, tx, evt)
+		}
+		return nil
+	})
+	if err != nil {
+		return asynxmd.Event[T]{}, err
+	}
+
+	return evt, nil
+}
+
+// Snapshot upserts the snapshot for evt.Aggregate at evt.Version.
+func (es *EventStore[T]) Snapshot(
+	ctx context.Context,
+	evt asynxmd.Event[T],
+) error {
+	return es.writer.Snapshot(ctx, evt)
+}
+
+// Store returns the backing event store.
+func (es *EventStore[T]) Store() asynxmd.Store {
+	return es.writer.EventStore()
+}
+
+// DeleteSnapshot removes the aggregate's snapshot. Idempotent.
+func (es *EventStore[T]) DeleteSnapshot(
+	ctx context.Context,
+	aggregateID string,
+) error {
+	return es.writer.SnapshotStore().Delete(ctx, aggregateID)
 }
 
 // Delete removes all events and snapshots for the aggregate from the backing stores.
@@ -137,10 +201,13 @@ func (es *EventStore[T]) Delete(
 	ctx context.Context,
 	aggregateID string,
 ) error {
-	if err := es.writer.EventStore().Delete(ctx, "events:"+aggregateID); err != nil {
+	err := es.writer.EventStore().Atomically(ctx, func(tx asynxmd.Tx) error {
+		return tx.DeleteStream(ctx, "events:"+aggregateID)
+	})
+	if err != nil {
 		return err
 	}
-	return es.writer.SnapshotStore().Delete(ctx, aggregateID)
+	return es.DeleteSnapshot(ctx, aggregateID)
 }
 
 // Replay iterates events in version order, upcasting each to the current

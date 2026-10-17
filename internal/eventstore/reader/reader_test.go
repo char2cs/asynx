@@ -459,7 +459,7 @@ func TestGet_ColdPath_HydrateError_ReturnsError(t *testing.T) {
 
 // writeEvent appends a single event for aggregateID directly to a
 // models.Store, computing the RFC 6902 patch from the zero value to state.
-func writeEvent(t *testing.T, s asynxmd.Store, id string, version int64, state order) {
+func writeEvent(t *testing.T, s store.Memory, id string, version int64, state order) {
 	t.Helper()
 	patch, err := jsondiff.Compare(order{}, state)
 	if err != nil {

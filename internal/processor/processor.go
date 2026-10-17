@@ -14,7 +14,10 @@ package processor
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/eventstore"
@@ -26,14 +29,29 @@ import (
 )
 
 type Processor[T any] struct {
-	pool         *pool.ShardPool[T]
-	router       *queue.Router
-	executor     *exec.CommandExecutor[T]
-	dispatcher   *dispatcher.Dispatcher[T]
-	bus          asynxmd.Bus[T]
-	shuttingDown atomic.Bool
+	es            *eventstore.EventStore[T]
+	pool          *pool.ShardPool[T]
+	router        *queue.Router
+	executor      *exec.CommandExecutor[T]
+	dispatcher    *dispatcher.Dispatcher[T]
+	bus           asynxmd.Bus[T]
+	shuttingDown  atomic.Bool
+	lifeMu        sync.Mutex     // orders Shutdown against Send and Forget calls starting
+	shutdown      shutdownState  // guarded by lifeMu
+	sends         sync.WaitGroup // Send and SendWait calls in flight
+	forgets       sync.WaitGroup // Forget calls in flight
 	onSendPending func()
 }
+
+// shutdownState lets a Shutdown that failed (its context ended) be retried.
+type shutdownState int
+
+const (
+	notShutDown shutdownState = iota
+	shuttingDownNow
+	shutdownFailed
+	shutDown
+)
 
 type ProcessorOpt[T any] func(*processorConfig[T])
 
@@ -42,6 +60,77 @@ type processorConfig[T any] struct {
 	queueDepth          int
 	workersPerShard     int
 	publishErrorHandler asynxmd.PublishErrorHandler[T]
+	executorOpts        []exec.Opt[T]
+	dispatcherOpts      []dispatcher.Opt[T]
+}
+
+// WithDurableSubscribers registers the durable subscribers the dispatcher runs,
+// with retry, for durable deliveries.
+func WithDurableSubscribers[T any](subs []dispatcher.DurableSub[T]) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithDurableSubs(subs))
+	}
+}
+
+// WithDeliveryErrorHandler observes failed durable delivery attempts.
+func WithDeliveryErrorHandler[T any](fn asynxmd.DeliveryErrorHandler[T]) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithDeliveryErrorHandler(fn))
+	}
+}
+
+// WithDeliveryPanicHandler is called when a durable handler panics.
+func WithDeliveryPanicHandler[T any](fn asynxmd.PanicHandler[T]) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithDeliveryPanicHandler(fn))
+	}
+}
+
+// WithDeliveryMaxAttempts caps the attempts of a failing durable delivery.
+func WithDeliveryMaxAttempts[T any](n int) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithMaxAttempts[T](n))
+	}
+}
+
+// WithDeadLetterHandler sets the handler for deliveries that ran out of attempts.
+func WithDeadLetterHandler[T any](fn asynxmd.DeadLetterHandler[T]) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithDeadLetterHandler(fn))
+	}
+}
+
+// WithDeliveryRetry sets the retry backoff of failed durable deliveries.
+func WithDeliveryRetry[T any](
+	initial time.Duration,
+	max time.Duration,
+) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithRetryBackoff[T](initial, max))
+	}
+}
+
+// WithSyncProjections registers projections that run inside each event's
+// transaction.
+func WithSyncProjections[T any](p []exec.SyncProjection[T]) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.executorOpts = append(cfg.executorOpts, exec.WithSyncProjections(p))
+	}
+}
+
+// WithDurableDelivery records a delivery entry for every event whose name
+// match accepts and acknowledges it once handlers finish; see Processor.Recover.
+func WithDurableDelivery[T any](match func(eventName string) bool) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.executorOpts = append(cfg.executorOpts, exec.WithDurableDelivery[T](match))
+	}
+}
+
+// WithSnapshotErrorHandler sets the callback for failed post-commit snapshots.
+func WithSnapshotErrorHandler[T any](fn func(context.Context, asynxmd.Event[T], error)) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.executorOpts = append(cfg.executorOpts, exec.WithSnapshotErrorHandler(fn))
+	}
 }
 
 func WithShards[T any](count int) ProcessorOpt[T] {
@@ -94,7 +183,7 @@ func New[T any](
 		cfg.queueDepth = cfg.workersPerShard
 	}
 
-	var dispatcherOpts []dispatcher.Opt[T]
+	dispatcherOpts := cfg.dispatcherOpts
 	if cfg.publishErrorHandler != nil {
 		dispatcherOpts = append(dispatcherOpts, dispatcher.WithPublishErrorHandler[T](cfg.publishErrorHandler))
 	}
@@ -104,8 +193,9 @@ func New[T any](
 		d = dispatcher.New(bus, dispatcherOpts...)
 	}
 
-	executor := exec.New(es, d)
+	executor := exec.New(es, d, cfg.executorOpts...)
 	return &Processor[T]{
+		es: es,
 		pool: pool.New(
 			executor,
 			cfg.shards,
@@ -125,9 +215,10 @@ func (p *Processor[T]) Send(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
 ) (asynxmd.Event[T], error) {
-	if p.isShuttingDown() {
+	if !p.beginSend() {
 		return asynxmd.Event[T]{}, asynxmd.ErrShuttingDown
 	}
+	defer p.sends.Done()
 
 	if err := ctx.Err(); err != nil {
 		return asynxmd.Event[T]{}, asynxmd.ErrContextCancelled
@@ -150,8 +241,13 @@ func (p *Processor[T]) SendWait(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
 ) (asynxmd.Event[T], error) {
-	if p.isShuttingDown() {
+	if !p.beginSend() {
 		return asynxmd.Event[T]{}, asynxmd.ErrShuttingDown
+	}
+	defer p.sends.Done()
+
+	if p.dispatcher != nil && p.dispatcher.InHandler(ctx, cmd.AggregateID()) {
+		return asynxmd.Event[T]{}, asynxmd.ErrSendWaitFromHandler
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -176,6 +272,19 @@ func (p *Processor[T]) isShuttingDown() bool {
 	return p.shuttingDown.Load()
 }
 
+// beginSend registers a Send or SendWait in flight, unless shutdown has begun.
+// Shutdown waits for the registered ones, so none is stranded in a queue the
+// pool has stopped reading.
+func (p *Processor[T]) beginSend() bool {
+	p.lifeMu.Lock()
+	defer p.lifeMu.Unlock()
+	if p.isShuttingDown() {
+		return false
+	}
+	p.sends.Add(1)
+	return true
+}
+
 func (p *Processor[T]) sendAndWait(
 	ctx context.Context,
 	shard *pool.Shard[T],
@@ -195,18 +304,48 @@ func (p *Processor[T]) sendAndWait(
 
 	select {
 	case result := <-envelope.ResultChan:
-		return result.Event, result.Err
+		if result.Err != nil || result.Wait == nil {
+			return result.Event, result.Err
+		}
+		if err := result.Wait(ctx); err != nil {
+			if errors.Is(err, asynxmd.ErrContextCancelled) {
+				return result.Event, asynxmd.ErrContextCancelled
+			}
+			return result.Event, err
+		}
+		return result.Event, nil
 	case <-ctx.Done():
 		return asynxmd.Event[T]{}, asynxmd.ErrContextCancelled
 	}
 }
 
+// Shutdown stops accepting work, waits for the commands and Forgets in flight,
+// then closes the dispatcher and the bus. If ctx ends first it returns the
+// error and can be called again to finish; once it has completed, or while
+// another call runs, it returns ErrAlreadyShuttingDown.
 func (p *Processor[T]) Shutdown(ctx context.Context) error {
-	if !p.setShuttingDown() {
+	if !p.beginShutdown() {
 		return asynxmd.ErrAlreadyShuttingDown
+	}
+	err := p.runShutdown(ctx)
+	p.endShutdown(err)
+	return err
+}
+
+func (p *Processor[T]) runShutdown(ctx context.Context) error {
+	if p.dispatcher != nil {
+		p.dispatcher.Interrupt()
+	}
+
+	if err := waitGroup(ctx, &p.sends); err != nil {
+		return err
 	}
 
 	if err := p.pool.Drain(ctx); err != nil {
+		return err
+	}
+
+	if err := waitGroup(ctx, &p.forgets); err != nil {
 		return err
 	}
 
@@ -217,8 +356,40 @@ func (p *Processor[T]) Shutdown(ctx context.Context) error {
 	return p.closeBus(ctx)
 }
 
-func (p *Processor[T]) setShuttingDown() bool {
-	return p.shuttingDown.CompareAndSwap(false, true)
+func (p *Processor[T]) beginShutdown() bool {
+	p.lifeMu.Lock()
+	defer p.lifeMu.Unlock()
+	if p.shutdown == shuttingDownNow || p.shutdown == shutDown {
+		return false
+	}
+	p.shutdown = shuttingDownNow
+	p.shuttingDown.Store(true)
+	return true
+}
+
+func (p *Processor[T]) endShutdown(err error) {
+	p.lifeMu.Lock()
+	defer p.lifeMu.Unlock()
+	if err != nil {
+		p.shutdown = shutdownFailed
+		return
+	}
+	p.shutdown = shutDown
+}
+
+// waitGroup waits for wg, or for ctx.
+func waitGroup(
+	ctx context.Context,
+	wg *sync.WaitGroup,
+) error {
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (p *Processor[T]) closeDispatcher(ctx context.Context) error {
@@ -248,4 +419,26 @@ func (p *Processor[T]) WaitPublish() {
 // Do not call in production code.
 func (p *Processor[T]) SetOnSendPending(fn func()) {
 	p.onSendPending = fn
+}
+
+// Forget erases the aggregate; see CommandExecutor.Forget. It does not occupy a
+// shard worker while waiting for handlers, so a slow handler cannot stall the
+// shard's other aggregates.
+func (p *Processor[T]) Forget(
+	ctx context.Context,
+	aggregateID string,
+) error {
+	p.lifeMu.Lock()
+	if p.isShuttingDown() {
+		p.lifeMu.Unlock()
+		return asynxmd.ErrShuttingDown
+	}
+	p.forgets.Add(1)
+	p.lifeMu.Unlock()
+	defer p.forgets.Done()
+
+	if err := ctx.Err(); err != nil {
+		return asynxmd.ErrContextCancelled
+	}
+	return p.executor.Forget(ctx, aggregateID)
 }

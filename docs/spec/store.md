@@ -1,5 +1,7 @@
 # Store Package Specification
 
+> **v0.9.0:** the write side of `Store` changed. `Append` and `Delete` moved onto the transactional `Tx` passed to `Store.Atomically`, and `Store` gained receipts and a delivery log. The authoritative contract is in [Write-Path Guarantees](guarantees.md#store-contract). This page still describes the stream semantics (uniqueness, stream naming, read behavior) that carry over unchanged.
+
 ## Overview
 
 The `models` package defines two independent persistence contracts: `Store` — the append-only **event** stream contract — and `SnapshotStore` — a single upserted cache cell per aggregate. This document covers `Store`. See [SnapshotStore](#snapshotstore) below for the other.
