@@ -51,12 +51,17 @@ type Dispatcher[T any] struct {
 
 type aggregateQueue[T any] struct {
 	ch chan *dispatchJob[T]
+	// senders counts Enqueue calls that picked this queue but have not yet put
+	// their job on ch. Protected by Dispatcher.mu. The idle worker must not
+	// retire the queue while it is non-zero, or that job would be stranded.
+	senders int
 }
 
 type dispatchJob[T any] struct {
 	event asynxmd.Event[T]
 	ctx   context.Context
 	done  chan struct{}
+	ack   func(context.Context) error
 }
 
 // New creates a Dispatcher that publishes events through bus.
@@ -77,10 +82,33 @@ func New[T any](bus asynxmd.Bus[T], opts ...Opt[T]) *Dispatcher[T] {
 // synchronous (establishes ordering). If waitHandlers is true the call blocks
 // until the event's handlers have completed.
 func (d *Dispatcher[T]) Dispatch(ctx context.Context, event asynxmd.Event[T], waitHandlers bool) error {
+	done, err := d.Enqueue(ctx, event, nil)
+	if err != nil {
+		return err
+	}
+	if waitHandlers {
+		<-done
+	}
+	return nil
+}
+
+// Enqueue puts an event on its aggregate's queue and returns a channel that is
+// closed once every handler for the event has finished. Enqueue order is
+// delivery order, so callers that must keep versions ordered enqueue while
+// holding their per-aggregate lock and wait on the channel afterwards.
+//
+// ack, when non-nil, runs after the handlers finished successfully (the bus
+// accepted the event). An ack error is reported to the publish error handler.
+// If the bus rejects the event, ack is not called.
+func (d *Dispatcher[T]) Enqueue(
+	ctx context.Context,
+	event asynxmd.Event[T],
+	ack func(context.Context) error,
+) (<-chan struct{}, error) {
 	d.mu.Lock()
 	if d.closed || d.waiting {
 		d.mu.Unlock()
-		return asynxmd.ErrDispatcherClosed
+		return nil, asynxmd.ErrDispatcherClosed
 	}
 	// Track this dispatch call immediately after checking not-waiting/not-closed.
 	// This ensures WaitIdle() cannot return with jobsWg==0 while a goroutine
@@ -92,6 +120,7 @@ func (d *Dispatcher[T]) Dispatch(ctx context.Context, event asynxmd.Event[T], wa
 		event: event,
 		ctx:   context.WithoutCancel(ctx),
 		done:  make(chan struct{}),
+		ack:   ack,
 	}
 
 	d.mu.Lock()
@@ -99,7 +128,7 @@ func (d *Dispatcher[T]) Dispatch(ctx context.Context, event asynxmd.Event[T], wa
 		d.mu.Unlock()
 		// Undo the Add(1) since we're not enqueueing a job.
 		d.jobsWg.Done()
-		return asynxmd.ErrDispatcherClosed
+		return nil, asynxmd.ErrDispatcherClosed
 	}
 
 	q, exists := d.queues[event.AggregateID]
@@ -110,14 +139,16 @@ func (d *Dispatcher[T]) Dispatch(ctx context.Context, event asynxmd.Event[T], wa
 		go d.worker(event.AggregateID, q)
 	}
 
+	q.senders++
 	d.mu.Unlock()
 
 	q.ch <- job
 
-	if waitHandlers {
-		<-job.done
-	}
-	return nil
+	d.mu.Lock()
+	q.senders--
+	d.mu.Unlock()
+
+	return job.done, nil
 }
 
 // Close marks the dispatcher as closed, closes all per-aggregate channels, and
@@ -184,7 +215,7 @@ func (d *Dispatcher[T]) worker(aggregateID string, q *aggregateQueue[T]) {
 			}
 		case <-time.After(d.idleTimeout):
 			d.mu.Lock()
-			if len(q.ch) > 0 {
+			if len(q.ch) > 0 || q.senders > 0 {
 				d.mu.Unlock()
 				continue
 			}
@@ -211,7 +242,15 @@ func (d *Dispatcher[T]) handle(job *dispatchJob[T]) {
 		return
 	}
 	err := d.bus.PublishSync(job.ctx, job.event)
-	if err != nil && d.onPublishError != nil {
-		d.onPublishError(job.ctx, job.event, err)
+	if err != nil {
+		if d.onPublishError != nil {
+			d.onPublishError(job.ctx, job.event, err)
+		}
+		return
+	}
+	if job.ack != nil {
+		if err := job.ack(job.ctx); err != nil && d.onPublishError != nil {
+			d.onPublishError(job.ctx, job.event, err)
+		}
 	}
 }

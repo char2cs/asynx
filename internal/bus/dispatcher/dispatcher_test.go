@@ -463,3 +463,91 @@ func TestDispatch_WorkerSurvivesPanic(t *testing.T) {
 		t.Errorf("expected 2 PublishSync calls (panic recovered), got %d", got)
 	}
 }
+
+func TestEnqueue_AckRunsAfterHandlersFinish(t *testing.T) {
+	var handled, acked atomic.Bool
+	bus := &callbackBus{fn: func(context.Context, asynxmd.Event[int]) error {
+		time.Sleep(20 * time.Millisecond)
+		handled.Store(true)
+		return nil
+	}}
+	d := New[int](bus)
+	defer d.Close(context.Background())
+
+	done, err := d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error {
+		if !handled.Load() {
+			t.Error("ack ran before the handlers finished")
+		}
+		acked.Store(true)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	<-done
+	if !acked.Load() {
+		t.Fatal("ack did not run before done closed")
+	}
+}
+
+func TestEnqueue_AckSkippedWhenBusRejectsEvent(t *testing.T) {
+	var acked atomic.Bool
+	var reported atomic.Int32
+	d := New(
+		asynxmd.Bus[int](&errBus{err: errors.New("bus closed")}),
+		WithPublishErrorHandler[int](func(context.Context, asynxmd.Event[int], error) { reported.Add(1) }),
+	)
+	defer d.Close(context.Background())
+
+	done, err := d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error {
+		acked.Store(true)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	<-done
+
+	if acked.Load() {
+		t.Error("ack ran although the bus rejected the event")
+	}
+	if reported.Load() != 1 {
+		t.Errorf("publish errors reported = %d, want 1", reported.Load())
+	}
+}
+
+func TestEnqueue_AckErrorIsReported(t *testing.T) {
+	ackErr := errors.New("ack failed")
+	var got atomic.Value
+	d := New(
+		asynxmd.Bus[int](&recordingBus{}),
+		WithPublishErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error) { got.Store(err) }),
+	)
+	defer d.Close(context.Background())
+
+	done, _ := d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error { return ackErr })
+	<-done
+
+	if err, _ := got.Load().(error); !errors.Is(err, ackErr) {
+		t.Fatalf("reported error = %v, want ack error", err)
+	}
+}
+
+// A job enqueued while the idle worker is about to retire must still run.
+func TestEnqueue_NeverStrandedByIdleWorkerRetirement(t *testing.T) {
+	d := New[int](&recordingBus{}, WithIdleTimeout[int](time.Millisecond))
+	defer d.Close(context.Background())
+
+	for i := int64(1); i <= 300; i++ {
+		time.Sleep(time.Millisecond) // land right on the idle deadline
+		done, err := d.Enqueue(context.Background(), makeEvent("a", i), nil)
+		if err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("event %d was stranded on a retired queue", i)
+		}
+	}
+}
