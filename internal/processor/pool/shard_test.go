@@ -316,3 +316,54 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(t *testing.T) {
 	}
 	close(release)
 }
+
+// Envelopes still queued when the pool stops are answered, not abandoned.
+func TestPool_Drain_AnswersEnvelopesLeftInTheQueue(t *testing.T) {
+	s := store.New()
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	executor := exec.New[order](es, nil)
+	p := pool.New(executor, 1, 8, 1)
+
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	send := func(cmd asynxmd.Command[order]) *models.CommandEnvelope[order] {
+		env := &models.CommandEnvelope[order]{Cmd: cmd, Ctx: context.Background(), ResultChan: make(chan models.CommandResult[order], 1)}
+		p.Shards()[0].CommandChan() <- env
+		return env
+	}
+	var envs []*models.CommandEnvelope[order]
+	envs = append(envs, send(gatedUpdate{UpdateOrderCmd: mocks.UpdateOrderCmd{ID: "a", NewState: order{ID: "a"}}, entered: entered, gate: gate}))
+	<-entered
+	for i := range 5 {
+		id := string(rune('b' + i))
+		envs = append(envs, send(mocks.UpdateOrderCmd{ID: id, NewState: order{ID: id}}))
+	}
+
+	drained := make(chan error, 1)
+	go func() { drained <- p.Drain(context.Background()) }()
+	time.Sleep(10 * time.Millisecond) // let the stop signal land
+	close(gate)
+
+	for i, env := range envs {
+		select {
+		case <-env.ResultChan:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("envelope %d never got a result", i)
+		}
+	}
+	if err := <-drained; err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+}
+
+type gatedUpdate struct {
+	mocks.UpdateOrderCmd
+	entered chan<- struct{}
+	gate    <-chan struct{}
+}
+
+func (c gatedUpdate) Validate(*order) error {
+	c.entered <- struct{}{}
+	<-c.gate
+	return nil
+}

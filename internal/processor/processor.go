@@ -36,10 +36,22 @@ type Processor[T any] struct {
 	dispatcher    *dispatcher.Dispatcher[T]
 	bus           asynxmd.Bus[T]
 	shuttingDown  atomic.Bool
-	lifeMu        sync.Mutex     // orders Shutdown against Forget calls starting
+	lifeMu        sync.Mutex     // orders Shutdown against Send and Forget calls starting
+	shutdown      shutdownState  // guarded by lifeMu
+	sends         sync.WaitGroup // Send and SendWait calls in flight
 	forgets       sync.WaitGroup // Forget calls in flight
 	onSendPending func()
 }
+
+// shutdownState lets a Shutdown that failed (its context ended) be retried.
+type shutdownState int
+
+const (
+	notShutDown shutdownState = iota
+	shuttingDownNow
+	shutdownFailed
+	shutDown
+)
 
 type ProcessorOpt[T any] func(*processorConfig[T])
 
@@ -200,9 +212,10 @@ func (p *Processor[T]) Send(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
 ) (asynxmd.Event[T], error) {
-	if p.isShuttingDown() {
+	if !p.beginSend() {
 		return asynxmd.Event[T]{}, asynxmd.ErrShuttingDown
 	}
+	defer p.sends.Done()
 
 	if err := ctx.Err(); err != nil {
 		return asynxmd.Event[T]{}, asynxmd.ErrContextCancelled
@@ -225,8 +238,15 @@ func (p *Processor[T]) SendWait(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
 ) (asynxmd.Event[T], error) {
-	if p.isShuttingDown() {
+	if !p.beginSend() {
 		return asynxmd.Event[T]{}, asynxmd.ErrShuttingDown
+	}
+	defer p.sends.Done()
+
+	// Waiting for the handlers of a command to the aggregate whose handler is
+	// calling would wait on that handler itself.
+	if dispatcher.InHandler(ctx, cmd.AggregateID()) {
+		return asynxmd.Event[T]{}, asynxmd.ErrSendWaitFromHandler
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -249,6 +269,19 @@ func (p *Processor[T]) SendWait(
 
 func (p *Processor[T]) isShuttingDown() bool {
 	return p.shuttingDown.Load()
+}
+
+// beginSend registers a Send or SendWait in flight, unless shutdown has begun.
+// Shutdown waits for the registered ones, so none is stranded in a queue the
+// pool has stopped reading.
+func (p *Processor[T]) beginSend() bool {
+	p.lifeMu.Lock()
+	defer p.lifeMu.Unlock()
+	if p.isShuttingDown() {
+		return false
+	}
+	p.sends.Add(1)
+	return true
 }
 
 func (p *Processor[T]) sendAndWait(
@@ -287,15 +320,28 @@ func (p *Processor[T]) sendAndWait(
 	}
 }
 
+// Shutdown stops accepting work, waits for the commands and Forgets in flight,
+// then closes the dispatcher and the bus. If ctx ends first it returns the
+// error and can be called again to finish; once it has completed, or while
+// another call runs, it returns ErrAlreadyShuttingDown.
 func (p *Processor[T]) Shutdown(ctx context.Context) error {
-	if !p.setShuttingDown() {
+	if !p.beginShutdown() {
 		return asynxmd.ErrAlreadyShuttingDown
 	}
+	err := p.runShutdown(ctx)
+	p.endShutdown(err)
+	return err
+}
 
+func (p *Processor[T]) runShutdown(ctx context.Context) error {
 	// Release anything waiting on a failing delivery before draining: such a
 	// delivery would otherwise hold the wait, and with it the shutdown, open.
 	if p.dispatcher != nil {
 		p.dispatcher.Interrupt()
+	}
+
+	if err := waitGroup(ctx, &p.sends); err != nil {
+		return err
 	}
 
 	if err := p.pool.Drain(ctx); err != nil {
@@ -313,6 +359,27 @@ func (p *Processor[T]) Shutdown(ctx context.Context) error {
 	return p.closeBus(ctx)
 }
 
+func (p *Processor[T]) beginShutdown() bool {
+	p.lifeMu.Lock()
+	defer p.lifeMu.Unlock()
+	if p.shutdown == shuttingDownNow || p.shutdown == shutDown {
+		return false
+	}
+	p.shutdown = shuttingDownNow
+	p.shuttingDown.Store(true)
+	return true
+}
+
+func (p *Processor[T]) endShutdown(err error) {
+	p.lifeMu.Lock()
+	defer p.lifeMu.Unlock()
+	if err != nil {
+		p.shutdown = shutdownFailed
+		return
+	}
+	p.shutdown = shutDown
+}
+
 // waitGroup waits for wg, or for ctx.
 func waitGroup(ctx context.Context, wg *sync.WaitGroup) error {
 	done := make(chan struct{})
@@ -323,12 +390,6 @@ func waitGroup(ctx context.Context, wg *sync.WaitGroup) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-}
-
-func (p *Processor[T]) setShuttingDown() bool {
-	p.lifeMu.Lock()
-	defer p.lifeMu.Unlock()
-	return p.shuttingDown.CompareAndSwap(false, true)
 }
 
 func (p *Processor[T]) closeDispatcher(ctx context.Context) error {

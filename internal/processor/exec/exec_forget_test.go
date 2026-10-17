@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -98,6 +99,23 @@ func TestForget_DeleteFailureReturnsErrForgetFailed(t *testing.T) {
 	}
 	if err := ex.Forget(context.Background(), "agg"); !errors.Is(err, asynxmd.ErrForgetFailed) {
 		t.Fatalf("err = %v, want ErrForgetFailed", err)
+	}
+}
+
+func TestForget_ErasePhaseFailureParksTheAggregate(t *testing.T) {
+	ex, _, _, d, _ := newEnvOn(t, deleteFailStore{store.New()})
+	ctx := context.Background()
+	if _, err := ex.Execute(ctx, update("agg", 1), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.Forget(ctx, "agg"); !errors.Is(err, asynxmd.ErrForgetFailed) {
+		t.Fatalf("err = %v", err)
+	}
+	if got := d.Halted(); !slices.Equal(got, []string{"agg"}) {
+		t.Fatalf("halted = %v, want [agg]", got)
+	}
+	if ex.isForgetting("agg") {
+		t.Fatal("fence left up after the failed erase")
 	}
 }
 
@@ -226,6 +244,54 @@ func TestForget_AfterDispatcherClosedFailsPipeline(t *testing.T) {
 	d.Close(ctx)
 	if err := ex.Forget(ctx, "agg"); !errors.Is(err, asynxmd.ErrPipelineFailed) {
 		t.Fatalf("err = %v, want ErrPipelineFailed", err)
+	}
+	// The marker is committed and pending, and nothing may be delivered ahead
+	// of it.
+	if got := d.Halted(); !slices.Equal(got, []string{"agg"}) {
+		t.Fatalf("halted = %v, want [agg]", got)
+	}
+	if pending, _ := ex.es.Store().PendingDeliveries(ctx, 10); len(pending) != 1 {
+		t.Fatalf("pending = %v, want the marker", pending)
+	}
+}
+
+// Once Forget has returned, no command may still be refused for it: the fence
+// is lifted before the lock is released.
+func TestForget_NoCommandIsRefusedAfterItReturns(t *testing.T) {
+	for range 200 {
+		ex, _, _, _, _ := newEnv(t)
+		ctx := context.Background()
+		if _, err := ex.Execute(ctx, update("agg", 1), false); err != nil {
+			t.Fatal(err)
+		}
+		var returned atomic.Bool
+		bad := make(chan error, 1)
+		stop := make(chan struct{})
+		go func() {
+			defer close(bad)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				after := returned.Load()
+				_, err := ex.Execute(ctx, update("agg", 2), false)
+				if after && errors.Is(err, asynxmd.ErrForgetInProgress) {
+					bad <- err
+					return
+				}
+			}
+		}()
+		if err := ex.Forget(ctx, "agg"); err != nil {
+			t.Fatal(err)
+		}
+		returned.Store(true)
+		runtime.Gosched()
+		close(stop)
+		if err := <-bad; err != nil {
+			t.Fatalf("command refused after Forget returned: %v", err)
+		}
 	}
 }
 
@@ -433,9 +499,11 @@ func TestForget_DoesNotEraseWhenADurableSubscriberCannotTakeTheTombstone(t *test
 	if got := ex.dispatcher.Halted(); !slices.Equal(got, []string{"agg"}) {
 		t.Fatalf("halted = %v, want [agg]: later events must wait behind the marker", got)
 	}
-	// The tombstone's transaction dropped the superseded deliveries.
-	if pending, _ := ex.es.Store().PendingDeliveries(ctx, 10); len(pending) != 0 {
-		t.Fatalf("pending = %v, want none", pending)
+	// The tombstone's transaction dropped the superseded delivery and left the
+	// marker itself pending, so a resume or a restart delivers it first.
+	pending, _ := ex.es.Store().PendingDeliveries(ctx, 10)
+	if len(pending) != 1 || pending[0].Version != 2 {
+		t.Fatalf("pending = %v, want only the marker (v2)", pending)
 	}
 }
 
@@ -504,5 +572,63 @@ func TestForget_LetsAFailingDeliveryGoWhenTheTombstoneIsAccepted(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Forget held back by a failing delivery of the same aggregate")
+	}
+}
+
+type deliveryFailStore struct {
+	store.Memory
+	drop, enqueue bool
+}
+
+func (s deliveryFailStore) Atomically(ctx context.Context, fn func(asynxmd.Tx) error) error {
+	return s.Memory.Atomically(ctx, func(tx asynxmd.Tx) error {
+		return fn(deliveryFailTx{Tx: tx, drop: s.drop, enqueue: s.enqueue})
+	})
+}
+
+type deliveryFailTx struct {
+	asynxmd.Tx
+	drop, enqueue bool
+}
+
+func (t deliveryFailTx) DropDeliveries(ctx context.Context, agg string) error {
+	if t.drop {
+		return errors.New("log gone")
+	}
+	return t.Tx.DropDeliveries(ctx, agg)
+}
+
+func (t deliveryFailTx) EnqueueDelivery(ctx context.Context, agg string, v int64) error {
+	if t.enqueue {
+		return errors.New("log gone")
+	}
+	return t.Tx.EnqueueDelivery(ctx, agg, v)
+}
+
+// The tombstone commits atomically with its bookkeeping in the delivery log: if
+// the log cannot be written, there is no tombstone at all.
+func TestForget_DeliveryLogFailureInTheTombstoneTransactionAbortsIt(t *testing.T) {
+	for name, s := range map[string]deliveryFailStore{
+		"drop":    {Memory: store.New(), drop: true},
+		"enqueue": {Memory: store.New(), enqueue: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ex, _, _, _, _ := newEnvOn(t, s)
+			ctx := context.Background()
+			// Seed through the plain store: the executor's own writes go through the failing tx.
+			if _, err := eventstore.New[order](s.Memory, store.NewSnapshots(), nil, 1, nil).
+				Write(ctx, update("agg", 1)); err != nil {
+				t.Fatal(err)
+			}
+			if err := ex.Forget(ctx, "agg"); !errors.Is(err, asynxmd.ErrPipelineFailed) {
+				t.Fatalf("err = %v, want ErrPipelineFailed", err)
+			}
+			if n := streamLen(t, s.Memory, "agg"); n != 1 {
+				t.Fatalf("stream length = %d, want the untouched 1: the tombstone must roll back", n)
+			}
+			if ex.isForgetting("agg") {
+				t.Fatal("fence left up after the aborted tombstone")
+			}
+		})
 	}
 }

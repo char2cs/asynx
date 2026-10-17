@@ -2216,10 +2216,10 @@ func TestFailure_FailedForgetDoesNotLetLaterEventsOvertakeTheMarker(t *testing.T
 	if got := inst.PausedAggregates(); !slices.Equal(got, []string{"agg"}) {
 		t.Fatalf("PausedAggregates = %v, want [agg]", got)
 	}
-	// The tombstone's transaction dropped the superseded v1 entry: a restart
-	// cannot deliver it after the marker.
-	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 0 {
-		t.Fatalf("pending after the tombstone = %v, want none", pending)
+	// The tombstone's transaction dropped the superseded v1 entry, so a restart
+	// cannot deliver it after the marker, and left the marker (v2) pending.
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 1 || pending[0].Version != 2 {
+		t.Fatalf("pending after the tombstone = %v, want only the marker v2", pending)
 	}
 
 	if _, err := inst.SendWait(ctx, upd("agg", 3)); !errors.Is(err, models.ErrDeliveryParked) {
@@ -2238,8 +2238,8 @@ func TestFailure_FailedForgetDoesNotLetLaterEventsOvertakeTheMarker(t *testing.T
 	waitPublish(t, inst)
 	mu.Lock()
 	defer mu.Unlock()
-	if len(delivered) != 1 || delivered[0] != "OrderUpdated/3" {
-		t.Fatalf("after resume delivered %v, want only the event after the tombstone", delivered)
+	if want := []string{models.ForgetEventName + "/2", "OrderUpdated/3"}; !slices.Equal(delivered, want) {
+		t.Fatalf("after resume delivered %v, want the marker first, then the event after it: %v", delivered, want)
 	}
 	if len(inst.PausedAggregates()) != 0 {
 		t.Fatalf("still paused: %v", inst.PausedAggregates())
@@ -2321,5 +2321,46 @@ func TestFailure_HandlerForgettingItsOwnAggregateFailsFast(t *testing.T) {
 	defer cancel()
 	if err := inst.Shutdown(sctx); err != nil {
 		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+// A crash after a failed Forget must not deliver anything ahead of the marker:
+// the restart delivers the marker first, then what followed it.
+func TestFailure_RestartAfterAFailedForgetDeliversTheMarkerFirst(t *testing.T) {
+	s := store.New()
+	ctx := context.Background()
+	down := build(t, eight(s).
+		WithDeliveryRetry(time.Millisecond, 2*time.Millisecond).
+		WithDeliveryMaxAttempts(2).
+		WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error { return errors.New("down") }))
+	if _, err := down.Send(ctx, upd("agg", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := down.Forget(ctx, "agg"); !errors.Is(err, models.ErrForgetFailed) {
+		t.Fatalf("Forget = %v, want ErrForgetFailed", err)
+	}
+	if _, err := down.SendWait(ctx, upd("agg", 3)); !errors.Is(err, models.ErrDeliveryParked) {
+		t.Fatalf("SendWait = %v, want ErrDeliveryParked", err)
+	}
+	sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := down.Shutdown(sctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var delivered []string
+	up := build(t, eight(s).
+		WithSubscriber("OrderUpdated", func(_ context.Context, e models.Event[mocks.Order]) error {
+			mu.Lock()
+			defer mu.Unlock()
+			delivered = append(delivered, fmt.Sprintf("%s/%d", e.EventName, e.Version))
+			return nil
+		}))
+	waitPublish(t, up)
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{models.ForgetEventName + "/2", "OrderUpdated/3"}; !slices.Equal(delivered, want) {
+		t.Fatalf("after the restart delivered %v, want %v", delivered, want)
 	}
 }

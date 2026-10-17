@@ -38,7 +38,9 @@ type Asynx[T any] interface {
 	// aggregate's pending deliveries: the deletion supersedes them. If Forget
 	// fails before the erase (ctx done, a durable subscriber parked) the
 	// aggregate keeps its tombstone and is parked (see PausedAggregates); call
-	// Forget again, which delivers the handlers' notifications again. A handler
+	// Forget again, which delivers the handlers' notifications again. The
+	// tombstone also stays in the delivery log until acknowledged, so
+	// ResumeDeliveries or a restart delivers it ahead of anything newer. A handler
 	// cannot Forget the aggregate it is handling (ErrForgetFromHandler).
 	Forget(
 		ctx context.Context,

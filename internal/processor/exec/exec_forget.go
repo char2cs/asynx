@@ -44,24 +44,23 @@ func (e *CommandExecutor[T]) clearForgetting(id string) {
 // than queueing is what lets handlers ahead of the tombstone, which may react
 // by sending commands to this aggregate, finish instead of deadlocking.)
 //
-// The aggregate's pending durable deliveries are abandoned first, so a failing
-// handler cannot hold the tombstone back. Forget then waits, up to ctx, for the
+// The tombstone's transaction drops the aggregate's older delivery entries, the
+// deletion superseding them, and records the tombstone itself as a delivery
+// entry. The deliveries still in memory are abandoned too, so a failing handler
+// cannot hold the tombstone back. Forget then waits, up to ctx, for the
 // tombstone to be delivered: to the forget handlers and to every durable
 // subscriber, each of which must succeed. Only then does it erase the snapshot,
 // the stream and the delivery entries, atomically, under the lock again.
 //
-// The tombstone's transaction also drops the aggregate's delivery entries: the
-// older events are superseded by the deletion, durably, so no restart can
-// deliver one after the marker.
-//
-// If Forget fails before the erase (ctx done, a durable subscriber parked, the
-// dispatcher closing) the aggregate keeps its tombstone and is parked, so
-// commands that arrive meanwhile are accepted but their durable events wait
-// behind the marker (ResumeDeliveries releases them). Call Forget again.
+// If Forget fails after the tombstone (ctx done, a durable subscriber parked,
+// the erase failing) the aggregate keeps its tombstone and is parked: commands
+// that arrive meanwhile are accepted but their durable events wait behind the
+// marker, which stays in the delivery log so that ResumeDeliveries or a restart
+// delivers it first. Call Forget again.
 //
 // A handler cannot Forget the aggregate it is handling: the marker queues
 // behind that very handler. That fails with ErrForgetFromHandler.
-func (e *CommandExecutor[T]) Forget(ctx context.Context, aggregateID string) error {
+func (e *CommandExecutor[T]) Forget(ctx context.Context, aggregateID string) (err error) {
 	if dispatcher.InHandler(ctx, aggregateID) {
 		return fmt.Errorf("%w: %s", asynxmd.ErrForgetFromHandler, aggregateID)
 	}
@@ -70,17 +69,23 @@ func (e *CommandExecutor[T]) Forget(ctx context.Context, aggregateID string) err
 		return err
 	}
 	defer e.clearForgetting(aggregateID)
-
-	if err := e.awaitTombstone(ctx, ticket); err != nil {
-		if e.dispatcher != nil {
+	defer func() {
+		if err != nil && e.dispatcher != nil {
 			e.dispatcher.Park(aggregateID)
 		}
+	}()
+
+	if err := e.awaitTombstone(ctx, ticket); err != nil {
 		return err
 	}
+	return e.erase(context.WithoutCancel(ctx), aggregateID) // must finish even if the caller gives up
+}
 
-	// The erase must finish even if the caller gives up.
-	eraseCtx := context.WithoutCancel(ctx)
-	unlock, err := e.locks.Lock(eraseCtx, aggregateID)
+// erase deletes the aggregate under its lock. On success it lifts the fence
+// before releasing the lock, so no command is refused after the erase has
+// completed; on failure the fence stays until Forget has parked the aggregate.
+func (e *CommandExecutor[T]) erase(ctx context.Context, aggregateID string) error {
+	unlock, err := e.locks.Lock(ctx, aggregateID)
 	if err != nil {
 		return fmt.Errorf("%w: %w", asynxmd.ErrForgetFailed, err)
 	}
@@ -89,18 +94,19 @@ func (e *CommandExecutor[T]) Forget(ctx context.Context, aggregateID string) err
 	// Snapshot first: if the stream erase then fails, the aggregate is intact
 	// and readable by cold replay; the other order could leave a stale snapshot
 	// that resurrects erased state.
-	if err := e.es.DeleteSnapshot(eraseCtx, aggregateID); err != nil {
+	if err := e.es.DeleteSnapshot(ctx, aggregateID); err != nil {
 		return fmt.Errorf("%w: %w", asynxmd.ErrForgetFailed, err)
 	}
 	erase := func(tx asynxmd.Tx) error {
-		if err := tx.DeleteStream(eraseCtx, "events:"+aggregateID); err != nil {
+		if err := tx.DeleteStream(ctx, "events:"+aggregateID); err != nil {
 			return err
 		}
-		return tx.DropDeliveries(eraseCtx, aggregateID)
+		return tx.DropDeliveries(ctx, aggregateID)
 	}
-	if err := e.es.Store().Atomically(eraseCtx, erase); err != nil {
+	if err := e.es.Store().Atomically(ctx, erase); err != nil {
 		return fmt.Errorf("%w: %w", asynxmd.ErrForgetFailed, err)
 	}
+	e.clearForgetting(aggregateID)
 	return nil
 }
 
@@ -154,24 +160,36 @@ func (e *CommandExecutor[T]) commitTombstone(ctx context.Context, aggregateID st
 	if e.dispatcher == nil {
 		return dispatcher.Ticket{}, nil
 	}
-	// A failing handler must not hold the tombstone back: the entries are
-	// dropped by the erase anyway.
+	// A failing handler must not hold the tombstone back: its entries are
+	// already dropped from the log.
 	e.dispatcher.Supersede(aggregateID)
-	ticket, err := e.dispatcher.EnqueueForget(ctx, tombstone)
+	store := e.es.Store()
+	ticket, err := e.dispatcher.EnqueueForget(ctx, tombstone, func(ctx context.Context) error {
+		return store.AckDelivery(ctx, tombstone.AggregateID, tombstone.Version)
+	})
 	if err != nil {
+		// The marker is committed and pending in the delivery log: park, so
+		// nothing is delivered ahead of it, and let a restart or
+		// ResumeDeliveries deliver it.
+		e.dispatcher.Park(aggregateID)
 		return dispatcher.Ticket{}, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 	}
 	return ticket, nil
 }
 
-// tombstoneHook runs synchronous projections for the tombstone and drops the
-// aggregate's pending deliveries, which the deletion supersedes. It enqueues no
-// delivery of its own: the tombstone is delivered to every subscriber through
-// the dispatcher and the stream is erased right after.
+// tombstoneHook runs synchronous projections for the tombstone, drops the
+// aggregate's pending deliveries, which the deletion supersedes, and records the
+// tombstone itself as pending, so that a failed Forget leaves the marker ahead
+// of anything that follows it.
 func (e *CommandExecutor[T]) tombstoneHook() eventstore.TxHook[T] {
 	return func(ctx context.Context, tx asynxmd.Tx, evt asynxmd.Event[T]) error {
-		if err := tx.DropDeliveries(ctx, evt.AggregateID); err != nil {
-			return err
+		if e.dispatcher != nil {
+			if err := tx.DropDeliveries(ctx, evt.AggregateID); err != nil {
+				return err
+			}
+			if err := tx.EnqueueDelivery(ctx, evt.AggregateID, evt.Version); err != nil {
+				return err
+			}
 		}
 		for _, p := range e.syncs {
 			if !p.Match(evt.EventName) {

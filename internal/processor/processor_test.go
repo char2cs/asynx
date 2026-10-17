@@ -1013,3 +1013,145 @@ func TestProcessor_Shutdown_WaitsForForgetInFlightUntilItsContextEnds(t *testing
 }
 
 var _ = bus.NewChannelBus[order]
+
+// gatedCmd blocks in Validate until its gate opens, which holds a shard worker.
+type gatedCmd struct {
+	mocks.UpdateOrderCmd
+	entered chan<- struct{}
+	gate    <-chan struct{}
+}
+
+func (c gatedCmd) Validate(o *order) error {
+	select {
+	case c.entered <- struct{}{}:
+	default:
+	}
+	<-c.gate
+	return nil
+}
+
+// Shutdown must not return while a sender is still waiting on a queue the pool
+// has stopped reading: every Send either runs or is refused.
+func TestProcessor_Shutdown_NeverStrandsAQueuedSend(t *testing.T) {
+	for range 25 {
+		gate := make(chan struct{})
+		entered := make(chan struct{}, 1)
+		p := newProcessor(t,
+			processor.WithShards[order](1),
+			processor.WithWorkersPerShard[order](1),
+			processor.WithQueueDepth[order](2))
+
+		results := make(chan error, 6)
+		for i := range 6 {
+			go func() {
+				cmd := gatedCmd{UpdateOrderCmd: updateCmd("agg"+string(rune('a'+i)), 1), entered: entered, gate: gate}
+				_, err := p.Send(context.Background(), cmd)
+				results <- err
+			}()
+		}
+		<-entered
+
+		down := make(chan error, 1)
+		go func() { down <- p.Shutdown(context.Background()) }()
+		close(gate)
+
+		for range 6 {
+			select {
+			case <-results:
+			case <-time.After(5 * time.Second):
+				t.Fatal("a Send was stranded by Shutdown")
+			}
+		}
+		if err := <-down; err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	}
+}
+
+func TestProcessor_Shutdown_CanBeRetriedAfterItsContextEnds(t *testing.T) {
+	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
+	b := bus.NewChannelBus[order]()
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	b.Subscribe("OrderUpdated", func(context.Context, asynxmd.Event[order]) {
+		close(entered)
+		<-release
+	})
+	p := processor.New(es, b)
+	if _, err := p.Send(context.Background(), updateCmd("o1", 1)); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+
+	short, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := p.Shutdown(short); err == nil {
+		t.Fatal("Shutdown succeeded with a handler still running")
+	}
+	close(release)
+	if err := p.Shutdown(context.Background()); err != nil {
+		t.Fatalf("retried Shutdown: %v", err)
+	}
+	if err := p.Shutdown(context.Background()); !errors.Is(err, asynxmd.ErrAlreadyShuttingDown) {
+		t.Fatalf("Shutdown after completion = %v, want ErrAlreadyShuttingDown", err)
+	}
+}
+
+func TestProcessor_SendWait_FromAHandlerOfTheSameAggregateFailsFast(t *testing.T) {
+	f := newFixture(t, store.New())
+	got := make(chan error, 1)
+	f.b.Subscribe("OrderUpdated", func(ctx context.Context, e asynxmd.Event[order]) {
+		_, err := f.p.SendWait(ctx, updateCmd(e.AggregateID, 2))
+		got <- err
+	})
+	if _, err := f.p.Send(context.Background(), updateCmd("o1", 1)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-got:
+		if !errors.Is(err, asynxmd.ErrSendWaitFromHandler) {
+			t.Fatalf("SendWait from the handler = %v, want ErrSendWaitFromHandler", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SendWait from a handler hung")
+	}
+}
+
+func TestProcessor_Shutdown_ReportsAWorkerThatWillNotFinish(t *testing.T) {
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	p := newProcessor(t, processor.WithShards[order](1), processor.WithWorkersPerShard[order](1))
+	t.Cleanup(func() { close(gate) })
+
+	// The sender gives up, but its command is still running on the worker.
+	sendCtx, cancelSend := context.WithCancel(context.Background())
+	sent := make(chan error, 1)
+	go func() {
+		_, err := p.Send(sendCtx, gatedCmd{UpdateOrderCmd: updateCmd("agg", 1), entered: entered, gate: gate})
+		sent <- err
+	}()
+	<-entered
+	cancelSend()
+	<-sent
+
+	short, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := p.Shutdown(short); err == nil {
+		t.Fatal("Shutdown succeeded with a command still running")
+	}
+}
+
+func TestProcessor_Shutdown_WaitsForASendInFlightUntilItsContextEnds(t *testing.T) {
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	p := newProcessor(t, processor.WithShards[order](1), processor.WithWorkersPerShard[order](1))
+	t.Cleanup(func() { close(gate) })
+	go p.Send(context.Background(), gatedCmd{UpdateOrderCmd: updateCmd("agg", 1), entered: entered, gate: gate})
+	<-entered
+
+	short, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := p.Shutdown(short); err == nil {
+		t.Fatal("Shutdown returned while a Send was in flight")
+	}
+}

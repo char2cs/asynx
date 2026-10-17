@@ -83,7 +83,9 @@ func (e *CommandExecutor[T]) answerFromReceipt(
 	// Rebuild the full event when its stream still exists.
 	_ = e.es.Replay(ctx, receipt.AggregateID, receipt.Version, receipt.Version,
 		func(_ context.Context, evt asynxmd.Event[T]) {
-			if evt.Version == receipt.Version {
+			// The ID check keeps an aggregate re-created after a Forget, whose
+			// version may coincide, from being mistaken for the original event.
+			if evt.Version == receipt.Version && evt.ID == receipt.EventID {
 				event = evt
 			}
 		})

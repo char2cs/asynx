@@ -34,9 +34,13 @@ func TestProcessor_Recover_RedeliversEveryPendingEventAndAcksIt(t *testing.T) {
 	seedPending(t, s, es, "a", "b", "c")
 
 	b := bus.NewChannelBus[order]()
+	var live atomic.Int32
+	b.Subscribe("OrderCreated", func(context.Context, asynxmd.Event[order]) { live.Add(1) })
 	var got atomic.Int32
-	b.Subscribe("OrderCreated", func(context.Context, asynxmd.Event[order]) { got.Add(1) })
-	p := processor.New(es, b)
+	p := processor.New(es, b, processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+		Match:   always,
+		Handler: func(context.Context, asynxmd.Event[order]) error { got.Add(1); return nil },
+	}}))
 	t.Cleanup(func() { p.Shutdown(context.Background()) })
 
 	// batch <= 0 falls back to the default; batch 2 forces multiple rounds.
@@ -46,6 +50,9 @@ func TestProcessor_Recover_RedeliversEveryPendingEventAndAcksIt(t *testing.T) {
 	p.WaitPublish()
 	if got.Load() != 3 {
 		t.Errorf("redelivered %d events, want 3", got.Load())
+	}
+	if live.Load() != 0 {
+		t.Errorf("live subscribers saw %d recovered events, want none", live.Load())
 	}
 	if pending, _ := s.PendingDeliveries(context.Background(), 10); len(pending) != 0 {
 		t.Errorf("pending = %v, want none", pending)
@@ -76,15 +83,62 @@ func TestProcessor_Recover_ReportsReadAndReplayFailures(t *testing.T) {
 		t.Error("Recover succeeded with an unreadable delivery log")
 	}
 
-	// Event blob that cannot be replayed.
+}
+
+// One corrupt event must not stop the process from starting or the other
+// aggregates from being recovered: its aggregate is parked and reported.
+func TestProcessor_Recover_ParksAnAggregateWhoseEventCannotBeRebuilt(t *testing.T) {
+	ctx := context.Background()
 	s := store.New()
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	seedPending(t, s, es, "good")
 	s.Append(ctx, "events:bad", 1, []byte("!!!"))
-	s.Atomically(ctx, func(tx asynxmd.Tx) error { return tx.EnqueueDelivery(ctx, "bad", 1) })
-	es2 := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	p2 := processor.New(es2, bus.NewChannelBus[order]())
-	t.Cleanup(func() { p2.Shutdown(ctx) })
-	if err := p2.Recover(ctx, 10); err == nil {
-		t.Error("Recover succeeded with an unreplayable event")
+	s.Atomically(ctx, func(tx asynxmd.Tx) error {
+		if err := tx.EnqueueDelivery(ctx, "bad", 1); err != nil {
+			return err
+		}
+		return tx.EnqueueDelivery(ctx, "bad", 2) // behind the failed one: stays pending
+	})
+
+	var got atomic.Int32
+	reported := make(chan error, 4)
+	p := processor.New(es, bus.NewChannelBus[order](),
+		processor.WithPublishErrorHandler(func(_ context.Context, e asynxmd.Event[order], err error) {
+			if e.AggregateID == "bad" {
+				reported <- err
+			}
+		}),
+		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+			Match:   always,
+			Handler: func(context.Context, asynxmd.Event[order]) error { got.Add(1); return nil },
+		}}))
+	t.Cleanup(func() { p.Shutdown(ctx) })
+
+	if err := p.Recover(ctx, 10); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	p.WaitPublish()
+	if got.Load() != 1 {
+		t.Errorf("delivered %d events, want only the healthy aggregate's", got.Load())
+	}
+	select {
+	case <-reported:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the unreadable event was not reported")
+	}
+	if paused := p.Paused(); len(paused) != 1 || paused[0] != "bad" {
+		t.Fatalf("Paused = %v, want [bad]", paused)
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 2 {
+		t.Fatalf("pending = %v, want both of the bad aggregate's entries kept", pending)
+	}
+
+	// Resume retries it, fails again, and says so.
+	if err := p.Resume(ctx, 10); err == nil {
+		t.Fatal("Resume hid the unreadable event")
+	}
+	if paused := p.Paused(); len(paused) != 1 {
+		t.Fatalf("Paused = %v after a failed Resume, want it still parked", paused)
 	}
 }
 
@@ -115,15 +169,22 @@ type ackErrStore struct{ store.Memory }
 
 func (ackErrStore) AckDelivery(context.Context, string, int64) error { return errors.New("ack failed") }
 
-func TestProcessor_Recover_SurfacesAckFailureForVanishedEvent(t *testing.T) {
+func TestProcessor_Recover_ReportsAnAckFailureForAVanishedEvent(t *testing.T) {
 	s := ackErrStore{store.New()}
 	ctx := context.Background()
 	s.Atomically(ctx, func(tx asynxmd.Tx) error { return tx.EnqueueDelivery(ctx, "ghost", 1) })
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	p := processor.New(es, bus.NewChannelBus[order]())
+	reported := make(chan error, 1)
+	p := processor.New(es, bus.NewChannelBus[order](),
+		processor.WithPublishErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error) { reported <- err }))
 	t.Cleanup(func() { p.Shutdown(ctx) })
 
-	if err := p.Recover(ctx, 10); err == nil {
+	if err := p.Recover(ctx, 10); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	select {
+	case <-reported:
+	case <-time.After(5 * time.Second):
 		t.Fatal("Recover hid an ack failure")
 	}
 }
@@ -268,5 +329,43 @@ func TestProcessor_Paused_WithoutDispatcherIsEmpty(t *testing.T) {
 	t.Cleanup(func() { p.Shutdown(context.Background()) })
 	if got := p.Paused(); got != nil {
 		t.Fatalf("Paused = %v", got)
+	}
+}
+
+func TestProcessor_Recover_AfterShutdownFails(t *testing.T) {
+	s := store.New()
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	seedPending(t, s, es, "a")
+	p := processor.New(es, bus.NewChannelBus[order]())
+	if err := p.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Recover(context.Background(), 10); !errors.Is(err, asynxmd.ErrDispatcherClosed) {
+		t.Fatalf("Recover on a closed dispatcher = %v, want ErrDispatcherClosed", err)
+	}
+}
+
+func TestProcessor_Resume_StopsWhenItsContextEnds(t *testing.T) {
+	var healthy atomic.Bool
+	parked := make(chan struct{}, 4)
+	f := newFixture(t, store.New(), parkingOpts(&healthy,
+		processor.WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+			if errors.Is(err, asynxmd.ErrDeliveryParked) {
+				parked <- struct{}{}
+			}
+		}))...)
+	for _, id := range []string{"o1", "o2"} {
+		if _, err := f.p.Send(context.Background(), updateCmd(id, 1)); err != nil {
+			t.Fatal(err)
+		}
+		<-parked
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := f.p.Resume(cancelled, 10); err == nil {
+		t.Fatal("Resume ignored its cancelled context")
+	}
+	if got := f.p.Paused(); len(got) != 2 {
+		t.Fatalf("Paused = %v, want both still parked", got)
 	}
 }

@@ -173,7 +173,7 @@ func (d *Dispatcher[T]) deliverDurable(agg string, q *aggregateQueue[T], job *di
 	}
 
 	d.mu.Lock()
-	halt := q.halt
+	var halt <-chan struct{} = q.halt
 	d.mu.Unlock()
 
 	backoff := d.retryInitial
@@ -195,18 +195,14 @@ func (d *Dispatcher[T]) deliverDurable(agg string, q *aggregateQueue[T], job *di
 			break
 		}
 		if attempt >= d.maxAttempts {
-			return d.giveUp(agg, job, lastErr, attempt)
+			return d.giveUp(agg, q, halt, job, lastErr, attempt)
 		}
 
 		select {
 		case <-d.quit:
 			// Parking the aggregate keeps its later durable events from being
 			// delivered past this one while the dispatcher drains.
-			if job.ack != nil {
-				d.mu.Lock()
-				d.haltLocked(agg)
-				d.mu.Unlock()
-			}
+			d.parkIfCurrent(agg, q, halt, job)
 			return asynxmd.ErrDispatcherClosed
 		case <-halt:
 			return asynxmd.ErrDeliveryParked
@@ -220,8 +216,24 @@ func (d *Dispatcher[T]) deliverDurable(agg string, q *aggregateQueue[T], job *di
 // giveUp ends a delivery whose attempts ran out. A dead-letter handler may
 // accept the event, which then counts as delivered. Otherwise the aggregate is
 // parked so its later events do not overtake this one.
-func (d *Dispatcher[T]) giveUp(agg string, job *dispatchJob[T], last error, attempt int) error {
-	if job.ack != nil && d.deadLetter != nil {
+func (d *Dispatcher[T]) giveUp(
+	agg string,
+	q *aggregateQueue[T],
+	halt <-chan struct{},
+	job *dispatchJob[T],
+	last error,
+	attempt int,
+) error {
+	// A park or supersede since the first attempt already decided this
+	// delivery's fate; parking again would outlive the erase that ended it.
+	select {
+	case <-halt:
+		return asynxmd.ErrDeliveryParked
+	default:
+	}
+	// A deletion marker is never dead-lettered: Forget must not erase until
+	// every subscriber has really taken it.
+	if job.ack != nil && !job.forget && d.deadLetter != nil {
 		err := d.callDeadLetter(job, last)
 		if err == nil {
 			d.reportDeliveryError(job, fmt.Errorf("dead-lettered after %d attempts: %w", attempt, last), attempt)
@@ -232,12 +244,25 @@ func (d *Dispatcher[T]) giveUp(agg string, job *dispatchJob[T], last error, atte
 
 	parked := fmt.Errorf("%w after %d attempts: %w", asynxmd.ErrDeliveryParked, attempt, last)
 	d.reportDeliveryError(job, parked, attempt)
-	if job.ack != nil {
-		d.mu.Lock()
-		d.haltLocked(agg)
-		d.mu.Unlock()
-	}
+	d.parkIfCurrent(agg, q, halt, job)
 	return parked
+}
+
+// parkIfCurrent parks the aggregate of a durable job, unless the halt it started
+// under has been closed since: then someone else has already settled the
+// aggregate's fate (a Forget superseded the delivery, a Resume lifted the park).
+func (d *Dispatcher[T]) parkIfCurrent(agg string, q *aggregateQueue[T], halt <-chan struct{}, job *dispatchJob[T]) {
+	if job.ack == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	select {
+	case <-halt:
+		return
+	default:
+	}
+	d.haltLocked(agg)
 }
 
 func (d *Dispatcher[T]) callDeadLetter(job *dispatchJob[T], last error) (err error) {

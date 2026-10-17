@@ -112,8 +112,8 @@ type dispatchJob[T any] struct {
 	// ack, when non-nil, marks a durable delivery: durable subscribers run and
 	// ack is called once they have all succeeded.
 	ack func(context.Context) error
-	// forget marks the tombstone: every durable subscriber receives it, once,
-	// without a delivery entry, and Final reports whether they all succeeded.
+	// forget marks the tombstone: every durable subscriber receives it,
+	// whatever its pattern, and Final reports whether they all succeeded.
 	forget bool
 	// skipLive keeps the live subscribers (the bus) out of a redelivery.
 	skipLive bool
@@ -204,23 +204,36 @@ func (d *Dispatcher[T]) EnqueueTicket(
 	return d.enqueue(ctx, event, ack, enqueueOpts{})
 }
 
-// EnqueueRedelivery enqueues an event read back from the delivery log. With
-// live false only the durable subscribers receive it: the live ones already saw
-// the event, or skipped it while its aggregate was parked, and receiving it now
-// would reorder their stream.
+// EnqueueRedelivery enqueues an event read back from the delivery log. Only the
+// durable subscribers receive it: live subscribers are fire-and-forget, they
+// either saw the event or never will, and a replay would reorder their stream.
+// A deletion marker is delivered to every durable subscriber, as the original
+// was.
 func (d *Dispatcher[T]) EnqueueRedelivery(
 	ctx context.Context,
 	event asynxmd.Event[T],
 	ack func(context.Context) error,
-	live bool,
 ) (Ticket, error) {
-	return d.enqueue(ctx, event, ack, enqueueOpts{skipLive: !live})
+	return d.enqueue(ctx, event, ack, enqueueOpts{
+		skipLive: true,
+		forget:   event.EventName == asynxmd.ForgetEventName,
+	})
+}
+
+// ReportError hands err, which concerns event, to the publish error handler.
+func (d *Dispatcher[T]) ReportError(ctx context.Context, event asynxmd.Event[T], err error) {
+	d.reportPublishError(&dispatchJob[T]{ctx: ctx, event: event}, err)
 }
 
 // EnqueueForget enqueues a tombstone. Every durable subscriber receives it
-// (whatever its pattern) before the ticket's Final yields nil.
-func (d *Dispatcher[T]) EnqueueForget(ctx context.Context, tombstone asynxmd.Event[T]) (Ticket, error) {
-	return d.enqueue(ctx, tombstone, nil, enqueueOpts{forget: true})
+// (whatever its pattern) and ack runs, before the ticket's Final closes without
+// an error.
+func (d *Dispatcher[T]) EnqueueForget(
+	ctx context.Context,
+	tombstone asynxmd.Event[T],
+	ack func(context.Context) error,
+) (Ticket, error) {
+	return d.enqueue(ctx, tombstone, ack, enqueueOpts{forget: true})
 }
 
 type enqueueOpts struct {
@@ -313,13 +326,11 @@ func (d *Dispatcher[T]) enqueue(
 // finish, the context error is returned.
 func (d *Dispatcher[T]) Close(ctx context.Context) error {
 	d.mu.Lock()
-	if d.closed {
-		d.mu.Unlock()
-		return nil
+	if !d.closed {
+		d.closed = true
+		d.waiting = false // allow any remaining Dispatch calls to fail cleanly
+		close(d.stopCh)   // signal all workers to drain and exit
 	}
-	d.closed = true
-	d.waiting = false // allow any remaining Dispatch calls to fail cleanly
-	close(d.stopCh)   // signal all workers to drain and exit
 	d.mu.Unlock()
 	d.Interrupt()
 
@@ -435,7 +446,7 @@ func (d *Dispatcher[T]) handle(agg string, q *aggregateQueue[T], job *dispatchJo
 	// A failing live subscriber must not skip the durable delivery: the next
 	// event of the aggregate would otherwise be delivered past this one.
 	if d.bus != nil && !job.skipLive {
-		if err := d.bus.PublishSync(job.ctx, job.event); err != nil {
+		if err := d.publishLive(job); err != nil {
 			d.reportPublishError(job, err)
 		}
 	}
@@ -456,6 +467,17 @@ func (d *Dispatcher[T]) handle(agg string, q *aggregateQueue[T], job *dispatchJo
 
 // reportPublishError calls the publish error handler. A panic in it is
 // swallowed: it must not take down the worker or the process.
+// publishLive publishes through the bus. A panic in a custom bus becomes an
+// error, so it cannot skip the durable delivery that follows.
+func (d *Dispatcher[T]) publishLive(job *dispatchJob[T]) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("asynx: bus panic: %v", r)
+		}
+	}()
+	return d.bus.PublishSync(job.ctx, job.event)
+}
+
 func (d *Dispatcher[T]) reportPublishError(job *dispatchJob[T], err error) {
 	if d.onPublishError == nil {
 		return

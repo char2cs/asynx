@@ -24,5 +24,6 @@ var (
 	ErrFallbackUnsupported  = errors.New("asynx: durable subscribers do not support WithFallback")
 	ErrDeliveryParked       = errors.New("asynx: durable delivery parked")
 	ErrForgetInProgress     = errors.New("asynx: aggregate is being forgotten")
+	ErrSendWaitFromHandler  = errors.New("asynx: a handler cannot SendWait to the aggregate it is handling")
 	ErrForgetFromHandler    = errors.New("asynx: a handler cannot forget the aggregate it is handling")
 )

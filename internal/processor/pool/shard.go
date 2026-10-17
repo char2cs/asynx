@@ -19,6 +19,7 @@ import (
 
 	"github.com/char2cs/asynx/internal/processor/exec"
 	"github.com/char2cs/asynx/internal/processor/models"
+	asynxmd "github.com/char2cs/asynx/models"
 )
 
 type Shard[T any] struct {
@@ -63,6 +64,7 @@ func (s *Shard[T]) dispatchCommands(
 func (s *Shard[T]) handleDispatch() bool {
 	select {
 	case <-s.stopChan:
+		s.failQueued()
 		close(s.jobQueue)
 		return true
 
@@ -78,6 +80,21 @@ func (s *Shard[T]) handleDispatch() bool {
 	}
 
 	return false
+}
+
+// failQueued answers the envelopes still waiting when the shard stops, so their
+// senders are released instead of waiting for a result nobody will produce.
+func (s *Shard[T]) failQueued() {
+	for {
+		select {
+		case envelope := <-s.commandChan:
+			if envelope != nil {
+				s.sendResult(envelope.ResultChan, models.CommandResult[T]{Err: asynxmd.ErrShuttingDown})
+			}
+		default:
+			return
+		}
+	}
 }
 
 func (s *Shard[T]) dispatchJob(

@@ -567,7 +567,7 @@ func TestResume_LiftsAParkAndDeliversAgain(t *testing.T) {
 
 	healthy.Store(true)
 	d.Resume("a")
-	tk, err := d.EnqueueRedelivery(context.Background(), makeEvent("a", 1), ackInto(&acked, makeEvent("a", 1)), true)
+	tk, err := d.EnqueueRedelivery(context.Background(), makeEvent("a", 1), ackInto(&acked, makeEvent("a", 1)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -658,7 +658,7 @@ func TestSupersede_LetsTheTombstoneThroughAFailingDelivery(t *testing.T) {
 	d.Supersede("a")
 	tomb := makeEvent("a", 3)
 	tomb.EventName = asynxmd.ForgetEventName
-	tk, err := d.EnqueueForget(ctx, tomb)
+	tk, err := d.EnqueueForget(ctx, tomb, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,13 +686,11 @@ func TestTombstone_FinalReportsADurableSubscriberThatKeepsFailing(t *testing.T) 
 		WithMaxAttempts[int](2))
 	tomb := makeEvent("a", 2)
 	tomb.EventName = asynxmd.ForgetEventName
-	tk, _ := d.EnqueueForget(context.Background(), tomb)
+	tk, _ := d.EnqueueForget(context.Background(), tomb, nil)
 	if err := final(t, tk, "final"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
 		t.Fatalf("final = %v, want ErrDeliveryParked", err)
 	}
-	if len(d.Halted()) != 0 {
-		t.Fatal("a failed tombstone must not park the aggregate (Forget fails instead)")
-	}
+	// Parking after a failed tombstone is Forget's job, not the dispatcher's.
 }
 
 func TestPark_OfAnAggregateWithoutAQueueStillBlocksItsDurableEvents(t *testing.T) {
@@ -750,29 +748,153 @@ func TestOptions_NonPositiveBoundsAreIgnored(t *testing.T) {
 	}
 }
 
-func TestEnqueueRedelivery_SkipsTheLiveSubscribersUnlessAsked(t *testing.T) {
+func TestEnqueueRedelivery_GoesToTheDurableSubscribersOnly(t *testing.T) {
 	bus := &recordingBus{}
 	var seen deliveries
-	d := New[int](bus, WithDurableSubs([]DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
-		seen.add(e)
-		return nil
-	}}}))
+	d := New[int](bus, WithDurableSubs([]DurableSub[int]{{Match: func(name string) bool { return name == "test.event" },
+		Handler: func(_ context.Context, e asynxmd.Event[int]) error {
+			seen.add(e)
+			return nil
+		}}}))
 	t.Cleanup(func() { d.Close(context.Background()) })
-	ack := func(context.Context) error { return nil }
+	var acked atomic.Int32
+	ack := func(context.Context) error { acked.Add(1); return nil }
 	ctx := context.Background()
 
-	tk, _ := d.EnqueueRedelivery(ctx, makeEvent("a", 1), ack, false)
-	final(t, tk, "durable only")
+	tk, _ := d.EnqueueRedelivery(ctx, makeEvent("a", 1), ack)
+	final(t, tk, "event")
+	marker := makeEvent("a", 2)
+	marker.EventName = asynxmd.ForgetEventName
+	tk, _ = d.EnqueueRedelivery(ctx, marker, ack)
+	final(t, tk, "marker")
+
 	if got := len(bus.snapshot()); got != 0 {
-		t.Fatalf("live subscribers got %d events from a durable-only redelivery", got)
+		t.Fatalf("live subscribers got %d events from redeliveries", got)
 	}
-	tk, _ = d.EnqueueRedelivery(ctx, makeEvent("a", 2), ack, true)
-	final(t, tk, "live too")
-	if got := len(bus.snapshot()); got != 1 {
-		t.Fatalf("live subscribers got %d events, want 1", got)
+	if got := seen.list(); !slices.Equal(got, []string{"a/1", "a/2"}) {
+		t.Fatalf("durable subscriber saw %v, want the event and the marker (whatever its pattern)", got)
 	}
-	if got := len(seen.list()); got != 2 {
-		t.Fatalf("durable subscribers got %d events, want 2", got)
+	if acked.Load() != 2 {
+		t.Fatalf("acked %d, want 2", acked.Load())
+	}
+}
+
+func TestEnqueueForget_IsNeverDeadLettered(t *testing.T) {
+	var dead atomic.Int32
+	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
+		return errors.New("cannot forget")
+	}}}, WithMaxAttempts[int](2), WithDeadLetterHandler[int](func(context.Context, asynxmd.Event[int], error) error {
+		dead.Add(1)
+		return nil
+	}))
+	marker := makeEvent("a", 2)
+	marker.EventName = asynxmd.ForgetEventName
+	tk, _ := d.EnqueueForget(context.Background(), marker, func(context.Context) error { return nil })
+	if err := final(t, tk, "marker"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("final = %v, want ErrDeliveryParked: a dead letter must not let Forget erase", err)
+	}
+	if dead.Load() != 0 {
+		t.Fatalf("dead-letter handler called %d times for the marker", dead.Load())
+	}
+}
+
+func TestGiveUp_AfterASupersedeDoesNotParkTheAggregateAgain(t *testing.T) {
+	inHandler := make(chan struct{})
+	release := make(chan struct{})
+	var dead atomic.Int32
+	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
+		inHandler <- struct{}{}
+		<-release
+		return errors.New("down")
+	}}}, WithMaxAttempts[int](1), WithDeadLetterHandler[int](func(context.Context, asynxmd.Event[int], error) error {
+		dead.Add(1)
+		return nil
+	}))
+	tk, _ := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	recv(t, inHandler, "last attempt running")
+
+	d.Supersede("a") // a Forget abandons the delivery while its last attempt runs
+	close(release)
+	if err := final(t, tk, "superseded delivery"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("final = %v", err)
+	}
+	if got := d.Halted(); len(got) != 0 {
+		t.Fatalf("halted = %v: the exhausted attempt re-parked an aggregate that was superseded", got)
+	}
+	if dead.Load() != 0 {
+		t.Fatal("a superseded delivery was dead-lettered")
+	}
+}
+
+func TestInterrupt_AfterASupersedeDoesNotParkTheAggregate(t *testing.T) {
+	attempted := make(chan struct{}, 4)
+	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
+		attempted <- struct{}{}
+		return errors.New("down")
+	}}}, WithRetryBackoff[int](time.Hour, time.Hour), WithMaxAttempts[int](100))
+	tk, _ := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	recv(t, attempted, "first attempt")
+	d.Supersede("a")
+	final(t, tk, "superseded")
+	d.Interrupt()
+	if got := d.Halted(); len(got) != 0 {
+		t.Fatalf("halted = %v", got)
+	}
+}
+
+func TestBusPanicDoesNotSkipTheDurableDelivery(t *testing.T) {
+	var acked atomic.Bool
+	var reported atomic.Int32
+	d := New[int](&panicBus{}, WithDurableSubs([]DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error { return nil }}}),
+		WithPublishErrorHandler[int](func(context.Context, asynxmd.Event[int], error) { reported.Add(1) }))
+	t.Cleanup(func() { d.Close(context.Background()) })
+	tk, _ := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	if err := final(t, tk, "delivery"); err != nil {
+		t.Fatalf("final = %v", err)
+	}
+	if !acked.Load() || reported.Load() != 1 {
+		t.Fatalf("acked=%v reported=%d, want the panic reported and the delivery completed", acked.Load(), reported.Load())
+	}
+}
+
+type panicBus struct{ recordingBus }
+
+func (*panicBus) PublishSync(context.Context, asynxmd.Event[int]) error { panic("bus exploded") }
+
+func TestReportError_ReachesThePublishErrorHandler(t *testing.T) {
+	var got atomic.Pointer[error]
+	d := New[int](nil, WithPublishErrorHandler[int](func(_ context.Context, e asynxmd.Event[int], err error) { got.Store(&err) }))
+	want := errors.New("bad record")
+	d.ReportError(context.Background(), makeEvent("a", 1), want)
+	if p := got.Load(); p == nil || !errors.Is(*p, want) {
+		t.Fatalf("handler got %v", p)
+	}
+}
+
+func TestClose_CalledAgainStillWaitsForTheWorkers(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
+		close(started)
+		<-release
+		return nil
+	}}})
+	d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	recv(t, started, "handler running")
+
+	short, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := d.Close(short); err == nil {
+		t.Fatal("first Close succeeded with a handler running")
+	}
+	short2, cancel2 := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel2()
+	if err := d.Close(short2); err == nil {
+		t.Fatal("second Close claimed success while the handler still runs")
+	}
+	close(release)
+	if err := d.Close(context.Background()); err != nil {
+		t.Fatalf("Close after the handler finished: %v", err)
 	}
 }
 

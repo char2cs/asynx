@@ -281,3 +281,33 @@ func TestExecute_Idempotent_RejectionRaceAnswersFromTheExistingReceipt(t *testin
 		t.Fatalf("err = %v, want the existing rejection", err)
 	}
 }
+
+// A retry after the aggregate was forgotten and re-created, where the new
+// aggregate reuses the version, must not be answered with the new aggregate's
+// event.
+func TestExecute_Idempotent_RetryAfterForgetAndRecreateDoesNotReturnTheNewAggregate(t *testing.T) {
+	ex, _, _, _, _ := newEnv(t)
+	ctx := context.Background()
+	first, err := ex.Execute(ctx, idemUpdate{UpdateOrderCmd: update("agg", 5), Cmd: "cmd-1"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.Forget(ctx, "agg"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := ex.Execute(ctx, update("agg", 99), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	retry, err := ex.Execute(ctx, idemUpdate{UpdateOrderCmd: update("agg", 5), Cmd: "cmd-1"}, false)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if retry.ID != first.ID || retry.ID == second.ID {
+		t.Fatalf("retry returned event %s, want the original %s (not the new aggregate's %s)", retry.ID, first.ID, second.ID)
+	}
+	if retry.Aggregate.Total == 99 {
+		t.Fatal("retry returned the re-created aggregate's state")
+	}
+}
