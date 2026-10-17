@@ -20,7 +20,11 @@ import (
 
 func newEnv(t *testing.T, opts ...Opt[order]) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, *dispatcher.Dispatcher[order], *bus.ChannelBus[order]) {
 	t.Helper()
-	s := store.New()
+	return newEnvOn(t, store.New(), opts...)
+}
+
+func newEnvOn(t *testing.T, s store.Memory, opts ...Opt[order]) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, *dispatcher.Dispatcher[order], *bus.ChannelBus[order]) {
+	t.Helper()
 	ss := store.NewSnapshots()
 	es := eventstore.New[order](s, ss, nil, 1, nil)
 	b := bus.NewChannelBus[order]()
