@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -463,3 +464,254 @@ func TestDispatch_WorkerSurvivesPanic(t *testing.T) {
 		t.Errorf("expected 2 PublishSync calls (panic recovered), got %d", got)
 	}
 }
+
+func TestEnqueue_AckRunsAfterHandlersFinish(t *testing.T) {
+	var handled, acked atomic.Bool
+	gate := make(chan struct{})
+	bus := &callbackBus{fn: func(context.Context, asynxmd.Event[int]) error {
+		<-gate
+		handled.Store(true)
+		return nil
+	}}
+	d := New[int](bus)
+	defer d.Close(context.Background())
+
+	done, err := d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error {
+		if !handled.Load() {
+			t.Error("ack ran before the handlers finished")
+		}
+		acked.Store(true)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if acked.Load() {
+		t.Fatal("ack ran while the handler was still blocked")
+	}
+	close(gate)
+	<-done
+	if !acked.Load() {
+		t.Fatal("ack did not run before done closed")
+	}
+}
+
+
+
+func TestEnqueue_AckErrorIsReported(t *testing.T) {
+	ackErr := errors.New("ack failed")
+	var got atomic.Value
+	d := New(
+		asynxmd.Bus[int](&recordingBus{}),
+		WithPublishErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error) { got.Store(err) }),
+	)
+	defer d.Close(context.Background())
+
+	done, _ := d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error { return ackErr })
+	<-done
+
+	if err, _ := got.Load().(error); !errors.Is(err, ackErr) {
+		t.Fatalf("reported error = %v, want ack error", err)
+	}
+}
+
+// A job enqueued while the idle worker is about to retire must still run.
+func TestEnqueue_NeverStrandedByIdleWorkerRetirement(t *testing.T) {
+	d := New[int](&recordingBus{}, WithIdleTimeout[int](time.Millisecond))
+	defer d.Close(context.Background())
+
+	for i := int64(1); i <= 300; i++ {
+		time.Sleep(time.Millisecond) // land right on the idle deadline
+		done, err := d.Enqueue(context.Background(), makeEvent("a", i), nil)
+		if err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("event %d was stranded on a retired queue", i)
+		}
+	}
+}
+
+// Enqueue must never block on a slow handler: callers enqueue while holding
+// their per-aggregate command lock.
+func TestEnqueue_NeverBlocksBehindASlowHandler(t *testing.T) {
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var seen []int64
+	bus := &callbackBus{fn: func(_ context.Context, e asynxmd.Event[int]) error {
+		<-release
+		mu.Lock()
+		seen = append(seen, e.Version)
+		mu.Unlock()
+		return nil
+	}}
+	d := New[int](bus)
+	defer d.Close(context.Background())
+
+	const n = 200
+	enqueued := make(chan struct{})
+	go func() {
+		for i := int64(1); i <= n; i++ {
+			if _, err := d.Enqueue(context.Background(), makeEvent("a", i), nil); err != nil {
+				t.Errorf("Enqueue: %v", err)
+			}
+		}
+		close(enqueued)
+	}()
+
+	select {
+	case <-enqueued:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Enqueue blocked behind a slow handler")
+	}
+
+	close(release)
+	d.WaitIdle()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != n {
+		t.Fatalf("handled %d events, want %d", len(seen), n)
+	}
+	for i, v := range seen {
+		if v != int64(i+1) {
+			t.Fatalf("order broken at %d: %v", i, v)
+		}
+	}
+}
+
+func TestClose_DrainsJobsQueuedBehindASlowHandler(t *testing.T) {
+	release := make(chan struct{})
+	running := make(chan struct{}, 3)
+	var handled atomic.Int32
+	bus := &callbackBus{fn: func(context.Context, asynxmd.Event[int]) error {
+		running <- struct{}{}
+		<-release
+		handled.Add(1)
+		return nil
+	}}
+	d := New[int](bus)
+
+	for i := int64(1); i <= 3; i++ {
+		if _, err := d.Enqueue(context.Background(), makeEvent("a", i), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	<-running // the first job is inside its handler, two more are queued behind it
+
+	closed := make(chan error, 1)
+	go func() { closed <- d.Close(context.Background()) }()
+	for {
+		d.mu.Lock()
+		isClosed := d.closed
+		d.mu.Unlock()
+		if isClosed {
+			break
+		}
+		runtime.Gosched()
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned (%v) before the queued jobs drained", err)
+	default:
+	}
+	close(release)
+
+	if err := <-closed; err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if handled.Load() != 3 {
+		t.Fatalf("handled %d jobs, want 3 (Close must drain)", handled.Load())
+	}
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+func TestHandle_DispatcherPanicIsReportedNotSwallowed(t *testing.T) {
+	var got atomic.Value
+	bus := &callbackBus{fn: func(context.Context, asynxmd.Event[int]) error { panic("bus exploded") }}
+	d := New[int](bus, WithPublishErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error) { got.Store(err) }))
+	defer d.Close(context.Background())
+
+	done, _ := d.Enqueue(context.Background(), makeEvent("a", 1), nil)
+	<-done
+	if err, _ := got.Load().(error); err == nil {
+		t.Fatal("a panic in the dispatcher was swallowed silently")
+	}
+
+	// The worker survives and keeps delivering.
+	done, _ = d.Enqueue(context.Background(), makeEvent("a", 2), nil)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker died after a panic")
+	}
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

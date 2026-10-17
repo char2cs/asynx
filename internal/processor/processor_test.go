@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"github.com/char2cs/asynx/internal/bus"
+	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor"
-	"github.com/char2cs/asynx/store"
+	"github.com/char2cs/asynx/internal/processor/exec"
 	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/store"
 )
 
 type order = mocks.Order
@@ -770,5 +772,417 @@ func TestProcessor_SendWait_ContextCancelledWhileWaiting(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Error("SendWait did not return after context cancel")
+	}
+}
+
+type fixture struct {
+	p    *processor.Processor[order]
+	s    store.Memory
+	snap store.SnapshotMemory
+	b    *bus.ChannelBus[order]
+}
+
+func newFixture(t *testing.T, s store.Memory, opts ...processor.ProcessorOpt[order]) fixture {
+	t.Helper()
+	snap := store.NewSnapshots()
+	b := bus.NewChannelBus[order]()
+	es := eventstore.New[order](s, snap, nil, 1, nil)
+	p := processor.New(es, b, opts...)
+	t.Cleanup(func() { p.Shutdown(context.Background()) })
+	return fixture{p: p, s: s, snap: snap, b: b}
+}
+
+func TestProcessor_Forget_ErasesAndNotifiesHandlers(t *testing.T) {
+	f := newFixture(t, store.New())
+	ctx := context.Background()
+
+	var tombstones atomic.Int32
+	f.b.Subscribe("asynx\\.aggregate\\.forget", func(context.Context, asynxmd.Event[order]) { tombstones.Add(1) })
+
+	if _, err := f.p.Send(ctx, mocks.CreateOrderCmd{ID: "o1", Total: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.p.Forget(ctx, "o1"); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+	if tombstones.Load() != 1 {
+		t.Errorf("forget handler calls = %d, want 1", tombstones.Load())
+	}
+	if blobs, _ := f.s.ReadFrom(ctx, "events:o1", 1); len(blobs) != 0 {
+		t.Errorf("stream not erased: %d blobs", len(blobs))
+	}
+	if err := f.p.Forget(ctx, "o1"); !errors.Is(err, asynxmd.ErrValidation) {
+		t.Errorf("second Forget err = %v, want ErrValidation", err)
+	}
+}
+
+func TestProcessor_Forget_RejectedWhenShuttingDownOrCancelled(t *testing.T) {
+	f := newFixture(t, store.New())
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := f.p.Forget(cancelled, "o1"); !errors.Is(err, asynxmd.ErrContextCancelled) {
+		t.Errorf("cancelled: err = %v, want ErrContextCancelled", err)
+	}
+
+	f.p.Shutdown(context.Background())
+	if err := f.p.Forget(context.Background(), "o1"); !errors.Is(err, asynxmd.ErrShuttingDown) {
+		t.Errorf("shutting down: err = %v, want ErrShuttingDown", err)
+	}
+}
+
+func TestProcessor_Options_SyncProjectionsDurableDeliverySnapshotErrors(t *testing.T) {
+	var projected, snapErrs atomic.Int32
+	s := store.New()
+	f := newFixture(t, s,
+		processor.WithSyncProjections([]exec.SyncProjection[order]{{
+			Match: func(string) bool { return true },
+			Fn: func(context.Context, asynxmd.Tx, asynxmd.Event[order]) error {
+				projected.Add(1)
+				return nil
+			},
+		}}),
+		processor.WithDurableDelivery[order](func(string) bool { return true }),
+		processor.WithSnapshotErrorHandler(func(context.Context, asynxmd.Event[order], error) { snapErrs.Add(1) }),
+	)
+	f.snap.SetError("o1", errors.New("snapshot down"))
+
+	ctx := context.Background()
+	cmd := mocks.UpdateOrderCmd{ID: "o1", NewState: order{ID: "o1", Total: 1}, Snapshot: true}
+	if _, err := f.p.SendWait(ctx, cmd); err != nil {
+		t.Fatal(err)
+	}
+	f.p.WaitPublish()
+
+	if projected.Load() != 1 || snapErrs.Load() != 1 {
+		t.Errorf("projected=%d snapshotErrors=%d, want 1 and 1", projected.Load(), snapErrs.Load())
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 0 {
+		t.Errorf("delivery not acked after SendWait: %v", pending)
+	}
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+func TestProcessor_DurableDeliveryOptions_RetryReportAndPanicHandling(t *testing.T) {
+	var attempts, reports, panics atomic.Int32
+	s := store.New()
+	f := newFixture(t, s,
+		processor.WithDurableDelivery[order](func(name string) bool { return name == "OrderUpdated" }),
+		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+			Match: func(string) bool { return true },
+			Handler: func(context.Context, asynxmd.Event[order]) error {
+				switch attempts.Add(1) {
+				case 1:
+					return errors.New("transient")
+				case 2:
+					panic("boom")
+				}
+				return nil
+			},
+		}}),
+		processor.WithDeliveryErrorHandler(func(context.Context, asynxmd.Event[order], error, int) { reports.Add(1) }),
+		processor.WithDeliveryPanicHandler(func(context.Context, asynxmd.Event[order], any) { panics.Add(1) }),
+		processor.WithDeliveryRetry[order](time.Millisecond, 2*time.Millisecond),
+	)
+
+	ctx := context.Background()
+	if _, err := f.p.Send(ctx, mocks.UpdateOrderCmd{ID: "o1", NewState: order{ID: "o1", Total: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	f.p.WaitPublish()
+
+	if attempts.Load() != 3 || reports.Load() != 2 || panics.Load() != 1 {
+		t.Fatalf("attempts=%d reports=%d panics=%d; want 3, 2, 1", attempts.Load(), reports.Load(), panics.Load())
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 0 {
+		t.Fatalf("pending = %v, want none after the retry succeeded", pending)
+	}
+}
+
+
+
+func always(string) bool { return true }
+
+
+
+
+
+
+
+
+
+
+
+
+
+func TestProcessor_Options_DeadLetter(t *testing.T) {
+	var healthy atomic.Bool
+	dead := make(chan int64, 4)
+	f := newFixture(t, store.New(), parkingOpts(&healthy,
+		processor.WithDeadLetterHandler(func(_ context.Context, e asynxmd.Event[order], _ error) error {
+			dead <- e.Version
+			return nil
+		}))...)
+	if _, err := f.p.Send(context.Background(), updateCmd("o1", 1)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case v := <-dead:
+		if v != 1 {
+			t.Fatalf("dead-lettered v%d", v)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dead-letter handler never called")
+	}
+}
+
+func TestProcessor_SendWait_GivesUpWaitingButReturnsTheCommittedEvent(t *testing.T) {
+	f := newFixture(t, store.New())
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	f.b.Subscribe("OrderUpdated", func(context.Context, asynxmd.Event[order]) {
+		close(entered)
+		<-release
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type result struct {
+		evt asynxmd.Event[order]
+		err error
+	}
+	got := make(chan result, 1)
+	go func() {
+		evt, err := f.p.SendWait(ctx, updateCmd("o1", 1))
+		got <- result{evt, err}
+	}()
+	<-entered
+	cancel()
+	r := <-got
+	if !errors.Is(r.err, asynxmd.ErrContextCancelled) {
+		t.Fatalf("err = %v, want ErrContextCancelled", r.err)
+	}
+	if r.evt.AggregateID != "o1" || r.evt.Version != 1 {
+		t.Fatalf("event = %+v, want the committed v1", r.evt)
+	}
+}
+
+func TestProcessor_Shutdown_WaitsForForgetInFlightUntilItsContextEnds(t *testing.T) {
+	f := newFixture(t, store.New())
+	ctx := context.Background()
+	if _, err := f.p.Send(ctx, mocks.CreateOrderCmd{ID: "o1", Total: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	f.b.Subscribe("asynx\\.aggregate\\.forget", func(context.Context, asynxmd.Event[order]) {
+		close(entered)
+		<-release
+	})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		f.p.Forget(ctx, "o1")
+	}()
+	<-entered
+
+	short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	if err := f.p.Shutdown(short); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown err = %v, want the context's deadline while a Forget is in flight", err)
+	}
+	close(release)
+	wg.Wait()
+}
+
+var _ = bus.NewChannelBus[order]
+
+// gatedCmd blocks in Validate until its gate opens, which holds a shard worker.
+type gatedCmd struct {
+	mocks.UpdateOrderCmd
+	entered chan<- struct{}
+	gate    <-chan struct{}
+}
+
+func (c gatedCmd) Validate(o *order) error {
+	select {
+	case c.entered <- struct{}{}:
+	default:
+	}
+	<-c.gate
+	return nil
+}
+
+// Shutdown must not return while a sender is still waiting on a queue the pool
+// has stopped reading: every Send either runs or is refused.
+func TestProcessor_Shutdown_NeverStrandsAQueuedSend(t *testing.T) {
+	for range 25 {
+		gate := make(chan struct{})
+		entered := make(chan struct{}, 1)
+		p := newProcessor(t,
+			processor.WithShards[order](1),
+			processor.WithWorkersPerShard[order](1),
+			processor.WithQueueDepth[order](2))
+
+		results := make(chan error, 6)
+		for i := range 6 {
+			go func() {
+				cmd := gatedCmd{UpdateOrderCmd: updateCmd("agg"+string(rune('a'+i)), 1), entered: entered, gate: gate}
+				_, err := p.Send(context.Background(), cmd)
+				results <- err
+			}()
+		}
+		<-entered
+
+		down := make(chan error, 1)
+		go func() { down <- p.Shutdown(context.Background()) }()
+		close(gate)
+
+		for range 6 {
+			select {
+			case <-results:
+			case <-time.After(5 * time.Second):
+				t.Fatal("a Send was stranded by Shutdown")
+			}
+		}
+		if err := <-down; err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	}
+}
+
+func TestProcessor_Shutdown_CanBeRetriedAfterItsContextEnds(t *testing.T) {
+	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
+	b := bus.NewChannelBus[order]()
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	b.Subscribe("OrderUpdated", func(context.Context, asynxmd.Event[order]) {
+		close(entered)
+		<-release
+	})
+	p := processor.New(es, b)
+	if _, err := p.Send(context.Background(), updateCmd("o1", 1)); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+
+	short, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := p.Shutdown(short); err == nil {
+		t.Fatal("Shutdown succeeded with a handler still running")
+	}
+	close(release)
+	if err := p.Shutdown(context.Background()); err != nil {
+		t.Fatalf("retried Shutdown: %v", err)
+	}
+	if err := p.Shutdown(context.Background()); !errors.Is(err, asynxmd.ErrAlreadyShuttingDown) {
+		t.Fatalf("Shutdown after completion = %v, want ErrAlreadyShuttingDown", err)
+	}
+}
+
+func TestProcessor_SendWait_FromAHandlerOfTheSameAggregateFailsFast(t *testing.T) {
+	f := newFixture(t, store.New())
+	got := make(chan error, 1)
+	f.b.Subscribe("OrderUpdated", func(ctx context.Context, e asynxmd.Event[order]) {
+		_, err := f.p.SendWait(ctx, updateCmd(e.AggregateID, 2))
+		got <- err
+	})
+	if _, err := f.p.Send(context.Background(), updateCmd("o1", 1)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-got:
+		if !errors.Is(err, asynxmd.ErrSendWaitFromHandler) {
+			t.Fatalf("SendWait from the handler = %v, want ErrSendWaitFromHandler", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SendWait from a handler hung")
+	}
+}
+
+func TestProcessor_Shutdown_ReportsAWorkerThatWillNotFinish(t *testing.T) {
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	p := newProcessor(t, processor.WithShards[order](1), processor.WithWorkersPerShard[order](1))
+	t.Cleanup(func() { close(gate) })
+
+	// The sender gives up, but its command is still running on the worker.
+	sendCtx, cancelSend := context.WithCancel(context.Background())
+	sent := make(chan error, 1)
+	go func() {
+		_, err := p.Send(sendCtx, gatedCmd{UpdateOrderCmd: updateCmd("agg", 1), entered: entered, gate: gate})
+		sent <- err
+	}()
+	<-entered
+	cancelSend()
+	<-sent
+
+	short, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := p.Shutdown(short); err == nil {
+		t.Fatal("Shutdown succeeded with a command still running")
+	}
+}
+
+func TestProcessor_Shutdown_WaitsForASendInFlightUntilItsContextEnds(t *testing.T) {
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	p := newProcessor(t, processor.WithShards[order](1), processor.WithWorkersPerShard[order](1))
+	t.Cleanup(func() { close(gate) })
+	go p.Send(context.Background(), gatedCmd{UpdateOrderCmd: updateCmd("agg", 1), entered: entered, gate: gate})
+	<-entered
+
+	short, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := p.Shutdown(short); err == nil {
+		t.Fatal("Shutdown returned while a Send was in flight")
+	}
+}
+
+// Applications use one aggregate ID across several instances (an arrow and its
+// runtime): a handler of one instance may Forget or SendWait on the other.
+func TestProcessor_HandlerMayWaitOnAnotherInstanceUnderTheSameID(t *testing.T) {
+	a := newFixture(t, store.New())
+	b := newFixture(t, store.New())
+	ctx := context.Background()
+	if _, err := b.p.Send(ctx, updateCmd("ns", 1)); err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(chan error, 2)
+	a.b.Subscribe("OrderUpdated", func(hctx context.Context, e asynxmd.Event[order]) {
+		_, err := b.p.SendWait(hctx, updateCmd(e.AggregateID, 2))
+		got <- err
+		got <- b.p.Forget(hctx, e.AggregateID)
+	})
+	if _, err := a.p.Send(ctx, updateCmd("ns", 1)); err != nil {
+		t.Fatal(err)
+	}
+	for _, what := range []string{"SendWait", "Forget"} {
+		select {
+		case err := <-got:
+			if err != nil {
+				t.Fatalf("%s on the other instance from a handler: %v", what, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s on the other instance from a handler hung", what)
+		}
 	}
 }

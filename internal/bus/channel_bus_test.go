@@ -999,3 +999,58 @@ func TestWaitForHandlers_BlocksUntilDone(t *testing.T) {
 		t.Error("WaitForHandlers returned before handler finished")
 	}
 }
+
+// PublishSync promises every handler has finished on return: a timeout is
+// reported but the slow handler is still waited for, so the next event of an
+// aggregate can never overlap it.
+func TestPublishSync_WaitsForATimedOutHandler(t *testing.T) {
+	var timeouts atomic.Int32
+	var finished atomic.Bool
+	timedOut := make(chan struct{})
+	b := bus.NewChannelBus[string](bus.WithTimeoutHandler[string](
+		func(context.Context, models.Event[string], time.Duration) {
+			if timeouts.Add(1) == 1 {
+				close(timedOut)
+			}
+		}))
+	defer closeAndWait(t, b)
+
+	b.Subscribe("slow", func(context.Context, models.Event[string]) {
+		<-timedOut // finishes only after the timeout fired
+		finished.Store(true)
+	}, models.WithHandlerTimeout[string](20*time.Millisecond))
+
+	if err := b.PublishSync(context.Background(), ev("slow")); err != nil {
+		t.Fatal(err)
+	}
+	if !finished.Load() {
+		t.Fatal("PublishSync returned while the timed-out handler was still running")
+	}
+	if timeouts.Load() != 1 {
+		t.Fatalf("timeouts reported = %d, want 1", timeouts.Load())
+	}
+}
+
+func TestPublish_StillAbandonsATimedOutHandler(t *testing.T) {
+	var timeouts atomic.Int32
+	release := make(chan struct{})
+	reported := make(chan struct{}, 1)
+	b := bus.NewChannelBus[string](bus.WithTimeoutHandler[string](
+		func(context.Context, models.Event[string], time.Duration) {
+			timeouts.Add(1)
+			reported <- struct{}{}
+		}))
+
+	b.Subscribe("slow", func(context.Context, models.Event[string]) { <-release },
+		models.WithHandlerTimeout[string](20*time.Millisecond))
+
+	if err := b.Publish(context.Background(), ev("slow")); err != nil {
+		t.Fatal(err)
+	}
+	<-reported
+	if timeouts.Load() != 1 {
+		t.Fatalf("timeouts reported = %d, want 1", timeouts.Load())
+	}
+	close(release)
+	closeAndWait(t, b)
+}

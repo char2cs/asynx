@@ -7,11 +7,11 @@
 //   - sendResult   — Non-blocking result send; drops if receiver gone
 //
 // Consistent hashing at the router routes each aggregate to a fixed shard and
-// dispatcher, so commands for one aggregate are dispatched in arrival order.
-// Execution is serial per aggregate only when workersPerShard is 1; with more
-// workers the dispatched commands run in parallel across the shard's worker
-// pool. The event version is assigned by the event store on write (optimistic
-// concurrency), not by the shard.
+// dispatcher. With more than one worker per shard, commands run in parallel
+// across the shard's worker pool; the executor's per-aggregate lock keeps
+// commands for one aggregate strictly serial and ordered regardless. The event
+// version is assigned by the event store on write (optimistic concurrency), not
+// by the shard.
 package pool
 
 import (
@@ -19,6 +19,7 @@ import (
 
 	"github.com/char2cs/asynx/internal/processor/exec"
 	"github.com/char2cs/asynx/internal/processor/models"
+	asynxmd "github.com/char2cs/asynx/models"
 )
 
 type Shard[T any] struct {
@@ -63,6 +64,7 @@ func (s *Shard[T]) dispatchCommands(
 func (s *Shard[T]) handleDispatch() bool {
 	select {
 	case <-s.stopChan:
+		s.failQueued()
 		close(s.jobQueue)
 		return true
 
@@ -78,6 +80,21 @@ func (s *Shard[T]) handleDispatch() bool {
 	}
 
 	return false
+}
+
+// failQueued answers the envelopes still waiting when the shard stops, so their
+// senders are released instead of waiting for a result nobody will produce.
+func (s *Shard[T]) failQueued() {
+	for {
+		select {
+		case envelope := <-s.commandChan:
+			if envelope != nil {
+				s.sendResult(envelope.ResultChan, models.CommandResult[T]{Err: asynxmd.ErrShuttingDown})
+			}
+		default:
+			return
+		}
+	}
 }
 
 func (s *Shard[T]) dispatchJob(
@@ -106,16 +123,16 @@ func (s *Shard[T]) executeJob(
 	executor *exec.CommandExecutor[T],
 	job *models.CommandJob[T],
 ) {
-	event, err := executor.Execute(
+	event, wait, err := executor.ExecuteAsync(
 		job.Envelope.Ctx,
 		job.Envelope.Cmd,
-		job.Envelope.WaitHandlers,
 	)
 
-	s.sendResult(
-		job.Envelope.ResultChan,
-		models.CommandResult[T]{Event: event, Err: err},
-	)
+	result := models.CommandResult[T]{Event: event, Err: err}
+	if job.Envelope.WaitHandlers {
+		result.Wait = wait
+	}
+	s.sendResult(job.Envelope.ResultChan, result)
 }
 
 func (s *Shard[T]) sendResult(

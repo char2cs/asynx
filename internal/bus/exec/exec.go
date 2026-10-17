@@ -23,6 +23,12 @@ type HandlerJob[T any] struct {
 	// OnHandlerPanic / OnHandlerTimeout functions are used instead.
 	OnPanic   asynxmd.PanicHandler[T]
 	OnTimeout asynxmd.TimeoutHandler[T]
+
+	// WaitAfterTimeout makes a timed-out handler still be waited for: the
+	// timeout is reported but ExecuteHandler returns only once the handler has
+	// finished. The dispatcher path needs this so the next event of an
+	// aggregate never starts while the previous one is still being handled.
+	WaitAfterTimeout bool
 }
 
 // ExecuteHandler runs job.Handler (via ExecuteWithTimeout), recovers from any
@@ -66,11 +72,11 @@ func ExecuteHandler[T any](wg *sync.WaitGroup, job *HandlerJob[T]) {
 					panicFn(r2)
 				}
 			}()
-			ExecuteWithTimeout(job.Ctx, job.FallbackHandler, job.Event, job.Timeout, panicFn, timeoutFn)
+			executeWithTimeout(job.Ctx, job.FallbackHandler, job.Event, job.Timeout, panicFn, timeoutFn, job.WaitAfterTimeout)
 		}()
 	}()
 
-	ExecuteWithTimeout(job.Ctx, job.Handler, job.Event, job.Timeout, panicFn, timeoutFn)
+	executeWithTimeout(job.Ctx, job.Handler, job.Event, job.Timeout, panicFn, timeoutFn, job.WaitAfterTimeout)
 }
 
 // ExecuteWithTimeout calls handler inline when timeout is zero, or in a
@@ -84,6 +90,20 @@ func ExecuteWithTimeout[T any](
 	timeout time.Duration,
 	onPanic func(any),
 	onTimeout func(),
+) {
+	executeWithTimeout(ctx, handler, event, timeout, onPanic, onTimeout, false)
+}
+
+// executeWithTimeout is ExecuteWithTimeout with the option to keep waiting for
+// the handler after the timeout has been reported.
+func executeWithTimeout[T any](
+	ctx context.Context,
+	handler asynxmd.ProjectionHandler[T],
+	event asynxmd.Event[T],
+	timeout time.Duration,
+	onPanic func(any),
+	onTimeout func(),
+	waitAfterTimeout bool,
 ) {
 	if timeout == 0 {
 		handler(ctx, event)
@@ -117,6 +137,9 @@ func ExecuteWithTimeout[T any](
 	case <-timer.C:
 		if onTimeout != nil {
 			onTimeout()
+		}
+		if waitAfterTimeout {
+			<-done
 		}
 	}
 }
