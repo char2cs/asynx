@@ -1,11 +1,16 @@
 package asynx
 
 import (
+	"context"
+	"fmt"
 	"maps"
+	"regexp"
 
 	"github.com/char2cs/asynx/internal/bus"
+	"github.com/char2cs/asynx/internal/bus/utils"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/processor"
+	"github.com/char2cs/asynx/internal/processor/exec"
 	"github.com/char2cs/asynx/models"
 )
 
@@ -13,16 +18,14 @@ import (
 // Shards defaults to 8; QueueDepth defaults to 0 (unbounded).
 //
 // WorkersPerShard controls how many workers drain each shard's queue and
-// defaults to 8 when left zero. It is a correctness knob, not just a
-// throughput dial:
-//
-//   - WorkersPerShard: 1 serializes the load-validate-write cycle for every
-//     aggregate on a shard. Commands targeting the same aggregate can never
-//     run concurrently, so there is no lost-update or version-conflict window.
-//   - WorkersPerShard > 1 (including the default 8) lets a shard execute queued
-//     commands in parallel. Two commands that hit the same aggregate at the
-//     same time may conflict: one succeeds and the other fails with
-//     ErrPipelineFailed for the caller to re-read state and retry.
+// defaults to 8 when left zero. It tunes throughput only: whatever its value,
+// commands for one aggregate run strictly one at a time (a per-aggregate lock
+// covers load, validate, commit and enqueue), so there is no lost-update or
+// version-conflict window and handlers receive an aggregate's events in version
+// order. Commands for different aggregates run in parallel up to
+// Shards*WorkersPerShard. The lock is in-process: several processes sharing one
+// store are protected from corruption by the store's version check, but not
+// from conflicts.
 type ShardingOpts struct {
 	Shards          int
 	QueueDepth      int
@@ -40,6 +43,20 @@ type Builder[T any] struct {
 	corruptionHook      func(error)
 	publishErrorHandler models.PublishErrorHandler[T]
 	forgetHandlers      []models.ForgetHandler[T]
+	syncProjections     []syncProjectionDef[T]
+	subscribers         []subscriberDef[T]
+	snapshotErrHandler  func(context.Context, models.Event[T], error)
+}
+
+type syncProjectionDef[T any] struct {
+	pattern string
+	fn      func(context.Context, models.Tx, models.Event[T]) error
+}
+
+type subscriberDef[T any] struct {
+	pattern string
+	handler models.ProjectionHandler[T]
+	opts    []models.SubscriptionOpt[T]
 }
 
 func New[T any]() *Builder[T] {
@@ -130,6 +147,50 @@ func (b *Builder[T]) WithForgetHandler(fn models.ForgetHandler[T]) *Builder[T] {
 	return b
 }
 
+// WithSyncProjection registers a projection that runs inside the transaction
+// that appends each matching event. fn writes its own state through
+// tx.Native() (for example a *sql.Tx), so the read model commits or rolls back
+// together with the event, the command receipt and the delivery entry. If fn
+// returns an error the transaction rolls back and Send returns
+// ErrPipelineFailed wrapping it: the event never existed.
+//
+// pattern follows Subscribe: an exact event name, or a regular expression when
+// it contains metacharacters. Projections run in registration order.
+func (b *Builder[T]) WithSyncProjection(
+	pattern string,
+	fn func(ctx context.Context, tx models.Tx, evt models.Event[T]) error,
+) *Builder[T] {
+	b.syncProjections = append(b.syncProjections, syncProjectionDef[T]{pattern: pattern, fn: fn})
+	return b
+}
+
+// WithSubscriber registers a durable subscriber at build time. Unlike
+// Subscribe, whose handlers only see events published while the process is
+// alive, a durable subscriber is guaranteed every committed event: each event
+// is recorded in the same transaction that commits it and acknowledged once
+// every handler has finished, and Build redelivers anything left unacknowledged
+// by a crash before it returns, in per-aggregate order.
+//
+// Delivery is at-least-once. After a crash a handler can see an event twice;
+// dedupe on (AggregateID, Version).
+func (b *Builder[T]) WithSubscriber(
+	pattern string,
+	handler models.ProjectionHandler[T],
+	opts ...models.SubscriptionOpt[T],
+) *Builder[T] {
+	b.subscribers = append(b.subscribers, subscriberDef[T]{pattern: pattern, handler: handler, opts: opts})
+	return b
+}
+
+// WithSnapshotErrorHandler sets a callback invoked when a snapshot write fails.
+// Snapshots are a derived cache written after the event commits, so a failure
+// never fails the command or blocks delivery. When not set, snapshot errors are
+// dropped.
+func (b *Builder[T]) WithSnapshotErrorHandler(fn func(context.Context, models.Event[T], error)) *Builder[T] {
+	b.snapshotErrHandler = fn
+	return b
+}
+
 // Build requires WithEventStore and WithSnapshotStore; all other options have
 // defaults.
 func (b *Builder[T]) Build() (Asynx[T], error) {
@@ -160,10 +221,24 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 		b.corruptionHook,
 	)
 
+	syncs, err := b.compileSyncProjections()
+	if err != nil {
+		return nil, err
+	}
+
 	procOpts := []processor.ProcessorOpt[T]{
 		processor.WithShards[T](b.shardingOpts.Shards),
 		processor.WithQueueDepth[T](b.shardingOpts.QueueDepth),
 		processor.WithWorkersPerShard[T](b.shardingOpts.WorkersPerShard),
+	}
+	if len(syncs) > 0 {
+		procOpts = append(procOpts, processor.WithSyncProjections(syncs))
+	}
+	if len(b.subscribers) > 0 {
+		procOpts = append(procOpts, processor.WithDurableDelivery[T](true))
+	}
+	if b.snapshotErrHandler != nil {
+		procOpts = append(procOpts, processor.WithSnapshotErrorHandler(b.snapshotErrHandler))
 	}
 	if b.publishErrorHandler != nil {
 		procOpts = append(procOpts, processor.WithPublishErrorHandler[T](b.publishErrorHandler))
@@ -182,5 +257,52 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 		}
 	}
 
+	for _, sub := range b.subscribers {
+		if _, err := activeBus.Subscribe(sub.pattern, sub.handler, sub.opts...); err != nil {
+			return nil, err
+		}
+	}
+
+	if len(b.subscribers) > 0 {
+		if err := proc.Recover(context.Background(), recoveryBatch); err != nil {
+			return nil, err
+		}
+	}
+
 	return instance, nil
+}
+
+// recoveryBatch is how many pending deliveries Build redelivers per round.
+const recoveryBatch = 100
+
+func (b *Builder[T]) compileSyncProjections() ([]exec.SyncProjection[T], error) {
+	out := make([]exec.SyncProjection[T], 0, len(b.syncProjections))
+	for _, def := range b.syncProjections {
+		if def.pattern == "" {
+			return nil, models.ErrEmptyPattern
+		}
+		if def.fn == nil {
+			return nil, models.ErrNilHandler
+		}
+
+		match, err := matcher(def.pattern)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, exec.SyncProjection[T]{Match: match, Fn: def.fn})
+	}
+	return out, nil
+}
+
+// matcher mirrors the bus's pattern rule: an exact event name, or an
+// (unanchored) regular expression when the pattern has metacharacters.
+func matcher(pattern string) (func(string) bool, error) {
+	if utils.IsExactPattern(pattern) {
+		return func(name string) bool { return name == pattern }, nil
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("asynx: invalid sync projection pattern %q: %w", pattern, err)
+	}
+	return re.MatchString, nil
 }

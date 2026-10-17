@@ -24,6 +24,10 @@ type CommandEnvelope[T any] struct {
 	Ctx          context.Context
 	ResultChan   chan CommandResult[T]
 	WaitHandlers bool
+	// Forget marks the envelope as a Forget job for Cmd's aggregate: the worker
+	// runs CommandExecutor.Forget instead of executing Cmd. Cmd only routes the
+	// job to the aggregate's shard.
+	Forget bool
 }
 
 type CommandJob[T any] struct {

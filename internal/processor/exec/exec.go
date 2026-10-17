@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"github.com/char2cs/asynx/internal/bus/dispatcher"
+	"github.com/char2cs/asynx/internal/commands"
 	"github.com/char2cs/asynx/internal/eventstore"
 	asynxmd "github.com/char2cs/asynx/models"
 )
@@ -265,4 +266,71 @@ func idempotencyKey[T any](cmd asynxmd.Command[T]) string {
 		return ic.CommandID()
 	}
 	return ""
+}
+
+// Forget erases an aggregate under its lock, so no command on it can
+// interleave: it writes a tombstone (running synchronous projections), lets the
+// forget handlers observe the tombstone and the aggregate's last state, then
+// deletes the stream, its pending deliveries and its snapshot.
+//
+// A crash between the tombstone and the delete leaves the aggregate in place;
+// retrying Forget runs the handlers again (at-least-once).
+func (e *CommandExecutor[T]) Forget(ctx context.Context, aggregateID string) error {
+	unlock, err := e.locks.Lock(ctx, aggregateID)
+	if err != nil {
+		return fmt.Errorf("%w: %w", asynxmd.ErrContextCancelled, err)
+	}
+	defer unlock()
+
+	tombstone, err := e.es.WriteTx(ctx, commands.NewForgetCommand[T](aggregateID), e.tombstoneHook())
+	if err != nil {
+		if errors.Is(err, asynxmd.ErrValidation) && !errors.Is(err, asynxmd.ErrSyncProjection) {
+			return err
+		}
+		return fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
+	}
+
+	if e.dispatcher != nil {
+		done, err := e.dispatcher.Enqueue(ctx, tombstone, nil)
+		if err != nil {
+			return fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
+		}
+		<-done
+	}
+
+	// The erase must finish even if the caller gives up.
+	eraseCtx := context.WithoutCancel(ctx)
+	erase := func(tx asynxmd.Tx) error {
+		if err := tx.DeleteStream(eraseCtx, "events:"+aggregateID); err != nil {
+			return err
+		}
+		return tx.DropDeliveries(eraseCtx, aggregateID)
+	}
+	if err := e.es.Store().Atomically(eraseCtx, erase); err != nil {
+		return fmt.Errorf("%w: %w", asynxmd.ErrForgetFailed, err)
+	}
+	if err := e.es.DeleteSnapshot(eraseCtx, aggregateID); err != nil {
+		return fmt.Errorf("%w: %w", asynxmd.ErrForgetFailed, err)
+	}
+	return nil
+}
+
+// tombstoneHook runs synchronous projections for the tombstone. It enqueues no
+// delivery: the tombstone is delivered synchronously to the forget handlers and
+// the stream is erased right after.
+func (e *CommandExecutor[T]) tombstoneHook() eventstore.TxHook[T] {
+	if len(e.syncs) == 0 {
+		return nil
+	}
+	return func(ctx context.Context, tx asynxmd.Tx, evt asynxmd.Event[T]) error {
+		for _, p := range e.syncs {
+			if !p.Match(evt.EventName) {
+				continue
+			}
+			if err := p.Fn(ctx, tx, evt); err != nil {
+				return fmt.Errorf("%w: %w", asynxmd.ErrSyncProjection, err)
+			}
+		}
+		return nil
+	}
 }

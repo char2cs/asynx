@@ -7,11 +7,11 @@
 //   - sendResult   — Non-blocking result send; drops if receiver gone
 //
 // Consistent hashing at the router routes each aggregate to a fixed shard and
-// dispatcher, so commands for one aggregate are dispatched in arrival order.
-// Execution is serial per aggregate only when workersPerShard is 1; with more
-// workers the dispatched commands run in parallel across the shard's worker
-// pool. The event version is assigned by the event store on write (optimistic
-// concurrency), not by the shard.
+// dispatcher. With more than one worker per shard, commands run in parallel
+// across the shard's worker pool; the executor's per-aggregate lock keeps
+// commands for one aggregate strictly serial and ordered regardless. The event
+// version is assigned by the event store on write (optimistic concurrency), not
+// by the shard.
 package pool
 
 import (
@@ -106,6 +106,14 @@ func (s *Shard[T]) executeJob(
 	executor *exec.CommandExecutor[T],
 	job *models.CommandJob[T],
 ) {
+	if job.Envelope.Forget {
+		s.sendResult(
+			job.Envelope.ResultChan,
+			models.CommandResult[T]{Err: executor.Forget(job.Envelope.Ctx, job.Envelope.Cmd.AggregateID())},
+		)
+		return
+	}
+
 	event, err := executor.Execute(
 		job.Envelope.Ctx,
 		job.Envelope.Cmd,

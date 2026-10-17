@@ -2,11 +2,9 @@ package asynx
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
-	"github.com/char2cs/asynx/internal/commands"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/processor"
 	"github.com/char2cs/asynx/models"
@@ -32,8 +30,11 @@ type Asynx[T any] interface {
 	) (models.Event[T], error)
 
 	// Forget writes a tombstone event for the aggregate, notifies all ForgetHandlers
-	// synchronously, then erases all events, snapshots, and cached state.
-	// Returns ErrValidation if the aggregate does not exist.
+	// synchronously, then erases all events, pending deliveries and snapshots.
+	// It runs on the aggregate's shard under the aggregate's lock, so no command
+	// can interleave with it. Returns ErrValidation if the aggregate does not
+	// exist. A crash between the tombstone and the erase leaves the aggregate in
+	// place; retrying runs the handlers again.
 	Forget(
 		ctx context.Context,
 		aggregateID string,
@@ -323,15 +324,7 @@ func (i *asynxImpl[T]) WaitPublish() {
 }
 
 func (i *asynxImpl[T]) Forget(ctx context.Context, aggregateID string) error {
-	_, err := i.proc.SendWait(ctx, commands.NewForgetCommand[T](aggregateID))
-	if err != nil {
-		return err
-	}
-	deleteCtx := context.WithoutCancel(ctx)
-	if err := i.es.Delete(deleteCtx, aggregateID); err != nil {
-		return fmt.Errorf("%w: %w", models.ErrForgetFailed, err)
-	}
-	return nil
+	return i.proc.Forget(ctx, aggregateID)
 }
 
 func (i *asynxImpl[T]) OnForget(fn models.ForgetHandler[T]) (string, error) {

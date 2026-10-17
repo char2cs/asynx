@@ -22,6 +22,10 @@ type lockEntry struct {
 // Lock blocks until the key is free or ctx is done. On success the returned
 // unlock releases the key; calling it more than once is a no-op.
 func (k *KeyedLock) Lock(ctx context.Context, key string) (unlock func(), err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	k.mu.Lock()
 	if k.entries == nil {
 		k.entries = make(map[string]*lockEntry)
