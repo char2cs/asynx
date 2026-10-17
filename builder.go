@@ -342,7 +342,9 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 	built := false
 	defer func() {
 		if !built {
-			_ = proc.Shutdown(context.Background())
+			sctx, cancel := context.WithTimeout(context.Background(), failedBuildShutdown)
+			defer cancel()
+			_ = proc.Shutdown(sctx)
 		}
 	}()
 
@@ -361,6 +363,10 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 	built = true
 	return instance, nil
 }
+
+// failedBuildShutdown bounds how long a failed Build waits for the instance it
+// abandons to shut down, so a hung recovered handler cannot hang Build too.
+const failedBuildShutdown = 30 * time.Second
 
 // recoveryBatch is how many pending deliveries Build redelivers per round.
 const recoveryBatch = 100

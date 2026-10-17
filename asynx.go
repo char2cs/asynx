@@ -135,6 +135,10 @@ type Asynx[T any] interface {
 		fn models.ProjectionHandler[T],
 	) error
 
+	// WaitPublish blocks until every queued event has been handled. It is for
+	// tests: while it waits, commands are refused by the dispatcher, so one that
+	// commits meanwhile fails with ErrPipelineFailed and parks its aggregate until
+	// ResumeDeliveries. Do not call it under live traffic.
 	WaitPublish()
 }
 

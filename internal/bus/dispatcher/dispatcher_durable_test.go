@@ -1078,3 +1078,29 @@ func TestResume_ReportsWhetherItLiftedAPark(t *testing.T) {
 		t.Fatal("Resume must report the lift once")
 	}
 }
+
+// If the ack of v1 fails, v2 must not be delivered and acknowledged ahead of it.
+func TestAckFailure_ParksTheAggregateSoALaterEventDoesNotOvertake(t *testing.T) {
+	var rec deliveries
+	var reported atomic.Int32
+	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
+		rec.add(e)
+		return nil
+	}}}, WithPublishErrorHandler[int](func(context.Context, asynxmd.Event[int], error) { reported.Add(1) }))
+
+	ctx := context.Background()
+	t1, _ := d.EnqueueTicket(ctx, makeEvent("a", 1), func(context.Context) error { return errors.New("store down") })
+	t2, _ := d.EnqueueTicket(ctx, makeEvent("a", 2), func(context.Context) error { return nil })
+	if err := final(t, t1, "v1"); err == nil {
+		t.Fatal("v1 ended as acknowledged")
+	}
+	if err := final(t, t2, "v2"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("v2 = %v, want ErrDeliveryParked", err)
+	}
+	if got := rec.list(); !slices.Equal(got, []string{"a/1"}) {
+		t.Fatalf("delivered %v, want only v1", got)
+	}
+	if got := d.Halted(); !slices.Equal(got, []string{"a"}) || reported.Load() != 1 {
+		t.Fatalf("halted=%v reported=%d", got, reported.Load())
+	}
+}

@@ -464,6 +464,9 @@ func (d *Dispatcher[T]) handle(agg string, q *aggregateQueue[T], halt <-chan str
 		if err := job.ack(job.ctx); err != nil {
 			d.reportPublishError(job, err)
 			outcome = err
+			// The entry stays pending: park, so the aggregate's next event is not
+			// delivered and acknowledged ahead of it.
+			d.parkIfCurrent(agg, q, halt, job)
 		}
 	}
 }
