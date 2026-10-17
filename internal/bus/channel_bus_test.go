@@ -1006,12 +1006,17 @@ func TestWaitForHandlers_BlocksUntilDone(t *testing.T) {
 func TestPublishSync_WaitsForATimedOutHandler(t *testing.T) {
 	var timeouts atomic.Int32
 	var finished atomic.Bool
+	timedOut := make(chan struct{})
 	b := bus.NewChannelBus[string](bus.WithTimeoutHandler[string](
-		func(context.Context, models.Event[string], time.Duration) { timeouts.Add(1) }))
+		func(context.Context, models.Event[string], time.Duration) {
+			if timeouts.Add(1) == 1 {
+				close(timedOut)
+			}
+		}))
 	defer closeAndWait(t, b)
 
 	b.Subscribe("slow", func(context.Context, models.Event[string]) {
-		time.Sleep(120 * time.Millisecond)
+		<-timedOut // finishes only after the timeout fired
 		finished.Store(true)
 	}, models.WithHandlerTimeout[string](20*time.Millisecond))
 
@@ -1029,8 +1034,12 @@ func TestPublishSync_WaitsForATimedOutHandler(t *testing.T) {
 func TestPublish_StillAbandonsATimedOutHandler(t *testing.T) {
 	var timeouts atomic.Int32
 	release := make(chan struct{})
+	reported := make(chan struct{}, 1)
 	b := bus.NewChannelBus[string](bus.WithTimeoutHandler[string](
-		func(context.Context, models.Event[string], time.Duration) { timeouts.Add(1) }))
+		func(context.Context, models.Event[string], time.Duration) {
+			timeouts.Add(1)
+			reported <- struct{}{}
+		}))
 
 	b.Subscribe("slow", func(context.Context, models.Event[string]) { <-release },
 		models.WithHandlerTimeout[string](20*time.Millisecond))
@@ -1038,7 +1047,7 @@ func TestPublish_StillAbandonsATimedOutHandler(t *testing.T) {
 	if err := b.Publish(context.Background(), ev("slow")); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(80 * time.Millisecond)
+	<-reported
 	if timeouts.Load() != 1 {
 		t.Fatalf("timeouts reported = %d, want 1", timeouts.Load())
 	}

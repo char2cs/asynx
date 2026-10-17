@@ -29,16 +29,23 @@ type Asynx[T any] interface {
 		cmd models.Command[T],
 	) (models.Event[T], error)
 
-	// Forget writes a tombstone event for the aggregate, notifies all ForgetHandlers
-	// synchronously, then erases all events, pending deliveries and snapshots.
-	// It runs on the aggregate's shard under the aggregate's lock, so no command
-	// can interleave with it. Returns ErrValidation if the aggregate does not
-	// exist. A crash between the tombstone and the erase leaves the aggregate in
-	// place; retrying runs the handlers again.
+	// Forget writes a tombstone event for the aggregate, delivers it to all
+	// ForgetHandlers and to every durable subscriber (each must succeed), then
+	// erases all events, pending deliveries and snapshots. From the tombstone
+	// until the erase finishes, commands for the aggregate are rejected with
+	// ErrForgetInProgress, so none can slip in. Returns ErrValidation if the
+	// aggregate does not exist. If Forget fails before the erase (ctx done, a
+	// durable subscriber parked) the aggregate keeps its tombstone; call Forget
+	// again, which delivers the handlers' notifications again.
 	Forget(
 		ctx context.Context,
 		aggregateID string,
 	) error
+
+	// ResumeDeliveries redelivers the aggregates whose durable delivery was parked
+	// (attempts exhausted or queue bound hit; see Builder.WithDeliveryMaxAttempts),
+	// in order, ahead of any live event. Call it once the cause is fixed.
+	ResumeDeliveries(ctx context.Context) error
 
 	// OnForget registers a handler invoked when any aggregate is forgotten.
 	// The handler receives the tombstone event; Event.Aggregate holds the last known state.
@@ -325,6 +332,10 @@ func (i *asynxImpl[T]) WaitPublish() {
 
 func (i *asynxImpl[T]) Forget(ctx context.Context, aggregateID string) error {
 	return i.proc.Forget(ctx, aggregateID)
+}
+
+func (i *asynxImpl[T]) ResumeDeliveries(ctx context.Context) error {
+	return i.proc.Resume(ctx, recoveryBatch)
 }
 
 func (i *asynxImpl[T]) OnForget(fn models.ForgetHandler[T]) (string, error) {

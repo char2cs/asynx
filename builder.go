@@ -51,6 +51,9 @@ type Builder[T any] struct {
 	deliveryErrHandler  models.DeliveryErrorHandler[T]
 	retryInitial        time.Duration
 	retryMax            time.Duration
+	maxAttempts         int
+	maxQueued           int
+	deadLetter          models.DeadLetterHandler[T]
 }
 
 type syncProjectionDef[T any] struct {
@@ -180,10 +183,15 @@ func (b *Builder[T]) WithSyncProjection(
 //     returns, in per-aggregate order.
 //   - A handler that returns an error, panics, or fails after exceeding its
 //     timeout leaves the delivery pending and is retried with backoff
-//     (WithDeliveryRetry) until it succeeds. The aggregate's later events wait
-//     behind it, so version 6 is never delivered before version 5 succeeded.
-//     Other aggregates are unaffected. Observe failures with
-//     WithDeliveryErrorHandler.
+//     (WithDeliveryRetry) up to WithDeliveryMaxAttempts times. The aggregate's
+//     later events wait behind it, for every durable subscriber, so version 6
+//     is never delivered before version 5 succeeded. Other aggregates are
+//     unaffected. After the last attempt the event is dead-lettered
+//     (WithDeadLetterHandler) or the aggregate is parked until
+//     ResumeDeliveries. Observe failures with WithDeliveryErrorHandler.
+//   - Every durable subscriber also receives the deletion marker Forget writes
+//     (models.ForgetEventName), whatever its pattern, so state keyed by
+//     (AggregateID, Version) can be cleared.
 //   - A timeout (WithHandlerTimeout) is an alarm: it is reported but the handler
 //     is still waited for. WithFallback is not supported and makes Build fail
 //     with ErrFallbackUnsupported.
@@ -217,6 +225,37 @@ func (b *Builder[T]) WithDeliveryErrorHandler(fn models.DeliveryErrorHandler[T])
 // and 30s.
 func (b *Builder[T]) WithDeliveryRetry(initial, max time.Duration) *Builder[T] {
 	b.retryInitial, b.retryMax = initial, max
+	return b
+}
+
+// WithDeliveryMaxAttempts caps how often a failing durable delivery is
+// attempted (default 20, about six minutes with the default backoff). When the
+// cap is reached the delivery goes to the dead-letter handler
+// (WithDeadLetterHandler) if one accepts it; otherwise the aggregate is parked:
+// its failed event and every later one stay pending in the store, nothing more
+// is delivered or held in memory for it, and the failure is reported to the
+// delivery error handler with ErrDeliveryParked. Other aggregates are
+// unaffected. ResumeDeliveries (or a restart) redelivers a parked aggregate.
+func (b *Builder[T]) WithDeliveryMaxAttempts(n int) *Builder[T] {
+	b.maxAttempts = n
+	return b
+}
+
+// WithDeliveryMaxQueued bounds how many events the dispatcher holds in memory
+// per aggregate behind a failing delivery (default 10000). A durable event
+// beyond it parks the aggregate like an exhausted delivery; the event is
+// already in the store's delivery log, so nothing is lost.
+func (b *Builder[T]) WithDeliveryMaxQueued(n int) *Builder[T] {
+	b.maxQueued = n
+	return b
+}
+
+// WithDeadLetterHandler sets the handler called when a durable delivery ran out
+// of attempts. Returning nil acknowledges the event as dealt with (typically
+// after storing it somewhere for inspection) and lets the aggregate's later
+// events flow; returning an error parks the aggregate.
+func (b *Builder[T]) WithDeadLetterHandler(fn models.DeadLetterHandler[T]) *Builder[T] {
+	b.deadLetter = fn
 	return b
 }
 
@@ -288,6 +327,15 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 			procOpts = append(procOpts, processor.WithDeliveryPanicHandler(b.panicHandler))
 		}
 		procOpts = append(procOpts, processor.WithDeliveryRetry[T](b.retryInitial, b.retryMax))
+		if b.maxAttempts > 0 {
+			procOpts = append(procOpts, processor.WithDeliveryMaxAttempts[T](b.maxAttempts))
+		}
+		if b.maxQueued > 0 {
+			procOpts = append(procOpts, processor.WithDeliveryMaxQueued[T](b.maxQueued))
+		}
+		if b.deadLetter != nil {
+			procOpts = append(procOpts, processor.WithDeadLetterHandler(b.deadLetter))
+		}
 	}
 	if b.snapshotErrHandler != nil {
 		procOpts = append(procOpts, processor.WithSnapshotErrorHandler(b.snapshotErrHandler))

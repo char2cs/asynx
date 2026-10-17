@@ -401,10 +401,9 @@ func TestGuarantee_FailedBuildShutsTheProcessorDown(t *testing.T) {
 			t.Fatal("Build should fail")
 		}
 	}
-	time.Sleep(200 * time.Millisecond)
-	if after := runtime.NumGoroutine(); after > before+5 {
-		t.Fatalf("goroutines grew from %d to %d across failed builds", before, after)
-	}
+	eventually(t, "goroutines to settle after failed builds", func() bool {
+		return runtime.NumGoroutine() <= before+5
+	})
 }
 
 // Durable subscribers can fail: the delivery stays pending, retries, and holds
@@ -436,17 +435,10 @@ func TestGuarantee_DurableSubscriberFailureRetriesAndKeepsOrder(t *testing.T) {
 		}
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	eventually(t, "deliveries to complete", func() bool {
 		pending, _ := s.PendingDeliveries(ctx, 10)
-		if len(pending) == 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("deliveries never completed: %v", pending)
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+		return len(pending) == 0
+	})
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -514,13 +506,7 @@ func TestGuarantee_BuildDoesNotHangOnAPoisonDelivery(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Build hung on a poison delivery")
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for attempts.Load() < 1 {
-		if time.Now().After(deadline) {
-			t.Fatal("the recovered delivery was never attempted")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	eventually(t, "the recovered delivery to be attempted", func() bool { return attempts.Load() >= 1 })
 	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 1 {
 		t.Fatalf("pending = %v, want the poison delivery to stay pending", pending)
 	}
@@ -554,14 +540,24 @@ func TestGuarantee_DurablePanicIsAFailureNotADelivery(t *testing.T) {
 	if _, err := inst.Send(context.Background(), upd("agg", 1)); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for attempts.Load() < 2 || func() bool { p, _ := s.PendingDeliveries(context.Background(), 1); return len(p) > 0 }() {
-		if time.Now().After(deadline) {
-			t.Fatalf("attempts = %d; delivery never completed after the panic", attempts.Load())
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+	eventually(t, "the delivery to complete after the panic", func() bool {
+		p, _ := s.PendingDeliveries(context.Background(), 1)
+		return attempts.Load() >= 2 && len(p) == 0
+	})
 	if panics.Load() != 1 {
 		t.Fatalf("panic handler calls = %d, want 1", panics.Load())
+	}
+}
+
+// eventually polls cond until it holds, failing after a generous deadline. It is
+// for state with no event to wait on (store contents, goroutine counts).
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		runtime.Gosched()
 	}
 }

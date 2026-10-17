@@ -157,6 +157,7 @@ func TestDurable_APanickingPanicHandlerCannotKillTheWorker(t *testing.T) {
 func TestDurable_TimeoutIsReportedButTheHandlerIsStillWaitedFor(t *testing.T) {
 	var running, overlapped atomic.Bool
 	var timeouts atomic.Int32
+	timedOut := make(chan struct{}, 8)
 	d := newDurable(t, []DurableSub[int]{{
 		Match:   always,
 		Timeout: 10 * time.Millisecond,
@@ -164,13 +165,14 @@ func TestDurable_TimeoutIsReportedButTheHandlerIsStillWaitedFor(t *testing.T) {
 			if !running.CompareAndSwap(false, true) {
 				overlapped.Store(true)
 			}
-			time.Sleep(60 * time.Millisecond)
+			<-timedOut // the handler outlives its timeout
 			running.Store(false)
 			return nil
 		},
 	}}, WithDeliveryErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error, _ int) {
 		if errors.Is(err, asynxmd.ErrHandlerTimeout) {
 			timeouts.Add(1)
+			timedOut <- struct{}{}
 		}
 	}))
 
@@ -308,17 +310,22 @@ func TestDurable_HandlerFinishingBeforeItsTimeoutReportsNothing(t *testing.T) {
 
 func TestDurable_ATimedOutHandlerThatThenFailsIsRetried(t *testing.T) {
 	var attempts atomic.Int32
+	timedOut := make(chan struct{}, 1)
 	d := newDurable(t, []DurableSub[int]{{
 		Match:   always,
 		Timeout: 5 * time.Millisecond,
 		Handler: func(context.Context, asynxmd.Event[int]) error {
 			if attempts.Add(1) == 1 {
-				time.Sleep(30 * time.Millisecond)
+				<-timedOut
 				return errors.New("failed late")
 			}
 			return nil
 		},
-	}})
+	}}, WithDeliveryErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error, _ int) {
+		if errors.Is(err, asynxmd.ErrHandlerTimeout) {
+			timedOut <- struct{}{}
+		}
+	}))
 
 	var acked atomic.Bool
 	d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })

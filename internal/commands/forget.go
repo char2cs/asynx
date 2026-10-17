@@ -22,7 +22,7 @@ func NewForgetCommand[T any](aggregateID string) *ForgetCommand[T] {
 }
 
 func (c *ForgetCommand[T]) AggregateID() string { return c.id }
-func (c *ForgetCommand[T]) EventName() string    { return "asynx.aggregate.forget" }
+func (c *ForgetCommand[T]) EventName() string    { return models.ForgetEventName }
 func (c *ForgetCommand[T]) ShouldSnapshot() bool { return false }
 
 func (c *ForgetCommand[T]) Validate(current *T) error {

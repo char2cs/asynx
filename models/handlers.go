@@ -60,3 +60,16 @@ type DeliveryErrorHandler[T any] func(
 	err error,
 	attempt int,
 )
+
+// DeadLetterHandler is called when a durable delivery exhausted its attempts
+// (Builder.WithDeliveryMaxAttempts). It receives the event and the last
+// handler error. Returning nil records the event as dealt with: the delivery is
+// acknowledged, skipped, and the aggregate's later events flow again. Returning
+// an error parks the aggregate instead (see ErrDeliveryParked).
+type DeadLetterHandler[T any] func(context.Context, Event[T], error) error
+
+// ForgetEventName is the EventName of the tombstone Forget writes. Every
+// durable subscriber receives it, whatever its pattern, so it can drop
+// per-aggregate state such as an (AggregateID, Version) dedupe table: a
+// re-created aggregate restarts at version 1.
+const ForgetEventName = "asynx.aggregate.forget"

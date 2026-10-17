@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"runtime"
 	"context"
 	"sync"
 	"testing"
@@ -27,7 +28,7 @@ func TestKeyedLock_SameKeyIsMutuallyExclusive(t *testing.T) {
 			maxInside = max(maxInside, inside)
 			mu.Unlock()
 
-			time.Sleep(100 * time.Microsecond)
+			runtime.Gosched() // widen the window for a second holder to show up
 
 			mu.Lock()
 			inside--
@@ -82,7 +83,16 @@ func TestKeyedLock_CancelledWaiterReturnsCtxErrAndLeavesNoEntry(t *testing.T) {
 		_, err := k.Lock(ctx, "agg")
 		errCh <- err
 	}()
-	time.Sleep(20 * time.Millisecond)
+	// Wait until the waiter has registered on the key.
+	for {
+		k.mu.Lock()
+		waiting := k.entries["agg"] != nil && k.entries["agg"].refs == 2
+		k.mu.Unlock()
+		if waiting {
+			break
+		}
+		runtime.Gosched()
+	}
 	cancel()
 
 	if err := <-errCh; err != context.Canceled {

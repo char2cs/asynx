@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/commands"
@@ -60,6 +61,8 @@ type CommandExecutor[T any] struct {
 	es              *eventstore.EventStore[T]
 	dispatcher      *dispatcher.Dispatcher[T]
 	locks           KeyedLock
+	forgetMu        sync.Mutex
+	forgetting      map[string]struct{} // aggregates between tombstone and erase
 	syncs           []SyncProjection[T]
 	durableMatch    func(eventName string) bool
 	onSnapshotError func(context.Context, asynxmd.Event[T], error)
@@ -70,34 +73,94 @@ func New[T any](
 	d *dispatcher.Dispatcher[T],
 	opts ...Opt[T],
 ) *CommandExecutor[T] {
-	e := &CommandExecutor[T]{es: es, dispatcher: d}
+	e := &CommandExecutor[T]{es: es, dispatcher: d, forgetting: make(map[string]struct{})}
 	for _, opt := range opts {
 		opt(e)
 	}
 	return e
 }
 
+// Execute runs the pipeline. With waitHandlers it also waits for the event's
+// handlers to run once, giving up when ctx is done: the event is committed by
+// then, so it is returned with an error wrapping ErrContextCancelled.
 func (e *CommandExecutor[T]) Execute(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
 	waitHandlers bool,
 ) (asynxmd.Event[T], error) {
-	unlock, err := e.locks.Lock(ctx, cmd.AggregateID())
-	if err != nil {
-		return asynxmd.Event[T]{}, fmt.Errorf("%w: %w", asynxmd.ErrContextCancelled, err)
-	}
-	defer unlock()
-
-	event, done, err := e.run(ctx, cmd)
-	unlock()
+	event, done, err := e.ExecuteAsync(ctx, cmd)
 	if err != nil {
 		return event, err
 	}
-
 	if waitHandlers && done != nil {
-		<-done
+		return event, WaitDone(ctx, done)
 	}
 	return event, nil
+}
+
+// WaitDone waits for done, or for ctx. A cancelled wait does not undo the
+// command, which is already committed.
+func WaitDone(ctx context.Context, done <-chan struct{}) error {
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("%w: waiting for handlers: %w", asynxmd.ErrContextCancelled, ctx.Err())
+	}
+}
+
+// ExecuteAsync runs the pipeline and returns once the event is committed and
+// queued. The channel closes when its handlers have run once (nil when there is
+// no dispatcher or the command was answered from a receipt), so the caller, not
+// a worker, does the waiting.
+func (e *CommandExecutor[T]) ExecuteAsync(
+	ctx context.Context,
+	cmd asynxmd.Command[T],
+) (asynxmd.Event[T], <-chan struct{}, error) {
+	unlock, err := e.locks.Lock(ctx, cmd.AggregateID())
+	if err != nil {
+		return asynxmd.Event[T]{}, nil, fmt.Errorf("%w: %w", asynxmd.ErrContextCancelled, err)
+	}
+	defer unlock()
+
+	if e.isForgetting(cmd.AggregateID()) {
+		return asynxmd.Event[T]{}, nil, fmt.Errorf("%w: %s", asynxmd.ErrForgetInProgress, cmd.AggregateID())
+	}
+	return e.run(ctx, cmd)
+}
+
+func (e *CommandExecutor[T]) isForgetting(id string) bool {
+	e.forgetMu.Lock()
+	defer e.forgetMu.Unlock()
+	_, ok := e.forgetting[id]
+	return ok
+}
+
+// setForgetting marks id as being forgotten; false if it already was.
+func (e *CommandExecutor[T]) setForgetting(id string) bool {
+	e.forgetMu.Lock()
+	defer e.forgetMu.Unlock()
+	if _, ok := e.forgetting[id]; ok {
+		return false
+	}
+	e.forgetting[id] = struct{}{}
+	return true
+}
+
+func (e *CommandExecutor[T]) clearForgetting(id string) {
+	e.forgetMu.Lock()
+	delete(e.forgetting, id)
+	e.forgetMu.Unlock()
+}
+
+// WithLock runs fn holding the aggregate's command lock.
+func (e *CommandExecutor[T]) WithLock(ctx context.Context, id string, fn func() error) error {
+	unlock, err := e.locks.Lock(ctx, id)
+	if err != nil {
+		return fmt.Errorf("%w: %w", asynxmd.ErrContextCancelled, err)
+	}
+	defer unlock()
+	return fn()
 }
 
 // run executes the pipeline. The caller holds the aggregate lock.
@@ -286,24 +349,40 @@ func idempotencyKey[T any](cmd asynxmd.Command[T]) string {
 	return ""
 }
 
-// Forget erases an aggregate. The tombstone is written (running synchronous
-// projections) and enqueued under the aggregate's lock; the lock is then
-// released while the forget handlers observe the tombstone and the aggregate's
-// last state — handlers queued ahead of it may legitimately send commands to
-// this aggregate, which need the lock. The lock is retaken to erase the stream,
-// its pending deliveries and its snapshot, so the erase is atomic with respect
-// to every command: a command that slipped in after the tombstone is erased
-// with the rest, and one that follows starts a new aggregate at version 1.
+// Forget erases an aggregate.
 //
-// A crash between the tombstone and the erase leaves the aggregate in place;
-// retrying Forget runs the handlers again (at-least-once).
+// The tombstone is written (running synchronous projections) and enqueued under
+// the aggregate's lock, and the aggregate is marked as being forgotten until the
+// erase finishes: commands for it are rejected with ErrForgetInProgress, so
+// nothing can slip in between the tombstone and the erase. (Rejecting rather
+// than queueing is what lets handlers ahead of the tombstone, which may react
+// by sending commands to this aggregate, finish instead of deadlocking.)
+//
+// The aggregate's pending durable deliveries are abandoned first, so a failing
+// handler cannot hold the tombstone back. Forget then waits, up to ctx, for the
+// tombstone to be delivered: to the forget handlers and to every durable
+// subscriber, each of which must succeed. Only then does it erase the snapshot,
+// the stream and the delivery entries, atomically, under the lock again.
+//
+// If Forget fails before the erase (ctx done, a durable subscriber parked, the
+// dispatcher closing) the aggregate keeps its tombstone and its abandoned
+// deliveries stay pending until the next recovery; call Forget again.
 func (e *CommandExecutor[T]) Forget(ctx context.Context, aggregateID string) error {
-	done, err := e.writeTombstone(ctx, aggregateID)
+	ticket, err := e.writeTombstone(ctx, aggregateID)
 	if err != nil {
 		return err
 	}
-	if done != nil {
-		<-done
+	defer e.clearForgetting(aggregateID)
+
+	if ticket.Final != nil {
+		select {
+		case err := <-ticket.Final:
+			if err != nil {
+				return fmt.Errorf("%w: tombstone delivery: %w", asynxmd.ErrForgetFailed, err)
+			}
+		case <-ctx.Done():
+			return fmt.Errorf("%w: waiting for handlers: %w", asynxmd.ErrForgetFailed, ctx.Err())
+		}
 	}
 
 	// The erase must finish even if the caller gives up.
@@ -332,32 +411,48 @@ func (e *CommandExecutor[T]) Forget(ctx context.Context, aggregateID string) err
 	return nil
 }
 
-// writeTombstone commits the tombstone and enqueues it for the forget
-// handlers, under the aggregate's lock. The returned channel closes when the
-// handlers have finished (nil without a dispatcher).
-func (e *CommandExecutor[T]) writeTombstone(ctx context.Context, aggregateID string) (<-chan struct{}, error) {
+// writeTombstone marks the aggregate as being forgotten, commits the tombstone
+// and enqueues it for delivery, under the aggregate's lock. On success the mark
+// stays until Forget clears it; on error it is cleared here.
+func (e *CommandExecutor[T]) writeTombstone(ctx context.Context, aggregateID string) (dispatcher.Ticket, error) {
 	unlock, err := e.locks.Lock(ctx, aggregateID)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", asynxmd.ErrContextCancelled, err)
+		return dispatcher.Ticket{}, fmt.Errorf("%w: %w", asynxmd.ErrContextCancelled, err)
 	}
 	defer unlock()
 
+	if !e.setForgetting(aggregateID) {
+		return dispatcher.Ticket{}, fmt.Errorf("%w: %s", asynxmd.ErrForgetInProgress, aggregateID)
+	}
+
+	ticket, err := e.commitTombstone(ctx, aggregateID)
+	if err != nil {
+		e.clearForgetting(aggregateID)
+		return dispatcher.Ticket{}, err
+	}
+	return ticket, nil
+}
+
+func (e *CommandExecutor[T]) commitTombstone(ctx context.Context, aggregateID string) (dispatcher.Ticket, error) {
 	tombstone, err := e.es.WriteTx(ctx, commands.NewForgetCommand[T](aggregateID), e.tombstoneHook())
 	if err != nil {
 		if errors.Is(err, asynxmd.ErrValidation) && !errors.Is(err, asynxmd.ErrSyncProjection) {
-			return nil, err
+			return dispatcher.Ticket{}, err
 		}
-		return nil, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
+		return dispatcher.Ticket{}, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 	}
 
 	if e.dispatcher == nil {
-		return nil, nil
+		return dispatcher.Ticket{}, nil
 	}
-	done, err := e.dispatcher.Enqueue(ctx, tombstone, nil)
+	// A failing handler must not hold the tombstone back: the entries are
+	// dropped by the erase anyway.
+	e.dispatcher.Supersede(aggregateID)
+	ticket, err := e.dispatcher.EnqueueForget(ctx, tombstone)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
+		return dispatcher.Ticket{}, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 	}
-	return done, nil
+	return ticket, nil
 }
 
 // tombstoneHook runs synchronous projections for the tombstone. It enqueues no

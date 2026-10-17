@@ -22,4 +22,6 @@ var (
 	ErrHandlerPanic         = errors.New("asynx: durable handler panicked")
 	ErrHandlerTimeout       = errors.New("asynx: durable handler timed out")
 	ErrFallbackUnsupported  = errors.New("asynx: durable subscribers do not support WithFallback")
+	ErrDeliveryParked       = errors.New("asynx: durable delivery parked")
+	ErrForgetInProgress     = errors.New("asynx: aggregate is being forgotten")
 )

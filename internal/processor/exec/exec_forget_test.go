@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -124,7 +125,10 @@ func TestForget_ConcurrentWithUpdatesNeverLeavesAGappedStream(t *testing.T) {
 					}
 					return
 				}
-				if _, err := ex.Execute(ctx, update("agg", float64(i)), false); err != nil {
+				// A command racing the Forget is either ordered before it, after it,
+				// or rejected while it runs.
+				_, err := ex.Execute(ctx, update("agg", float64(i)), false)
+				if err != nil && !errors.Is(err, asynxmd.ErrForgetInProgress) {
 					t.Errorf("Execute: %v", err)
 				}
 			}()
@@ -262,7 +266,14 @@ func TestForget_DoesNotDeadlockWithAReactionToItsOwnAggregate(t *testing.T) {
 
 	forgot := make(chan error, 1)
 	go func() { forgot <- ex.Forget(ctx, "agg") }()
-	time.Sleep(30 * time.Millisecond) // tombstone is now queued behind the reaction
+	// The tombstone is queued behind the reaction once Forget has marked the
+	// aggregate and released its lock.
+	for !ex.isForgetting("agg") {
+		runtime.Gosched()
+	}
+	if err := ex.WithLock(ctx, "agg", func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
 	close(release)
 
 	select {

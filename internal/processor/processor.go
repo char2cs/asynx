@@ -15,11 +15,11 @@ package processor
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/char2cs/asynx/internal/bus/dispatcher"
-	"github.com/char2cs/asynx/internal/commands"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/processor/exec"
 	"github.com/char2cs/asynx/internal/processor/models"
@@ -36,6 +36,8 @@ type Processor[T any] struct {
 	dispatcher    *dispatcher.Dispatcher[T]
 	bus           asynxmd.Bus[T]
 	shuttingDown  atomic.Bool
+	lifeMu        sync.Mutex     // orders Shutdown against Forget calls starting
+	forgets       sync.WaitGroup // Forget calls in flight
 	onSendPending func()
 }
 
@@ -69,6 +71,27 @@ func WithDeliveryErrorHandler[T any](fn asynxmd.DeliveryErrorHandler[T]) Process
 func WithDeliveryPanicHandler[T any](fn asynxmd.PanicHandler[T]) ProcessorOpt[T] {
 	return func(cfg *processorConfig[T]) {
 		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithDeliveryPanicHandler(fn))
+	}
+}
+
+// WithDeliveryMaxAttempts caps the attempts of a failing durable delivery.
+func WithDeliveryMaxAttempts[T any](n int) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithMaxAttempts[T](n))
+	}
+}
+
+// WithDeliveryMaxQueued bounds the jobs held in memory per aggregate.
+func WithDeliveryMaxQueued[T any](n int) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithMaxQueued[T](n))
+	}
+}
+
+// WithDeadLetterHandler sets the handler for deliveries that ran out of attempts.
+func WithDeadLetterHandler[T any](fn asynxmd.DeadLetterHandler[T]) ProcessorOpt[T] {
+	return func(cfg *processorConfig[T]) {
+		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithDeadLetterHandler(fn))
 	}
 }
 
@@ -254,7 +277,14 @@ func (p *Processor[T]) sendAndWait(
 
 	select {
 	case result := <-envelope.ResultChan:
-		return result.Event, result.Err
+		if result.Err != nil || result.Done == nil {
+			return result.Event, result.Err
+		}
+		if err := exec.WaitDone(ctx, result.Done); err != nil {
+			// Same sentinel as every other cancelled wait; the event is committed.
+			return result.Event, asynxmd.ErrContextCancelled
+		}
+		return result.Event, nil
 	case <-ctx.Done():
 		return asynxmd.Event[T]{}, asynxmd.ErrContextCancelled
 	}
@@ -265,7 +295,17 @@ func (p *Processor[T]) Shutdown(ctx context.Context) error {
 		return asynxmd.ErrAlreadyShuttingDown
 	}
 
+	// Release anything waiting on a failing delivery before draining: such a
+	// delivery would otherwise hold the wait, and with it the shutdown, open.
+	if p.dispatcher != nil {
+		p.dispatcher.Interrupt()
+	}
+
 	if err := p.pool.Drain(ctx); err != nil {
+		return err
+	}
+
+	if err := waitGroup(ctx, &p.forgets); err != nil {
 		return err
 	}
 
@@ -276,7 +316,21 @@ func (p *Processor[T]) Shutdown(ctx context.Context) error {
 	return p.closeBus(ctx)
 }
 
+// waitGroup waits for wg, or for ctx.
+func waitGroup(ctx context.Context, wg *sync.WaitGroup) error {
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (p *Processor[T]) setShuttingDown() bool {
+	p.lifeMu.Lock()
+	defer p.lifeMu.Unlock()
 	return p.shuttingDown.CompareAndSwap(false, true)
 }
 
@@ -309,33 +363,56 @@ func (p *Processor[T]) SetOnSendPending(fn func()) {
 	p.onSendPending = fn
 }
 
-// Forget erases the aggregate on its shard worker, fenced by the aggregate's
-// lock so no command can interleave. It returns once the forget handlers have
-// run and the aggregate is erased.
+// Forget erases the aggregate; see CommandExecutor.Forget. It does not occupy a
+// shard worker while waiting for handlers, so a slow handler cannot stall the
+// shard's other aggregates.
 func (p *Processor[T]) Forget(
 	ctx context.Context,
 	aggregateID string,
 ) error {
+	p.lifeMu.Lock()
 	if p.isShuttingDown() {
+		p.lifeMu.Unlock()
 		return asynxmd.ErrShuttingDown
 	}
+	p.forgets.Add(1)
+	p.lifeMu.Unlock()
+	defer p.forgets.Done()
 
 	if err := ctx.Err(); err != nil {
 		return asynxmd.ErrContextCancelled
 	}
+	return p.executor.Forget(ctx, aggregateID)
+}
 
-	cmd := commands.NewForgetCommand[T](aggregateID)
-	shard := p.pool.Shards()[p.router.Route(aggregateID)]
-	envelope := &models.CommandEnvelope[T]{
-		Cmd:          cmd,
-		Ctx:          ctx,
-		ResultChan:   make(chan models.CommandResult[T], 1),
-		WaitHandlers: true,
-		Forget:       true,
+// Resume redelivers the aggregates parked after a delivery gave up (see
+// ErrDeliveryParked) or overflowed its queue. For each it lifts the park and
+// re-enqueues the aggregate's pending deliveries, in order, under the
+// aggregate's command lock so no live event overtakes them. Call it once the
+// cause (a bad handler, a downstream outage) is fixed.
+func (p *Processor[T]) Resume(ctx context.Context, batch int) error {
+	if p.dispatcher == nil {
+		return nil
 	}
-
-	_, err := p.sendAndWait(ctx, shard, envelope)
-	return err
+	if batch <= 0 {
+		batch = 100
+	}
+	for _, agg := range p.dispatcher.Halted() {
+		err := p.executor.WithLock(ctx, agg, func() error {
+			p.dispatcher.Resume(agg)
+			if err := p.redeliverPending(ctx, batch, agg); err != nil {
+				// Leave it parked: its entries are not all queued, and a
+				// lifted park would hide that from the next Resume.
+				p.dispatcher.Park(agg)
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("asynx: resume %s: %w", agg, err)
+		}
+	}
+	return nil
 }
 
 // Recover re-enqueues every unacknowledged delivery, in enqueue order, on the
@@ -355,26 +432,34 @@ func (p *Processor[T]) Recover(ctx context.Context, batch int) error {
 	if batch <= 0 {
 		batch = 100
 	}
+	return p.redeliverPending(ctx, batch, "")
+}
 
+// redeliverPending re-enqueues pending deliveries in enqueue order: all of
+// them, or only those of aggregateID when it is not empty.
+func (p *Processor[T]) redeliverPending(ctx context.Context, batch int, aggregateID string) error {
 	store := p.es.Store()
-	queued := make(map[asynxmd.Delivery]struct{})
+	seen := make(map[asynxmd.Delivery]struct{})
 
 	for {
-		// Entries already queued sit at the front (the log is in enqueue
-		// order), so asking for that many plus a batch always reaches new ones.
-		pending, err := store.PendingDeliveries(ctx, len(queued)+batch)
+		// Entries already seen sit at the front (the log is in enqueue order),
+		// so asking for that many plus a batch always reaches new ones.
+		pending, err := store.PendingDeliveries(ctx, len(seen)+batch)
 		if err != nil {
 			return fmt.Errorf("asynx: recovery: %w", err)
 		}
 
 		fresh := 0
 		for _, d := range pending {
-			if _, again := queued[d]; again {
+			if _, again := seen[d]; again {
 				continue
 			}
-			queued[d] = struct{}{}
+			seen[d] = struct{}{}
 			fresh++
 
+			if aggregateID != "" && d.AggregateID != aggregateID {
+				continue
+			}
 			if err := p.redeliver(ctx, d); err != nil {
 				return fmt.Errorf("asynx: recovery: %w", err)
 			}
@@ -406,7 +491,7 @@ func (p *Processor[T]) redeliver(ctx context.Context, d asynxmd.Delivery) error 
 		return store.AckDelivery(ctx, d.AggregateID, d.Version)
 	}
 
-	_, err = p.dispatcher.Enqueue(ctx, event, func(ctx context.Context) error {
+	_, err = p.dispatcher.EnqueueRecovered(ctx, event, func(ctx context.Context) error {
 		return store.AckDelivery(ctx, d.AggregateID, d.Version)
 	})
 	return err

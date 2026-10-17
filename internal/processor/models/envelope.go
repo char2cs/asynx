@@ -17,6 +17,10 @@ import (
 type CommandResult[T any] struct {
 	Event asynxmd.Event[T]
 	Err   error
+	// Done, when non-nil, closes once the event's handlers have run (set only
+	// for envelopes with WaitHandlers). The sender waits on it, not the worker,
+	// so a slow or failing handler never occupies a shard worker.
+	Done <-chan struct{}
 }
 
 type CommandEnvelope[T any] struct {
@@ -24,10 +28,6 @@ type CommandEnvelope[T any] struct {
 	Ctx          context.Context
 	ResultChan   chan CommandResult[T]
 	WaitHandlers bool
-	// Forget marks the envelope as a Forget job for Cmd's aggregate: the worker
-	// runs CommandExecutor.Forget instead of executing Cmd. Cmd only routes the
-	// job to the aggregate's shard.
-	Forget bool
 }
 
 type CommandJob[T any] struct {

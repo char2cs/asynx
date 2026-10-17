@@ -790,15 +790,17 @@ func TestForget_ConcurrentForget_SecondReturnsErrValidation(t *testing.T) {
 	}
 	wg.Wait()
 
-	// At least one call must fail: either ErrValidation (aggregate already gone)
-	// or ErrPipelineFailed (concurrent write conflict). Both callers succeeding
+	// At least one call must fail: ErrValidation (aggregate already gone),
+	// ErrForgetInProgress (the other Forget is still running) or
+	// ErrPipelineFailed (concurrent write conflict). Both callers succeeding
 	// would mean two tombstone events were written without a conflict, which is
 	// also safe (aggregate is still erased), but we verify the aggregate is gone.
 	successCount := 0
 	for _, err := range errs {
 		if err == nil {
 			successCount++
-		} else if !errors.Is(err, models.ErrValidation) && !errors.Is(err, models.ErrPipelineFailed) {
+		} else if !errors.Is(err, models.ErrValidation) && !errors.Is(err, models.ErrPipelineFailed) &&
+			!errors.Is(err, models.ErrForgetInProgress) {
 			t.Errorf("unexpected error from concurrent Forget: %v", err)
 		}
 	}

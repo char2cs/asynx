@@ -260,34 +260,58 @@ func TestShard_NilEnvelopeClosesJobQueue(t *testing.T) {
 	}
 }
 
-func TestShard_ForgetEnvelopeRunsTheForgetJob(t *testing.T) {
+func TestShard_WaitingForHandlersDoesNotHoldTheWorker(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
+	release := make(chan struct{})
+	if _, err := b.Subscribe("OrderCreated", func(context.Context, asynxmd.Event[order]) {
+		<-release
+	}); err != nil {
+		t.Fatal(err)
+	}
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	d := dispatcher.New[order](b)
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
-	p := pool.New(executor, 1, 0, 1)
+	p := pool.New(executor, 1, 0, 1) // one shard, one worker
 	defer p.Drain(context.Background())
 
-	ctx := context.Background()
-	if _, err := executor.Execute(ctx, mocks.CreateOrderCmd{ID: "order1", Total: 1}, false); err != nil {
-		t.Fatal(err)
+	send := func(id string) *models.CommandEnvelope[order] {
+		env := &models.CommandEnvelope[order]{
+			Cmd:          mocks.CreateOrderCmd{ID: id, Total: 1},
+			Ctx:          context.Background(),
+			ResultChan:   make(chan models.CommandResult[order], 1),
+			WaitHandlers: true,
+		}
+		p.Shards()[0].CommandChan() <- env
+		return env
 	}
 
-	envelope := &models.CommandEnvelope[order]{
-		Cmd:        mocks.CreateOrderCmd{ID: "order1"},
-		Ctx:        ctx,
-		ResultChan: make(chan models.CommandResult[order], 1),
-		Forget:     true,
+	first := send("order1")
+	select {
+	case res := <-first.ResultChan:
+		if res.Err != nil || res.Done == nil {
+			t.Fatalf("result = %+v, want committed with a Done channel", res)
+		}
+		select {
+		case <-res.Done:
+			t.Fatal("Done closed while the handler is still blocked")
+		default:
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker is held by a blocked handler: first result never arrived")
 	}
-	p.Shards()[0].CommandChan() <- envelope
 
-	if result := <-envelope.ResultChan; result.Err != nil {
-		t.Fatalf("forget job failed: %v", result.Err)
+	// The single worker is free: another aggregate commits while the handler blocks.
+	second := send("order2")
+	select {
+	case res := <-second.ResultChan:
+		if res.Err != nil {
+			t.Fatal(res.Err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second aggregate stalled behind the first one's handler")
 	}
-	if ok, _ := es.Exists(ctx, "order1"); ok {
-		t.Fatal("aggregate still exists after the forget job")
-	}
+	close(release)
 }

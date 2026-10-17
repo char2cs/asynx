@@ -106,24 +106,18 @@ func (s *Shard[T]) executeJob(
 	executor *exec.CommandExecutor[T],
 	job *models.CommandJob[T],
 ) {
-	if job.Envelope.Forget {
-		s.sendResult(
-			job.Envelope.ResultChan,
-			models.CommandResult[T]{Err: executor.Forget(job.Envelope.Ctx, job.Envelope.Cmd.AggregateID())},
-		)
-		return
-	}
-
-	event, err := executor.Execute(
+	// The worker is released once the event is committed; waiting for handlers
+	// is the sender's job, so a slow or failing handler never holds a worker.
+	event, done, err := executor.ExecuteAsync(
 		job.Envelope.Ctx,
 		job.Envelope.Cmd,
-		job.Envelope.WaitHandlers,
 	)
 
-	s.sendResult(
-		job.Envelope.ResultChan,
-		models.CommandResult[T]{Event: event, Err: err},
-	)
+	result := models.CommandResult[T]{Event: event, Err: err}
+	if job.Envelope.WaitHandlers {
+		result.Done = done
+	}
+	s.sendResult(job.Envelope.ResultChan, result)
 }
 
 func (s *Shard[T]) sendResult(

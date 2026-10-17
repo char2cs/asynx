@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -466,8 +467,9 @@ func TestDispatch_WorkerSurvivesPanic(t *testing.T) {
 
 func TestEnqueue_AckRunsAfterHandlersFinish(t *testing.T) {
 	var handled, acked atomic.Bool
+	gate := make(chan struct{})
 	bus := &callbackBus{fn: func(context.Context, asynxmd.Event[int]) error {
-		time.Sleep(20 * time.Millisecond)
+		<-gate
 		handled.Store(true)
 		return nil
 	}}
@@ -484,13 +486,17 @@ func TestEnqueue_AckRunsAfterHandlersFinish(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
+	if acked.Load() {
+		t.Fatal("ack ran while the handler was still blocked")
+	}
+	close(gate)
 	<-done
 	if !acked.Load() {
 		t.Fatal("ack did not run before done closed")
 	}
 }
 
-func TestEnqueue_AckSkippedWhenBusRejectsEvent(t *testing.T) {
+func TestEnqueue_DurableDeliveryStillAcksWhenBusRejectsEvent(t *testing.T) {
 	var acked atomic.Bool
 	var reported atomic.Int32
 	d := New(
@@ -499,17 +505,21 @@ func TestEnqueue_AckSkippedWhenBusRejectsEvent(t *testing.T) {
 	)
 	defer d.Close(context.Background())
 
-	done, err := d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error {
+	ticket, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error {
 		acked.Store(true)
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
-	<-done
 
-	if acked.Load() {
-		t.Error("ack ran although the bus rejected the event")
+	// A failing live subscriber must not skip the durable delivery: the next
+	// event of the aggregate would otherwise overtake this one.
+	if err := <-ticket.Final; err != nil {
+		t.Fatalf("delivery ended with %v", err)
+	}
+	if !acked.Load() {
+		t.Error("ack did not run after the bus rejected the event")
 	}
 	if reported.Load() != 1 {
 		t.Errorf("publish errors reported = %d, want 1", reported.Load())
@@ -602,8 +612,10 @@ func TestEnqueue_NeverBlocksBehindASlowHandler(t *testing.T) {
 
 func TestClose_DrainsJobsQueuedBehindASlowHandler(t *testing.T) {
 	release := make(chan struct{})
+	running := make(chan struct{}, 3)
 	var handled atomic.Int32
 	bus := &callbackBus{fn: func(context.Context, asynxmd.Event[int]) error {
+		running <- struct{}{}
 		<-release
 		handled.Add(1)
 		return nil
@@ -615,10 +627,24 @@ func TestClose_DrainsJobsQueuedBehindASlowHandler(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	<-running // the first job is inside its handler, two more are queued behind it
 
 	closed := make(chan error, 1)
 	go func() { closed <- d.Close(context.Background()) }()
-	time.Sleep(20 * time.Millisecond)
+	for {
+		d.mu.Lock()
+		isClosed := d.closed
+		d.mu.Unlock()
+		if isClosed {
+			break
+		}
+		runtime.Gosched()
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned (%v) before the queued jobs drained", err)
+	default:
+	}
 	close(release)
 
 	if err := <-closed; err != nil {
