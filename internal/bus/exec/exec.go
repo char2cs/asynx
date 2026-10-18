@@ -33,12 +33,15 @@ type HandlerJob[T any] struct {
 
 // ExecuteHandler runs job.Handler (via ExecuteWithTimeout), recovers from any
 // panic, and optionally calls job.FallbackHandler. It calls wg.Done() when it
-// returns. Intended to be called as a goroutine.
+// returns. Intended to be called as a goroutine. The panic and timeout callbacks
+// run in goroutines nobody recovers, so a panic inside one is swallowed: a
+// misbehaving observer must not take the process down.
 func ExecuteHandler[T any](wg *sync.WaitGroup, job *HandlerJob[T]) {
 	defer wg.Done()
 
 	// Build resolved callbacks — job-level overrides the package default.
 	panicFn := func(v any) {
+		defer func() { _ = recover() }()
 		if job.OnPanic != nil {
 			job.OnPanic(job.Ctx, job.Event, v)
 		} else {
@@ -46,6 +49,7 @@ func ExecuteHandler[T any](wg *sync.WaitGroup, job *HandlerJob[T]) {
 		}
 	}
 	timeoutFn := func() {
+		defer func() { _ = recover() }()
 		if job.OnTimeout != nil {
 			job.OnTimeout(job.Ctx, job.Event, job.Timeout)
 		} else {
@@ -64,8 +68,6 @@ func ExecuteHandler[T any](wg *sync.WaitGroup, job *HandlerJob[T]) {
 			return
 		}
 
-		// Wrap the fallback call in its own recover so a second panic (Bug 1)
-		// never escapes this defer function and crash the process.
 		func() {
 			defer func() {
 				if r2 := recover(); r2 != nil {

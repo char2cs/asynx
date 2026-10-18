@@ -1,7 +1,9 @@
 package dispatcher
 
 import (
+	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	asynxmd "github.com/char2cs/asynx/models"
@@ -10,6 +12,8 @@ import (
 // DurableSub is a durable subscriber the dispatcher runs itself, with retry,
 // instead of publishing through the bus.
 type DurableSub[T any] struct {
+	// Name identifies the subscriber in the errors reported for it.
+	Name string
 	// Match reports whether the subscriber wants an event name.
 	Match func(eventName string) bool
 	// Handler delivers an event. A non-nil error, a panic, or a timeout then
@@ -94,7 +98,6 @@ func (d *Dispatcher[T]) haltLocked(agg string) {
 		}
 		j.markUnrun(asynxmd.ErrDeliveryParked)
 		j.complete(asynxmd.ErrDeliveryParked)
-		d.jobsWg.Done()
 	}
 	q.jobs = kept
 }
@@ -159,6 +162,10 @@ func (d *Dispatcher[T]) Interrupt() {
 	d.quitOnce.Do(func() { close(d.quit) })
 }
 
+// Interrupted is closed once Interrupt or Close has been called: from then on
+// failing durable deliveries give up instead of retrying.
+func (d *Dispatcher[T]) Interrupted() <-chan struct{} { return d.quit }
+
 func (d *Dispatcher[T]) isHalted(agg string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -203,11 +210,21 @@ func (d *Dispatcher[T]) deliverDurable(
 			return asynxmd.ErrDispatcherClosed
 		case <-halt:
 			return asynxmd.ErrDeliveryParked
-		case <-time.After(backoff):
+		case <-time.After(jittered(backoff)):
 		}
 		backoff = min(backoff*2, d.retryMax)
 	}
 	return nil
+}
+
+// jittered spreads a retry delay over its upper half, so deliveries that failed
+// together (a downstream outage) do not retry in lockstep.
+func jittered(delay time.Duration) time.Duration {
+	half := delay / 2
+	if half <= 0 {
+		return delay
+	}
+	return half + rand.N(half+1)
 }
 
 // subscribersFor lists the durable subscribers that receive the job: all of
@@ -223,22 +240,24 @@ func (d *Dispatcher[T]) subscribersFor(job *dispatchJob[T]) (subs []DurableSub[T
 }
 
 // attempt runs each pending subscriber once and returns the ones that failed,
-// with the last error.
+// with their errors joined, so the dead-letter handler learns of every one.
 func (d *Dispatcher[T]) attempt(
 	job *dispatchJob[T],
 	pending []DurableSub[T],
 	attempt int,
 ) (failed []DurableSub[T], lastErr error) {
+	var errs []error
 	for _, sub := range pending {
 		err := d.runDurable(job, sub, attempt)
 		if err == nil {
 			continue
 		}
-		d.reportDeliveryError(job, err, attempt)
+		failure := &asynxmd.SubscriberError{Subscriber: sub.Name, Err: err}
+		d.reportDeliveryError(job, failure, attempt)
 		failed = append(failed, sub)
-		lastErr = err
+		errs = append(errs, failure)
 	}
-	return failed, lastErr
+	return failed, errors.Join(errs...)
 }
 
 // giveUp ends a delivery whose attempts ran out. A dead-letter handler may
@@ -364,7 +383,8 @@ func (d *Dispatcher[T]) runDurable(
 	case err := <-result:
 		return err
 	case <-timer.C:
-		d.reportDeliveryError(job, fmt.Errorf("%w after %v", asynxmd.ErrHandlerTimeout, sub.Timeout), attempt)
+		timedOut := &asynxmd.SubscriberError{Subscriber: sub.Name, Err: fmt.Errorf("%w after %v", asynxmd.ErrHandlerTimeout, sub.Timeout)}
+		d.reportDeliveryError(job, timedOut, attempt)
 		return <-result
 	}
 }

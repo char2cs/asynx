@@ -1012,3 +1012,27 @@ func TestExecute_EnqueueFailureAfterCommitParksTheAggregate(t *testing.T) {
 		t.Fatalf("halted = %v, want [agg]", got)
 	}
 }
+
+func TestWithLockIfFree_RunsWhenFreeAndSkipsWhenHeld(t *testing.T) {
+	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
+	executor := New(es, nil)
+
+	ran := false
+	if !executor.WithLockIfFree("agg", func() { ran = true }) || !ran {
+		t.Fatal("fn did not run on a free aggregate")
+	}
+
+	err := executor.WithLock(context.Background(), "agg", func() error {
+		if executor.WithLockIfFree("agg", func() { t.Error("fn ran while the lock was held") }) {
+			t.Error("WithLockIfFree reported running while the lock was held")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !executor.WithLockIfFree("agg", func() {}) {
+		t.Fatal("the lock was not released")
+	}
+}

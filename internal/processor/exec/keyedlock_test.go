@@ -117,3 +117,64 @@ func TestKeyedLock_UnlockIsIdempotent(t *testing.T) {
 	}
 	unlock2()
 }
+
+func TestKeyedLock_TryLockTakesAFreeKeyAndRefusesAHeldOne(t *testing.T) {
+	var k KeyedLock
+
+	unlock, ok := k.TryLock("agg")
+	if !ok {
+		t.Fatal("TryLock refused a free key")
+	}
+	if _, again := k.TryLock("agg"); again {
+		t.Fatal("TryLock took a key that is held")
+	}
+	if other, ok := k.TryLock("other"); !ok {
+		t.Fatal("TryLock refused an unrelated key")
+	} else {
+		other()
+	}
+
+	unlock()
+	unlock()
+	retaken, ok := k.TryLock("agg")
+	if !ok {
+		t.Fatal("TryLock refused the key after it was released")
+	}
+	retaken()
+	if n := k.size(); n != 0 {
+		t.Fatalf("entries left after all unlocks = %d, want 0", n)
+	}
+}
+
+func TestKeyedLock_TryLockDoesNotJumpAWaiter(t *testing.T) {
+	var k KeyedLock
+	unlock, _ := k.TryLock("agg")
+
+	acquired := make(chan func(), 1)
+	go func() {
+		release, err := k.Lock(context.Background(), "agg")
+		if err == nil {
+			acquired <- release
+		}
+	}()
+	for k.refs("agg") < 2 {
+		runtime.Gosched()
+	}
+
+	unlock()
+	release := <-acquired
+	if _, ok := k.TryLock("agg"); ok {
+		t.Fatal("TryLock took the key from the waiter that was handed it")
+	}
+	release()
+}
+
+// refs reports how many holders and waiters the key has. For tests.
+func (k *KeyedLock) refs(key string) int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if e, ok := k.entries[key]; ok {
+		return e.refs
+	}
+	return 0
+}

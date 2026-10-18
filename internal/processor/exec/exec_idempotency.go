@@ -93,12 +93,15 @@ func (e *CommandExecutor[T]) answerFromReceipt(
 		AggregateID: receipt.AggregateID,
 		Version:     receipt.Version,
 	}
-	_ = e.es.Replay(ctx, receipt.AggregateID, receipt.Version, receipt.Version,
+	replayErr := e.es.Replay(ctx, receipt.AggregateID, receipt.Version, receipt.Version,
 		func(_ context.Context, evt asynxmd.Event[T]) {
 			if evt.Version == receipt.Version && evt.ID == receipt.EventID {
 				event = evt
 			}
 		})
+	if replayErr != nil {
+		return event, true, fmt.Errorf("%w: reading the event of command %s: %w", asynxmd.ErrPipelineFailed, commandID, replayErr)
+	}
 	return event, true, nil
 }
 

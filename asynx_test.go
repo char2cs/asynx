@@ -1346,21 +1346,18 @@ func TestSubscribeWait_EventArrivesBeforeDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cmd := mocks.CreateOrderCmd{ID: "sw-1", Total: 42.0}
-		instance.SendWait(context.Background(), cmd) //nolint:errcheck
-	}()
+	stop := feedOrders(instance, "sw")
+	defer stop()
 
 	evt, err := instance.SubscribeWait(ctx, "OrderCreated")
 	if err != nil {
 		t.Fatalf("SubscribeWait: %v", err)
 	}
-	if evt.AggregateID != "sw-1" {
-		t.Fatalf("expected AggregateID sw-1, got %q", evt.AggregateID)
+	if !strings.HasPrefix(evt.AggregateID, "sw-") {
+		t.Fatalf("expected AggregateID sw-*, got %q", evt.AggregateID)
 	}
-	if evt.Aggregate.Total != 42.0 {
-		t.Fatalf("expected Total 42.0, got %f", evt.Aggregate.Total)
+	if evt.Aggregate.Total != 1.0 {
+		t.Fatalf("expected Total 1.0, got %f", evt.Aggregate.Total)
 	}
 }
 
@@ -1412,14 +1409,8 @@ func TestSubscribeWait_ConcurrentDifferentPatterns(t *testing.T) {
 		results[1], errs[1] = instance.SubscribeWait(ctx, "OrderCancelled")
 	}()
 
-	time.Sleep(100 * time.Millisecond)
-
-	if _, err := instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: "conc-1", Total: 10.0}); err != nil {
-		t.Fatalf("Send create: %v", err)
-	}
-	if _, err := instance.SendWait(context.Background(), mocks.CancelOrderCmd{ID: "conc-1"}); err != nil {
-		t.Fatalf("Send cancel: %v", err)
-	}
+	stop := feedOrders(instance, "conc", func(id string) models.Command[mocks.Order] { return mocks.CancelOrderCmd{ID: id} })
+	defer stop()
 
 	wg.Wait()
 
@@ -1446,12 +1437,10 @@ func TestSubscribeWait_AutoUnsubscribes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: "auto-1", Total: 1.0}) //nolint:errcheck
-	}()
+	stop := feedOrders(instance, "feed")
 
 	_, err := instance.SubscribeWait(ctx, "OrderCreated")
+	stop()
 	if err != nil {
 		t.Fatalf("SubscribeWait: %v", err)
 	}
@@ -1532,8 +1521,9 @@ func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(t *testing.T) {
 		}
 	}
 
-	// Give some handlers a chance to start blocking on ch <- evt.
-	time.Sleep(100 * time.Millisecond)
+	// The buffer is full once handlers have nowhere left to put an event: the
+	// remaining ones are blocked on ch <- evt.
+	eventually(t, "the Listen buffer to fill", func() bool { return len(ch) == cap(ch) })
 
 	// unsub MUST return promptly even with handlers blocked.
 	done := make(chan struct{})
@@ -2362,5 +2352,215 @@ func TestFailure_RestartAfterAFailedForgetDeliversTheMarkerFirst(t *testing.T) {
 	defer mu.Unlock()
 	if want := []string{models.ForgetEventName + "/2", "OrderUpdated/3"}; !slices.Equal(delivered, want) {
 		t.Fatalf("after the restart delivered %v, want %v", delivered, want)
+	}
+}
+
+// feedOrders sends a new order, and a follow-up command when given, every time
+// it can, until the returned stop is called. It stands in for traffic that
+// starts once a subscription exists, without guessing how long that takes: the
+// subscription sees the first order created after it registers.
+func feedOrders(
+	instance asynx.Asynx[mocks.Order],
+	prefix string,
+	followUps ...func(id string) models.Command[mocks.Order],
+) (stop func()) {
+	quit := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		for i := 0; ; i++ {
+			select {
+			case <-quit:
+				return
+			default:
+			}
+			id := fmt.Sprintf("%s-%d", prefix, i)
+			if _, err := instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: id, Total: 1}); err != nil {
+				return
+			}
+			for _, followUp := range followUps {
+				instance.SendWait(context.Background(), followUp(id)) //nolint:errcheck
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(quit); <-finished })
+	}
+}
+
+// blockingSnapshots holds the first armed Put for one aggregate until released.
+type blockingSnapshots struct {
+	models.SnapshotStore
+	aggregate string
+	armed     atomic.Bool
+	entered   chan struct{}
+	release   chan struct{}
+}
+
+func (s *blockingSnapshots) Put(
+	ctx context.Context,
+	aggregateID string,
+	version int64,
+	data []byte,
+) error {
+	if aggregateID == s.aggregate && s.armed.CompareAndSwap(true, false) {
+		close(s.entered)
+		<-s.release
+	}
+	return s.SnapshotStore.Put(ctx, aggregateID, version, data)
+}
+
+// A Get that upcasts writes an auto-snapshot without holding the aggregate's
+// lock. It must not be able to land after a Forget's erase, which would bring
+// the erased state back and make the re-created aggregate start above v1.
+func TestGet_AutoSnapshotCannotResurrectAForgottenAggregate(t *testing.T) {
+	ctx := context.Background()
+	s := store.New()
+	old := build(t, eight(s))
+	for _, cmd := range []models.Command[mocks.Order]{mocks.CreateOrderCmd{ID: "ws", Total: 10}, upd("ws", 20)} {
+		if _, err := old.SendWait(ctx, cmd); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := old.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snaps := &blockingSnapshots{SnapshotStore: store.NewSnapshots(), aggregate: "ws", entered: make(chan struct{}), release: make(chan struct{})}
+	inst := build(t, asynx.New[mocks.Order]().WithEventStore(s).WithSnapshotStore(snaps).
+		WithSchemaVersion(2).
+		WithUpcaster(1, func(_ context.Context, _ string, p []byte) ([]byte, error) { return p, nil }))
+	snaps.armed.Store(true)
+	got := make(chan error, 1)
+	go func() { _, err := inst.Get(ctx, "ws"); got <- err }()
+	within(t, snaps.entered, "the auto-snapshot write")
+
+	forgot := make(chan error, 1)
+	go func() { forgot <- inst.Forget(ctx, "ws") }()
+	select {
+	case err := <-forgot:
+		t.Fatalf("Forget finished (%v) while an auto-snapshot of the aggregate was being written", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(snaps.release)
+	if err := within(t, forgot, "Forget"); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+	within(t, got, "Get")
+
+	if exists, _ := inst.Exists(ctx, "ws"); exists {
+		t.Fatal("the forgotten aggregate exists again")
+	}
+	if _, err := inst.Get(ctx, "ws"); !errors.Is(err, models.ErrNotFound) {
+		t.Fatalf("Get after Forget = %v, want ErrNotFound", err)
+	}
+	if evt, err := inst.SendWait(ctx, mocks.CreateOrderCmd{ID: "ws", Total: 1}); err != nil || evt.Version != 1 {
+		t.Fatalf("re-create = v%d, %v; want v1", evt.Version, err)
+	}
+}
+
+// A retry of a command whose handlers are still running waits for them, as its
+// first attempt would have.
+func TestSendWait_RetryOfAnIdempotentCommandWaitsForTheOriginalHandlers(t *testing.T) {
+	ctx := context.Background()
+	inst := build(t, eight(store.New()))
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var finished atomic.Bool
+	if _, err := inst.Subscribe("OrderCreated", func(context.Context, models.Event[mocks.Order]) {
+		entered <- struct{}{}
+		<-release
+		finished.Store(true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cmd := idemCreate{CreateOrderCmd: mocks.CreateOrderCmd{ID: "agg", Total: 1}, Cmd: "cmd-1"}
+
+	short, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if _, err := inst.SendWait(short, cmd); !errors.Is(err, models.ErrContextCancelled) {
+		t.Fatalf("first SendWait = %v, want ErrContextCancelled (committed, handler still running)", err)
+	}
+	within(t, entered, "the handler")
+
+	retried := make(chan error, 1)
+	go func() { _, err := inst.SendWait(ctx, cmd); retried <- err }()
+	select {
+	case err := <-retried:
+		t.Fatalf("the retry returned (%v) before the original handler finished", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if err := within(t, retried, "the retry"); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if !finished.Load() {
+		t.Fatal("the retry returned before the handler finished")
+	}
+}
+
+// A handler that Forgets its own aggregate with a context that is not its own
+// cannot be recognised, and the Forget waits for the very handler that called it.
+// Shutting down must still release it.
+func TestShutdown_ReleasesAHandlerWaitingOnItsOwnAggregatesForget(t *testing.T) {
+	ctx := context.Background()
+	forgetResult := make(chan error, 1)
+	var inst asynx.Asynx[mocks.Order]
+	inst = build(t, eight(store.New()).
+		WithSubscriber("OrderCreated", func(_ context.Context, e models.Event[mocks.Order]) error {
+			forgetResult <- inst.Forget(context.Background(), e.AggregateID)
+			return nil
+		}))
+	if _, err := inst.Send(ctx, mocks.CreateOrderCmd{ID: "agg", Total: 1}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the Forget to raise its fence", func() bool {
+		_, err := inst.Send(ctx, upd("agg", 2))
+		return errors.Is(err, models.ErrForgetInProgress)
+	})
+
+	shutdown, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := inst.Shutdown(shutdown); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	err := within(t, forgetResult, "the Forget")
+	if !errors.Is(err, models.ErrForgetFailed) || !errors.Is(err, models.ErrShuttingDown) {
+		t.Fatalf("Forget = %v, want ErrForgetFailed wrapping ErrShuttingDown", err)
+	}
+}
+
+// When several durable subscribers fail, the dead-letter handler learns of each,
+// by name.
+func TestFailure_DeadLetterLearnsEverySubscriberThatFailed(t *testing.T) {
+	ctx := context.Background()
+	got := make(chan error, 1)
+	billing, search := errors.New("billing down"), errors.New("search down")
+	inst := build(t, eight(store.New()).
+		WithDeliveryMaxAttempts(2).
+		WithDeliveryRetry(time.Millisecond, time.Millisecond).
+		WithDeadLetterHandler(func(_ context.Context, _ models.Event[mocks.Order], err error) error {
+			got <- err
+			return nil
+		}).
+		WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error { return billing }).
+		WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error { return search }))
+	if _, err := inst.Send(ctx, upd("agg", 1)); err != nil {
+		t.Fatal(err)
+	}
+
+	err := within(t, got, "the dead letter")
+	if !errors.Is(err, billing) || !errors.Is(err, search) {
+		t.Fatalf("dead-letter handler received %q, want both failures", err)
+	}
+	if !strings.Contains(err.Error(), "OrderUpdated#1") || !strings.Contains(err.Error(), "OrderUpdated#2") {
+		t.Fatalf("dead-letter handler received %q, want both subscribers named", err)
+	}
+	var sub *models.SubscriberError
+	if !errors.As(err, &sub) {
+		t.Fatal("errors.As does not find a SubscriberError")
 	}
 }

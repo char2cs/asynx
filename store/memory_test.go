@@ -573,3 +573,60 @@ func TestPutReceipt_DuplicateAcrossTransactionsIsRejected(t *testing.T) {
 		t.Fatalf("err = %v, want ErrDuplicateReceipt", err)
 	}
 }
+
+func TestReads_FailOnACancelledContext(t *testing.T) {
+	s := New()
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, _, err := s.GetReceipt(dead, "c"); !errors.Is(err, context.Canceled) {
+		t.Errorf("GetReceipt = %v, want context.Canceled", err)
+	}
+	if _, err := s.PendingDeliveries(dead, 1); !errors.Is(err, context.Canceled) {
+		t.Errorf("PendingDeliveries = %v, want context.Canceled", err)
+	}
+	if err := s.AckDelivery(dead, "a", 1); !errors.Is(err, context.Canceled) {
+		t.Errorf("AckDelivery = %v, want context.Canceled", err)
+	}
+}
+
+func TestGetReceipt_ReturnsWhatWasStored(t *testing.T) {
+	ctx := context.Background()
+	s := New()
+	err := s.Atomically(ctx, func(tx asynxmd.Tx) error {
+		return tx.PutReceipt(ctx, "c1", asynxmd.Receipt{Accepted: true})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r, found, err := s.GetReceipt(ctx, "c1")
+	if err != nil || !found || !r.Accepted {
+		t.Fatalf("GetReceipt = %+v, %v, %v", r, found, err)
+	}
+	if _, found, _ := s.GetReceipt(ctx, "other"); found {
+		t.Fatal("found a receipt that was never stored")
+	}
+}
+
+func TestAckDelivery_RemovesOnlyTheNamedEntry(t *testing.T) {
+	ctx := context.Background()
+	s := New()
+	err := s.Atomically(ctx, func(tx asynxmd.Tx) error {
+		return errors.Join(tx.EnqueueDelivery(ctx, "a", 1), tx.EnqueueDelivery(ctx, "a", 2))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.AckDelivery(ctx, "a", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AckDelivery(ctx, "a", 9); err != nil {
+		t.Fatalf("acking an unknown entry = %v, want nil", err)
+	}
+	pending, _ := s.PendingDeliveries(ctx, 10)
+	if len(pending) != 1 || pending[0].Version != 2 {
+		t.Fatalf("pending = %v, want only a v2", pending)
+	}
+}

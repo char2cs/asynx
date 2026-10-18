@@ -1574,7 +1574,7 @@ func (w *Worker[T]) run(commandChan chan *CommandEnvelope[T]) {
 ```go
 type ShardingOpts struct {
     Shards          int  // Number of shards (default 8)
-    QueueDepth      int  // Per-shard buffer (default 0 = unbounded)
+    QueueDepth      int  // Commands waiting per aggregate (default 0 = WorkersPerShard)
     WorkersPerShard int  // Workers per shard (default 1)
 }
 ```

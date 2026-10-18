@@ -413,16 +413,16 @@ Sharding provides parallelism without allocating a goroutine per aggregate. The 
 ```go
 asynx.ShardingOpts{
     Shards:     8,       // Number of shard queues (default 8)
-    QueueDepth: 0,       // Max items per shard (0 = unbounded, default 0)
+    QueueDepth: 0,       // Commands waiting per aggregate (0 = WorkersPerShard)
 }
 ```
 
 **Shards:** Typically set to number of CPU cores or higher for throughput. Each shard is independent.
 
-**QueueDepth:** Limits memory usage. If set:
-- Full queue → Send() returns `ErrQueueFull` immediately
+**QueueDepth:** Bounds the commands that may wait behind the one running for an aggregate (and the shard's hand-off buffer):
+- More waiting → Send() returns `ErrQueueFull` immediately; other aggregates are unaffected
 - Backpressure → caller must back off
-- Unbounded (0) → queue grows until memory exhausted (monitor memory usage)
+- 0 → `WorkersPerShard`; it is never unlimited
 
 ### Example Configuration
 

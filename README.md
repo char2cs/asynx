@@ -183,7 +183,7 @@ ax.Subscribe("Order.*",
 
 **Timeouts:**
 ```go
-// Handler must complete within 5 seconds
+// Alarm if the handler takes longer than 5 seconds (it is still waited for, not cancelled)
 ax.Subscribe("Order.*",
 	handler,
 	models.WithHandlerTimeout[Order](5 * time.Second),
@@ -297,7 +297,7 @@ func upcastOrderV1toV2(ctx context.Context, eventName string, patches []byte) ([
 | `WithEventStore(Store)` | Persistent event backend | — | **Yes** |
 | `WithSnapshotStore(SnapshotStore)` | Snapshot backend (one upserted row per aggregate) | — | **Yes** |
 | `WithBus(Bus[T])` | Custom event publisher | In-process channel bus | No |
-| `WithShardingOpts(opts)` | Worker concurrency | 8 shards, unbounded queue | No |
+| `WithShardingOpts(opts)` | Worker concurrency | 8 shards × 8 workers, queue depth = workers | No |
 | `WithSchemaVersion(int)` | Current aggregate schema | 1 | No |
 | `WithUpcaster(from, fn)` | Schema version migration | — | No |
 | `WithPanicHandler(fn)` | Projection panic handler | Log and continue | No |
@@ -314,7 +314,7 @@ func upcastOrderV1toV2(ctx context.Context, eventName string, patches []byte) ([
 ```go
 opts := asynx.ShardingOpts{
 	Shards:     16,   // More goroutines for high throughput
-	QueueDepth: 1000, // Bounded queue (0 = unbounded)
+	QueueDepth: 1000, // Commands that may wait per aggregate (0 = WorkersPerShard)
 }
 
 ax, _ := asynx.New[Order]().
@@ -546,7 +546,7 @@ All errors are sentinel values in the `models` package — match them with `erro
 | `ErrValidation` | `Validate()` rejects a command, or `Forget()` on a missing aggregate | Command rejected; state unchanged |
 | `ErrNotFound` | `Get()` or `Replay()` on missing aggregate | Check aggregate ID |
 | `ErrPipelineFailed` | Store `Append` failed (e.g. version conflict from a concurrent writer) | Safe to retry the command |
-| `ErrQueueFull` | Send exceeds buffer (with `QueueDepth`) | Retry or increase capacity |
+| `ErrQueueFull` | More than `QueueDepth` commands already wait for one aggregate, or the shard is saturated | Retry or increase capacity |
 | `ErrShuttingDown` | Send after `Shutdown()` called | Wait for shutdown to complete |
 | `ErrAlreadyShuttingDown` | `Shutdown()` called twice | Await the first call |
 | `ErrContextCancelled` | Context cancelled during operation | Check caller context |

@@ -593,3 +593,23 @@ func TestWriteTx_ValidationFailureWritesNothingAndSkipsTheHook(t *testing.T) {
 		t.Fatal("rejected command wrote an event")
 	}
 }
+
+func TestGuardAutoSnapshots_InstallsTheGuardOnTheReader(t *testing.T) {
+	ctx := context.Background()
+	es := New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
+	asked := 0
+	es.GuardAutoSnapshots(func(string, func()) bool {
+		asked++
+		return false
+	})
+	if _, err := es.Write(ctx, cmd(order{Total: 5})); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := es.Get(ctx, "agg1"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if asked > 1 {
+		t.Fatalf("guard consulted %d times for one Get", asked)
+	}
+}

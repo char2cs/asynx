@@ -24,6 +24,9 @@ type Asynx[T any] interface {
 	// projection handlers have completed. When SendWait returns without error,
 	// the event is persisted and every projection subscribed to it has finished.
 	// Use Send when projection consistency is not required at the call site.
+	// The retry of an idempotent command (see IdempotentCommand) waits too, for
+	// the handlers of the event its first attempt produced, if they are still
+	// running.
 	SendWait(
 		ctx context.Context,
 		cmd models.Command[T],
@@ -41,7 +44,11 @@ type Asynx[T any] interface {
 	// Forget again, which delivers the handlers' notifications again. The
 	// tombstone also stays in the delivery log until acknowledged, so
 	// ResumeDeliveries or a restart delivers it ahead of anything newer. A handler
-	// cannot Forget the aggregate it is handling (ErrForgetFromHandler).
+	// cannot Forget the aggregate it is handling (ErrForgetFromHandler); that is
+	// recognised through the handler's ctx, so pass it on: a Forget made with an
+	// unrelated context (context.Background()) waits behind the very handler that
+	// called it, and only ctx, or the shutdown (which then fails it with
+	// ErrShuttingDown), ends the wait.
 	Forget(
 		ctx context.Context,
 		aggregateID string,
@@ -135,10 +142,10 @@ type Asynx[T any] interface {
 		fn models.ProjectionHandler[T],
 	) error
 
-	// WaitPublish blocks until every queued event has been handled. It is for
-	// tests: while it waits, commands are refused by the dispatcher, so one that
-	// commits meanwhile fails with ErrPipelineFailed and parks its aggregate until
-	// ResumeDeliveries. Do not call it under live traffic.
+	// WaitPublish blocks until every event queued when it was called has been
+	// handled. It is for tests: under live traffic it still returns, but what it
+	// waited for is only a moment's worth of events. Commands sent while it waits
+	// are neither refused nor waited for.
 	WaitPublish()
 }
 

@@ -194,6 +194,7 @@ func New[T any](
 	}
 
 	executor := exec.New(es, d, cfg.executorOpts...)
+	es.GuardAutoSnapshots(executor.WithLockIfFree)
 	return &Processor[T]{
 		es: es,
 		pool: pool.New(

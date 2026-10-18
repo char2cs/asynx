@@ -715,3 +715,128 @@ func TestHandle_DispatcherPanicIsReportedNotSwallowed(t *testing.T) {
 
 
 
+
+// blockingBus holds every PublishSync until release is closed.
+type blockingBus struct {
+	recordingBus
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingBus) PublishSync(ctx context.Context, e asynxmd.Event[int]) error {
+	b.entered <- struct{}{}
+	<-b.release
+	return b.recordingBus.PublishSync(ctx, e)
+}
+
+func TestTicketFor_FindsAnEventWhileItsDeliveryIsUnderWay(t *testing.T) {
+	bus := &blockingBus{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	d := New[int](bus)
+	defer d.Close(context.Background())
+
+	if _, found := d.TicketFor("a", 1); found {
+		t.Fatal("TicketFor found an event that was never queued")
+	}
+
+	enqueued, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-bus.entered
+
+	ticket, found := d.TicketFor("a", 1)
+	if !found {
+		t.Fatal("TicketFor lost an event whose handler is running")
+	}
+	if ticket.Settled != enqueued.Settled || ticket.Final != enqueued.Final {
+		t.Fatal("TicketFor returned a different ticket than the one Enqueue returned")
+	}
+	if _, found := d.TicketFor("a", 2); found {
+		t.Fatal("TicketFor matched another version")
+	}
+	if _, found := d.TicketFor("b", 1); found {
+		t.Fatal("TicketFor matched another aggregate")
+	}
+
+	close(bus.release)
+	<-ticket.Final
+	if _, found := d.TicketFor("a", 1); found {
+		t.Fatal("TicketFor kept an event whose delivery is over")
+	}
+}
+
+func TestTicketFor_ForgetsEventsLeftBehindByAPark(t *testing.T) {
+	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error { return nil }}})
+	d.Park("a")
+
+	ticket, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-ticket.Final
+	if _, found := d.TicketFor("a", 1); found {
+		t.Fatal("TicketFor kept an event that was never queued because its aggregate is parked")
+	}
+}
+
+func TestTicketFor_ForgetsQueuedEventsWhenTheyAreParked(t *testing.T) {
+	bus := &blockingBus{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	d := New[int](bus)
+	defer d.Close(context.Background())
+	ack := func(context.Context) error { return nil }
+
+	if _, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), ack); err != nil {
+		t.Fatal(err)
+	}
+	<-bus.entered
+	queued, err := d.EnqueueTicket(context.Background(), makeEvent("a", 2), ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d.Park("a")
+	<-queued.Final
+	if _, found := d.TicketFor("a", 2); found {
+		t.Fatal("TicketFor kept a queued event that parking took out of memory")
+	}
+	close(bus.release)
+}
+
+// WaitIdle waits for what was queued when it was called and refuses nothing:
+// commands keep enqueueing while it waits.
+func TestWaitIdle_DoesNotRefuseEnqueuesWhileItWaits(t *testing.T) {
+	bus := &blockingBus{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	d := New[int](bus)
+	defer d.Close(context.Background())
+
+	first, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-bus.entered
+
+	idle := make(chan struct{})
+	go func() { d.WaitIdle(); close(idle) }()
+
+	later, err := d.EnqueueTicket(context.Background(), makeEvent("b", 1), nil)
+	if err != nil {
+		t.Fatalf("an enqueue during WaitIdle was refused: %v", err)
+	}
+
+	select {
+	case <-idle:
+		t.Fatal("WaitIdle returned while an event it should wait for was still being handled")
+	default:
+	}
+
+	close(bus.release)
+	<-idle
+	<-first.Final
+	<-later.Final
+}
+
+func TestWaitIdle_ReturnsAtOnceWhenNothingIsQueued(t *testing.T) {
+	d := New[int](&recordingBus{})
+	defer d.Close(context.Background())
+	d.WaitIdle()
+}

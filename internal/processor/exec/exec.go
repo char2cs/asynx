@@ -135,6 +135,21 @@ func (e *CommandExecutor[T]) WithLock(
 	return fn()
 }
 
+// WithLockIfFree runs fn holding the aggregate's command lock, unless someone
+// holds it: then fn is not run and false is returned. It never waits.
+func (e *CommandExecutor[T]) WithLockIfFree(
+	id string,
+	fn func(),
+) bool {
+	unlock, ok := e.locks.TryLock(id)
+	if !ok {
+		return false
+	}
+	defer unlock()
+	fn()
+	return true
+}
+
 // run executes the pipeline. The caller holds the aggregate lock.
 func (e *CommandExecutor[T]) run(
 	ctx context.Context,
@@ -143,7 +158,7 @@ func (e *CommandExecutor[T]) run(
 	commandID := idempotencyKey(cmd)
 	if commandID != "" {
 		if event, handled, err := e.answerFromReceipt(ctx, commandID); handled {
-			return event, nil, err
+			return event, e.waitForAnswered(event, err), err
 		}
 	}
 
@@ -151,7 +166,7 @@ func (e *CommandExecutor[T]) run(
 	if err != nil {
 		event, handled, err := e.writeFailed(ctx, commandID, err)
 		if handled {
-			return event, nil, err
+			return event, e.waitForAnswered(event, err), err
 		}
 		return asynxmd.Event[T]{}, nil, err
 	}
@@ -187,6 +202,32 @@ func (e *CommandExecutor[T]) enqueue(
 	if err != nil {
 		return nil, err
 	}
+	return waitOn(t, event), nil
+}
+
+// waitForAnswered gives the retry of an idempotent command the same wait as the
+// original: for the handlers of the event the first attempt produced, if its
+// delivery is still under way. Once that is over, or when the answer is an
+// error, there is nothing to wait for.
+func (e *CommandExecutor[T]) waitForAnswered(
+	event asynxmd.Event[T],
+	answer error,
+) Wait {
+	if answer != nil || e.dispatcher == nil {
+		return nil
+	}
+	t, underway := e.dispatcher.TicketFor(event.AggregateID, event.Version)
+	if !underway {
+		return nil
+	}
+	return waitOn(t, event)
+}
+
+// waitOn is the Wait for the handlers of the event ticket t tracks.
+func waitOn[T any](
+	t dispatcher.Ticket,
+	event asynxmd.Event[T],
+) Wait {
 	return func(ctx context.Context) error {
 		select {
 		case <-t.Settled:
@@ -197,7 +238,7 @@ func (e *CommandExecutor[T]) enqueue(
 		case <-ctx.Done():
 			return fmt.Errorf("%w: waiting for handlers: %w", asynxmd.ErrContextCancelled, ctx.Err())
 		}
-	}, nil
+	}
 }
 
 // isDurable reports whether the event gets a delivery entry.

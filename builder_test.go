@@ -741,3 +741,75 @@ func eventually(t *testing.T, what string, cond func() bool) {
 		runtime.Gosched()
 	}
 }
+
+type gatedUpdate struct {
+	mocks.UpdateOrderCmd
+	entered chan<- struct{}
+	gate    <-chan struct{}
+}
+
+func (c gatedUpdate) Validate(*mocks.Order) error {
+	c.entered <- struct{}{}
+	<-c.gate
+	return nil
+}
+
+// A busy aggregate holds one worker, however many commands are queued behind
+// it: the others keep running, as WorkersPerShard promises.
+func TestShardingOpts_ABusyAggregateDoesNotStallItsShard(t *testing.T) {
+	ctx := context.Background()
+	inst := build(t, asynx.New[mocks.Order]().WithEventStore(store.New()).WithSnapshotStore(store.NewSnapshots()).
+		WithShardingOpts(asynx.ShardingOpts{Shards: 1, WorkersPerShard: 2, QueueDepth: 1000}))
+	if _, err := inst.SendWait(ctx, mocks.CreateOrderCmd{ID: "hot", Total: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	defer close(gate)
+	go inst.Send(ctx, gatedUpdate{UpdateOrderCmd: upd("hot", 2), entered: entered, gate: gate})
+	within(t, entered, "the hot command to start")
+	for i := range 6 {
+		go inst.Send(ctx, upd("hot", float64(i+3)))
+	}
+
+	cold, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := inst.SendWait(cold, mocks.CreateOrderCmd{ID: "cold", Total: 1}); err != nil {
+		t.Fatalf("an unrelated aggregate on the same shard: %v", err)
+	}
+}
+
+// QueueDepth bounds the commands that may wait behind a running one, per
+// aggregate: a flood to one aggregate is refused with ErrQueueFull, and other
+// aggregates are unaffected.
+func TestShardingOpts_QueueDepthBoundsTheBacklogOfOneAggregate(t *testing.T) {
+	ctx := context.Background()
+	inst := build(t, asynx.New[mocks.Order]().WithEventStore(store.New()).WithSnapshotStore(store.NewSnapshots()).
+		WithShardingOpts(asynx.ShardingOpts{Shards: 1, WorkersPerShard: 2}))
+	if _, err := inst.SendWait(ctx, mocks.CreateOrderCmd{ID: "hot", Total: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	defer close(gate)
+	go inst.Send(ctx, gatedUpdate{UpdateOrderCmd: upd("hot", 2), entered: entered, gate: gate})
+	within(t, entered, "the hot command to start")
+
+	refused := make(chan struct{}, 32)
+	for range 20 {
+		go func() {
+			if _, err := inst.Send(ctx, upd("hot", 3)); errors.Is(err, models.ErrQueueFull) {
+				refused <- struct{}{}
+			}
+		}()
+	}
+	for range 18 {
+		within(t, refused, "a hot Send to be refused with ErrQueueFull")
+	}
+
+	if _, err := inst.Send(ctx, mocks.CreateOrderCmd{ID: "cold", Total: 1}); err != nil {
+		t.Fatalf("an unrelated aggregate got %v while another was flooded", err)
+	}
+}

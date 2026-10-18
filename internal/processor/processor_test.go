@@ -1186,3 +1186,37 @@ func TestProcessor_HandlerMayWaitOnAnotherInstanceUnderTheSameID(t *testing.T) {
 		}
 	}
 }
+
+// WaitPublish waits for what is queued and refuses nothing: a command sent while
+// it waits commits, is not reported as failed, and parks nobody.
+func TestProcessor_WaitPublish_DoesNotFailCommandsSentWhileItWaits(t *testing.T) {
+	f := newFixture(t, store.New())
+	ctx := context.Background()
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	if _, err := f.b.Subscribe("OrderCreated", func(_ context.Context, e asynxmd.Event[order]) {
+		if e.AggregateID == "slow" {
+			entered <- struct{}{}
+			<-release
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.p.Send(ctx, mocks.CreateOrderCmd{ID: "slow", Total: 1}); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+
+	idle := make(chan struct{})
+	go func() { f.p.WaitPublish(); close(idle) }()
+
+	if _, err := f.p.SendWait(ctx, mocks.CreateOrderCmd{ID: "other", Total: 1}); err != nil {
+		t.Fatalf("a command sent while WaitPublish waits failed: %v", err)
+	}
+	if paused := f.p.Paused(); len(paused) != 0 {
+		t.Fatalf("Paused = %v, want nobody parked", paused)
+	}
+
+	close(release)
+	<-idle
+}

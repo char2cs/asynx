@@ -47,7 +47,6 @@ type Dispatcher[T any] struct {
 	mu             sync.Mutex
 	queues         map[string]*aggregateQueue[T]
 	closed         bool
-	waiting        bool          // prevents new Dispatch calls during WaitIdle
 	stopCh         chan struct{} // closed on Close to signal workers to drain and exit
 	quit           chan struct{} // closed by Interrupt/Close: retry loops give up
 	quitOnce       sync.Once
@@ -55,7 +54,8 @@ type Dispatcher[T any] struct {
 	cancelBase     context.CancelFunc
 	halted         map[string]struct{} // aggregates whose durable delivery is parked
 	wg             sync.WaitGroup      // tracks goroutine lifetime (for Close)
-	jobsWg         sync.WaitGroup      // tracks in-flight jobs (for WaitIdle)
+	inflight       sync.Map            // *dispatchJob -> struct{}: queued or running (for WaitIdle)
+	tickets        sync.Map            // ticketKey -> *dispatchJob: the same, by event (for TicketFor)
 	onPublishError asynxmd.PublishErrorHandler[T]
 	idleTimeout    time.Duration
 
@@ -98,6 +98,12 @@ type Ticket struct {
 	Unrun func() error
 }
 
+// ticketKey identifies an event in flight.
+type ticketKey struct {
+	aggregateID string
+	version     int64
+}
+
 type dispatchJob[T any] struct {
 	event asynxmd.Event[T]
 	ctx   context.Context
@@ -117,6 +123,17 @@ type dispatchJob[T any] struct {
 	forget bool
 	// skipLive keeps the live subscribers (the bus) out of a redelivery.
 	skipLive bool
+	// onComplete, when set, runs once when the delivery is over.
+	onComplete func()
+}
+
+func (j *dispatchJob[T]) ticket() Ticket {
+	return Ticket{
+		Settled: j.done,
+		Final:   j.final,
+		Err:     func() error { return j.err },
+		Unrun:   func() error { return j.unrun },
+	}
 }
 
 func (j *dispatchJob[T]) markSettled() { j.settle.Do(func() { close(j.done) }) }
@@ -131,6 +148,9 @@ func (j *dispatchJob[T]) complete(err error) {
 		j.err = err
 		j.cancel()
 		close(j.final)
+		if j.onComplete != nil {
+			j.onComplete()
+		}
 	})
 }
 
@@ -252,14 +272,10 @@ func (d *Dispatcher[T]) enqueue(
 	o enqueueOpts,
 ) (Ticket, error) {
 	d.mu.Lock()
-	if d.closed || d.waiting {
+	if d.closed {
 		d.mu.Unlock()
 		return Ticket{}, asynxmd.ErrDispatcherClosed
 	}
-	// Track this dispatch call immediately after checking not-waiting/not-closed.
-	// This ensures WaitIdle() cannot return with jobsWg==0 while a goroutine
-	// is still inside this function (potentially accessing d.mu/d.queues).
-	d.jobsWg.Add(1)
 	d.mu.Unlock()
 
 	jobCtx, cancel := context.WithCancel(context.WithValue(context.WithoutCancel(ctx), inHandlerKey[T]{d}, event.AggregateID))
@@ -274,19 +290,12 @@ func (d *Dispatcher[T]) enqueue(
 		skipLive: o.skipLive,
 		cancel:   func() { stop(); cancel() },
 	}
-	ticket := Ticket{
-		Settled: job.done,
-		Final:   job.final,
-		Err:     func() error { return job.err },
-		Unrun:   func() error { return job.unrun },
-	}
+	ticket := job.ticket()
 
 	d.mu.Lock()
 	if d.closed {
 		d.mu.Unlock()
-		// Undo the Add(1) since we're not enqueueing a job.
 		job.cancel()
-		d.jobsWg.Done()
 		return Ticket{}, asynxmd.ErrDispatcherClosed
 	}
 
@@ -298,7 +307,6 @@ func (d *Dispatcher[T]) enqueue(
 			d.mu.Unlock()
 			job.markUnrun(asynxmd.ErrDeliveryParked)
 			job.complete(asynxmd.ErrDeliveryParked)
-			d.jobsWg.Done()
 			return ticket, nil
 		}
 	}
@@ -310,6 +318,7 @@ func (d *Dispatcher[T]) enqueue(
 		go d.worker(agg, q)
 	}
 
+	d.track(job)
 	q.jobs = append(q.jobs, job)
 	select {
 	case q.wake <- struct{}{}:
@@ -320,6 +329,33 @@ func (d *Dispatcher[T]) enqueue(
 	return ticket, nil
 }
 
+// track registers a queued job until its delivery is over.
+func (d *Dispatcher[T]) track(job *dispatchJob[T]) {
+	key := ticketKey{job.event.AggregateID, job.event.Version}
+	d.inflight.Store(job, struct{}{})
+	d.tickets.Store(key, job)
+	job.onComplete = func() {
+		d.inflight.Delete(job)
+		d.tickets.CompareAndDelete(key, job)
+	}
+}
+
+// TicketFor returns the ticket of the event at (aggregateID, version) while its
+// delivery is under way: queued, being handled, or retrying. Once the delivery
+// is over (or if the event was never queued) there is none, and false is
+// returned. A retried idempotent command uses it to wait for the handlers of
+// the event its first attempt produced.
+func (d *Dispatcher[T]) TicketFor(
+	aggregateID string,
+	version int64,
+) (Ticket, bool) {
+	v, ok := d.tickets.Load(ticketKey{aggregateID, version})
+	if !ok {
+		return Ticket{}, false
+	}
+	return v.(*dispatchJob[T]).ticket(), true
+}
+
 // Close marks the dispatcher as closed, closes all per-aggregate channels, and
 // waits for every worker to drain its queue. If ctx expires before all workers
 // finish, the context error is returned.
@@ -327,8 +363,7 @@ func (d *Dispatcher[T]) Close(ctx context.Context) error {
 	d.mu.Lock()
 	if !d.closed {
 		d.closed = true
-		d.waiting = false // allow any remaining Dispatch calls to fail cleanly
-		close(d.stopCh)   // signal all workers to drain and exit
+		close(d.stopCh) // signal all workers to drain and exit
 	}
 	d.mu.Unlock()
 	d.Interrupt()
@@ -345,21 +380,20 @@ func (d *Dispatcher[T]) Close(ctx context.Context) error {
 	}
 }
 
-// WaitIdle blocks until all in-flight jobs have been handled. The per-aggregate
-// worker goroutines may still be alive (waiting for their idle timeout), but
-// every dispatched event has been delivered to the bus. New Dispatch calls are
-// rejected during WaitIdle to prevent the race where a new goroutine enters
-// Dispatch while WaitIdle is checking idleness.
+// WaitIdle blocks until every event queued when it was called has been handled.
+// The per-aggregate worker goroutines may still be alive (waiting for their
+// idle timeout), but those events have been delivered to the bus. Events queued
+// while it waits are not waited for, and are not refused: commands keep
+// committing and enqueueing meanwhile.
 func (d *Dispatcher[T]) WaitIdle() {
-	d.mu.Lock()
-	d.waiting = true
-	d.mu.Unlock()
-
-	d.jobsWg.Wait()
-
-	d.mu.Lock()
-	d.waiting = false
-	d.mu.Unlock()
+	var queued []*dispatchJob[T]
+	d.inflight.Range(func(key, _ any) bool {
+		queued = append(queued, key.(*dispatchJob[T]))
+		return true
+	})
+	for _, job := range queued {
+		<-job.final
+	}
 }
 
 // waitWorkers blocks until all per-aggregate worker goroutines have exited
@@ -447,7 +481,6 @@ func (d *Dispatcher[T]) handle(
 	halt <-chan struct{},
 	job *dispatchJob[T],
 ) {
-	defer d.jobsWg.Done()
 	var outcome error
 	defer func() {
 		job.markSettled()

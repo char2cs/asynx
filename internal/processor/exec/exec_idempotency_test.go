@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
 	asynxmd "github.com/char2cs/asynx/models"
 	"github.com/char2cs/asynx/store"
@@ -309,5 +312,114 @@ func TestExecute_Idempotent_RetryAfterForgetAndRecreateDoesNotReturnTheNewAggreg
 	}
 	if retry.Aggregate.Total == 99 {
 		t.Fatal("retry returned the re-created aggregate's state")
+	}
+}
+
+// readFailStore fails the reads of event streams once switched on.
+type readFailStore struct {
+	store.Memory
+	fail atomic.Bool
+}
+
+func (s *readFailStore) ReadFrom(
+	ctx context.Context,
+	streamID string,
+	fromVersion int64,
+) ([][]byte, error) {
+	if s.fail.Load() {
+		return nil, errors.New("stream unreadable")
+	}
+	return s.Memory.ReadFrom(ctx, streamID, fromVersion)
+}
+
+// A retry that cannot read the original event back must say so, not hand the
+// caller a hollow event as if all were well.
+func TestExecute_Idempotent_RetryFailsWhenTheOriginalEventCannotBeRead(t *testing.T) {
+	s := &readFailStore{Memory: store.New()}
+	ex, _, _, _, _ := newEnvOn(t, s)
+	cmd := idemUpdate{UpdateOrderCmd: update("agg", 5), Cmd: "cmd-1"}
+	if _, err := ex.Execute(context.Background(), cmd, false); err != nil {
+		t.Fatal(err)
+	}
+
+	s.fail.Store(true)
+	evt, err := ex.Execute(context.Background(), cmd, false)
+	if !errors.Is(err, asynxmd.ErrPipelineFailed) {
+		t.Fatalf("retry = %+v, %v; want ErrPipelineFailed", evt, err)
+	}
+
+	s.fail.Store(false)
+	if evt, err := ex.Execute(context.Background(), cmd, false); err != nil || evt.Aggregate.Total != 5 {
+		t.Fatalf("retry once the stream is readable = %+v, %v; want the original event", evt, err)
+	}
+}
+
+// The retry of a command whose handlers are still running waits for them, as
+// the first attempt would have: read-your-writes must not depend on whether the
+// caller is on its first attempt or its second.
+func TestExecute_Idempotent_RetryWaitsForTheOriginalEventsHandlers(t *testing.T) {
+	ex, _, _, _, b := newEnv(t)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	if _, err := b.Subscribe("OrderUpdated", func(context.Context, asynxmd.Event[order]) {
+		entered <- struct{}{}
+		<-release
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cmd := idemUpdate{UpdateOrderCmd: update("agg", 5), Cmd: "cmd-1"}
+	ctx := context.Background()
+
+	first, _, err := ex.ExecuteAsync(ctx, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+
+	retried, wait, err := ex.ExecuteAsync(ctx, cmd)
+	if err != nil || retried.ID != first.ID {
+		t.Fatalf("retry = %+v, %v; want the original event", retried, err)
+	}
+	if wait == nil {
+		t.Fatal("the retry has nothing to wait on although the handler is still running")
+	}
+	short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	if err := wait(short); !errors.Is(err, asynxmd.ErrContextCancelled) {
+		t.Fatalf("wait = %v while the handler runs, want ErrContextCancelled", err)
+	}
+
+	close(release)
+	if err := wait(ctx); err != nil {
+		t.Fatalf("wait after the handler finished = %v", err)
+	}
+	if _, wait, err := ex.ExecuteAsync(ctx, cmd); err != nil || wait != nil {
+		t.Fatalf("retry after the delivery is over: wait set = %v, err = %v; want nothing to wait on", wait != nil, err)
+	}
+}
+
+func TestExecute_Idempotent_RejectedRetryHasNothingToWaitOn(t *testing.T) {
+	ex, _, _, _, _ := newEnv(t)
+	bad := idemCreate{CreateOrderCmd: mocks.CreateOrderCmd{ID: "agg", Total: -1}, Cmd: "cmd-bad"}
+	if _, _, err := ex.ExecuteAsync(context.Background(), bad); !errors.Is(err, asynxmd.ErrValidation) {
+		t.Fatalf("first err = %v", err)
+	}
+
+	_, wait, err := ex.ExecuteAsync(context.Background(), bad)
+	if !errors.Is(err, asynxmd.ErrValidation) || wait != nil {
+		t.Fatalf("retry: err = %v, wait set = %v; want ErrValidation and no wait", err, wait != nil)
+	}
+}
+
+func TestExecute_Idempotent_RetryWithoutADispatcherHasNothingToWaitOn(t *testing.T) {
+	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
+	ex := New(es, nil)
+	cmd := idemUpdate{UpdateOrderCmd: update("agg", 5), Cmd: "cmd-1"}
+	if _, _, err := ex.ExecuteAsync(context.Background(), cmd); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, wait, err := ex.ExecuteAsync(context.Background(), cmd); err != nil || wait != nil {
+		t.Fatalf("retry: err = %v, wait set = %v", err, wait != nil)
 	}
 }

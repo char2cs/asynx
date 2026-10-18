@@ -379,6 +379,7 @@ func TestProcessor_Resume_ConcurrentCallsRedeliverOnce(t *testing.T) {
 	var mu sync.Mutex
 	var delivered []int64
 	parked := make(chan struct{}, 4)
+	release := make(chan struct{})
 	f := newFixture(t, store.New(),
 		processor.WithDurableDelivery[order](func(name string) bool { return name == "OrderUpdated" }),
 		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
@@ -387,7 +388,7 @@ func TestProcessor_Resume_ConcurrentCallsRedeliverOnce(t *testing.T) {
 				if !healthy.Load() {
 					return errors.New("down")
 				}
-				time.Sleep(5 * time.Millisecond)
+				<-release
 				mu.Lock()
 				delivered = append(delivered, e.Version)
 				mu.Unlock()
@@ -416,10 +417,163 @@ func TestProcessor_Resume_ConcurrentCallsRedeliverOnce(t *testing.T) {
 		go func() { defer wg.Done(); f.p.Resume(ctx, 10) }()
 	}
 	wg.Wait()
+	close(release)
 	f.p.WaitPublish()
 	mu.Lock()
 	defer mu.Unlock()
 	if !slices.Equal(delivered, []int64{1, 2, 3}) {
 		t.Fatalf("delivered %v, want [1 2 3] exactly once", delivered)
+	}
+}
+
+// rowCountingStore counts the event rows its reads return.
+type rowCountingStore struct {
+	store.Memory
+	rows atomic.Int64
+}
+
+func (s *rowCountingStore) ReadFrom(
+	ctx context.Context,
+	streamID string,
+	fromVersion int64,
+) ([][]byte, error) {
+	blobs, err := s.Memory.ReadFrom(ctx, streamID, fromVersion)
+	s.rows.Add(int64(len(blobs)))
+	return blobs, err
+}
+
+// A long backlog of one aggregate costs one pass over its stream, not one pass
+// per entry: the work must grow linearly with the backlog.
+func TestProcessor_Recover_ReplaysAnAggregatesStreamOnce(t *testing.T) {
+	const events = 300
+	ctx := context.Background()
+	s := &rowCountingStore{Memory: store.New()}
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	if _, err := es.Write(ctx, mocks.CreateOrderCmd{ID: "a", Total: 1}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < events; i++ {
+		if _, err := es.Write(ctx, updateCmd("a", float64(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Atomically(ctx, func(tx asynxmd.Tx) error {
+		for v := int64(1); v <= events; v++ {
+			if err := tx.EnqueueDelivery(ctx, "a", v); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	var mu sync.Mutex
+	var delivered []int64
+	p := processor.New(es, bus.NewChannelBus[order](), processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+		Match: always,
+		Handler: func(_ context.Context, e asynxmd.Event[order]) error {
+			mu.Lock()
+			defer mu.Unlock()
+			delivered = append(delivered, e.Version)
+			return nil
+		},
+	}}))
+	t.Cleanup(func() { p.Shutdown(ctx) })
+
+	s.rows.Store(0)
+	if err := p.Recover(ctx, 50); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	p.WaitPublish()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(delivered) != events || !slices.IsSorted(delivered) {
+		t.Fatalf("delivered %d events (sorted: %v), want %d in order", len(delivered), slices.IsSorted(delivered), events)
+	}
+	if rows := s.rows.Load(); rows > 2*events {
+		t.Fatalf("recovery read %d stream rows for %d pending entries, want a single pass", rows, events)
+	}
+}
+
+func TestProcessor_Resume_ReplaysAnAggregatesStreamOnce(t *testing.T) {
+	const events = 60
+	var healthy atomic.Bool
+	parked := make(chan struct{}, 4)
+	s := &rowCountingStore{Memory: store.New()}
+	f := newFixture(t, s, parkingOpts(&healthy,
+		processor.WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+			if errors.Is(err, asynxmd.ErrDeliveryParked) {
+				parked <- struct{}{}
+			}
+		}))...)
+	ctx := context.Background()
+	for i := range events {
+		if _, err := f.p.Send(ctx, updateCmd("o1", float64(i+1))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	<-parked
+
+	healthy.Store(true)
+	s.rows.Store(0)
+	if err := f.p.Resume(ctx, 10); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	f.p.WaitPublish()
+
+	if pending, _ := s.PendingDeliveries(ctx, 1000); len(pending) != 0 {
+		t.Fatalf("pending after Resume = %d entries", len(pending))
+	}
+	if rows := s.rows.Load(); rows > 2*events {
+		t.Fatalf("resume read %d stream rows for %d pending entries, want a single pass", rows, events)
+	}
+}
+
+// Entries behind an event that cannot be rebuilt stay pending while the entries
+// before it are still delivered.
+func TestProcessor_Recover_DeliversWhatPrecedesAnUnreadableEvent(t *testing.T) {
+	ctx := context.Background()
+	s := store.New()
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	for _, cmd := range []asynxmd.Command[order]{mocks.CreateOrderCmd{ID: "a", Total: 1}, updateCmd("a", 2)} {
+		if _, err := es.Write(ctx, cmd); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Append(ctx, "events:a", 3, []byte("!!!"))
+	s.Atomically(ctx, func(tx asynxmd.Tx) error {
+		return errors.Join(tx.EnqueueDelivery(ctx, "a", 1), tx.EnqueueDelivery(ctx, "a", 3))
+	})
+
+	var got atomic.Int32
+	reported := make(chan error, 1)
+	p := processor.New(es, bus.NewChannelBus[order](),
+		processor.WithPublishErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error) { reported <- err }),
+		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+			Match:   always,
+			Handler: func(context.Context, asynxmd.Event[order]) error { got.Add(1); return nil },
+		}}))
+	t.Cleanup(func() { p.Shutdown(ctx) })
+
+	if err := p.Recover(ctx, 10); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	select {
+	case <-reported:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the unreadable event was not reported")
+	}
+	p.WaitPublish()
+	pending, _ := s.PendingDeliveries(ctx, 10)
+	versions := make([]int64, len(pending))
+	for i, d := range pending {
+		versions[i] = d.Version
+	}
+	if !slices.Contains(versions, 3) {
+		t.Fatalf("pending = %v, want version 3 (behind the unreadable event) kept", versions)
+	}
+	delivered := got.Load() == 1
+	if delivered == slices.Contains(versions, 1) {
+		t.Fatalf("delivered %d, pending %v: version 1 must be either delivered and acknowledged, or still pending", got.Load(), versions)
 	}
 }

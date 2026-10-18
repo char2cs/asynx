@@ -17,7 +17,13 @@ import (
 )
 
 // ShardingOpts configures the processor's worker pool.
-// Shards defaults to 8; QueueDepth defaults to 0 (unbounded).
+// Shards defaults to 8.
+//
+// QueueDepth bounds the commands that may wait behind the one running for an
+// aggregate: further commands to it are refused with ErrQueueFull, while other
+// aggregates are unaffected. It is also the size of the shard's hand-off
+// buffer. It defaults to WorkersPerShard when left zero, and is never less than
+// it. The queue is bounded: it is not unlimited when zero.
 //
 // WorkersPerShard controls how many workers drain each shard's queue and
 // defaults to 8 when left zero. It tunes throughput only: whatever its value,
@@ -25,7 +31,9 @@ import (
 // covers load, validate, commit and enqueue), so there is no lost-update or
 // version-conflict window and handlers receive an aggregate's events in version
 // order. Commands for different aggregates run in parallel up to
-// Shards*WorkersPerShard. The lock is in-process: several processes sharing one
+// Shards*WorkersPerShard: a command waiting for a busy aggregate does not hold
+// a worker, so one slow aggregate occupies at most one of its shard's workers.
+// The lock is in-process: several processes sharing one
 // store are protected from corruption by the store's version check, but not
 // from conflicts.
 type ShardingOpts struct {
@@ -220,8 +228,10 @@ func (b *Builder[T]) WithDeliveryErrorHandler(fn models.DeliveryErrorHandler[T])
 }
 
 // WithDeliveryRetry sets the retry backoff of failed durable deliveries: the
-// first retry waits initial, then the delay doubles up to max. Defaults: 100ms
-// and 30s.
+// first retry waits about initial, then the delay doubles up to about max.
+// Defaults: 100ms and 30s. Each wait is randomised within its upper half
+// (jitter), so deliveries that failed together, because a downstream service
+// went down, do not retry in lockstep.
 func (b *Builder[T]) WithDeliveryRetry(
 	initial time.Duration,
 	max time.Duration,
@@ -244,7 +254,10 @@ func (b *Builder[T]) WithDeliveryMaxAttempts(n int) *Builder[T] {
 }
 
 // WithDeadLetterHandler sets the handler called when a durable delivery ran out
-// of attempts. Returning nil acknowledges the event as dealt with (typically
+// of attempts. Its error argument holds the failure of every subscriber that
+// failed on the last attempt, each a *models.SubscriberError naming the
+// subscriber by pattern and registration order (such as "OrderUpdated#2").
+// Returning nil acknowledges the event as dealt with (typically
 // after storing it somewhere for inspection) and lets the aggregate's later
 // events flow; returning an error parks the aggregate.
 func (b *Builder[T]) WithDeadLetterHandler(fn models.DeadLetterHandler[T]) *Builder[T] {
@@ -401,7 +414,7 @@ func (b *Builder[T]) compileDurable() ([]dispatcher.DurableSub[T], func(string) 
 	}
 
 	subs := make([]dispatcher.DurableSub[T], 0, len(b.subscribers))
-	for _, def := range b.subscribers {
+	for i, def := range b.subscribers {
 		if def.pattern == "" {
 			return nil, nil, models.ErrEmptyPattern
 		}
@@ -421,7 +434,8 @@ func (b *Builder[T]) compileDurable() ([]dispatcher.DurableSub[T], func(string) 
 		if err != nil {
 			return nil, nil, err
 		}
-		subs = append(subs, dispatcher.DurableSub[T]{Match: m, Handler: def.handler, Timeout: cfg.Timeout})
+		name := fmt.Sprintf("%s#%d", def.pattern, i+1)
+		subs = append(subs, dispatcher.DurableSub[T]{Name: name, Match: m, Handler: def.handler, Timeout: cfg.Timeout})
 	}
 
 	return subs, func(name string) bool {

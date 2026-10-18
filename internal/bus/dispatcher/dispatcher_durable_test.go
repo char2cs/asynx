@@ -3,6 +3,7 @@ package dispatcher
 import (
 	"context"
 	"errors"
+	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -60,7 +61,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)
 		}
-		time.Sleep(time.Millisecond)
+		runtime.Gosched()
 	}
 }
 
@@ -1107,5 +1108,129 @@ func TestAckFailure_ParksTheAggregateSoALaterEventDoesNotOvertake(t *testing.T) 
 	}
 	if got := d.Halted(); !slices.Equal(got, []string{"a"}) || reported.Load() != 1 {
 		t.Fatalf("halted=%v reported=%d", got, reported.Load())
+	}
+}
+
+func TestJittered_StaysInTheUpperHalfOfTheDelay(t *testing.T) {
+	const delay = 100 * time.Millisecond
+	seen := map[time.Duration]struct{}{}
+	for range 200 {
+		got := jittered(delay)
+		if got < delay/2 || got > delay {
+			t.Fatalf("jittered(%v) = %v, want within [%v, %v]", delay, got, delay/2, delay)
+		}
+		seen[got] = struct{}{}
+	}
+	if len(seen) < 2 {
+		t.Fatal("jittered returned the same delay every time")
+	}
+}
+
+func TestJittered_LeavesTinyDelaysAlone(t *testing.T) {
+	for _, delay := range []time.Duration{0, 1, -time.Second} {
+		if got := jittered(delay); got != delay {
+			t.Fatalf("jittered(%v) = %v, want it unchanged", delay, got)
+		}
+	}
+}
+
+func TestDurable_FailuresNameTheSubscriberAndDeadLetterGetsThemAll(t *testing.T) {
+	billing, search := errors.New("billing down"), errors.New("search down")
+	var mu sync.Mutex
+	var reported []error
+	deadLettered := make(chan error, 1)
+	d := newDurable(t, []DurableSub[int]{
+		{Name: "OrderUpdated#1", Match: always, Handler: func(context.Context, asynxmd.Event[int]) error { return billing }},
+		{Name: "OrderUpdated#2", Match: always, Handler: func(context.Context, asynxmd.Event[int]) error { return search }},
+	},
+		WithMaxAttempts[int](2),
+		WithDeliveryErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error, _ int) {
+			mu.Lock()
+			reported = append(reported, err)
+			mu.Unlock()
+		}),
+		WithDeadLetterHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error) error {
+			deadLettered <- err
+			return nil
+		}),
+	)
+
+	ticket, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := final(t, ticket, "dead-lettered delivery"); err != nil {
+		t.Fatalf("delivery ended with %v", err)
+	}
+
+	got := recv(t, deadLettered, "the dead-letter handler")
+	if !errors.Is(got, billing) || !errors.Is(got, search) {
+		t.Fatalf("dead-letter handler learned of %q, want both failures", got)
+	}
+	var names []string
+	for _, part := range unjoin(got) {
+		var sub *asynxmd.SubscriberError
+		if errors.As(part, &sub) {
+			names = append(names, sub.Subscriber)
+		}
+	}
+	if !slices.Equal(names, []string{"OrderUpdated#1", "OrderUpdated#2"}) {
+		t.Fatalf("subscribers named in the dead-letter error = %v", names)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var sub *asynxmd.SubscriberError
+	if len(reported) == 0 || !errors.As(reported[0], &sub) || sub.Subscriber != "OrderUpdated#1" {
+		t.Fatalf("delivery error handler got %v, want the first failure wrapped with its subscriber", reported)
+	}
+}
+
+// unjoin splits an errors.Join result into its parts.
+func unjoin(err error) []error {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		return joined.Unwrap()
+	}
+	return []error{err}
+}
+
+func TestDurable_ATimeoutNamesItsSubscriber(t *testing.T) {
+	release := make(chan struct{})
+	reported := make(chan error, 4)
+	d := newDurable(t, []DurableSub[int]{{
+		Name:    "slow#1",
+		Match:   always,
+		Timeout: time.Millisecond,
+		Handler: func(context.Context, asynxmd.Event[int]) error { <-release; return nil },
+	}}, WithDeliveryErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error, _ int) { reported <- err }))
+
+	ticket, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := recv(t, reported, "the timeout report")
+	close(release)
+	<-ticket.Final
+
+	var sub *asynxmd.SubscriberError
+	if !errors.As(got, &sub) || sub.Subscriber != "slow#1" || !errors.Is(got, asynxmd.ErrHandlerTimeout) {
+		t.Fatalf("timeout reported as %q, want ErrHandlerTimeout from subscriber slow#1", got)
+	}
+}
+
+func TestInterrupted_ClosesWhenTheDispatcherIsInterrupted(t *testing.T) {
+	d := New[int](&recordingBus{})
+	defer d.Close(context.Background())
+
+	select {
+	case <-d.Interrupted():
+		t.Fatal("Interrupted closed before Interrupt")
+	default:
+	}
+	d.Interrupt()
+	select {
+	case <-d.Interrupted():
+	default:
+		t.Fatal("Interrupted did not close after Interrupt")
 	}
 }

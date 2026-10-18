@@ -65,13 +65,10 @@ func (p *Processor[T]) resumeAggregate(
 	if !wasParked {
 		return nil
 	}
-	err := p.scanPending(ctx, batch, func(d asynxmd.Delivery) error {
-		isOtherAggregate := d.AggregateID != agg
-		if isOtherAggregate {
-			return nil
-		}
-		return p.redeliver(ctx, d)
-	})
+	backlogs, _, err := p.pendingByAggregate(ctx, batch, func(id string) bool { return id == agg })
+	if err == nil {
+		err = p.redeliver(ctx, agg, backlogs[agg])
+	}
 	if err != nil {
 		p.dispatcher.Park(agg)
 	}
@@ -103,24 +100,23 @@ func (p *Processor[T]) Recover(
 	if batch <= 0 {
 		batch = 100
 	}
-	failed := make(map[string]struct{})
-	return p.scanPending(ctx, batch, func(d asynxmd.Delivery) error {
-		if _, skip := failed[d.AggregateID]; skip {
-			return nil // behind a failed event of its aggregate: stays pending
-		}
-		err := p.redeliver(ctx, d)
+	backlogs, order, err := p.pendingByAggregate(ctx, batch, func(string) bool { return true })
+	if err != nil {
+		return err
+	}
+	for _, agg := range order {
+		err := p.redeliver(ctx, agg, backlogs[agg])
 		if err == nil {
-			return nil
+			continue
 		}
 		if ctx.Err() != nil || errors.Is(err, asynxmd.ErrDispatcherClosed) {
-			return err
+			return fmt.Errorf("asynx: recovery: %w", err)
 		}
-		failed[d.AggregateID] = struct{}{}
-		p.dispatcher.Park(d.AggregateID)
-		p.dispatcher.ReportError(ctx, asynxmd.Event[T]{AggregateID: d.AggregateID, Version: d.Version},
+		p.dispatcher.Park(agg)
+		p.dispatcher.ReportError(ctx, asynxmd.Event[T]{AggregateID: agg, Version: backlogs[agg][0].Version},
 			fmt.Errorf("recovery: %w", err))
-		return nil
-	})
+	}
+	return nil
 }
 
 // scanPending calls visit for every pending delivery once, in enqueue order. It
@@ -154,32 +150,72 @@ func (p *Processor[T]) scanPending(
 	}
 }
 
-// redeliver rebuilds the event behind d and enqueues it. When the event no
-// longer exists the delivery is acknowledged instead.
+// pendingByAggregate reads the delivery log and groups the entries of the
+// aggregates that want selects by aggregate, in enqueue order. order lists the
+// aggregates by first appearance.
+func (p *Processor[T]) pendingByAggregate(
+	ctx context.Context,
+	batch int,
+	want func(aggregateID string) bool,
+) (backlogs map[string][]asynxmd.Delivery, order []string, err error) {
+	backlogs = make(map[string][]asynxmd.Delivery)
+	err = p.scanPending(ctx, batch, func(d asynxmd.Delivery) error {
+		if !want(d.AggregateID) {
+			return nil
+		}
+		if _, known := backlogs[d.AggregateID]; !known {
+			order = append(order, d.AggregateID)
+		}
+		backlogs[d.AggregateID] = append(backlogs[d.AggregateID], d)
+		return nil
+	})
+	return backlogs, order, err
+}
+
+// redeliver rebuilds the events behind one aggregate's pending deliveries and
+// enqueues them in version order. The stream is replayed once, however many
+// entries are pending, so a long backlog costs one pass over the stream rather
+// than one per entry. Entries whose event no longer exists are acknowledged
+// instead. On an error the entries not yet enqueued stay pending.
 func (p *Processor[T]) redeliver(
 	ctx context.Context,
-	d asynxmd.Delivery,
+	agg string,
+	backlog []asynxmd.Delivery,
 ) error {
+	if len(backlog) == 0 {
+		return nil
+	}
 	store := p.es.Store()
+	ack := func(version int64) func(context.Context) error {
+		return func(ctx context.Context) error { return store.AckDelivery(ctx, agg, version) }
+	}
 
-	var event asynxmd.Event[T]
-	found := false
-	err := p.es.Replay(ctx, d.AggregateID, d.Version, d.Version,
+	pending := make(map[int64]struct{}, len(backlog))
+	lowest, highest := backlog[0].Version, backlog[0].Version
+	for _, d := range backlog {
+		pending[d.Version] = struct{}{}
+		lowest, highest = min(lowest, d.Version), max(highest, d.Version)
+	}
+
+	var enqueueErr error
+	err := p.es.Replay(ctx, agg, lowest, highest,
 		func(_ context.Context, evt asynxmd.Event[T]) {
-			if evt.Version == d.Version {
-				event, found = evt, true
+			if _, wanted := pending[evt.Version]; !wanted || enqueueErr != nil {
+				return
 			}
+			delete(pending, evt.Version)
+			_, enqueueErr = p.dispatcher.EnqueueRedelivery(ctx, evt, ack(evt.Version))
 		})
-	if err != nil {
+	if err = errors.Join(err, enqueueErr); err != nil {
 		return err
 	}
 
-	if !found {
-		return store.AckDelivery(ctx, d.AggregateID, d.Version)
+	for _, d := range backlog {
+		if _, vanished := pending[d.Version]; vanished {
+			if err := store.AckDelivery(ctx, agg, d.Version); err != nil {
+				return err
+			}
+		}
 	}
-
-	_, err = p.dispatcher.EnqueueRedelivery(ctx, event, func(ctx context.Context) error {
-		return store.AckDelivery(ctx, d.AggregateID, d.Version)
-	})
-	return err
+	return nil
 }

@@ -119,7 +119,10 @@ func (e *CommandExecutor[T]) erase(
 	return nil
 }
 
-// awaitTombstone waits for the marker to reach every subscriber.
+// awaitTombstone waits for the marker to reach every subscriber. It gives up
+// when ctx ends or the processor starts shutting down, so a Forget stuck behind
+// a handler that is itself waiting for it (see ErrForgetFromHandler, which is
+// only detected through the handler's context) cannot hold the shutdown open.
 func (e *CommandExecutor[T]) awaitTombstone(
 	ctx context.Context,
 	t dispatcher.Ticket,
@@ -129,13 +132,19 @@ func (e *CommandExecutor[T]) awaitTombstone(
 	}
 	select {
 	case <-t.Final:
-		if err := t.Err(); err != nil {
-			return fmt.Errorf("%w: tombstone delivery: %w", asynxmd.ErrForgetFailed, err)
-		}
-		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("%w: waiting for handlers: %w", asynxmd.ErrForgetFailed, ctx.Err())
+	case <-e.dispatcher.Interrupted():
+		select {
+		case <-t.Final:
+		default:
+			return fmt.Errorf("%w: waiting for handlers: %w", asynxmd.ErrForgetFailed, asynxmd.ErrShuttingDown)
+		}
 	}
+	if err := t.Err(); err != nil {
+		return fmt.Errorf("%w: tombstone delivery: %w", asynxmd.ErrForgetFailed, err)
+	}
+	return nil
 }
 
 // writeTombstone marks the aggregate as being forgotten, commits the tombstone
