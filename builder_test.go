@@ -3,6 +3,7 @@ package asynx_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -769,15 +770,23 @@ func TestShardingOpts_ABusyAggregateDoesNotStallItsShard(t *testing.T) {
 	defer close(gate)
 	go inst.Send(ctx, gatedUpdate{UpdateOrderCmd: upd("hot", 2), entered: entered, gate: gate})
 	within(t, entered, "the hot command to start")
+	var flooding sync.WaitGroup
 	for i := range 20 {
-		go inst.Send(ctx, upd("hot", float64(i+3)))
+		flooding.Add(1)
+		go func() {
+			flooding.Done()
+			inst.Send(ctx, upd("hot", float64(i+3)))
+		}()
 	}
-	time.Sleep(100 * time.Millisecond)
+	flooding.Wait()
 
-	cold, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	if _, err := inst.SendWait(cold, mocks.CreateOrderCmd{ID: "cold", Total: 1}); err != nil {
-		t.Fatalf("an unrelated aggregate on the same shard: %v", err)
+	for i := range 50 {
+		cold, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_, err := inst.SendWait(cold, mocks.CreateOrderCmd{ID: fmt.Sprintf("cold-%d", i), Total: 1})
+		cancel()
+		if err != nil {
+			t.Fatalf("an unrelated aggregate on the same shard, probe %d: %v", i, err)
+		}
 	}
 }
 

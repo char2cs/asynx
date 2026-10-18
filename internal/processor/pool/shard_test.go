@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -326,7 +327,7 @@ func TestPool_Drain_AnswersEnvelopesLeftInTheQueue(t *testing.T) {
 	executor := exec.New[order](es, nil)
 	p := pool.New(executor, 1, 8, 1)
 
-	gate := make(chan struct{})
+	gate, release := gateReleasedOnCleanup(t)
 	entered := make(chan struct{}, 1)
 	send := func(cmd asynxmd.Command[order]) *models.CommandEnvelope[order] {
 		env := &models.CommandEnvelope[order]{Cmd: cmd, Ctx: context.Background(), ResultChan: make(chan models.CommandResult[order], 1)}
@@ -344,7 +345,7 @@ func TestPool_Drain_AnswersEnvelopesLeftInTheQueue(t *testing.T) {
 	drained := make(chan error, 1)
 	go func() { drained <- p.Drain(context.Background()) }()
 	<-p.Shards()[0].Stopping()
-	close(gate)
+	release()
 
 	for i, env := range envs {
 		select {
@@ -379,7 +380,7 @@ func TestShard_ABusyAggregateLeavesTheOtherWorkersFree(t *testing.T) {
 	p := pool.New(executor, 1, 8, 2)
 	t.Cleanup(func() { p.Drain(context.Background()) })
 
-	gate := make(chan struct{})
+	gate, release := gateReleasedOnCleanup(t)
 	entered := make(chan struct{}, 1)
 	send := func(cmd asynxmd.Command[order]) *models.CommandEnvelope[order] {
 		env := &models.CommandEnvelope[order]{Cmd: cmd, Ctx: context.Background(), ResultChan: make(chan models.CommandResult[order], 1)}
@@ -401,12 +402,25 @@ func TestShard_ABusyAggregateLeavesTheOtherWorkersFree(t *testing.T) {
 		t.Fatal("an unrelated aggregate stalled behind the busy one")
 	}
 
-	close(gate)
+	release()
 	for name, env := range map[string]*models.CommandEnvelope[order]{"running": hot, "queued": queued} {
 		if res := resultWithin(t, env, name+" hot command"); res.Err != nil {
 			t.Fatalf("%s hot command: %v", name, res.Err)
 		}
 	}
+}
+
+// gateReleasedOnCleanup returns a gate and the function that opens it. The gate
+// is also opened when the test ends, before any cleanup registered earlier (such
+// as a Drain) runs, so a test that fails with a command still held does not
+// leave that Drain waiting for it.
+func gateReleasedOnCleanup(t *testing.T) (gate chan struct{}, release func()) {
+	t.Helper()
+	gate = make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	return gate, release
 }
 
 func resultWithin(
@@ -432,7 +446,7 @@ func TestShard_AMailboxKeepsTheOrderOfItsCommands(t *testing.T) {
 	p := pool.New(executor, 1, 8, 4)
 	t.Cleanup(func() { p.Drain(context.Background()) })
 
-	gate := make(chan struct{})
+	gate, release := gateReleasedOnCleanup(t)
 	entered := make(chan struct{}, 1)
 	send := func(cmd asynxmd.Command[order]) *models.CommandEnvelope[order] {
 		env := &models.CommandEnvelope[order]{Cmd: cmd, Ctx: context.Background(), ResultChan: make(chan models.CommandResult[order], 1)}
@@ -448,7 +462,7 @@ func TestShard_AMailboxKeepsTheOrderOfItsCommands(t *testing.T) {
 		envs = append(envs, send(mocks.UpdateOrderCmd{ID: "a", NewState: order{ID: "a", Total: float64(i)}}))
 		waitForBacklog(t, p.Shards()[0], len(envs)-1)
 	}
-	close(gate)
+	release()
 
 	for i, env := range envs {
 		res := resultWithin(t, env, fmt.Sprintf("command %d", i))
@@ -467,7 +481,7 @@ func TestShard_AMailboxRefusesWhatExceedsTheQueueDepth(t *testing.T) {
 	p := pool.New(executor, 1, 2, 2)
 	t.Cleanup(func() { p.Drain(context.Background()) })
 
-	gate := make(chan struct{})
+	gate, release := gateReleasedOnCleanup(t)
 	entered := make(chan struct{}, 1)
 	send := func(cmd asynxmd.Command[order]) *models.CommandEnvelope[order] {
 		env := &models.CommandEnvelope[order]{Cmd: cmd, Ctx: context.Background(), ResultChan: make(chan models.CommandResult[order], 1)}
@@ -493,7 +507,7 @@ func TestShard_AMailboxRefusesWhatExceedsTheQueueDepth(t *testing.T) {
 		t.Fatal("overflow was neither queued nor refused")
 	}
 
-	close(gate)
+	release()
 	for _, env := range append(waiting, running) {
 		if res := <-env.ResultChan; res.Err != nil {
 			t.Fatalf("queued command: %v", res.Err)

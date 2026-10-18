@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -365,8 +366,12 @@ func TestProcessor_Resume_StopsWhenItsContextEnds(t *testing.T) {
 	}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := f.p.Resume(cancelled, 10); err == nil {
+	err := f.p.Resume(cancelled, 10)
+	if err == nil {
 		t.Fatal("Resume ignored its cancelled context")
+	}
+	if strings.Contains(err.Error(), "\n") {
+		t.Fatalf("Resume kept going after its context ended, reporting every aggregate: %v", err)
 	}
 	if got := f.p.Paused(); len(got) != 2 {
 		t.Fatalf("Paused = %v, want both still parked", got)
@@ -526,7 +531,8 @@ func TestProcessor_Resume_ReplaysAnAggregatesStreamOnce(t *testing.T) {
 // logCountingStore counts the delivery-log rows its reads return.
 type logCountingStore struct {
 	store.Memory
-	rows atomic.Int64
+	rows  atomic.Int64
+	reads atomic.Int64
 }
 
 func (s *logCountingStore) PendingDeliveries(
@@ -534,33 +540,37 @@ func (s *logCountingStore) PendingDeliveries(
 	limit int,
 ) ([]asynxmd.Delivery, error) {
 	pending, err := s.Memory.PendingDeliveries(ctx, limit)
+	s.reads.Add(1)
 	s.rows.Add(int64(len(pending)))
 	return pending, err
 }
 
-// Resuming many parked aggregates reads the delivery log once per group of them,
-// not once per aggregate: an outage that parks many chats must not make the
-// recovery quadratic in them.
-func TestProcessor_Resume_ReadsTheDeliveryLogOncePerGroupOfAggregates(t *testing.T) {
-	const aggregates, perAggregate = 130, 3
+// Resuming many parked aggregates reads the delivery log once for all of them,
+// not once per aggregate and not once per group of them: an outage that parks
+// many chats must not make the recovery quadratic in them.
+func TestProcessor_Resume_ReadsTheDeliveryLogOnceForAllAggregates(t *testing.T) {
+	const aggregates = 600
 	var healthy atomic.Bool
+	parked := make(chan struct{}, aggregates)
 	s := &logCountingStore{Memory: store.New()}
-	f := newFixture(t, s, parkingOpts(&healthy)...)
+	f := newFixture(t, s, parkingOpts(&healthy,
+		processor.WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+			if errors.Is(err, asynxmd.ErrDeliveryParked) {
+				parked <- struct{}{}
+			}
+		}))...)
 	ctx := context.Background()
 	for i := range aggregates {
-		id := fmt.Sprintf("o%03d", i)
-		for v := range perAggregate {
-			if _, err := f.p.Send(ctx, updateCmd(id, float64(v+1))); err != nil {
-				t.Fatal(err)
-			}
+		if _, err := f.p.Send(ctx, updateCmd(fmt.Sprintf("o%03d", i), 1)); err != nil {
+			t.Fatal(err)
 		}
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for len(f.p.Paused()) != aggregates {
-		if time.Now().After(deadline) {
+	for range aggregates {
+		select {
+		case <-parked:
+		case <-time.After(10 * time.Second):
 			t.Fatalf("%d of %d aggregates parked", len(f.p.Paused()), aggregates)
 		}
-		time.Sleep(time.Millisecond)
 	}
 
 	healthy.Store(true)
@@ -571,11 +581,530 @@ func TestProcessor_Resume_ReadsTheDeliveryLogOncePerGroupOfAggregates(t *testing
 	f.p.WaitPublish()
 
 	if len(f.p.Paused()) != 0 {
-		t.Fatalf("still parked: %v", f.p.Paused())
+		t.Fatalf("still parked: %d aggregates", len(f.p.Paused()))
 	}
-	total := int64(aggregates * perAggregate)
-	if rows := s.rows.Load(); rows > 8*total {
-		t.Fatalf("resume read %d delivery-log rows for %d pending entries, want a few passes over the log", rows, total)
+	rows, reads := s.rows.Load(), s.reads.Load()
+	if rows > 3*aggregates {
+		t.Fatalf("resume read %d delivery-log rows for %d pending entries, want a single pass over the log", rows, aggregates)
+	}
+	if err := f.p.Resume(ctx, 10); err != nil {
+		t.Fatalf("second Resume: %v", err)
+	}
+	if again := s.reads.Load(); again != reads {
+		t.Fatalf("a Resume with nothing parked read the delivery log %d more times", again-reads)
+	}
+}
+
+// A command on one aggregate may send to another from inside its validation. A
+// resume must not hold one aggregate's lock while waiting for another's, or the
+// two wait for each other forever.
+func TestProcessor_Resume_DoesNotDeadlockWithACommandSendingToAnotherAggregate(t *testing.T) {
+	var healthy atomic.Bool
+	parked := make(chan struct{}, 2)
+	var readA sync.Once
+	redelivering := make(chan struct{})
+	s := &readHookStore{Memory: store.New(), onRead: func(streamID string) {
+		if streamID == "events:a" {
+			readA.Do(func() { close(redelivering) })
+		}
+	}}
+	f := newFixture(t, s, parkingOpts(&healthy,
+		processor.WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+			if errors.Is(err, asynxmd.ErrDeliveryParked) {
+				parked <- struct{}{}
+			}
+		}))...)
+	ctx := context.Background()
+	for _, id := range []string{"a", "b"} {
+		if _, err := f.p.Send(ctx, updateCmd(id, 1)); err != nil {
+			t.Fatal(err)
+		}
+		<-parked
+	}
+	healthy.Store(true)
+
+	validating := make(chan struct{})
+	cmd := validatingUpdate{UpdateOrderCmd: updateCmd("b", 2), validate: func() error {
+		close(validating)
+		select {
+		case <-redelivering:
+		case <-time.After(3 * time.Second):
+		}
+		sendCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		_, err := f.p.Send(sendCtx, updateCmd("a", 3))
+		return err
+	}}
+	sent := make(chan error, 1)
+	go func() { _, err := f.p.Send(ctx, cmd); sent <- err }()
+	<-validating
+
+	resumed := make(chan error, 1)
+	go func() { resumed <- f.p.Resume(ctx, 10) }()
+	for _, c := range []struct {
+		name string
+		done <-chan error
+	}{{"command", sent}, {"Resume", resumed}} {
+		select {
+		case err := <-c.done:
+			if err != nil {
+				t.Fatalf("%s: %v", c.name, err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s is deadlocked", c.name)
+		}
+	}
+}
+
+type validatingUpdate struct {
+	mocks.UpdateOrderCmd
+	validate func() error
+}
+
+func (c validatingUpdate) Validate(*order) error { return c.validate() }
+
+// readHookStore reports every stream read.
+type readHookStore struct {
+	store.Memory
+	onRead func(streamID string)
+}
+
+func (s *readHookStore) ReadFrom(
+	ctx context.Context,
+	streamID string,
+	fromVersion int64,
+) ([][]byte, error) {
+	s.onRead(streamID)
+	return s.Memory.ReadFrom(ctx, streamID, fromVersion)
+}
+
+// staleLogStore returns the delivery log as it was before afterRead ran, which
+// commits more events: the read of the log predates them.
+type staleLogStore struct {
+	store.Memory
+	afterRead func()
+	ran       atomic.Bool
+	sender    *processor.Processor[order]
+}
+
+func (s *staleLogStore) PendingDeliveries(
+	ctx context.Context,
+	limit int,
+) ([]asynxmd.Delivery, error) {
+	pending, err := s.Memory.PendingDeliveries(ctx, limit)
+	if s.ran.CompareAndSwap(false, true) {
+		s.afterRead()
+	}
+	return pending, err
+}
+
+// An event committed while the delivery log is being read is on no scanned
+// entry; the resume must still deliver it, ahead of anything later.
+func TestProcessor_Resume_DeliversAnEventCommittedAfterItReadTheLog(t *testing.T) {
+	var healthy atomic.Bool
+	parked := make(chan struct{}, 1)
+	var mu sync.Mutex
+	var delivered []int64
+	var s *staleLogStore
+	s = &staleLogStore{Memory: store.New(), afterRead: func() {
+		sendCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if _, err := s.sender.Send(sendCtx, updateCmd("o1", 2)); err != nil {
+			t.Errorf("a command during the resume: %v", err)
+		}
+	}}
+	f := newFixture(t, s, parkingOpts(&healthy,
+		processor.WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+			if errors.Is(err, asynxmd.ErrDeliveryParked) {
+				parked <- struct{}{}
+			}
+		}),
+		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+			Match: always,
+			Handler: func(_ context.Context, e asynxmd.Event[order]) error {
+				if !healthy.Load() {
+					return errors.New("down")
+				}
+				mu.Lock()
+				delivered = append(delivered, e.Version)
+				mu.Unlock()
+				return nil
+			},
+		}}))...)
+	s.sender = f.p
+	ctx := context.Background()
+	if _, err := f.p.Send(ctx, updateCmd("o1", 1)); err != nil {
+		t.Fatal(err)
+	}
+	<-parked
+
+	healthy.Store(true)
+	if err := f.p.Resume(ctx, 10); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	f.p.WaitPublish()
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(delivered, []int64{1, 2}) {
+		t.Fatalf("delivered %v, want [1 2]", delivered)
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 0 {
+		t.Fatalf("pending after Resume = %v", pending)
+	}
+}
+
+// A resume that finds an aggregate already resumed by another leaves it alone:
+// redelivering what its own, stale, read of the log lists would deliver the same
+// events twice.
+func TestProcessor_Resume_SkipsAnAggregateAnotherResumeLiftedMeanwhile(t *testing.T) {
+	var healthy atomic.Bool
+	parked := make(chan struct{}, 1)
+	var mu sync.Mutex
+	var delivered []int64
+	var s *staleLogStore
+	s = &staleLogStore{Memory: store.New(), afterRead: func() {
+		if err := s.sender.Resume(context.Background(), 10); err != nil {
+			t.Errorf("the second Resume: %v", err)
+		}
+	}}
+	f := newFixture(t, s, parkingOpts(&healthy, parkedSignal(parked),
+		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+			Match: always,
+			Handler: func(_ context.Context, e asynxmd.Event[order]) error {
+				if !healthy.Load() {
+					return errors.New("down")
+				}
+				mu.Lock()
+				delivered = append(delivered, e.Version)
+				mu.Unlock()
+				return nil
+			},
+		}}))...)
+	s.sender = f.p
+	if _, err := f.p.Send(context.Background(), updateCmd("o1", 1)); err != nil {
+		t.Fatal(err)
+	}
+	<-parked
+
+	healthy.Store(true)
+	if err := f.p.Resume(context.Background(), 10); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	f.p.WaitPublish()
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(delivered, []int64{1}) {
+		t.Fatalf("delivered %v, want [1] once", delivered)
+	}
+}
+
+// A park lifted by another resume and imposed again before this one reaches the
+// aggregate is a different park: the log read this resume made describes the old
+// one. Redelivering from it would deliver an acknowledged event twice and miss
+// the one that parked the aggregate again, so the aggregate is left for the next
+// Resume.
+func TestProcessor_Resume_LeavesAParkImposedAgainSinceItReadTheLog(t *testing.T) {
+	var healthy atomic.Bool
+	parked := make(chan struct{}, 2)
+	var mu sync.Mutex
+	var delivered []int64
+	var s *staleLogStore
+	s = &staleLogStore{Memory: store.New(), afterRead: func() {
+		ctx := context.Background()
+		if err := s.sender.Resume(ctx, 10); err != nil {
+			t.Errorf("the inner Resume: %v", err)
+		}
+		s.sender.WaitPublish()
+		healthy.Store(false)
+		if _, err := s.sender.Send(ctx, updateCmd("o1", 2)); err != nil {
+			t.Errorf("the command that parks again: %v", err)
+		}
+		<-parked
+		healthy.Store(true)
+	}}
+	f := newFixture(t, s, parkingOpts(&healthy, parkedSignal(parked),
+		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+			Match: always,
+			Handler: func(_ context.Context, e asynxmd.Event[order]) error {
+				if !healthy.Load() {
+					return errors.New("down")
+				}
+				mu.Lock()
+				delivered = append(delivered, e.Version)
+				mu.Unlock()
+				return nil
+			},
+		}}))...)
+	s.sender = f.p
+	ctx := context.Background()
+	if _, err := f.p.Send(ctx, updateCmd("o1", 1)); err != nil {
+		t.Fatal(err)
+	}
+	<-parked
+
+	healthy.Store(true)
+	if err := f.p.Resume(ctx, 10); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	f.p.WaitPublish()
+	if paused := f.p.Paused(); !slices.Equal(paused, []string{"o1"}) {
+		t.Fatalf("Paused = %v, want o1 left parked for the next Resume", paused)
+	}
+	if err := f.p.Resume(ctx, 10); err != nil {
+		t.Fatalf("second Resume: %v", err)
+	}
+	f.p.WaitPublish()
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(delivered, []int64{1, 2}) {
+		t.Fatalf("delivered %v, want [1 2], each once and in order", delivered)
+	}
+}
+
+// A Resume whose context ends part-way stops there instead of going on to the
+// aggregates it did not get to.
+func TestProcessor_Resume_StopsAtTheAggregateWhereItsContextEnds(t *testing.T) {
+	var healthy atomic.Bool
+	parked := make(chan struct{}, 3)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &readHookStore{Memory: store.New(), onRead: func(string) { cancel() }}
+	f := newFixture(t, s, parkingOpts(&healthy, parkedSignal(parked))...)
+	for _, id := range []string{"o1", "o2", "o3"} {
+		if _, err := f.p.Send(context.Background(), updateCmd(id, 1)); err != nil {
+			t.Fatal(err)
+		}
+		<-parked
+	}
+
+	healthy.Store(true)
+	f.p.Resume(ctx, 10)
+	paused := f.p.Paused()
+	if !slices.Contains(paused, "o2") || !slices.Contains(paused, "o3") {
+		t.Fatalf("Paused = %v, want o2 and o3 left alone once the context ended during o1", paused)
+	}
+}
+
+type idemOrderUpdate struct {
+	mocks.UpdateOrderCmd
+	Cmd string
+}
+
+func (c idemOrderUpdate) CommandID() string { return c.Cmd }
+
+// failingReadsStore fails event-stream reads while fail is set: of every stream,
+// or only of stream when that is not empty.
+type failingReadsStore struct {
+	store.Memory
+	fail   atomic.Bool
+	stream string
+}
+
+func (s *failingReadsStore) ReadFrom(
+	ctx context.Context,
+	streamID string,
+	fromVersion int64,
+) ([][]byte, error) {
+	if s.fail.Load() && (s.stream == "" || s.stream == streamID) {
+		return nil, errors.New("stream unreadable")
+	}
+	return s.Memory.ReadFrom(ctx, streamID, fromVersion)
+}
+
+// parkWithTwoCommands parks o1 on the failure of command c-1, whose handler ran
+// and failed, then commits c-2 behind the park, which no handler took.
+func parkWithTwoCommands(
+	t *testing.T,
+	f fixture,
+	parked <-chan struct{},
+) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := f.p.Send(ctx, idemOrderUpdate{updateCmd("o1", 1), "c-1"}); err != nil {
+		t.Fatal(err)
+	}
+	<-parked
+	_, err := f.p.SendWait(ctx, idemOrderUpdate{updateCmd("o1", 2), "c-2"})
+	if !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("c-2 behind the park = %v, want ErrDeliveryParked", err)
+	}
+}
+
+func parkedSignal(parked chan<- struct{}) processor.ProcessorOpt[order] {
+	return processor.WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+		if errors.Is(err, asynxmd.ErrDeliveryParked) {
+			select {
+			case parked <- struct{}{}:
+			default:
+			}
+		}
+	})
+}
+
+func retryOutcomes(
+	t *testing.T,
+	f fixture,
+) (ranAndFailed, neverTaken error) {
+	t.Helper()
+	ctx := context.Background()
+	_, ranAndFailed = f.p.SendWait(ctx, idemOrderUpdate{updateCmd("o1", 1), "c-1"})
+	_, neverTaken = f.p.SendWait(ctx, idemOrderUpdate{updateCmd("o1", 2), "c-2"})
+	return ranAndFailed, neverTaken
+}
+
+// A resume that cannot read the delivery log changes nothing: the retry of an
+// event no handler took is still told so.
+func TestProcessor_Resume_AfterALogReadFailureRetriesStillReportTheParkedEvent(t *testing.T) {
+	var healthy atomic.Bool
+	parked := make(chan struct{}, 1)
+	s := &flakyPendingStore{Memory: store.New()}
+	f := newFixture(t, s, parkingOpts(&healthy, parkedSignal(parked))...)
+	parkWithTwoCommands(t, f, parked)
+
+	s.fail.Store(true)
+	if err := f.p.Resume(context.Background(), 10); err == nil {
+		t.Fatal("Resume hid the unreadable log")
+	}
+	ranAndFailed, neverTaken := retryOutcomes(t, f)
+	if ranAndFailed != nil || !errors.Is(neverTaken, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("retries = %v, %v; want nil for c-1 (its handler ran) and ErrDeliveryParked for c-2", ranAndFailed, neverTaken)
+	}
+}
+
+// A resume that fails to replay the stream leaves the aggregate parked with the
+// same account of what ran: the event whose handler failed stays "ran".
+func TestProcessor_Resume_AfterAReplayFailureRetriesKeepTheirAnswers(t *testing.T) {
+	var healthy atomic.Bool
+	parked := make(chan struct{}, 1)
+	s := &failingReadsStore{Memory: store.New()}
+	f := newFixture(t, s, parkingOpts(&healthy, parkedSignal(parked))...)
+	parkWithTwoCommands(t, f, parked)
+
+	s.fail.Store(true)
+	if err := f.p.Resume(context.Background(), 10); err == nil {
+		t.Fatal("Resume hid the unreadable stream")
+	}
+	s.fail.Store(false)
+	if paused := f.p.Paused(); len(paused) != 1 {
+		t.Fatalf("Paused = %v, want o1 parked again", paused)
+	}
+	ranAndFailed, neverTaken := retryOutcomes(t, f)
+	if ranAndFailed != nil || !errors.Is(neverTaken, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("retries = %v, %v; want nil for c-1 (its handler ran) and ErrDeliveryParked for c-2", ranAndFailed, neverTaken)
+	}
+}
+
+// ackSignalStore reports every acknowledged delivery.
+type ackSignalStore struct {
+	store.Memory
+	acked chan struct{}
+}
+
+func (s *ackSignalStore) AckDelivery(
+	ctx context.Context,
+	aggregateID string,
+	version int64,
+) error {
+	err := s.Memory.AckDelivery(ctx, aggregateID, version)
+	select {
+	case s.acked <- struct{}{}:
+	default:
+	}
+	return err
+}
+
+// One aggregate that cannot be redelivered does not hold the others back: they
+// are resumed, it stays parked, and the error names it.
+func TestProcessor_Resume_AnAggregateThatFailsDoesNotStopTheOthers(t *testing.T) {
+	var healthy atomic.Bool
+	parked := make(chan struct{}, 2)
+	s := &failingReadsStore{Memory: store.New(), stream: "events:o1"}
+	f := newFixture(t, s, parkingOpts(&healthy, parkedSignal(parked))...)
+	ctx := context.Background()
+	for _, id := range []string{"o1", "o2"} {
+		if _, err := f.p.Send(ctx, updateCmd(id, 1)); err != nil {
+			t.Fatal(err)
+		}
+		<-parked
+	}
+
+	healthy.Store(true)
+	s.fail.Store(true)
+	err := f.p.Resume(ctx, 10)
+	if err == nil || !strings.Contains(err.Error(), "o1") {
+		t.Fatalf("Resume = %v, want an error naming o1", err)
+	}
+	f.p.WaitPublish()
+	if paused := f.p.Paused(); !slices.Equal(paused, []string{"o1"}) {
+		t.Fatalf("Paused = %v, want only o1", paused)
+	}
+	pending, _ := s.PendingDeliveries(ctx, 10)
+	if len(pending) != 1 || pending[0].AggregateID != "o1" {
+		t.Fatalf("pending = %v, want only o1's entry: o2 was redelivered", pending)
+	}
+}
+
+// A recovery that gets through only part of an aggregate's backlog does not
+// claim that the events it delivered went undelivered. The third event's
+// upcaster fails once the first two have been handled and acknowledged, which
+// makes the recovery fail halfway, deterministically.
+func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(t *testing.T) {
+	ctx := context.Background()
+	s := &ackSignalStore{Memory: store.New(), acked: make(chan struct{}, 8)}
+	var healthy atomic.Bool
+	parked := make(chan struct{}, 1)
+	first := newFixture(t, s, parkingOpts(&healthy, parkedSignal(parked))...)
+	for i, id := range []string{"c-1", "c-2", "c-3"} {
+		if _, err := first.p.Send(ctx, idemOrderUpdate{updateCmd("o1", float64(i+1)), id}); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			<-parked
+		}
+	}
+	if err := first.p.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var upcasts atomic.Int32
+	upcaster := func(_ context.Context, _ string, patches []byte) ([]byte, error) {
+		if upcasts.Add(1) != 3 {
+			return patches, nil
+		}
+		for range 2 {
+			select {
+			case <-s.acked:
+			case <-time.After(5 * time.Second):
+			}
+		}
+		return nil, errors.New("event cannot be upcast")
+	}
+	es := eventstore.New[order](s, store.NewSnapshots(), map[int]asynxmd.Upcaster{1: upcaster}, 2, nil)
+	reported := make(chan struct{}, 1)
+	p := processor.New(es, bus.NewChannelBus[order](),
+		processor.WithDurableDelivery[order](func(name string) bool { return name == "OrderUpdated" }),
+		processor.WithPublishErrorHandler(func(context.Context, asynxmd.Event[order], error) { reported <- struct{}{} }),
+		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+			Match:   always,
+			Handler: func(context.Context, asynxmd.Event[order]) error { return nil },
+		}}))
+	t.Cleanup(func() { p.Shutdown(ctx) })
+
+	if err := p.Recover(ctx, 10); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	select {
+	case <-reported:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the failure was not reported")
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 1 || pending[0].Version != 3 {
+		t.Fatalf("pending = %v, want only version 3", pending)
+	}
+	_, delivered := p.SendWait(ctx, idemOrderUpdate{updateCmd("o1", 1), "c-1"})
+	_, behind := p.SendWait(ctx, idemOrderUpdate{updateCmd("o1", 3), "c-3"})
+	if delivered != nil || !errors.Is(behind, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("retries = %v, %v; want nil for c-1 (delivered and acknowledged) and ErrDeliveryParked for c-3", delivered, behind)
 	}
 }
 

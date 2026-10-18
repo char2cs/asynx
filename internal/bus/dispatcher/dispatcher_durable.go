@@ -3,7 +3,9 @@ package dispatcher
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
+	"slices"
 	"time"
 
 	asynxmd "github.com/char2cs/asynx/models"
@@ -82,7 +84,8 @@ func (d *Dispatcher[T]) haltLocked(agg string) {
 	if _, already := d.halted[agg]; already {
 		return
 	}
-	d.halted[agg] = struct{}{}
+	d.parkSeq++
+	d.halted[agg] = d.parkSeq
 
 	q, ok := d.queues[agg]
 	if !ok {
@@ -141,11 +144,52 @@ func (d *Dispatcher[T]) Halted() []string {
 // across both so no live event slips ahead of them; when it was not parked,
 // someone else has done that already and redelivering would repeat it.
 func (d *Dispatcher[T]) Resume(agg string) bool {
+	parked, _ := d.resumeParked(agg, func(uint64) bool { return true })
+	return parked
+}
+
+// Parks lists the parked aggregates with the generation of each park. A park
+// that is lifted and imposed again has a new generation.
+func (d *Dispatcher[T]) Parks() map[string]uint64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	_, parked := d.halted[agg]
+	return maps.Clone(d.halted)
+}
+
+// ResumeUndelivered lifts the park of the given generation and reports whether
+// it did; a park that is gone, or has been lifted and imposed again since the
+// caller listed it (see Parks), is left alone, because what the caller read
+// about it is stale. It also returns, in ascending order, the versions the park
+// left undelivered: the events no handler took, which a redelivery must cover
+// even when the caller's own scan of the delivery log predates them. Putting
+// them back if the redelivery fails is the caller's (see ParkUndelivered),
+// because lifting the park forgets them.
+func (d *Dispatcher[T]) ResumeUndelivered(
+	agg string,
+	generation uint64,
+) (lifted bool, undelivered []int64) {
+	return d.resumeParked(agg, func(g uint64) bool { return g == generation })
+}
+
+func (d *Dispatcher[T]) resumeParked(
+	agg string,
+	wanted func(generation uint64) bool,
+) (lifted bool, undelivered []int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	generation, parked := d.halted[agg]
+	if !parked || !wanted(generation) {
+		return false, nil
+	}
+	undelivered = d.undelivered(agg)
 	d.resumeLocked(agg)
-	return parked
+	return true, undelivered
+}
+
+func (d *Dispatcher[T]) undelivered(agg string) []int64 {
+	d.unrunMu.Lock()
+	defer d.unrunMu.Unlock()
+	return slices.Sorted(maps.Keys(d.unrun[agg]))
 }
 
 // Park halts an aggregate's durable delivery, as exhausting its attempts does.
@@ -184,13 +228,6 @@ func (d *Dispatcher[T]) Interrupt() {
 // Interrupted is closed once Interrupt or Close has been called: from then on
 // failing durable deliveries give up instead of retrying.
 func (d *Dispatcher[T]) Interrupted() <-chan struct{} { return d.quit }
-
-func (d *Dispatcher[T]) isHalted(agg string) bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	_, ok := d.halted[agg]
-	return ok
-}
 
 // deliverDurable runs the durable subscribers until they all succeed. It
 // returns nil on success. Otherwise the delivery stays pending and the error

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 
 	asynxmd "github.com/char2cs/asynx/models"
@@ -25,8 +26,15 @@ func (p *Processor[T]) Paused() []string {
 // which therefore goes out before anything that followed it. Call it once the
 // cause (a bad handler, a downstream outage) is fixed.
 //
+// The delivery log is read once for all of them, before any park is lifted and
+// without holding a lock; the store has no per-aggregate query. Each aggregate
+// is then redelivered under its own lock, never holding another one, so a
+// command that sends to a second aggregate from inside its validation cannot
+// deadlock with a resume. Events committed after the read are covered because
+// the dispatcher remembers the ones a park left undelivered.
+//
 // An aggregate that cannot be redelivered stays parked and the others are still
-// resumed; the errors are joined.
+// resumed; the errors are joined. If the log cannot be read nothing changes.
 func (p *Processor[T]) Resume(
 	ctx context.Context,
 	batch int,
@@ -37,16 +45,28 @@ func (p *Processor[T]) Resume(
 	if batch <= 0 {
 		batch = 100
 	}
+	parks := p.dispatcher.Parks()
+	halted := slices.Sorted(maps.Keys(parks))
+	if len(halted) == 0 {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(halted))
+	for _, agg := range halted {
+		wanted[agg] = struct{}{}
+	}
+	backlogs, _, err := p.pendingByAggregate(ctx, batch, func(id string) bool {
+		_, isParked := wanted[id]
+		return isParked
+	})
+	if err != nil {
+		return err
+	}
+
 	var errs []error
-	halted := slices.Sorted(slices.Values(p.dispatcher.Halted()))
-	for group := range slices.Chunk(halted, resumeGroupSize) {
-		err := p.withLocks(ctx, group, func() error {
-			return p.resumeGroup(ctx, batch, group)
-		})
-		if err == nil {
-			continue
+	for _, agg := range halted {
+		if err := p.resumeAggregate(ctx, agg, parks[agg], backlogs[agg]); err != nil {
+			errs = append(errs, err)
 		}
-		errs = append(errs, err)
 		if ctx.Err() != nil {
 			break
 		}
@@ -54,67 +74,61 @@ func (p *Processor[T]) Resume(
 	return errors.Join(errs...)
 }
 
-const resumeGroupSize = 512
-
-// withLocks runs fn holding the command locks of aggs, taken in the order given.
-// Callers pass them sorted, so concurrent callers cannot deadlock.
-func (p *Processor[T]) withLocks(
+// resumeAggregate lifts the park of agg, the one listed as generation park, and
+// redelivers what is pending for it:
+// the entries the log read found and the events committed since. A park that
+// has been lifted, or lifted and imposed again, since Resume listed it is left
+// to the next Resume: the log read does not describe it. It holds agg's command
+// lock, and only that one. When the redelivery fails the aggregate is
+// parked again, remembering which of its events no handler has taken, because a
+// lifted park would hide the failure from the next Resume.
+func (p *Processor[T]) resumeAggregate(
 	ctx context.Context,
-	aggs []string,
-	fn func() error,
+	agg string,
+	park uint64,
+	scanned []asynxmd.Delivery,
 ) error {
-	if len(aggs) == 0 {
-		return fn()
-	}
-	return p.executor.WithLock(ctx, aggs[0], func() error {
-		return p.withLocks(ctx, aggs[1:], fn)
+	return p.executor.WithLock(ctx, agg, func() error {
+		lifted, undelivered := p.dispatcher.ResumeUndelivered(agg, park)
+		if !lifted {
+			return nil
+		}
+		remaining, err := p.redeliver(ctx, agg, withUndelivered(agg, scanned, undelivered))
+		if err == nil {
+			return nil
+		}
+		p.dispatcher.ParkUndelivered(agg, stillUndelivered(undelivered, remaining))
+		return fmt.Errorf("asynx: resume %s: %w", agg, err)
 	})
 }
 
-// resumeGroup lifts the park of each aggregate in group that is still parked and
-// redelivers their pending entries, reading the delivery log once for the whole
-// group. An aggregate that cannot be redelivered is parked again, because a
-// lifted park would hide that from the next Resume; the others are still
-// resumed. The caller holds the command lock of every aggregate in group, so no
-// live event overtakes the redelivery and no entry appears behind the scan.
-func (p *Processor[T]) resumeGroup(
-	ctx context.Context,
-	batch int,
-	group []string,
-) error {
-	stillParked := make(map[string]struct{}, len(group))
-	for _, agg := range group {
-		if p.dispatcher.Resume(agg) {
-			stillParked[agg] = struct{}{}
-		}
+// withUndelivered adds the undelivered versions to the scanned entries. The
+// order does not matter, and a version named twice is redelivered once: the
+// stream is replayed in version order and each version is taken from it once.
+func withUndelivered(
+	agg string,
+	scanned []asynxmd.Delivery,
+	undelivered []int64,
+) []asynxmd.Delivery {
+	backlog := slices.Clone(scanned)
+	for _, v := range undelivered {
+		backlog = append(backlog, asynxmd.Delivery{AggregateID: agg, Version: v})
 	}
-	if len(stillParked) == 0 {
-		return nil
-	}
-
-	backlogs, order, err := p.pendingByAggregate(ctx, batch, func(id string) bool {
-		_, wanted := stillParked[id]
-		return wanted
-	})
-	if err != nil {
-		p.parkAll(stillParked)
-		return err
-	}
-
-	var errs []error
-	for _, agg := range order {
-		if err := p.redeliver(ctx, agg, backlogs[agg]); err != nil {
-			p.dispatcher.ParkUndelivered(agg, versionsOf(backlogs[agg]))
-			errs = append(errs, fmt.Errorf("asynx: resume %s: %w", agg, err))
-		}
-	}
-	return errors.Join(errs...)
+	return backlog
 }
 
-func (p *Processor[T]) parkAll(aggs map[string]struct{}) {
-	for agg := range aggs {
-		p.dispatcher.Park(agg)
-	}
+// stillUndelivered keeps the versions of undelivered that remaining names: the
+// ones that were undelivered before the redelivery and still are. An event that
+// had been handed to a handler before the park stays out, as does one the
+// redelivery enqueued.
+func stillUndelivered(
+	undelivered []int64,
+	remaining []int64,
+) []int64 {
+	return slices.DeleteFunc(slices.Clone(undelivered), func(v int64) bool {
+		_, notEnqueued := slices.BinarySearch(remaining, v)
+		return !notEnqueued
+	})
 }
 
 // Recover re-enqueues every unacknowledged delivery, in enqueue order, on the
@@ -147,14 +161,14 @@ func (p *Processor[T]) Recover(
 		return err
 	}
 	for _, agg := range order {
-		err := p.redeliver(ctx, agg, backlogs[agg])
+		undelivered, err := p.redeliver(ctx, agg, backlogs[agg])
 		if err == nil {
 			continue
 		}
 		if ctx.Err() != nil || errors.Is(err, asynxmd.ErrDispatcherClosed) {
 			return fmt.Errorf("asynx: recovery: %w", err)
 		}
-		p.dispatcher.ParkUndelivered(agg, versionsOf(backlogs[agg]))
+		p.dispatcher.ParkUndelivered(agg, undelivered)
 		p.dispatcher.ReportError(ctx, asynxmd.Event[T]{AggregateID: agg, Version: backlogs[agg][0].Version},
 			fmt.Errorf("recovery: %w", err))
 	}
@@ -229,20 +243,21 @@ func (p *Processor[T]) pendingByAggregate(
 // enqueues them in version order. The stream is replayed once, however many
 // entries are pending, so a long backlog costs one pass over the stream rather
 // than one per entry. Entries whose event no longer exists are acknowledged
-// instead. On an error the entries not yet enqueued stay pending.
+// instead. On an error the entries not yet enqueued stay pending, and their
+// versions, ascending, are returned.
 func (p *Processor[T]) redeliver(
 	ctx context.Context,
 	agg string,
 	backlog []asynxmd.Delivery,
-) error {
+) (notEnqueued []int64, err error) {
 	if len(backlog) == 0 {
-		return nil
+		return nil, nil
 	}
 	vanished, err := p.enqueueBacklog(ctx, agg, backlog)
 	if err != nil {
-		return err
+		return slices.Sorted(maps.Keys(vanished)), err
 	}
-	return p.ackVanished(ctx, agg, backlog, vanished)
+	return nil, p.ackVanished(ctx, agg, backlog, vanished)
 }
 
 // enqueueBacklog replays the stream once and enqueues the events the backlog
@@ -270,8 +285,10 @@ func (p *Processor[T]) enqueueBacklog(
 			if _, wanted := vanished[evt.Version]; !wanted || enqueueErr != nil {
 				return
 			}
-			delete(vanished, evt.Version)
 			_, enqueueErr = p.dispatcher.EnqueueRedelivery(ctx, evt, ack(evt.Version))
+			if enqueueErr == nil {
+				delete(vanished, evt.Version)
+			}
 		})
 	return vanished, errors.Join(replayErr, enqueueErr)
 }
@@ -291,12 +308,4 @@ func (p *Processor[T]) ackVanished(
 		}
 	}
 	return nil
-}
-
-func versionsOf(backlog []asynxmd.Delivery) []int64 {
-	versions := make([]int64, len(backlog))
-	for i, d := range backlog {
-		versions[i] = d.Version
-	}
-	return versions
 }

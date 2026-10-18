@@ -52,10 +52,11 @@ type Dispatcher[T any] struct {
 	quitOnce       sync.Once
 	base           context.Context // cancelled when Close gives up: stops handler contexts
 	cancelBase     context.CancelFunc
-	halted         map[string]struct{} // aggregates whose durable delivery is parked
-	wg             sync.WaitGroup      // tracks goroutine lifetime (for Close)
-	inflight       sync.Map            // *dispatchJob -> struct{}: queued or running (for WaitIdle)
-	tickets        sync.Map            // ticketKey -> *dispatchJob: the same, by event (for TicketFor)
+	halted         map[string]uint64 // aggregates whose durable delivery is parked -> the park's generation
+	parkSeq        uint64
+	wg             sync.WaitGroup // tracks goroutine lifetime (for Close)
+	inflight       sync.Map       // *dispatchJob -> struct{}: queued or running (for WaitIdle)
+	tickets        sync.Map       // ticketKey -> *dispatchJob: the same, by event (for TicketFor)
 	unrunMu        sync.Mutex
 	unrun          map[string]map[int64]error // aggregate -> version -> why no handler ran, until the park lifts
 	onPublishError asynxmd.PublishErrorHandler[T]
@@ -169,7 +170,7 @@ func New[T any](bus asynxmd.Bus[T], opts ...Opt[T]) *Dispatcher[T] {
 		base:         base,
 		cancelBase:   cancelBase,
 		quit:         make(chan struct{}),
-		halted:       make(map[string]struct{}),
+		halted:       make(map[string]uint64),
 		unrun:        make(map[string]map[int64]error),
 		maxAttempts:  defaultMaxAttempts,
 		idleTimeout:  defaultIdleTimeout,
@@ -307,8 +308,8 @@ func (d *Dispatcher[T]) enqueue(
 
 	if ack != nil {
 		if _, parked := d.halted[agg]; parked {
-			d.mu.Unlock()
 			d.markParkedUnrun(job)
+			d.mu.Unlock()
 			job.complete(asynxmd.ErrDeliveryParked)
 			return ticket, nil
 		}
@@ -345,7 +346,8 @@ func (d *Dispatcher[T]) track(job *dispatchJob[T]) {
 
 // markParkedUnrun settles a job whose handlers never ran because its aggregate
 // is parked, and remembers it until the park lifts, so a retry of the command
-// that produced it can be told.
+// that produced it can be told. Callers hold d.mu, which is what keeps a lift
+// from running between the check that the aggregate is parked and the record.
 func (d *Dispatcher[T]) markParkedUnrun(job *dispatchJob[T]) {
 	job.markUnrun(asynxmd.ErrDeliveryParked)
 	d.unrunMu.Lock()
@@ -355,6 +357,27 @@ func (d *Dispatcher[T]) markParkedUnrun(job *dispatchJob[T]) {
 		d.unrun[agg] = make(map[int64]error)
 	}
 	d.unrun[agg][job.event.Version] = asynxmd.ErrDeliveryParked
+}
+
+// settleIfParked settles job as undelivered if its aggregate is parked, or was
+// parked since halt was taken. Only a park still in force is remembered: after a
+// lift the redelivery covers the job, and a record would outlive the park.
+func (d *Dispatcher[T]) settleIfParked(
+	agg string,
+	halt <-chan struct{},
+	job *dispatchJob[T],
+) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, parked := d.halted[agg]; parked {
+		d.markParkedUnrun(job)
+		return true
+	}
+	if !closed(halt) {
+		return false
+	}
+	job.markUnrun(asynxmd.ErrDeliveryParked)
+	return true
 }
 
 func (d *Dispatcher[T]) forgetUnrun(agg string) {
@@ -540,9 +563,8 @@ func (d *Dispatcher[T]) handle(
 		}
 	}()
 
-	if job.ack != nil && (d.isHalted(agg) || closed(halt)) {
+	if job.ack != nil && d.settleIfParked(agg, halt, job) {
 		outcome = asynxmd.ErrDeliveryParked
-		d.markParkedUnrun(job)
 		return
 	}
 

@@ -1085,6 +1085,45 @@ func TestResume_ReportsWhetherItLiftedAPark(t *testing.T) {
 	}
 }
 
+func TestResumeUndelivered_ReturnsWhatTheParkLeftUndeliveredAndForgetsIt(t *testing.T) {
+	d := newDurable(t, nil)
+	if lifted, undelivered := d.ResumeUndelivered("a", 1); lifted || undelivered != nil {
+		t.Fatalf("not parked: got %v, %v", lifted, undelivered)
+	}
+	d.ParkUndelivered("a", []int64{7, 3, 5})
+	lifted, undelivered := d.ResumeUndelivered("a", d.Parks()["a"])
+	if !lifted || !slices.Equal(undelivered, []int64{3, 5, 7}) {
+		t.Fatalf("ResumeUndelivered = %v, %v; want true, [3 5 7]", lifted, undelivered)
+	}
+	if err := d.Unrun("a", 3); err != nil {
+		t.Fatalf("Unrun after the lift = %v, want nil", err)
+	}
+}
+
+// What a caller read about a park is stale once the park has been lifted and
+// imposed again: ResumeUndelivered leaves the new park, and what it left
+// undelivered, alone.
+func TestResumeUndelivered_LeavesAParkImposedAgainSinceItWasListed(t *testing.T) {
+	d := newDurable(t, nil)
+	d.Park("a")
+	listed := d.Parks()["a"]
+	d.Resume("a")
+	d.ParkUndelivered("a", []int64{4})
+
+	if lifted, _ := d.ResumeUndelivered("a", listed); lifted {
+		t.Fatal("lifted a park other than the one listed")
+	}
+	if got := d.Halted(); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("halted = %v, want a still parked", got)
+	}
+	if err := d.Unrun("a", 4); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("Unrun = %v, want what the new park left undelivered kept", err)
+	}
+	if again := d.Parks()["a"]; again == listed {
+		t.Fatal("a new park reused the generation of the old one")
+	}
+}
+
 // If the ack of v1 fails, v2 must not be delivered and acknowledged ahead of it.
 func TestAckFailure_ParksTheAggregateSoALaterEventDoesNotOvertake(t *testing.T) {
 	var rec deliveries
