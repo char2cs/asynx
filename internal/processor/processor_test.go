@@ -1194,12 +1194,13 @@ func TestProcessor_WaitPublish_DoesNotFailCommandsSentWhileItWaits(t *testing.T)
 	ctx := context.Background()
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
-	if _, err := f.b.Subscribe("OrderCreated", func(_ context.Context, e asynxmd.Event[order]) {
+	holdSlow := func(_ context.Context, e asynxmd.Event[order]) {
 		if e.AggregateID == "slow" {
 			entered <- struct{}{}
 			<-release
 		}
-	}); err != nil {
+	}
+	if _, err := f.b.Subscribe("OrderCreated", holdSlow); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.p.Send(ctx, mocks.CreateOrderCmd{ID: "slow", Total: 1}); err != nil {

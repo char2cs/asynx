@@ -2368,24 +2368,37 @@ func feedOrders(
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
-		for i := 0; ; i++ {
-			select {
-			case <-quit:
-				return
-			default:
-			}
-			id := fmt.Sprintf("%s-%d", prefix, i)
-			if _, err := instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: id, Total: 1}); err != nil {
-				return
-			}
-			for _, followUp := range followUps {
-				instance.SendWait(context.Background(), followUp(id)) //nolint:errcheck
-			}
-		}
+		feedUntil(quit, instance, prefix, followUps)
 	}()
 	var once sync.Once
 	return func() {
 		once.Do(func() { close(quit); <-finished })
+	}
+}
+
+func feedUntil(
+	quit <-chan struct{},
+	instance asynx.Asynx[mocks.Order],
+	prefix string,
+	followUps []func(id string) models.Command[mocks.Order],
+) {
+	for i := 0; !isClosed(quit); i++ {
+		id := fmt.Sprintf("%s-%d", prefix, i)
+		if _, err := instance.SendWait(context.Background(), mocks.CreateOrderCmd{ID: id, Total: 1}); err != nil {
+			return
+		}
+		for _, followUp := range followUps {
+			instance.SendWait(context.Background(), followUp(id)) //nolint:errcheck
+		}
+	}
+}
+
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
 	}
 }
 

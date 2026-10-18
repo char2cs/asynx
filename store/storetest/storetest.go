@@ -53,18 +53,74 @@ func mustAtomically(
 	}
 }
 
+func appendEach(
+	ctx context.Context,
+	tx models.Tx,
+	streamID string,
+	blobs ...[]byte,
+) error {
+	for i, blob := range blobs {
+		if err := tx.Append(ctx, streamID, int64(i+1), blob); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func enqueueEach(
+	ctx context.Context,
+	tx models.Tx,
+	deliveries ...models.Delivery,
+) error {
+	for _, d := range deliveries {
+		if err := tx.EnqueueDelivery(ctx, d.AggregateID, d.Version); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func raceAll(
+	n int,
+	run func(i int) error,
+) []error {
+	results := make([]error, n)
+	var start, finished sync.WaitGroup
+	start.Add(1)
+	for i := range n {
+		finished.Add(1)
+		go func() {
+			defer finished.Done()
+			start.Wait()
+			results[i] = run(i)
+		}()
+	}
+	start.Done()
+	finished.Wait()
+	return results
+}
+
+func appendAndHold(
+	ctx context.Context,
+	tx models.Tx,
+	appended chan<- struct{},
+	release <-chan struct{},
+) error {
+	if err := tx.Append(ctx, "s1", 1, []byte("a")); err != nil {
+		return err
+	}
+	close(appended)
+	<-release
+	return nil
+}
+
 func appendCommitsAndReads(
 	t testing.TB,
 	s models.Store,
 ) {
 	ctx := context.Background()
 	mustAtomically(t, s, func(tx models.Tx) error {
-		for v, d := range []string{"a", "b", "c"} {
-			if err := tx.Append(ctx, "s1", int64(v+1), []byte(d)); err != nil {
-				return err
-			}
-		}
-		return nil
+		return appendEach(ctx, tx, "s1", []byte("a"), []byte("b"), []byte("c"))
 	})
 
 	blobs, err := s.ReadFrom(ctx, "s1", 2)
@@ -82,12 +138,7 @@ func readRangeLimits(
 ) {
 	ctx := context.Background()
 	mustAtomically(t, s, func(tx models.Tx) error {
-		for v := int64(1); v <= 4; v++ {
-			if err := tx.Append(ctx, "s1", v, []byte{byte('0' + v)}); err != nil {
-				return err
-			}
-		}
-		return nil
+		return appendEach(ctx, tx, "s1", []byte("1"), []byte("2"), []byte("3"), []byte("4"))
 	})
 
 	blobs, err := s.ReadRange(ctx, "s1", 2, 2)
@@ -182,20 +233,13 @@ func deliveriesOrderAndAck(
 	s models.Store,
 ) {
 	ctx := context.Background()
-	mustAtomically(t, s, func(tx models.Tx) error {
-		for _, d := range []models.Delivery{{AggregateID: "a", Version: 1}, {AggregateID: "b", Version: 1}, {AggregateID: "a", Version: 2}} {
-			if err := tx.EnqueueDelivery(ctx, d.AggregateID, d.Version); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	want := []models.Delivery{{AggregateID: "a", Version: 1}, {AggregateID: "b", Version: 1}, {AggregateID: "a", Version: 2}}
+	mustAtomically(t, s, func(tx models.Tx) error { return enqueueEach(ctx, tx, want...) })
 
 	pending, err := s.PendingDeliveries(ctx, 10)
 	if err != nil {
 		t.Fatalf("PendingDeliveries: %v", err)
 	}
-	want := []models.Delivery{{AggregateID: "a", Version: 1}, {AggregateID: "b", Version: 1}, {AggregateID: "a", Version: 2}}
 	if len(pending) != len(want) {
 		t.Fatalf("pending = %v, want %v", pending, want)
 	}
@@ -381,12 +425,13 @@ func pendingLimit(
 ) {
 	ctx := context.Background()
 	mustAtomically(t, s, func(tx models.Tx) error {
-		for v := int64(1); v <= 5; v++ {
-			if err := tx.EnqueueDelivery(ctx, "a", v); err != nil {
-				return err
-			}
-		}
-		return nil
+		return enqueueEach(ctx, tx,
+			models.Delivery{AggregateID: "a", Version: 1},
+			models.Delivery{AggregateID: "a", Version: 2},
+			models.Delivery{AggregateID: "a", Version: 3},
+			models.Delivery{AggregateID: "a", Version: 4},
+			models.Delivery{AggregateID: "a", Version: 5},
+		)
 	})
 	pending, _ := s.PendingDeliveries(ctx, 2)
 	if len(pending) != 2 || pending[0].Version != 1 || pending[1].Version != 2 {
@@ -443,20 +488,12 @@ func concurrentSameVersion(
 ) {
 	const writers = 16
 	ctx := context.Background()
-	results := make(chan error, writers)
-	var start sync.WaitGroup
-	start.Add(1)
-	for i := range writers {
-		go func() {
-			start.Wait()
-			results <- s.Atomically(ctx, func(tx models.Tx) error { return tx.Append(ctx, "s1", 1, []byte{byte(i)}) })
-		}()
-	}
-	start.Done()
+	results := raceAll(writers, func(i int) error {
+		return s.Atomically(ctx, func(tx models.Tx) error { return tx.Append(ctx, "s1", 1, []byte{byte(i)}) })
+	})
 
 	committed := 0
-	for range writers {
-		err := <-results
+	for _, err := range results {
 		switch {
 		case err == nil:
 			committed++
@@ -479,20 +516,14 @@ func concurrentDistinctVersions(
 ) {
 	const writers = 20
 	ctx := context.Background()
-	errs := make(chan error, writers)
-	var start sync.WaitGroup
-	start.Add(1)
-	for v := int64(1); v <= writers; v++ {
-		go func() {
-			start.Wait()
-			errs <- s.Atomically(ctx, func(tx models.Tx) error {
-				return errors.Join(tx.Append(ctx, "s1", v, []byte{byte(v)}), tx.EnqueueDelivery(ctx, "s1", v))
-			})
-		}()
-	}
-	start.Done()
-	for range writers {
-		if err := <-errs; err != nil {
+	results := raceAll(writers, func(i int) error {
+		v := int64(i + 1)
+		return s.Atomically(ctx, func(tx models.Tx) error {
+			return errors.Join(tx.Append(ctx, "s1", v, []byte{byte(v)}), tx.EnqueueDelivery(ctx, "s1", v))
+		})
+	})
+	for _, err := range results {
+		if err != nil {
 			t.Fatalf("a non-conflicting transaction failed: %v", err)
 		}
 	}
@@ -562,12 +593,7 @@ func readsDuringOpenTransaction(
 	committed := make(chan error, 1)
 	go func() {
 		committed <- s.Atomically(ctx, func(tx models.Tx) error {
-			if err := tx.Append(ctx, "s1", 1, []byte("a")); err != nil {
-				return err
-			}
-			close(appended)
-			<-release
-			return nil
+			return appendAndHold(ctx, tx, appended, release)
 		})
 	}()
 	select {
@@ -717,20 +743,17 @@ func snapshotConcurrentPuts(
 ) {
 	const writers = 16
 	ctx := context.Background()
+	payload := func(i int) []byte { return []byte{'v', byte('a' + i)} }
 	candidates := map[string]struct{}{}
-	var wg sync.WaitGroup
-	for v := int64(1); v <= writers; v++ {
-		data := []byte{'v', byte('a' + v)}
-		candidates[string(data)] = struct{}{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := s.Put(ctx, "a", v, data); err != nil {
-				t.Errorf("Put v%d: %v", v, err)
-			}
-		}()
+	for i := range writers {
+		candidates[string(payload(i))] = struct{}{}
 	}
-	wg.Wait()
+	results := raceAll(writers, func(i int) error { return s.Put(ctx, "a", int64(i+1), payload(i)) })
+	for i, err := range results {
+		if err != nil {
+			t.Errorf("Put v%d: %v", i+1, err)
+		}
+	}
 
 	got, found, err := s.Get(ctx, "a")
 	if err != nil || !found {

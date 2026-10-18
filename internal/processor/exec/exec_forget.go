@@ -205,14 +205,23 @@ func (e *CommandExecutor[T]) commitTombstone(
 // of anything that follows it.
 func (e *CommandExecutor[T]) tombstoneHook() eventstore.TxHook[T] {
 	return func(ctx context.Context, tx asynxmd.Tx, evt asynxmd.Event[T]) error {
-		hasDeliveryLog := e.durableMatch != nil && e.dispatcher != nil
-		if hasDeliveryLog {
-			if err := supersedeDeliveries(ctx, tx, evt); err != nil {
-				return err
-			}
+		if err := e.supersedeDeliveriesIfLogged(ctx, tx, evt); err != nil {
+			return err
 		}
 		return e.runSyncProjections(ctx, tx, evt)
 	}
+}
+
+func (e *CommandExecutor[T]) supersedeDeliveriesIfLogged(
+	ctx context.Context,
+	tx asynxmd.Tx,
+	tombstone asynxmd.Event[T],
+) error {
+	hasDeliveryLog := e.durableMatch != nil && e.dispatcher != nil
+	if !hasDeliveryLog {
+		return nil
+	}
+	return supersedeDeliveries(ctx, tx, tombstone)
 }
 
 // supersedeDeliveries drops the aggregate's pending deliveries and records the

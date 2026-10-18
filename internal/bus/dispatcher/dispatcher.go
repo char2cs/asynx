@@ -407,17 +407,27 @@ func (d *Dispatcher[T]) worker(
 	defer d.wg.Done()
 	for {
 		d.drain(aggregateID, q)
-
-		select {
-		case <-q.wake:
-		case <-d.stopCh:
-			d.drain(aggregateID, q)
+		if d.awaitWork(aggregateID, q) {
 			return
-		case <-time.After(d.idleTimeout):
-			if d.retire(aggregateID, q) {
-				return
-			}
 		}
+	}
+}
+
+// awaitWork blocks until the aggregate has more to handle and reports whether
+// its worker is finished instead: the dispatcher stopped, or the worker idled
+// out.
+func (d *Dispatcher[T]) awaitWork(
+	aggregateID string,
+	q *aggregateQueue[T],
+) (finished bool) {
+	select {
+	case <-q.wake:
+		return false
+	case <-d.stopCh:
+		d.drain(aggregateID, q)
+		return true
+	case <-time.After(d.idleTimeout):
+		return d.retire(aggregateID, q)
 	}
 }
 

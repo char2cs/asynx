@@ -781,6 +781,17 @@ func TestShardingOpts_ABusyAggregateDoesNotStallItsShard(t *testing.T) {
 	}
 }
 
+func sendHot(
+	ctx context.Context,
+	inst asynx.Asynx[mocks.Order],
+	refused chan<- struct{},
+) {
+	_, err := inst.Send(ctx, upd("hot", 3))
+	if errors.Is(err, models.ErrQueueFull) {
+		refused <- struct{}{}
+	}
+}
+
 // QueueDepth bounds the commands that may wait behind a running one, per
 // aggregate: a flood to one aggregate is refused with ErrQueueFull, and other
 // aggregates are unaffected.
@@ -800,11 +811,7 @@ func TestShardingOpts_QueueDepthBoundsTheBacklogOfOneAggregate(t *testing.T) {
 
 	refused := make(chan struct{}, 32)
 	for range 20 {
-		go func() {
-			if _, err := inst.Send(ctx, upd("hot", 3)); errors.Is(err, models.ErrQueueFull) {
-				refused <- struct{}{}
-			}
-		}()
+		go sendHot(ctx, inst, refused)
 	}
 	for range 18 {
 		within(t, refused, "a hot Send to be refused with ErrQueueFull")

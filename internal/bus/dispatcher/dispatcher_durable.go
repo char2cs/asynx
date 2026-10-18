@@ -360,6 +360,26 @@ func (d *Dispatcher[T]) notifyPanic(
 	d.onPanic(job.ctx, job.event, recovered)
 }
 
+func (d *Dispatcher[T]) callRecovering(
+	job *dispatchJob[T],
+	sub DurableSub[T],
+) (err error) {
+	defer func() { d.errorFromPanic(job, recover(), &err) }()
+	return sub.Handler(job.ctx, job.event)
+}
+
+func (d *Dispatcher[T]) errorFromPanic(
+	job *dispatchJob[T],
+	recovered any,
+	err *error,
+) {
+	if recovered == nil {
+		return
+	}
+	d.notifyPanic(job, recovered)
+	*err = fmt.Errorf("%w: %v", asynxmd.ErrHandlerPanic, recovered)
+}
+
 // runDurable runs one durable handler, turning a panic into an error. A slow
 // handler is reported once as timed out and still waited for.
 func (d *Dispatcher[T]) runDurable(
@@ -367,15 +387,7 @@ func (d *Dispatcher[T]) runDurable(
 	sub DurableSub[T],
 	attempt int,
 ) error {
-	call := func() (err error) {
-		defer func() {
-			if r := recover(); r != nil {
-				d.notifyPanic(job, r)
-				err = fmt.Errorf("%w: %v", asynxmd.ErrHandlerPanic, r)
-			}
-		}()
-		return sub.Handler(job.ctx, job.event)
-	}
+	call := func() error { return d.callRecovering(job, sub) }
 
 	if sub.Timeout <= 0 {
 		return call()

@@ -253,14 +253,23 @@ func waitOn[T any](
 	return func(ctx context.Context) error {
 		select {
 		case <-t.Settled:
-			if err := t.Unrun(); err != nil {
-				return fmt.Errorf("%w: event %s v%d is pending, no handler ran", err, event.AggregateID, event.Version)
-			}
-			return nil
+			return settledOutcome(t, event)
 		case <-ctx.Done():
 			return fmt.Errorf("%w: waiting for handlers: %w", asynxmd.ErrContextCancelled, ctx.Err())
 		}
 	}
+}
+
+// settledOutcome reports why a settled delivery ran no handler, if it did not.
+func settledOutcome[T any](
+	t dispatcher.Ticket,
+	event asynxmd.Event[T],
+) error {
+	err := t.Unrun()
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: event %s v%d is pending, no handler ran", err, event.AggregateID, event.Version)
 }
 
 // isDurable reports whether the event gets a delivery entry.
@@ -308,16 +317,8 @@ func (e *CommandExecutor[T]) txHook(commandID string) eventstore.TxHook[T] {
 			return err
 		}
 
-		if commandID != "" {
-			receipt := asynxmd.Receipt{
-				Accepted:    true,
-				AggregateID: evt.AggregateID,
-				EventID:     evt.ID,
-				Version:     evt.Version,
-			}
-			if err := tx.PutReceipt(ctx, commandID, receipt); err != nil {
-				return err
-			}
+		if err := putAcceptedReceipt(ctx, tx, commandID, evt); err != nil {
+			return err
 		}
 
 		if e.isDurable(evt.EventName) {
@@ -325,4 +326,23 @@ func (e *CommandExecutor[T]) txHook(commandID string) eventstore.TxHook[T] {
 		}
 		return nil
 	}
+}
+
+// putAcceptedReceipt records the command's receipt, unless it has no id.
+func putAcceptedReceipt[T any](
+	ctx context.Context,
+	tx asynxmd.Tx,
+	commandID string,
+	evt asynxmd.Event[T],
+) error {
+	if commandID == "" {
+		return nil
+	}
+	receipt := asynxmd.Receipt{
+		Accepted:    true,
+		AggregateID: evt.AggregateID,
+		EventID:     evt.ID,
+		Version:     evt.Version,
+	}
+	return tx.PutReceipt(ctx, commandID, receipt)
 }

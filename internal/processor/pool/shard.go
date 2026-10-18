@@ -98,13 +98,18 @@ func (s *Shard[T]) failQueued() {
 	for {
 		select {
 		case envelope := <-s.commandChan:
-			if envelope != nil {
-				s.sendResult(envelope.ResultChan, models.CommandResult[T]{Err: asynxmd.ErrShuttingDown})
-			}
+			s.failEnvelope(envelope)
 		default:
 			return
 		}
 	}
+}
+
+func (s *Shard[T]) failEnvelope(envelope *models.CommandEnvelope[T]) {
+	if envelope == nil {
+		return
+	}
+	s.sendResult(envelope.ResultChan, models.CommandResult[T]{Err: asynxmd.ErrShuttingDown})
 }
 
 func (s *Shard[T]) dispatchJob(

@@ -1023,14 +1023,16 @@ func TestWithLockIfFree_RunsWhenFreeAndSkipsWhenHeld(t *testing.T) {
 		t.Fatal("fn did not run on a free aggregate")
 	}
 
+	var ranWhileHeld, reportedRunning bool
 	err := executor.WithLock(context.Background(), "agg", func() error {
-		if executor.WithLockIfFree("agg", func() { t.Error("fn ran while the lock was held") }) {
-			t.Error("WithLockIfFree reported running while the lock was held")
-		}
+		reportedRunning = executor.WithLockIfFree("agg", func() { ranWhileHeld = true })
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if ranWhileHeld || reportedRunning {
+		t.Errorf("WithLockIfFree ran = %v, reported running = %v while the lock was held", ranWhileHeld, reportedRunning)
 	}
 
 	if !executor.WithLockIfFree("agg", func() {}) {

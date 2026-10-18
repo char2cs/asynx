@@ -3,6 +3,7 @@ package pool_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime"
 	"testing"
 	"time"
@@ -402,14 +403,24 @@ func TestShard_ABusyAggregateLeavesTheOtherWorkersFree(t *testing.T) {
 
 	close(gate)
 	for name, env := range map[string]*models.CommandEnvelope[order]{"running": hot, "queued": queued} {
-		select {
-		case res := <-env.ResultChan:
-			if res.Err != nil {
-				t.Fatalf("%s hot command: %v", name, res.Err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("%s hot command never finished", name)
+		if res := resultWithin(t, env, name+" hot command"); res.Err != nil {
+			t.Fatalf("%s hot command: %v", name, res.Err)
 		}
+	}
+}
+
+func resultWithin(
+	t *testing.T,
+	env *models.CommandEnvelope[order],
+	what string,
+) models.CommandResult[order] {
+	t.Helper()
+	select {
+	case res := <-env.ResultChan:
+		return res
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s never finished", what)
+		panic("unreachable")
 	}
 }
 
@@ -440,13 +451,9 @@ func TestShard_AMailboxKeepsTheOrderOfItsCommands(t *testing.T) {
 	close(gate)
 
 	for i, env := range envs {
-		select {
-		case res := <-env.ResultChan:
-			if res.Err != nil || res.Event.Version != int64(i+1) {
-				t.Fatalf("command %d = v%d, %v; want v%d", i, res.Event.Version, res.Err, i+1)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("command %d never finished", i)
+		res := resultWithin(t, env, fmt.Sprintf("command %d", i))
+		if res.Err != nil || res.Event.Version != int64(i+1) {
+			t.Fatalf("command %d = v%d, %v; want v%d", i, res.Event.Version, res.Err, i+1)
 		}
 	}
 }

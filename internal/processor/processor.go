@@ -305,19 +305,24 @@ func (p *Processor[T]) sendAndWait(
 
 	select {
 	case result := <-envelope.ResultChan:
-		if result.Err != nil || result.Wait == nil {
-			return result.Event, result.Err
-		}
-		if err := result.Wait(ctx); err != nil {
-			if errors.Is(err, asynxmd.ErrContextCancelled) {
-				return result.Event, asynxmd.ErrContextCancelled
-			}
-			return result.Event, err
-		}
-		return result.Event, nil
+		return awaitHandlers(ctx, result)
 	case <-ctx.Done():
 		return asynxmd.Event[T]{}, asynxmd.ErrContextCancelled
 	}
+}
+
+func awaitHandlers[T any](
+	ctx context.Context,
+	result models.CommandResult[T],
+) (asynxmd.Event[T], error) {
+	if result.Err != nil || result.Wait == nil {
+		return result.Event, result.Err
+	}
+	err := result.Wait(ctx)
+	if errors.Is(err, asynxmd.ErrContextCancelled) {
+		return result.Event, asynxmd.ErrContextCancelled
+	}
+	return result.Event, err
 }
 
 // Shutdown stops accepting work, waits for the commands and Forgets in flight,

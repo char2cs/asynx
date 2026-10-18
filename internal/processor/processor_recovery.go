@@ -135,19 +135,30 @@ func (p *Processor[T]) scanPending(
 		if err != nil {
 			return fmt.Errorf("asynx: recovery: %w", err)
 		}
-		for _, d := range pending {
-			if _, again := seen[d]; again {
-				continue
-			}
-			seen[d] = struct{}{}
-			if err := visit(d); err != nil {
-				return fmt.Errorf("asynx: recovery: %w", err)
-			}
+		if err := visitUnseen(pending, seen, visit); err != nil {
+			return fmt.Errorf("asynx: recovery: %w", err)
 		}
 		if len(pending) < limit {
 			return nil
 		}
 	}
+}
+
+func visitUnseen(
+	pending []asynxmd.Delivery,
+	seen map[asynxmd.Delivery]struct{},
+	visit func(asynxmd.Delivery) error,
+) error {
+	for _, d := range pending {
+		if _, again := seen[d]; again {
+			continue
+		}
+		seen[d] = struct{}{}
+		if err := visit(d); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // pendingByAggregate reads the delivery log and groups the entries of the
@@ -185,36 +196,56 @@ func (p *Processor[T]) redeliver(
 	if len(backlog) == 0 {
 		return nil
 	}
+	vanished, err := p.enqueueBacklog(ctx, agg, backlog)
+	if err != nil {
+		return err
+	}
+	return p.ackVanished(ctx, agg, backlog, vanished)
+}
+
+// enqueueBacklog replays the stream once and enqueues the events the backlog
+// names. It returns the versions whose event was not found.
+func (p *Processor[T]) enqueueBacklog(
+	ctx context.Context,
+	agg string,
+	backlog []asynxmd.Delivery,
+) (vanished map[int64]struct{}, err error) {
 	store := p.es.Store()
 	ack := func(version int64) func(context.Context) error {
 		return func(ctx context.Context) error { return store.AckDelivery(ctx, agg, version) }
 	}
 
-	pending := make(map[int64]struct{}, len(backlog))
+	vanished = make(map[int64]struct{}, len(backlog))
 	lowest, highest := backlog[0].Version, backlog[0].Version
 	for _, d := range backlog {
-		pending[d.Version] = struct{}{}
+		vanished[d.Version] = struct{}{}
 		lowest, highest = min(lowest, d.Version), max(highest, d.Version)
 	}
 
 	var enqueueErr error
-	err := p.es.Replay(ctx, agg, lowest, highest,
+	replayErr := p.es.Replay(ctx, agg, lowest, highest,
 		func(_ context.Context, evt asynxmd.Event[T]) {
-			if _, wanted := pending[evt.Version]; !wanted || enqueueErr != nil {
+			if _, wanted := vanished[evt.Version]; !wanted || enqueueErr != nil {
 				return
 			}
-			delete(pending, evt.Version)
+			delete(vanished, evt.Version)
 			_, enqueueErr = p.dispatcher.EnqueueRedelivery(ctx, evt, ack(evt.Version))
 		})
-	if err = errors.Join(err, enqueueErr); err != nil {
-		return err
-	}
+	return vanished, errors.Join(replayErr, enqueueErr)
+}
 
+func (p *Processor[T]) ackVanished(
+	ctx context.Context,
+	agg string,
+	backlog []asynxmd.Delivery,
+	vanished map[int64]struct{},
+) error {
 	for _, d := range backlog {
-		if _, vanished := pending[d.Version]; vanished {
-			if err := store.AckDelivery(ctx, agg, d.Version); err != nil {
-				return err
-			}
+		if _, isVanished := vanished[d.Version]; !isVanished {
+			continue
+		}
+		if err := p.es.Store().AckDelivery(ctx, agg, d.Version); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -457,14 +457,7 @@ func TestProcessor_Recover_ReplaysAnAggregatesStreamOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	s.Atomically(ctx, func(tx asynxmd.Tx) error {
-		for v := int64(1); v <= events; v++ {
-			if err := tx.EnqueueDelivery(ctx, "a", v); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	s.Atomically(ctx, func(tx asynxmd.Tx) error { return enqueueUpTo(ctx, tx, "a", events) })
 
 	var mu sync.Mutex
 	var delivered []int64
@@ -576,4 +569,18 @@ func TestProcessor_Recover_DeliversWhatPrecedesAnUnreadableEvent(t *testing.T) {
 	if delivered == slices.Contains(versions, 1) {
 		t.Fatalf("delivered %d, pending %v: version 1 must be either delivered and acknowledged, or still pending", got.Load(), versions)
 	}
+}
+
+func enqueueUpTo(
+	ctx context.Context,
+	tx asynxmd.Tx,
+	aggregateID string,
+	last int64,
+) error {
+	for v := int64(1); v <= last; v++ {
+		if err := tx.EnqueueDelivery(ctx, aggregateID, v); err != nil {
+			return err
+		}
+	}
+	return nil
 }

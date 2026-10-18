@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"slices"
 	"time"
 
 	"github.com/char2cs/asynx/internal/bus"
@@ -415,37 +416,49 @@ func (b *Builder[T]) compileDurable() ([]dispatcher.DurableSub[T], func(string) 
 
 	subs := make([]dispatcher.DurableSub[T], 0, len(b.subscribers))
 	for i, def := range b.subscribers {
-		if def.pattern == "" {
-			return nil, nil, models.ErrEmptyPattern
-		}
-		if def.handler == nil {
-			return nil, nil, models.ErrNilHandler
-		}
-
-		cfg := &models.SubscriptionConfig[T]{}
-		for _, opt := range def.opts {
-			opt(cfg)
-		}
-		if cfg.Fallback != nil {
-			return nil, nil, models.ErrFallbackUnsupported
-		}
-
-		m, err := matcher(def.pattern)
+		sub, err := compileSubscriber(i, def)
 		if err != nil {
 			return nil, nil, err
 		}
-		name := fmt.Sprintf("%s#%d", def.pattern, i+1)
-		subs = append(subs, dispatcher.DurableSub[T]{Name: name, Match: m, Handler: def.handler, Timeout: cfg.Timeout})
+		subs = append(subs, sub)
 	}
 
-	return subs, func(name string) bool {
-		for _, sub := range subs {
-			if sub.Match(name) {
-				return true
-			}
-		}
-		return false
-	}, nil
+	return subs, wantedBy(subs), nil
+}
+
+func compileSubscriber[T any](
+	index int,
+	def subscriberDef[T],
+) (dispatcher.DurableSub[T], error) {
+	if def.pattern == "" {
+		return dispatcher.DurableSub[T]{}, models.ErrEmptyPattern
+	}
+	if def.handler == nil {
+		return dispatcher.DurableSub[T]{}, models.ErrNilHandler
+	}
+
+	cfg := &models.SubscriptionConfig[T]{}
+	for _, opt := range def.opts {
+		opt(cfg)
+	}
+	if cfg.Fallback != nil {
+		return dispatcher.DurableSub[T]{}, models.ErrFallbackUnsupported
+	}
+
+	m, err := matcher(def.pattern)
+	if err != nil {
+		return dispatcher.DurableSub[T]{}, err
+	}
+	name := fmt.Sprintf("%s#%d", def.pattern, index+1)
+	return dispatcher.DurableSub[T]{Name: name, Match: m, Handler: def.handler, Timeout: cfg.Timeout}, nil
+}
+
+func wantedBy[T any](subs []dispatcher.DurableSub[T]) func(string) bool {
+	return func(name string) bool {
+		return slices.ContainsFunc(subs, func(sub dispatcher.DurableSub[T]) bool {
+			return sub.Match(name)
+		})
+	}
 }
 
 // matcher mirrors the bus's pattern rule: an exact event name, or an

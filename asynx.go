@@ -217,104 +217,137 @@ func (i *asynxImpl[T]) Listen(
 		return nil, nil, models.ErrEmptyPattern
 	}
 
+	l := newListener(i.bus, count)
+	id, err := i.bus.Subscribe(Topic(pattern), l.handle)
+	if err != nil {
+		return nil, nil, err
+	}
+	l.publishSubscription(id)
+
+	return l.ch, l.unsubscribe, nil
+}
+
+// listener feeds a Listen channel. In bounded mode (count > 0) the channel has
+// capacity count, so a send never blocks once sendMu is held, and ch is closed
+// under sendMu so no handler can send on a closed channel.
+type listener[T any] struct {
+	bus   models.Bus[T]
+	ch    chan models.Event[T]
+	count int
+
+	done       chan struct{}
+	subIDReady chan struct{}
+	received   atomic.Int64
+	closed     atomic.Bool
+
+	sendMu    sync.Mutex
+	delivered int64
+	chClosed  bool
+	subID     string
+}
+
+func newListener[T any](
+	bus models.Bus[T],
+	count int,
+) *listener[T] {
 	capacity := count
 	if capacity <= 0 {
 		capacity = 16
 	}
-	ch := make(chan models.Event[T], capacity)
-
-	var (
-		received  atomic.Int64
-		delivered int64 // protected by sendMu; counts actual sends so close fires after exactly count deliveries
-		closed    atomic.Bool
-		// sendMu serialises send+close in bounded mode so close(ch) never races with ch<-evt.
-		sendMu   sync.Mutex
-		chClosed bool // protected by sendMu; closed means "unsubbed or finished", chClosed means ch itself is closed
-		subID    string
-	)
-	// closeCh closes ch exactly once. Caller must hold sendMu.
-	closeCh := func() {
-		if !chClosed {
-			chClosed = true
-			close(ch)
-		}
+	return &listener[T]{
+		bus:        bus,
+		ch:         make(chan models.Event[T], capacity),
+		count:      count,
+		done:       make(chan struct{}),
+		subIDReady: make(chan struct{}),
 	}
-	done := make(chan struct{})       // signals unbounded-mode handlers to abort on unsub
-	subIDReady := make(chan struct{}) // closed once subID is written; gates auto-unsub goroutine
+}
 
-	handler := func(_ context.Context, evt models.Event[T]) {
-		// Fast-path short-circuit if already closed/unsubbed.
-		if closed.Load() {
-			return
-		}
-
-		if count <= 0 {
-			// Unbounded mode: send may block if consumer doesn't drain.
-			// Use the done channel to abort cleanly when unsub() is called.
-			select {
-			case <-done:
-				return
-			case ch <- evt:
-			}
-			return
-		}
-
-		// Bounded mode: channel capacity == count, so send never blocks once we
-		// hold the guard. Use received to gate exactly count deliveries.
-		n := received.Add(1)
-		if n > int64(count) {
-			return
-		}
-
-		sendMu.Lock()
-		if closed.Load() {
-			sendMu.Unlock()
-			return
-		}
-		ch <- evt // capacity == count, never blocks
-		delivered++
-		isLast := delivered == int64(count)
-		if isLast {
-			closed.Store(true)
-			closeCh()
-		}
-		sendMu.Unlock()
-
-		if isLast {
-			// Auto-unsubscribe asynchronously — wait for subID to be published, then unsub.
-			go func() {
-				<-subIDReady
-				_ = i.bus.Unsubscribe(subID)
-			}()
-		}
+func (l *listener[T]) handle(
+	_ context.Context,
+	evt models.Event[T],
+) {
+	if l.closed.Load() {
+		return
 	}
-
-	id, err := i.bus.Subscribe(Topic(pattern), handler)
-	if err != nil {
-		return nil, nil, err
+	if l.count <= 0 {
+		l.sendUnbounded(evt)
+		return
 	}
+	l.sendBounded(evt)
+}
 
-	sendMu.Lock()
-	subID = id
-	sendMu.Unlock()
-	close(subIDReady)
-
-	unsub := func() {
-		if !closed.CompareAndSwap(false, true) {
-			return
-		}
-		close(done)
-		_ = i.bus.Unsubscribe(subID)
-		// In bounded mode, close ch under sendMu so any handler that slipped
-		// past the fast-path closed.Load() check cannot send to a closed channel.
-		if count > 0 {
-			sendMu.Lock()
-			closeCh()
-			sendMu.Unlock()
-		}
+func (l *listener[T]) sendUnbounded(evt models.Event[T]) {
+	select {
+	case <-l.done:
+	case l.ch <- evt:
 	}
+}
 
-	return ch, unsub, nil
+func (l *listener[T]) sendBounded(evt models.Event[T]) {
+	withinCount := l.received.Add(1) <= int64(l.count)
+	if !withinCount {
+		return
+	}
+	if !l.deliver(evt) {
+		return
+	}
+	go l.unsubscribeWhenPublished()
+}
+
+// deliver sends evt and reports whether it was the last one the listener takes.
+func (l *listener[T]) deliver(evt models.Event[T]) (isLast bool) {
+	l.sendMu.Lock()
+	defer l.sendMu.Unlock()
+
+	if l.closed.Load() {
+		return false
+	}
+	l.ch <- evt
+	l.delivered++
+	isLast = l.delivered == int64(l.count)
+	if isLast {
+		l.closed.Store(true)
+		l.closeChLocked()
+	}
+	return isLast
+}
+
+func (l *listener[T]) unsubscribeWhenPublished() {
+	<-l.subIDReady
+	_ = l.bus.Unsubscribe(l.subID)
+}
+
+// closeChLocked closes ch exactly once. The caller holds sendMu.
+func (l *listener[T]) closeChLocked() {
+	if l.chClosed {
+		return
+	}
+	l.chClosed = true
+	close(l.ch)
+}
+
+func (l *listener[T]) publishSubscription(id string) {
+	l.sendMu.Lock()
+	l.subID = id
+	l.sendMu.Unlock()
+	close(l.subIDReady)
+}
+
+func (l *listener[T]) unsubscribe() {
+	if !l.closed.CompareAndSwap(false, true) {
+		return
+	}
+	close(l.done)
+	_ = l.bus.Unsubscribe(l.subID)
+
+	isBounded := l.count > 0
+	if !isBounded {
+		return
+	}
+	l.sendMu.Lock()
+	l.closeChLocked()
+	l.sendMu.Unlock()
 }
 
 func (i *asynxImpl[T]) SubscribeWait(

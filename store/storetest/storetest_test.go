@@ -54,20 +54,28 @@ func failures[S any](
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r := &recorder{}
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				scenario(r, subject)
-			}()
-			<-done
+			didFail := runScenario(scenario, subject)
 			mu.Lock()
-			failed[name] = r.failed.Load()
+			failed[name] = didFail
 			mu.Unlock()
 		}()
 	}
 	wg.Wait()
 	return failed
+}
+
+func runScenario[S any](
+	scenario func(testing.TB, S),
+	subject S,
+) bool {
+	r := &recorder{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		scenario(r, subject)
+	}()
+	<-done
+	return r.failed.Load()
 }
 
 func countFailed(failed map[string]bool) int {
