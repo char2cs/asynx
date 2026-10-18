@@ -461,12 +461,12 @@ func (b *recordingBus[T]) Unsubscribe(_ string) error    { return nil }
 func (b *recordingBus[T]) Close(_ context.Context) error { return nil }
 func (b *recordingBus[T]) WaitForHandlers()              {}
 
-func newEnv(t *testing.T, opts ...Opt[order]) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, *dispatcher.Dispatcher[order], *bus.ChannelBus[order]) {
+func newEnv(t *testing.T, opts ...Opt[order]) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, asynxmd.Dispatcher[order], *bus.ChannelBus[order]) {
 	t.Helper()
 	return newEnvOn(t, store.New(), opts...)
 }
 
-func newEnvOn(t *testing.T, s store.Memory, opts ...Opt[order]) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, *dispatcher.Dispatcher[order], *bus.ChannelBus[order]) {
+func newEnvOn(t *testing.T, s store.Memory, opts ...Opt[order]) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, asynxmd.Dispatcher[order], *bus.ChannelBus[order]) {
 	t.Helper()
 	ss := store.NewSnapshots()
 	es := eventstore.New[order](s, ss, nil, 1, nil)

@@ -45,7 +45,7 @@ func TestEnqueue_DurableDeliveryStillAcksWhenBusRejectsEvent(t *testing.T) {
 
 func always(string) bool { return true }
 
-func newDurable(t *testing.T, subs []asynxmd.DurableSub[int], opts ...testOpt[int]) *Dispatcher[int] {
+func newDurable(t *testing.T, subs []asynxmd.DurableSub[int], opts ...testOpt[int]) *dispatcher[int] {
 	t.Helper()
 	all := append([]testOpt[int]{withDurableSubs(subs), withRetryBackoff[int](time.Millisecond, 5*time.Millisecond)}, opts...)
 	d := newTestDispatcher[int](&recordingBus{}, all...)
@@ -955,7 +955,7 @@ func TestPublishErrorHandlerPanicDoesNotCrashTheWorker(t *testing.T) {
 
 func TestHandlerContext_MarksItsAggregateAndEndsWithTheDelivery(t *testing.T) {
 	var got context.Context
-	var d, other *Dispatcher[int]
+	var d, other *dispatcher[int]
 	d = newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(ctx context.Context, e asynxmd.Event[int]) error {
 		got = ctx
 		if other.InHandler(ctx, "a") {
@@ -1051,7 +1051,7 @@ func TestSupersede_AfterThePopStillSkipsTheSupersededJob(t *testing.T) {
 // Whoever is told that a delivery gave up may act on it at once, for instance by
 // resuming; the aggregate must already be parked by then.
 func TestGiveUp_TheAggregateIsParkedBeforeTheErrorHandlerIsTold(t *testing.T) {
-	var d *Dispatcher[int]
+	var d *dispatcher[int]
 	parkedWhenTold := make(chan []string, 1)
 	d = newDurable(t,
 		[]asynxmd.DurableSub[int]{{Match: always, Handler: func(
@@ -1079,7 +1079,7 @@ func TestGiveUp_TheAggregateIsParkedBeforeTheErrorHandlerIsTold(t *testing.T) {
 }
 
 func TestAckFailure_TheAggregateIsParkedBeforeThePublishErrorHandlerIsTold(t *testing.T) {
-	var d *Dispatcher[int]
+	var d *dispatcher[int]
 	parkedWhenTold := make(chan []string, 1)
 	d = newDurable(t,
 		[]asynxmd.DurableSub[int]{{Match: always, Handler: func(
@@ -1175,29 +1175,6 @@ func TestAckFailure_ParksTheAggregateSoALaterEventDoesNotOvertake(t *testing.T) 
 	}
 	if got := halted(d); !slices.Equal(got, []string{"a"}) || reported.Load() != 1 {
 		t.Fatalf("halted=%v reported=%d", got, reported.Load())
-	}
-}
-
-func TestJittered_StaysInTheUpperHalfOfTheDelay(t *testing.T) {
-	const delay = 100 * time.Millisecond
-	seen := map[time.Duration]struct{}{}
-	for range 200 {
-		got := jittered(delay)
-		if got < delay/2 || got > delay {
-			t.Fatalf("jittered(%v) = %v, want within [%v, %v]", delay, got, delay/2, delay)
-		}
-		seen[got] = struct{}{}
-	}
-	if len(seen) < 2 {
-		t.Fatal("jittered returned the same delay every time")
-	}
-}
-
-func TestJittered_LeavesTinyDelaysAlone(t *testing.T) {
-	for _, delay := range []time.Duration{0, 1, -time.Second} {
-		if got := jittered(delay); got != delay {
-			t.Fatalf("jittered(%v) = %v, want it unchanged", delay, got)
-		}
 	}
 }
 

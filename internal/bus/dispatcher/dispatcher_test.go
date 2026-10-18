@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -42,7 +41,7 @@ type testOpt[T any] func(
 func newTestDispatcher[T any](
 	bus asynxmd.Bus[T],
 	opts ...testOpt[T],
-) *Dispatcher[T] {
+) *dispatcher[T] {
 	c := testConfig[T]{cfg: asynxmd.DispatcherConfig[T]{
 		Bus:          bus,
 		RetryInitial: 100 * time.Millisecond,
@@ -52,7 +51,7 @@ func newTestDispatcher[T any](
 	for _, opt := range opts {
 		opt(&c)
 	}
-	return New(c.cfg, c.opts...)
+	return newDispatcher(c.cfg, c.opts...)
 }
 
 func withIdleTimeout[T any](
@@ -138,7 +137,7 @@ func withMaxAttempts[T any](
 
 func dispatch[T any](
 	ctx context.Context,
-	d *Dispatcher[T],
+	d *dispatcher[T],
 	event asynxmd.Event[T],
 	waitHandlers bool,
 ) error {
@@ -154,7 +153,7 @@ func dispatch[T any](
 
 func enqueueEvent[T any](
 	ctx context.Context,
-	d *Dispatcher[T],
+	d *dispatcher[T],
 	event asynxmd.Event[T],
 	ack func(context.Context) error,
 ) (<-chan struct{}, error) {
@@ -164,7 +163,7 @@ func enqueueEvent[T any](
 
 func enqueueTicket[T any](
 	ctx context.Context,
-	d *Dispatcher[T],
+	d *dispatcher[T],
 	event asynxmd.Event[T],
 	ack func(context.Context) error,
 ) (asynxmd.Ticket, error) {
@@ -173,7 +172,7 @@ func enqueueTicket[T any](
 
 func enqueueRedelivery[T any](
 	ctx context.Context,
-	d *Dispatcher[T],
+	d *dispatcher[T],
 	event asynxmd.Event[T],
 	ack func(context.Context) error,
 ) (asynxmd.Ticket, error) {
@@ -182,7 +181,7 @@ func enqueueRedelivery[T any](
 
 func enqueueForget[T any](
 	ctx context.Context,
-	d *Dispatcher[T],
+	d *dispatcher[T],
 	tombstone asynxmd.Event[T],
 	ack func(context.Context) error,
 ) (asynxmd.Ticket, error) {
@@ -190,13 +189,13 @@ func enqueueForget[T any](
 }
 
 func halted[T any](
-	d *Dispatcher[T],
+	d *dispatcher[T],
 ) []string {
 	return slices.Sorted(maps.Keys(d.Parks()))
 }
 
 func resume[T any](
-	d *Dispatcher[T],
+	d *dispatcher[T],
 	agg string,
 ) bool {
 	generation, parked := d.Parks()[agg]
@@ -380,14 +379,12 @@ func TestDispatch_IdleCleanup(t *testing.T) {
 
 	_ = dispatch(ctx, d, makeEvent("agg-1", 1), true)
 
-	// WaitIdle returns once the job is handled; waitWorkers waits for the
+	// WaitIdle returns once the job is handled; workers.Wait waits for the
 	// goroutine to exit after its idle timeout.
 	d.WaitIdle()
-	d.waitWorkers()
+	d.workers.Wait()
 
-	d.mu.Lock()
-	_, exists := d.queues["agg-1"]
-	d.mu.Unlock()
+	exists := d.registry.Wake("agg-1") != nil
 
 	if exists {
 		t.Error("expected queue to be cleaned up after idle timeout")
@@ -609,17 +606,13 @@ func TestDispatch_WithIdleTimeoutOption(t *testing.T) {
 
 	_ = dispatch(ctx, d, makeEvent("agg-1", 1), true)
 
-	// WaitIdle returns once the job is handled; waitWorkers waits for the
+	// WaitIdle returns once the job is handled; workers.Wait waits for the
 	// goroutine to exit after its idle timeout.
 	d.WaitIdle()
-	d.waitWorkers()
+	d.workers.Wait()
 
-	d.mu.Lock()
-	qLen := len(d.queues)
-	d.mu.Unlock()
-
-	if qLen != 0 {
-		t.Errorf("expected 0 queues after idle timeout, got %d", qLen)
+	if d.registry.Wake("agg-1") != nil {
+		t.Errorf("expected 0 queues after idle timeout, got the queue of agg-1")
 	}
 
 	_ = d.Close(ctx)
@@ -628,32 +621,10 @@ func TestDispatch_WithIdleTimeoutOption(t *testing.T) {
 func TestWithIdleTimeout_IgnoresNonPositiveValues(
 	t *testing.T,
 ) {
-	d := New(asynxmd.DispatcherConfig[int]{}, WithIdleTimeout[int](0), WithIdleTimeout[int](-time.Second))
+	d := newDispatcher(asynxmd.DispatcherConfig[int]{}, WithIdleTimeout[int](0), WithIdleTimeout[int](-time.Second))
 	defer d.Close(context.Background())
 	if d.idleTimeout != defaultIdleTimeout {
 		t.Fatalf("idleTimeout = %v, want the default", d.idleTimeout)
-	}
-}
-
-func TestEnqueue_TheKindSelectsWhoReceivesTheEvent(
-	t *testing.T,
-) {
-	cases := []struct {
-		kind asynxmd.DispatchKind
-		name string
-		want enqueueOpts
-	}{
-		{asynxmd.DispatchEvent, "test.event", enqueueOpts{}},
-		{asynxmd.DispatchEvent, asynxmd.ForgetEventName, enqueueOpts{}},
-		{asynxmd.DispatchRedelivery, "test.event", enqueueOpts{skipLive: true}},
-		{asynxmd.DispatchRedelivery, asynxmd.ForgetEventName, enqueueOpts{skipLive: true, forget: true}},
-		{asynxmd.DispatchTombstone, asynxmd.ForgetEventName, enqueueOpts{forget: true}},
-	}
-	for _, c := range cases {
-		request := asynxmd.DispatchRequest[int]{Event: asynxmd.Event[int]{EventName: c.name}, Kind: c.kind}
-		if got := optsFor(request); got != c.want {
-			t.Errorf("kind %d, event %q: opts = %+v, want %+v", c.kind, c.name, got, c.want)
-		}
 	}
 }
 
@@ -818,15 +789,7 @@ func TestClose_DrainsJobsQueuedBehindASlowHandler(t *testing.T) {
 
 	closed := make(chan error, 1)
 	go func() { closed <- d.Close(context.Background()) }()
-	for {
-		d.mu.Lock()
-		isClosed := d.closed
-		d.mu.Unlock()
-		if isClosed {
-			break
-		}
-		runtime.Gosched()
-	}
+	<-d.Interrupted() // Close has closed the registry and is waiting for the workers
 	select {
 	case err := <-closed:
 		t.Fatalf("Close returned (%v) before the queued jobs drained", err)
