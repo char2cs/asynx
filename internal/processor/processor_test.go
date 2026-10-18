@@ -24,7 +24,7 @@ func newProcessor(t *testing.T, opts ...processor.ProcessorOpt[order]) *processo
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(es, channelBus, opts...)
+	p := mustNew(t, es, channelBus, opts...)
 
 	t.Cleanup(func() {
 		p.Shutdown(context.Background())
@@ -280,7 +280,7 @@ func TestProcessor_EventPublishedToRealBus(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(es, channelBus)
+	p := mustNew(t, es, channelBus)
 	defer p.Shutdown(context.Background())
 
 	ctx := context.Background()
@@ -313,7 +313,7 @@ func TestProcessor_PublishUsesDetachedContext(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(es, channelBus)
+	p := mustNew(t, es, channelBus)
 	defer p.Shutdown(context.Background())
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -347,7 +347,7 @@ func TestProcessor_WithWorkersPerShard(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(
+	p := mustNew(t, 
 		es,
 		channelBus,
 		processor.WithShards[order](2),
@@ -369,7 +369,7 @@ func TestProcessor_WithQueueDepth(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(
+	p := mustNew(t, 
 		es,
 		channelBus,
 		processor.WithQueueDepth[order](100),
@@ -391,7 +391,7 @@ func TestProcessor_NegativeOptionsIgnored(t *testing.T) {
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 	// Negative values should be ignored, using defaults
-	p := processor.New(
+	p := mustNew(t, 
 		es,
 		channelBus,
 		processor.WithShards[order](-5),
@@ -441,7 +441,7 @@ func TestProcessor_ShutdownWithBus(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(es, channelBus)
+	p := mustNew(t, es, channelBus)
 
 	ctx := context.Background()
 
@@ -478,7 +478,7 @@ func TestProcessor_ShutdownWithoutBus(t *testing.T) {
 	memStore := store.New()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(es, nil) // No bus
+	p := mustNew(t, es, nil) // No bus
 
 	ctx := context.Background()
 
@@ -515,7 +515,7 @@ func TestProcessor_AllSendBranches(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(es, channelBus, processor.WithShards[order](8), processor.WithQueueDepth[order](100))
+	p := mustNew(t, es, channelBus, processor.WithShards[order](8), processor.WithQueueDepth[order](100))
 	defer p.Shutdown(context.Background())
 
 	ctx := context.Background()
@@ -558,7 +558,7 @@ func TestProcessor_ShutdownClosesPool(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(es, channelBus)
+	p := mustNew(t, es, channelBus)
 
 	ctx := context.Background()
 
@@ -606,7 +606,7 @@ func TestProcessor_SendWait_HandlersCompleteBeforeReturn(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(es, channelBus)
+	p := mustNew(t, es, channelBus)
 	defer p.Shutdown(context.Background())
 
 	var handlerDone atomic.Bool
@@ -682,7 +682,7 @@ func TestWithPublishErrorHandler_IsInvokedOnPublishError(t *testing.T) {
 		got.Unlock()
 	}
 
-	proc := processor.New(
+	proc := mustNew(t, 
 		eventstore.New[mocks.Order](s, store.NewSnapshots(), nil, 1, nil),
 		&mocks.ErrBus[mocks.Order]{Err: errors.New("bus down")},
 		processor.WithPublishErrorHandler[mocks.Order](handler),
@@ -733,7 +733,7 @@ func TestProcessor_SendWait_ContextCancelledWhileWaiting(t *testing.T) {
 	bb := &blockingTestBus[order]{unblockCh: unblockCh}
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(es, bb, processor.WithShards[order](1))
+	p := mustNew(t, es, bb, processor.WithShards[order](1))
 	t.Cleanup(func() {
 		close(unblockCh) // unblock any pending PublishSync before shutdown
 		p.Shutdown(context.Background())
@@ -788,7 +788,7 @@ func newFixture(t *testing.T, s store.Memory, opts ...processor.ProcessorOpt[ord
 	snap := store.NewSnapshots()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, snap, nil, 1, nil)
-	p := processor.New(es, b, opts...)
+	p := mustNew(t, es, b, opts...)
 	t.Cleanup(func() { p.Shutdown(context.Background()) })
 	return fixture{p: p, s: s, snap: snap, b: b}
 }
@@ -1048,7 +1048,7 @@ func TestProcessor_Shutdown_CanBeRetriedAfterItsContextEnds(t *testing.T) {
 		close(entered)
 		<-release
 	})
-	p := processor.New(es, b)
+	p := mustNew(t, es, b)
 	if _, err := p.Send(context.Background(), updateCmd("o1", 1)); err != nil {
 		t.Fatal(err)
 	}
@@ -1194,4 +1194,143 @@ func TestProcessor_WaitPublish_DoesNotFailCommandsSentWhileItWaits(t *testing.T)
 
 	close(release)
 	<-idle
+}
+
+func mustNew[T any](
+	tb testing.TB,
+	es *eventstore.EventStore[T],
+	bus asynxmd.Bus[T],
+	opts ...processor.ProcessorOpt[T],
+) *processor.Processor[T] {
+	tb.Helper()
+	p, err := processor.New(es, bus, opts...)
+	if err != nil {
+		tb.Fatalf("processor.New: %v", err)
+	}
+	return p
+}
+
+func newES() *eventstore.EventStore[order] {
+	return eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
+}
+
+func TestNew_AFactoryReplacesTheDefaultDispatcher(t *testing.T) {
+	fake := mocks.NewDispatcher[order]()
+	p := mustNew(t, newES(), bus.NewChannelBus[order](), processor.WithDispatcherFactory(fake.Factory()))
+	t.Cleanup(func() { p.Shutdown(context.Background()) })
+
+	if _, err := p.Send(context.Background(), mocks.CreateOrderCmd{ID: "a", Total: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := fake.Requests()
+	if len(requests) != 1 || requests[0].Kind != asynxmd.DispatchEvent || requests[0].Event.AggregateID != "a" {
+		t.Errorf("requests = %+v, want the one DispatchEvent of a", requests)
+	}
+}
+
+func TestNew_AFactoryErrorIsReturned(t *testing.T) {
+	sentinel := errors.New("factory failed")
+	factory := func(asynxmd.DispatcherConfig[order]) (asynxmd.Dispatcher[order], error) {
+		return nil, sentinel
+	}
+
+	p, err := processor.New(newES(), bus.NewChannelBus[order](), processor.WithDispatcherFactory(factory))
+
+	if !errors.Is(err, sentinel) || p != nil {
+		t.Errorf("New = (%v, %v), want the factory error and no processor", p, err)
+	}
+}
+
+func TestNew_ANilDispatcherWithoutAnErrorFails(t *testing.T) {
+	factory := func(asynxmd.DispatcherConfig[order]) (asynxmd.Dispatcher[order], error) {
+		return nil, nil
+	}
+
+	p, err := processor.New(newES(), bus.NewChannelBus[order](), processor.WithDispatcherFactory(factory))
+
+	if err == nil || p != nil {
+		t.Errorf("New = (%v, %v), want an error and no processor", p, err)
+	}
+}
+
+func TestNew_AFactoryIsCalledEvenWithoutABus(t *testing.T) {
+	fake := mocks.NewDispatcher[order]()
+	p := mustNew[order](t, newES(), nil, processor.WithDispatcherFactory(fake.Factory()))
+	t.Cleanup(func() { p.Shutdown(context.Background()) })
+
+	if _, err := p.Send(context.Background(), mocks.CreateOrderCmd{ID: "a", Total: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(fake.Requests()) != 1 || fake.Config().Bus != nil {
+		t.Errorf("requests = %d, bus = %v, want one request and a nil bus", len(fake.Requests()), fake.Config().Bus)
+	}
+}
+
+func TestNew_TheFactoryReceivesTheConfigWithDefaultsApplied(t *testing.T) {
+	handled := func(context.Context, asynxmd.Event[order], error) {}
+	tests := []struct {
+		name     string
+		opts     []processor.ProcessorOpt[order]
+		attempts int
+		initial  time.Duration
+		max      time.Duration
+	}{
+		{
+			name:     "no options keeps the defaults",
+			attempts: 20,
+			initial:  100 * time.Millisecond,
+			max:      30 * time.Second,
+		},
+		{
+			name: "non-positive values are ignored",
+			opts: []processor.ProcessorOpt[order]{
+				processor.WithDeliveryMaxAttempts[order](0),
+				processor.WithDeliveryRetry[order](-time.Second, 0),
+			},
+			attempts: 20,
+			initial:  100 * time.Millisecond,
+			max:      30 * time.Second,
+		},
+		{
+			name: "positive values are carried",
+			opts: []processor.ProcessorOpt[order]{
+				processor.WithDeliveryMaxAttempts[order](4),
+				processor.WithDeliveryRetry[order](time.Millisecond, 9*time.Millisecond),
+			},
+			attempts: 4,
+			initial:  time.Millisecond,
+			max:      9 * time.Millisecond,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := mocks.NewDispatcher[order]()
+			opts := append(tt.opts, processor.WithDispatcherFactory(fake.Factory()), processor.WithPublishErrorHandler(handled))
+			mustNew(t, newES(), bus.NewChannelBus[order](), opts...)
+
+			got := fake.Config()
+			if got.MaxAttempts != tt.attempts || got.RetryInitial != tt.initial || got.RetryMax != tt.max {
+				t.Errorf("config = (%d, %v, %v), want (%d, %v, %v)", got.MaxAttempts, got.RetryInitial, got.RetryMax, tt.attempts, tt.initial, tt.max)
+			}
+			if got.Bus == nil || got.OnPublishError == nil {
+				t.Errorf("config = %+v, want the bus and the publish error handler", got)
+			}
+		})
+	}
+}
+
+func TestShutdown_InterruptsThenClosesTheSuppliedDispatcher(t *testing.T) {
+	fake := mocks.NewDispatcher[order]()
+	p := mustNew(t, newES(), bus.NewChannelBus[order](), processor.WithDispatcherFactory(fake.Factory()))
+
+	if err := p.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := fake.Calls()
+	if len(calls) != 3 || calls[1] != "Interrupt" || calls[2] != "Close" {
+		t.Errorf("calls = %v, want Factory, Interrupt, Close", calls)
+	}
 }

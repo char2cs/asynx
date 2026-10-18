@@ -39,7 +39,7 @@ func TestProcessor_Recover_RedeliversEveryPendingEventAndAcksIt(t *testing.T) {
 	var live atomic.Int32
 	b.Subscribe("OrderCreated", func(context.Context, asynxmd.Event[order]) { live.Add(1) })
 	var got atomic.Int32
-	p := processor.New(es, b, processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
+	p := mustNew(t, es, b, processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 		Match:   always,
 		Handler: func(context.Context, asynxmd.Event[order]) error { got.Add(1); return nil },
 	}}))
@@ -67,7 +67,7 @@ func TestProcessor_Recover_RedeliversEveryPendingEventAndAcksIt(t *testing.T) {
 func TestProcessor_Recover_WithoutBusIsNoOp(t *testing.T) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	p := processor.New[order](es, nil)
+	p := mustNew[order](t, es, nil)
 	t.Cleanup(func() { p.Shutdown(context.Background()) })
 	if err := p.Recover(context.Background(), 10); err != nil {
 		t.Fatalf("Recover: %v", err)
@@ -79,7 +79,7 @@ func TestProcessor_Recover_ReportsReadAndReplayFailures(t *testing.T) {
 
 	// Unreadable delivery log.
 	es := eventstore.New[order](&mocks.ErrStore{Err: errors.New("log down")}, store.NewSnapshots(), nil, 1, nil)
-	p := processor.New(es, bus.NewChannelBus[order]())
+	p := mustNew(t, es, bus.NewChannelBus[order]())
 	t.Cleanup(func() { p.Shutdown(ctx) })
 	if err := p.Recover(ctx, 10); err == nil {
 		t.Error("Recover succeeded with an unreadable delivery log")
@@ -104,7 +104,7 @@ func TestProcessor_Recover_ParksAnAggregateWhoseEventCannotBeRebuilt(t *testing.
 
 	var got atomic.Int32
 	reported := make(chan error, 4)
-	p := processor.New(es, bus.NewChannelBus[order](),
+	p := mustNew(t, es, bus.NewChannelBus[order](),
 		processor.WithPublishErrorHandler(func(_ context.Context, e asynxmd.Event[order], err error) {
 			if e.AggregateID == "bad" {
 				reported <- err
@@ -173,7 +173,7 @@ func TestProcessor_Recover_ReportsAnUnrebuildableEventToThePublishErrorHandler(
 		err   error
 	}
 	reported := make(chan report, 4)
-	p := processor.New(es, bus.NewChannelBus[order](),
+	p := mustNew(t, es, bus.NewChannelBus[order](),
 		processor.WithPublishErrorHandler(func(_ context.Context, e asynxmd.Event[order], err error) {
 			reported <- report{e, err}
 		}),
@@ -212,7 +212,7 @@ func TestProcessor_Recover_APanickingPublishErrorHandlerDoesNotCrash(
 
 	var called atomic.Int32
 	var delivered sync.Map
-	p := processor.New(es, bus.NewChannelBus[order](),
+	p := mustNew(t, es, bus.NewChannelBus[order](),
 		processor.WithPublishErrorHandler(func(context.Context, asynxmd.Event[order], error) {
 			called.Add(1)
 			panic("publish error handler exploded")
@@ -251,7 +251,7 @@ func TestProcessor_Recover_ReturnsWithoutWaitingForHandlers(t *testing.T) {
 	b := bus.NewChannelBus[order]()
 	release := make(chan struct{})
 	b.Subscribe("OrderCreated", func(context.Context, asynxmd.Event[order]) { <-release })
-	p := processor.New(es, b)
+	p := mustNew(t, es, b)
 	t.Cleanup(func() { close(release); p.Shutdown(context.Background()) })
 
 	returned := make(chan error, 1)
@@ -276,7 +276,7 @@ func TestProcessor_Recover_ReportsAnAckFailureForAVanishedEvent(t *testing.T) {
 	s.Atomically(ctx, func(tx asynxmd.Tx) error { return tx.EnqueueDelivery(ctx, "ghost", 1) })
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	reported := make(chan error, 1)
-	p := processor.New(es, bus.NewChannelBus[order](),
+	p := mustNew(t, es, bus.NewChannelBus[order](),
 		processor.WithPublishErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error) { reported <- err }))
 	t.Cleanup(func() { p.Shutdown(ctx) })
 
@@ -349,7 +349,7 @@ func TestProcessor_Resume_RedeliversParkedAggregatesInOrder(t *testing.T) {
 
 func TestProcessor_Resume_WithoutDispatcherIsNoOp(t *testing.T) {
 	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
-	p := processor.New[order](es, nil)
+	p := mustNew[order](t, es, nil)
 	t.Cleanup(func() { p.Shutdown(context.Background()) })
 	if err := p.Resume(context.Background(), 10); err != nil {
 		t.Fatalf("Resume: %v", err)
@@ -426,7 +426,7 @@ func TestProcessor_Paused_ListsParkedAggregatesAndSendWaitSaysSo(t *testing.T) {
 
 func TestProcessor_Paused_WithoutDispatcherIsEmpty(t *testing.T) {
 	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
-	p := processor.New[order](es, nil)
+	p := mustNew[order](t, es, nil)
 	t.Cleanup(func() { p.Shutdown(context.Background()) })
 	if got := p.Paused(); got != nil {
 		t.Fatalf("Paused = %v", got)
@@ -437,7 +437,7 @@ func TestProcessor_Recover_AfterShutdownFails(t *testing.T) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	seedPending(t, s, es, "a")
-	p := processor.New(es, bus.NewChannelBus[order]())
+	p := mustNew(t, es, bus.NewChannelBus[order]())
 	if err := p.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -564,7 +564,7 @@ func TestProcessor_Recover_ReplaysAnAggregatesStreamOnce(t *testing.T) {
 
 	var mu sync.Mutex
 	var delivered []int64
-	p := processor.New(es, bus.NewChannelBus[order](), processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
+	p := mustNew(t, es, bus.NewChannelBus[order](), processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 		Match: always,
 		Handler: func(
 			_ context.Context,
@@ -1225,7 +1225,7 @@ func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(t
 	}
 	es := eventstore.New[order](s, store.NewSnapshots(), map[int]asynxmd.Upcaster{1: upcaster}, 2, nil)
 	reported := make(chan struct{}, 1)
-	p := processor.New(es, bus.NewChannelBus[order](),
+	p := mustNew(t, es, bus.NewChannelBus[order](),
 		processor.WithDurableDelivery[order](func(name string) bool { return name == "OrderUpdated" }),
 		processor.WithPublishErrorHandler(func(
 			context.Context,
@@ -1281,7 +1281,7 @@ func TestProcessor_Recover_DeliversWhatPrecedesAnUnreadableEvent(t *testing.T) {
 
 	var got atomic.Int32
 	reported := make(chan error, 1)
-	p := processor.New(es, bus.NewChannelBus[order](),
+	p := mustNew(t, es, bus.NewChannelBus[order](),
 		processor.WithPublishErrorHandler(func(
 			_ context.Context,
 			_ asynxmd.Event[order],

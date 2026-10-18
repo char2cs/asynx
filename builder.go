@@ -65,6 +65,7 @@ type Builder[T any] struct {
 	retryMax            time.Duration
 	maxAttempts         int
 	deadLetter          models.DeadLetterHandler[T]
+	dispatcherFactory   models.DispatcherFactory[T]
 }
 
 type syncProjectionDef[T any] struct {
@@ -278,6 +279,26 @@ func (b *Builder[T]) WithSnapshotErrorHandler(fn func(context.Context, models.Ev
 	return b
 }
 
+// WithDispatcher plugs in the dispatcher that delivers committed events to the
+// live and durable subscribers, in place of the in-memory default. The factory
+// is called once per Build, with the configuration the instance was built with:
+// the bus, the durable subscribers, the handlers, and the retry and attempt
+// settings with their defaults already applied (20 attempts, a backoff of 100ms
+// doubling up to 30s). It returns the dispatcher the instance owns, which
+// Shutdown interrupts and then closes. A factory error fails Build, and what
+// was built so far is shut down. A nil factory is ignored.
+//
+// The dispatcher must keep the guarantees documented on models.Dispatcher. The
+// delivery log, the aggregate lock and recovery stay with asynx: Build reads
+// the log and hands the pending deliveries to the dispatcher as
+// models.DispatchRedelivery requests.
+func (b *Builder[T]) WithDispatcher(
+	factory models.DispatcherFactory[T],
+) *Builder[T] {
+	b.dispatcherFactory = factory
+	return b
+}
+
 // Build requires WithEventStore and WithSnapshotStore; all other options have
 // defaults.
 func (b *Builder[T]) Build() (Asynx[T], error) {
@@ -350,7 +371,14 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 	if b.publishErrorHandler != nil {
 		procOpts = append(procOpts, processor.WithPublishErrorHandler[T](b.publishErrorHandler))
 	}
-	proc := processor.New(es, activeBus, procOpts...)
+	if b.dispatcherFactory != nil {
+		procOpts = append(procOpts, processor.WithDispatcherFactory(b.dispatcherFactory))
+	}
+	proc, err := processor.New(es, activeBus, procOpts...)
+	if err != nil {
+		closeAbandonedBus(activeBus)
+		return nil, err
+	}
 
 	instance := &asynxImpl[T]{
 		proc: proc,
@@ -381,6 +409,16 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 
 	built = true
 	return instance, nil
+}
+
+// closeAbandonedBus closes the bus of a Build that failed before a processor
+// existed to shut it down, within the same bound.
+func closeAbandonedBus[T any](
+	activeBus models.Bus[T],
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), failedBuildShutdown)
+	defer cancel()
+	_ = activeBus.Close(ctx)
 }
 
 // failedBuildShutdown bounds how long a failed Build waits for the instance it

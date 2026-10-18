@@ -60,6 +60,8 @@ const (
 	defaultMaxAttempts  = 20
 )
 
+var errNilDispatcher = errors.New("asynx: the dispatcher factory returned no dispatcher")
+
 type ProcessorOpt[T any] func(*processorConfig[T])
 
 type processorConfig[T any] struct {
@@ -69,6 +71,7 @@ type processorConfig[T any] struct {
 	publishErrorHandler asynxmd.PublishErrorHandler[T]
 	executorOpts        []exec.Opt[T]
 	dispatcher          asynxmd.DispatcherConfig[T]
+	dispatcherFactory   asynxmd.DispatcherFactory[T]
 }
 
 // WithDurableSubscribers registers the durable subscribers the dispatcher runs,
@@ -219,18 +222,36 @@ func WithPublishErrorHandler[T any](fn asynxmd.PublishErrorHandler[T]) Processor
 	}
 }
 
+// WithDispatcherFactory sets the factory that builds the dispatcher the
+// processor delivers through, from the configuration with the defaults applied.
+// A nil factory is ignored, leaving the in-memory default. When set, the
+// factory runs even without a bus.
+func WithDispatcherFactory[T any](
+	f asynxmd.DispatcherFactory[T],
+) ProcessorOpt[T] {
+	if f == nil {
+		return ignored[T]
+	}
+	return func(
+		cfg *processorConfig[T],
+	) {
+		cfg.dispatcherFactory = f
+	}
+}
+
+// New builds a Processor. The dispatcher comes from the factory given by
+// WithDispatcherFactory, or from the in-memory default when there is none and a
+// bus is present. A factory error, or a factory that returns no dispatcher,
+// fails New and nothing is left running.
 func New[T any](
 	es *eventstore.EventStore[T],
 	bus asynxmd.Bus[T],
 	opts ...ProcessorOpt[T],
-) *Processor[T] {
+) (*Processor[T], error) {
 	cfg := configure(opts...)
-
-	var d asynxmd.Dispatcher[T]
-	if bus != nil {
-		cfg.dispatcher.Bus = bus
-		cfg.dispatcher.OnPublishError = cfg.publishErrorHandler
-		d = defaultDispatcher(cfg.dispatcher)
+	d, err := newDispatcher(cfg, bus)
+	if err != nil {
+		return nil, err
 	}
 
 	executor := exec.New(es, d, cfg.executorOpts...)
@@ -250,7 +271,30 @@ func New[T any](
 		dispatcher:   d,
 		onPublishErr: cfg.publishErrorHandler,
 		bus:          bus,
+	}, nil
+}
+
+func newDispatcher[T any](
+	cfg *processorConfig[T],
+	bus asynxmd.Bus[T],
+) (asynxmd.Dispatcher[T], error) {
+	factory := cfg.dispatcherFactory
+	if factory == nil && bus == nil {
+		return nil, nil
 	}
+	if factory == nil {
+		factory = defaultDispatcher[T]
+	}
+	cfg.dispatcher.Bus = bus
+	cfg.dispatcher.OnPublishError = cfg.publishErrorHandler
+	d, err := factory(cfg.dispatcher)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil {
+		return nil, errNilDispatcher
+	}
+	return d, nil
 }
 
 func configure[T any](
@@ -277,8 +321,8 @@ func configure[T any](
 
 func defaultDispatcher[T any](
 	cfg asynxmd.DispatcherConfig[T],
-) asynxmd.Dispatcher[T] {
-	return dispatcher.New(cfg)
+) (asynxmd.Dispatcher[T], error) {
+	return dispatcher.New(cfg), nil
 }
 
 func (p *Processor[T]) reportPublishError(

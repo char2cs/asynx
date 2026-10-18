@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -828,5 +829,193 @@ func TestShardingOpts_QueueDepthBoundsTheBacklogOfOneAggregate(t *testing.T) {
 
 	if _, err := inst.Send(ctx, mocks.CreateOrderCmd{ID: "cold", Total: 1}); err != nil {
 		t.Fatalf("an unrelated aggregate got %v while another was flooded", err)
+	}
+}
+
+func noopDurable(context.Context, models.Event[mocks.Order]) error { return nil }
+
+func TestBuild_UsesTheSuppliedDispatcher(t *testing.T) {
+	ctx := context.Background()
+	s := store.New()
+	fake := mocks.NewDispatcher[mocks.Order]()
+	inst := build(t, eight(s).WithDispatcher(fake.Factory()).WithSubscriber("OrderCreated", noopDurable))
+
+	if _, err := inst.Send(ctx, mocks.CreateOrderCmd{ID: "a", Total: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := fake.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(requests))
+	}
+	request := requests[0]
+	if request.Kind != models.DispatchEvent || request.Event.AggregateID != "a" || request.Event.Version != 1 {
+		t.Errorf("request = %+v, want the DispatchEvent of a v1", request)
+	}
+	if request.Ack == nil {
+		t.Fatal("a durable event was enqueued without an Ack")
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 1 {
+		t.Fatalf("pending before the Ack = %v, want the entry", pending)
+	}
+	if err := request.Ack(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 0 {
+		t.Errorf("pending after the Ack = %v, want none", pending)
+	}
+}
+
+func TestBuild_RecoverEnqueuesRedeliveries(t *testing.T) {
+	ctx := context.Background()
+	s := store.New()
+	stuck := make(chan struct{})
+	first := build(t, eight(s).WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error {
+		<-stuck
+		return nil
+	}))
+	t.Cleanup(func() { close(stuck) })
+	for _, cmd := range []models.Command[mocks.Order]{mocks.CreateOrderCmd{ID: "a", Total: 1}, upd("a", 2), upd("a", 3)} {
+		if _, err := first.Send(ctx, cmd); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fake := mocks.NewDispatcher[mocks.Order]()
+	build(t, eight(s).WithDispatcher(fake.Factory()).WithSubscriber("OrderUpdated", noopDurable))
+
+	requests := fake.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("requests = %d, want the 2 pending deliveries", len(requests))
+	}
+	for i, request := range requests {
+		if request.Kind != models.DispatchRedelivery || request.Event.Version != int64(i+2) || request.Ack == nil {
+			t.Errorf("request %d = %+v, want the redelivery of v%d with an Ack", i, request, i+2)
+		}
+	}
+}
+
+func TestForget_SupersedesThenEnqueuesATombstone(t *testing.T) {
+	ctx := context.Background()
+	fake := mocks.NewDispatcher[mocks.Order]()
+	inst := build(t, eight(store.New()).WithDispatcher(fake.Factory()))
+	if _, err := inst.Send(ctx, mocks.CreateOrderCmd{ID: "a", Total: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := inst.Forget(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := fake.Calls()
+	supersede := slices.Index(calls, "Supersede")
+	if supersede < 0 || calls[supersede+1] != "Enqueue" {
+		t.Fatalf("calls = %v, want Supersede immediately followed by Enqueue", calls)
+	}
+	requests := fake.Requests()
+	tombstone := requests[len(requests)-1]
+	if tombstone.Kind != models.DispatchTombstone || tombstone.Event.AggregateID != "a" || tombstone.Ack == nil {
+		t.Errorf("last request = %+v, want a tombstone of a with an Ack", tombstone)
+	}
+}
+
+func TestBuild_ADispatcherFactoryErrorFailsBuild(t *testing.T) {
+	sentinel := errors.New("no dispatcher today")
+	factory := func(models.DispatcherConfig[mocks.Order]) (models.Dispatcher[mocks.Order], error) {
+		return nil, sentinel
+	}
+	before := runtime.NumGoroutine()
+	for range 5 {
+		inst, err := eight(store.New()).WithDispatcher(factory).Build()
+		if !errors.Is(err, sentinel) || inst != nil {
+			t.Fatalf("Build = (%v, %v), want the factory error and no instance", inst, err)
+		}
+	}
+	eventually(t, "goroutines to settle after failed builds", func() bool {
+		return runtime.NumGoroutine() <= before+5
+	})
+}
+
+func TestShutdown_InterruptsThenClosesTheDispatcher(t *testing.T) {
+	fake := mocks.NewDispatcher[mocks.Order]()
+	inst, err := eight(store.New()).WithDispatcher(fake.Factory()).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := inst.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	got := slices.DeleteFunc(fake.Calls(), func(call string) bool { return call != "Interrupt" && call != "Close" })
+	if !slices.Equal(got, []string{"Interrupt", "Close"}) {
+		t.Errorf("shutdown calls = %v, want Interrupt then Close", got)
+	}
+}
+
+func TestSend_AnEnqueueFailureAfterCommitParksThroughTheSuppliedDispatcher(t *testing.T) {
+	ctx := context.Background()
+	sentinel := errors.New("enqueue refused")
+	fake := mocks.NewDispatcher[mocks.Order]()
+	fake.FailEnqueue(sentinel)
+	inst := build(t, eight(store.New()).WithDispatcher(fake.Factory()).WithSubscriber("OrderCreated", noopDurable))
+
+	_, err := inst.Send(ctx, mocks.CreateOrderCmd{ID: "a", Total: 1})
+
+	if !errors.Is(err, models.ErrPipelineFailed) || !errors.Is(err, sentinel) {
+		t.Fatalf("Send = %v, want ErrPipelineFailed wrapping the enqueue failure", err)
+	}
+	if got := fake.ParkCalls(); len(got) != 1 || got[0].AggregateID != "a" {
+		t.Errorf("Park calls = %v, want the one park of a", got)
+	}
+	if got := inst.PausedAggregates(); !slices.Equal(got, []string{"a"}) {
+		t.Errorf("PausedAggregates = %v, want [a]", got)
+	}
+}
+
+func TestBuild_DefaultsAreAppliedBeforeTheFactoryRuns(t *testing.T) {
+	defaults := models.DispatcherConfig[mocks.Order]{MaxAttempts: 20, RetryInitial: 100 * time.Millisecond, RetryMax: 30 * time.Second}
+	tests := []struct {
+		name     string
+		retry    [2]time.Duration
+		attempts int
+		want     models.DispatcherConfig[mocks.Order]
+	}{
+		{
+			name:     "non-positive builder values are ignored",
+			retry:    [2]time.Duration{-1, 0},
+			attempts: -3,
+			want:     defaults,
+		},
+		{
+			name: "unset builder values keep the defaults",
+			want: defaults,
+		},
+		{
+			name:     "positive builder values are carried",
+			retry:    [2]time.Duration{5 * time.Millisecond, 50 * time.Millisecond},
+			attempts: 3,
+			want:     models.DispatcherConfig[mocks.Order]{MaxAttempts: 3, RetryInitial: 5 * time.Millisecond, RetryMax: 50 * time.Millisecond},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := mocks.NewDispatcher[mocks.Order]()
+			b := eight(store.New()).
+				WithDispatcher(fake.Factory()).
+				WithSubscriber("OrderUpdated", noopDurable).
+				WithDeliveryRetry(tt.retry[0], tt.retry[1]).
+				WithDeliveryMaxAttempts(tt.attempts)
+			build(t, b)
+
+			got := fake.Config()
+			if got.MaxAttempts != tt.want.MaxAttempts || got.RetryInitial != tt.want.RetryInitial || got.RetryMax != tt.want.RetryMax {
+				t.Errorf("config = (%d, %v, %v), want (%d, %v, %v)", got.MaxAttempts, got.RetryInitial, got.RetryMax,
+					tt.want.MaxAttempts, tt.want.RetryInitial, tt.want.RetryMax)
+			}
+			if got.Bus == nil || len(got.DurableSubs) != 1 {
+				t.Errorf("config = %+v, want the bus and the one durable subscriber", got)
+			}
+		})
 	}
 }

@@ -22,7 +22,7 @@ func TestProcessor_IntegrationHighThroughput(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(
+	p := mustNew(t, 
 		es,
 		channelBus,
 		processor.WithShards[order](8),
@@ -59,7 +59,7 @@ func TestProcessor_IntegrationOrderPreservation(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(
+	p := mustNew(t, 
 		es,
 		channelBus,
 		processor.WithShards[order](4),
@@ -106,7 +106,7 @@ func TestProcessor_IntegrationCancelDuringBurst(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(
+	p := mustNew(t, 
 		es,
 		channelBus,
 		processor.WithShards[order](8),
@@ -141,7 +141,7 @@ func TestProcessor_IntegrationShutdownGraceful(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(
+	p := mustNew(t, 
 		es,
 		channelBus,
 		processor.WithShards[order](4),
@@ -198,7 +198,7 @@ func TestProcessor_IntegrationWithValidationErrors(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(
+	p := mustNew(t, 
 		es,
 		channelBus,
 		processor.WithShards[order](8),
@@ -264,7 +264,7 @@ func TestProcessor_IntegrationMemoryStability(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(
+	p := mustNew(t, 
 		es,
 		channelBus,
 		processor.WithShards[order](4),
@@ -301,7 +301,7 @@ func TestProcessor_IntegrationEventPublishingReliability(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(
+	p := mustNew(t, 
 		es,
 		channelBus,
 		processor.WithShards[order](4),
@@ -372,7 +372,7 @@ func TestProcessor_IntegrationDefaultQueueDepthScaling(t *testing.T) {
 			channelBus := bus.NewChannelBus[order]()
 			es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-			p := processor.New(
+			p := mustNew(t, 
 				es,
 				channelBus,
 				processor.WithWorkersPerShard[order](tt.workers),
