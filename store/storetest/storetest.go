@@ -467,15 +467,15 @@ func outOfOrderAppends(
 	}
 
 	all, err := s.ReadFrom(ctx, "s1", 1)
-	if err != nil || len(all) != 3 || string(all[0]) != "1" || string(all[1]) != "2" || string(all[2]) != "3" {
+	if err != nil || !slices.Equal(asStrings(all), []string{"1", "2", "3"}) {
 		t.Fatalf("ReadFrom(1) = %q, %v; want [1 2 3] in version order", all, err)
 	}
 	tail, err := s.ReadFrom(ctx, "s1", 2)
-	if err != nil || len(tail) != 2 || string(tail[0]) != "2" {
+	if err != nil || !slices.Equal(asStrings(tail), []string{"2", "3"}) {
 		t.Fatalf("ReadFrom(2) = %q, %v; want [2 3]", tail, err)
 	}
 	window, err := s.ReadRange(ctx, "s1", 2, 1)
-	if err != nil || len(window) != 1 || string(window[0]) != "2" {
+	if err != nil || !slices.Equal(asStrings(window), []string{"2"}) {
 		t.Fatalf("ReadRange(2, 1) = %q, %v; want [2]", window, err)
 	}
 }
@@ -646,12 +646,21 @@ func RunSnapshots(
 	}
 }
 
+func asStrings(blobs [][]byte) []string {
+	out := make([]string, len(blobs))
+	for i, b := range blobs {
+		out[i] = string(b)
+	}
+	return out
+}
+
 func snapshotUnknown(
 	t testing.TB,
 	s models.SnapshotStore,
 ) {
 	data, found, err := s.Get(context.Background(), "ghost")
-	if err != nil || found || data != nil && len(data) != 0 {
+	isAbsent := !found && len(data) == 0
+	if err != nil || !isAbsent {
 		t.Fatalf("Get(unknown) = %q, %v, %v; want not found and no error", data, found, err)
 	}
 }
@@ -666,7 +675,8 @@ func snapshotRoundTrip(
 		t.Fatalf("Put: %v", err)
 	}
 	got, found, err := s.Get(ctx, "a")
-	if err != nil || !found || !bytes.Equal(got, want) {
+	isStored := found && bytes.Equal(got, want)
+	if err != nil || !isStored {
 		t.Fatalf("Get = %v, %v, %v; want %v", got, found, err, want)
 	}
 }
@@ -682,7 +692,8 @@ func snapshotReplaced(
 		}
 	}
 	got, found, err := s.Get(ctx, "a")
-	if err != nil || !found || string(got) != "three" {
+	isNewest := found && string(got) == "three"
+	if err != nil || !isNewest {
 		t.Fatalf("Get = %q, %v, %v; want the newest snapshot only", got, found, err)
 	}
 }
@@ -787,9 +798,15 @@ func snapshotCancelled(
 	}
 }
 
+// scenario is one check of the suite, run against a store of type S.
+type scenario[S any] func(
+	t testing.TB,
+	s S,
+)
+
 // storeScenarios lists the scenarios of the suite, by name.
-func storeScenarios() map[string]func(testing.TB, models.Store) {
-	return map[string]func(testing.TB, models.Store){
+func storeScenarios() map[string]scenario[models.Store] {
+	return map[string]scenario[models.Store]{
 		"AppendCommitsAndReadFromReturnsInOrder":       appendCommitsAndReads,
 		"ReadRangeLimitsCount":                         readRangeLimits,
 		"DuplicateVersionConflictsAndRollsBack":        duplicateVersionRollsBack,
@@ -816,8 +833,8 @@ func storeScenarios() map[string]func(testing.TB, models.Store) {
 }
 
 // snapshotScenarios lists the scenarios of the suite, by name.
-func snapshotScenarios() map[string]func(testing.TB, models.SnapshotStore) {
-	return map[string]func(testing.TB, models.SnapshotStore){
+func snapshotScenarios() map[string]scenario[models.SnapshotStore] {
+	return map[string]scenario[models.SnapshotStore]{
 		"GetOfUnknownAggregateIsNotFoundNotAnError": snapshotUnknown,
 		"PutThenGetReturnsTheBytes":                 snapshotRoundTrip,
 		"PutReplacesTheSnapshot":                    snapshotReplaced,

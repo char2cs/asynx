@@ -598,7 +598,10 @@ func TestGuardAutoSnapshots_InstallsTheGuardOnTheReader(t *testing.T) {
 	ctx := context.Background()
 	es := New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
 	asked := 0
-	es.GuardAutoSnapshots(func(string, func()) bool {
+	es.GuardAutoSnapshots(func(
+		string,
+		func(),
+	) bool {
 		asked++
 		return false
 	})

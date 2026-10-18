@@ -1521,8 +1521,6 @@ func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(t *testing.T) {
 		}
 	}
 
-	// The buffer is full once handlers have nowhere left to put an event: the
-	// remaining ones are blocked on ch <- evt.
 	eventually(t, "the Listen buffer to fill", func() bool { return len(ch) == cap(ch) })
 
 	// unsub MUST return promptly even with handlers blocked.
@@ -1549,7 +1547,6 @@ func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(t *testing.T) {
 		}
 	}
 }
-
 
 func TestListen_BoundedConcurrent_DeliversAllCountEvents(t *testing.T) {
 	// Regression test for close-race bug: with count > 1 and concurrent events,
@@ -1662,16 +1659,16 @@ func TestWaitPublish_RaceWithAsyncReactionGoroutines(t *testing.T) {
 			// Register a reaction that spawns a goroutine sending commands
 			var reactionStarted atomic.Int32
 			var reactionFinished atomic.Int32
-			
+
 			handlerID, err := instance.Subscribe("OrderCreated", func(ctx context.Context, evt models.Event[mocks.Order]) {
 				reactionStarted.Store(1)
 				defer func() { reactionFinished.Store(1) }()
-				
+
 				// Spawn a goroutine that sends a command after a small delay
 				go func() {
 					// Small delay to ensure this happens while WaitPublish is being called
 					time.Sleep(1 * time.Millisecond)
-					
+
 					// Send a new command from the reaction handler's goroutine
 					cmd := mocks.UpdateOrderCmd{
 						ID:       evt.AggregateID,
@@ -2443,7 +2440,13 @@ func TestGet_AutoSnapshotCannotResurrectAForgottenAggregate(t *testing.T) {
 	snaps := &blockingSnapshots{SnapshotStore: store.NewSnapshots(), aggregate: "ws", entered: make(chan struct{}), release: make(chan struct{})}
 	inst := build(t, asynx.New[mocks.Order]().WithEventStore(s).WithSnapshotStore(snaps).
 		WithSchemaVersion(2).
-		WithUpcaster(1, func(_ context.Context, _ string, p []byte) ([]byte, error) { return p, nil }))
+		WithUpcaster(1, func(
+			_ context.Context,
+			_ string,
+			p []byte,
+		) ([]byte, error) {
+			return p, nil
+		}))
 	snaps.armed.Store(true)
 	got := make(chan error, 1)
 	go func() { _, err := inst.Get(ctx, "ws"); got <- err }()
@@ -2484,7 +2487,10 @@ func TestSendWait_RetryOfAnIdempotentCommandWaitsForTheOriginalHandlers(t *testi
 	var releaseOnce sync.Once
 	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
 	var finished atomic.Bool
-	if _, err := inst.Subscribe("OrderCreated", func(context.Context, models.Event[mocks.Order]) {
+	if _, err := inst.Subscribe("OrderCreated", func(
+		context.Context,
+		models.Event[mocks.Order],
+	) {
 		entered <- struct{}{}
 		<-release
 		finished.Store(true)
@@ -2525,7 +2531,10 @@ func TestShutdown_ReleasesAHandlerWaitingOnItsOwnAggregatesForget(t *testing.T) 
 	forgetResult := make(chan error, 1)
 	var inst asynx.Asynx[mocks.Order]
 	inst, err := eight(store.New()).
-		WithSubscriber("OrderCreated", func(_ context.Context, e models.Event[mocks.Order]) error {
+		WithSubscriber("OrderCreated", func(
+			_ context.Context,
+			e models.Event[mocks.Order],
+		) error {
 			forgetResult <- inst.Forget(context.Background(), e.AggregateID)
 			return nil
 		}).Build()
@@ -2565,12 +2574,26 @@ func TestFailure_DeadLetterLearnsEverySubscriberThatFailed(t *testing.T) {
 	inst := build(t, eight(store.New()).
 		WithDeliveryMaxAttempts(2).
 		WithDeliveryRetry(time.Millisecond, time.Millisecond).
-		WithDeadLetterHandler(func(_ context.Context, _ models.Event[mocks.Order], err error) error {
+		WithDeadLetterHandler(func(
+			_ context.Context,
+			_ models.Event[mocks.Order],
+			err error,
+		) error {
 			got <- err
 			return nil
 		}).
-		WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error { return billing }).
-		WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error { return search }))
+		WithSubscriber("OrderUpdated", func(
+			context.Context,
+			models.Event[mocks.Order],
+		) error {
+			return billing
+		}).
+		WithSubscriber("OrderUpdated", func(
+			context.Context,
+			models.Event[mocks.Order],
+		) error {
+			return search
+		}))
 	if _, err := inst.Send(ctx, upd("agg", 1)); err != nil {
 		t.Fatal(err)
 	}
@@ -2598,7 +2621,10 @@ func TestSendWait_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWasTold(t *te
 	down.Store(true)
 	inst := build(t, eight(store.New()).
 		WithDeliveryMaxAttempts(1).
-		WithSubscriber("OrderUpdated", func(_ context.Context, e models.Event[mocks.Order]) error {
+		WithSubscriber("OrderUpdated", func(
+			_ context.Context,
+			e models.Event[mocks.Order],
+		) error {
 			if e.Version >= 2 && down.Load() {
 				return errors.New("downstream down")
 			}

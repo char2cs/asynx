@@ -422,7 +422,7 @@ func (d *Dispatcher[T]) Close(ctx context.Context) error {
 	d.mu.Lock()
 	if !d.closed {
 		d.closed = true
-		close(d.stopCh) // signal all workers to drain and exit
+		close(d.stopCh)
 	}
 	d.mu.Unlock()
 	d.Interrupt()
@@ -446,7 +446,10 @@ func (d *Dispatcher[T]) Close(ctx context.Context) error {
 // committing and enqueueing meanwhile.
 func (d *Dispatcher[T]) WaitIdle() {
 	var queued []*dispatchJob[T]
-	d.inflight.Range(func(key, _ any) bool {
+	d.inflight.Range(func(
+		key any,
+		_ any,
+	) bool {
 		queued = append(queued, key.(*dispatchJob[T]))
 		return true
 	})

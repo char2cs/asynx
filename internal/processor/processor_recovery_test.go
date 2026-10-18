@@ -20,7 +20,6 @@ import (
 	"github.com/char2cs/asynx/store"
 )
 
-
 func seedPending(t *testing.T, s store.Memory, es *eventstore.EventStore[order], ids ...string) {
 	t.Helper()
 	ctx := context.Background()
@@ -469,7 +468,10 @@ func TestProcessor_Recover_ReplaysAnAggregatesStreamOnce(t *testing.T) {
 	var delivered []int64
 	p := processor.New(es, bus.NewChannelBus[order](), processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
 		Match: always,
-		Handler: func(_ context.Context, e asynxmd.Event[order]) error {
+		Handler: func(
+			_ context.Context,
+			e asynxmd.Event[order],
+		) error {
 			mu.Lock()
 			defer mu.Unlock()
 			delivered = append(delivered, e.Version)
@@ -500,7 +502,12 @@ func TestProcessor_Resume_ReplaysAnAggregatesStreamOnce(t *testing.T) {
 	parked := make(chan struct{}, 4)
 	s := &rowCountingStore{Memory: store.New()}
 	f := newFixture(t, s, parkingOpts(&healthy,
-		processor.WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+		processor.WithDeliveryErrorHandler(func(
+			_ context.Context,
+			_ asynxmd.Event[order],
+			err error,
+			_ int,
+		) {
 			if errors.Is(err, asynxmd.ErrDeliveryParked) {
 				parked <- struct{}{}
 			}
@@ -554,7 +561,12 @@ func TestProcessor_Resume_ReadsTheDeliveryLogOnceForAllAggregates(t *testing.T) 
 	parked := make(chan struct{}, aggregates)
 	s := &logCountingStore{Memory: store.New()}
 	f := newFixture(t, s, parkingOpts(&healthy,
-		processor.WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+		processor.WithDeliveryErrorHandler(func(
+			_ context.Context,
+			_ asynxmd.Event[order],
+			err error,
+			_ int,
+		) {
 			if errors.Is(err, asynxmd.ErrDeliveryParked) {
 				parked <- struct{}{}
 			}
@@ -609,7 +621,12 @@ func TestProcessor_Resume_DoesNotDeadlockWithACommandSendingToAnotherAggregate(t
 		}
 	}}
 	f := newFixture(t, s, parkingOpts(&healthy,
-		processor.WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+		processor.WithDeliveryErrorHandler(func(
+			_ context.Context,
+			_ asynxmd.Event[order],
+			err error,
+			_ int,
+		) {
 			if errors.Is(err, asynxmd.ErrDeliveryParked) {
 				parked <- struct{}{}
 			}
@@ -641,18 +658,23 @@ func TestProcessor_Resume_DoesNotDeadlockWithACommandSendingToAnotherAggregate(t
 
 	resumed := make(chan error, 1)
 	go func() { resumed <- f.p.Resume(ctx, 10) }()
-	for _, c := range []struct {
-		name string
-		done <-chan error
-	}{{"command", sent}, {"Resume", resumed}} {
-		select {
-		case err := <-c.done:
-			if err != nil {
-				t.Fatalf("%s: %v", c.name, err)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatalf("%s is deadlocked", c.name)
+	requireFinishes(t, "command", sent)
+	requireFinishes(t, "Resume", resumed)
+}
+
+func requireFinishes(
+	t *testing.T,
+	name string,
+	done <-chan error,
+) {
+	t.Helper()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
 		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s is deadlocked", name)
 	}
 }
 
@@ -714,14 +736,22 @@ func TestProcessor_Resume_DeliversAnEventCommittedAfterItReadTheLog(t *testing.T
 		}
 	}}
 	f := newFixture(t, s, parkingOpts(&healthy,
-		processor.WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+		processor.WithDeliveryErrorHandler(func(
+			_ context.Context,
+			_ asynxmd.Event[order],
+			err error,
+			_ int,
+		) {
 			if errors.Is(err, asynxmd.ErrDeliveryParked) {
 				parked <- struct{}{}
 			}
 		}),
 		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
 			Match: always,
-			Handler: func(_ context.Context, e asynxmd.Event[order]) error {
+			Handler: func(
+				_ context.Context,
+				e asynxmd.Event[order],
+			) error {
 				if !healthy.Load() {
 					return errors.New("down")
 				}
@@ -770,7 +800,10 @@ func TestProcessor_Resume_SkipsAnAggregateAnotherResumeLiftedMeanwhile(t *testin
 	f := newFixture(t, s, parkingOpts(&healthy, parkedSignal(parked),
 		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
 			Match: always,
-			Handler: func(_ context.Context, e asynxmd.Event[order]) error {
+			Handler: func(
+				_ context.Context,
+				e asynxmd.Event[order],
+			) error {
 				if !healthy.Load() {
 					return errors.New("down")
 				}
@@ -825,7 +858,10 @@ func TestProcessor_Resume_LeavesAParkImposedAgainSinceItReadTheLog(t *testing.T)
 	f := newFixture(t, s, parkingOpts(&healthy, parkedSignal(parked),
 		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
 			Match: always,
-			Handler: func(_ context.Context, e asynxmd.Event[order]) error {
+			Handler: func(
+				_ context.Context,
+				e asynxmd.Event[order],
+			) error {
 				if !healthy.Load() {
 					return errors.New("down")
 				}
@@ -905,7 +941,8 @@ func (s *failingReadsStore) ReadFrom(
 	streamID string,
 	fromVersion int64,
 ) ([][]byte, error) {
-	if s.fail.Load() && (s.stream == "" || s.stream == streamID) {
+	isFailingStream := s.stream == "" || s.stream == streamID
+	if s.fail.Load() && isFailingStream {
 		return nil, errors.New("stream unreadable")
 	}
 	return s.Memory.ReadFrom(ctx, streamID, fromVersion)
@@ -931,7 +968,12 @@ func parkWithTwoCommands(
 }
 
 func parkedSignal(parked chan<- struct{}) processor.ProcessorOpt[order] {
-	return processor.WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+	return processor.WithDeliveryErrorHandler(func(
+		_ context.Context,
+		_ asynxmd.Event[order],
+		err error,
+		_ int,
+	) {
 		if errors.Is(err, asynxmd.ErrDeliveryParked) {
 			select {
 			case parked <- struct{}{}:
@@ -1067,7 +1109,11 @@ func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(t
 	}
 
 	var upcasts atomic.Int32
-	upcaster := func(_ context.Context, _ string, patches []byte) ([]byte, error) {
+	upcaster := func(
+		_ context.Context,
+		_ string,
+		patches []byte,
+	) ([]byte, error) {
 		if upcasts.Add(1) != 3 {
 			return patches, nil
 		}
@@ -1083,10 +1129,21 @@ func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(t
 	reported := make(chan struct{}, 1)
 	p := processor.New(es, bus.NewChannelBus[order](),
 		processor.WithDurableDelivery[order](func(name string) bool { return name == "OrderUpdated" }),
-		processor.WithPublishErrorHandler(func(context.Context, asynxmd.Event[order], error) { reported <- struct{}{} }),
+		processor.WithPublishErrorHandler(func(
+			context.Context,
+			asynxmd.Event[order],
+			error,
+		) {
+			reported <- struct{}{}
+		}),
 		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
-			Match:   always,
-			Handler: func(context.Context, asynxmd.Event[order]) error { return nil },
+			Match: always,
+			Handler: func(
+				context.Context,
+				asynxmd.Event[order],
+			) error {
+				return nil
+			},
 		}}))
 	t.Cleanup(func() { p.Shutdown(ctx) })
 
@@ -1127,10 +1184,22 @@ func TestProcessor_Recover_DeliversWhatPrecedesAnUnreadableEvent(t *testing.T) {
 	var got atomic.Int32
 	reported := make(chan error, 1)
 	p := processor.New(es, bus.NewChannelBus[order](),
-		processor.WithPublishErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error) { reported <- err }),
+		processor.WithPublishErrorHandler(func(
+			_ context.Context,
+			_ asynxmd.Event[order],
+			err error,
+		) {
+			reported <- err
+		}),
 		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
-			Match:   always,
-			Handler: func(context.Context, asynxmd.Event[order]) error { got.Add(1); return nil },
+			Match: always,
+			Handler: func(
+				context.Context,
+				asynxmd.Event[order],
+			) error {
+				got.Add(1)
+				return nil
+			},
 		}}))
 	t.Cleanup(func() { p.Shutdown(ctx) })
 

@@ -29,11 +29,19 @@ type recorder struct {
 
 func (r *recorder) Helper() {}
 
-func (r *recorder) Errorf(string, ...any) { r.failed.Store(true) }
+func (r *recorder) Errorf(
+	string,
+	...any,
+) {
+	r.failed.Store(true)
+}
 
 func (r *recorder) Error(...any) { r.failed.Store(true) }
 
-func (r *recorder) Fatalf(string, ...any) {
+func (r *recorder) Fatalf(
+	string,
+	...any,
+) {
 	r.failed.Store(true)
 	runtime.Goexit()
 }
@@ -44,17 +52,17 @@ func (r *recorder) Fatal(...any) {
 }
 
 func failures[S any](
-	scenarios map[string]func(testing.TB, S),
+	scenarios map[string]scenario[S],
 	subject S,
 ) map[string]bool {
 	var mu sync.Mutex
 	failed := map[string]bool{}
 	var wg sync.WaitGroup
-	for name, scenario := range scenarios {
+	for name, check := range scenarios {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			didFail := runScenario(scenario, subject)
+			didFail := runScenario(check, subject)
 			mu.Lock()
 			failed[name] = didFail
 			mu.Unlock()
@@ -65,14 +73,14 @@ func failures[S any](
 }
 
 func runScenario[S any](
-	scenario func(testing.TB, S),
+	check scenario[S],
 	subject S,
 ) bool {
 	r := &recorder{}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		scenario(r, subject)
+		check(r, subject)
 	}()
 	<-done
 	return r.failed.Load()
@@ -91,32 +99,63 @@ func countFailed(failed map[string]bool) int {
 // hollowStore accepts every write and keeps none, and reads nothing back.
 type hollowStore struct{ models.Store }
 
-func (hollowStore) Atomically(context.Context, func(models.Tx) error) error { return nil }
+func (hollowStore) Atomically(
+	context.Context,
+	func(models.Tx) error,
+) error {
+	return nil
+}
 
 // brokenStore fails every operation.
 type brokenStore struct{ models.Store }
 
 var errBroken = errors.New("broken")
 
-func (brokenStore) Atomically(context.Context, func(models.Tx) error) error { return errBroken }
+func (brokenStore) Atomically(
+	context.Context,
+	func(models.Tx) error,
+) error {
+	return errBroken
+}
 
-func (brokenStore) ReadFrom(context.Context, string, int64) ([][]byte, error) {
+func (brokenStore) ReadFrom(
+	context.Context,
+	string,
+	int64,
+) ([][]byte, error) {
 	return nil, errBroken
 }
 
-func (brokenStore) ReadRange(context.Context, string, int64, int64) ([][]byte, error) {
+func (brokenStore) ReadRange(
+	context.Context,
+	string,
+	int64,
+	int64,
+) ([][]byte, error) {
 	return nil, errBroken
 }
 
-func (brokenStore) GetReceipt(context.Context, string) (models.Receipt, bool, error) {
+func (brokenStore) GetReceipt(
+	context.Context,
+	string,
+) (models.Receipt, bool, error) {
 	return models.Receipt{}, false, errBroken
 }
 
-func (brokenStore) PendingDeliveries(context.Context, int) ([]models.Delivery, error) {
+func (brokenStore) PendingDeliveries(
+	context.Context,
+	int,
+) ([]models.Delivery, error) {
 	return nil, errBroken
 }
 
-func (brokenStore) AckDelivery(context.Context, string, int64) error { return errBroken }
+func (brokenStore) AckDelivery(
+	context.Context,
+	string,
+	int64,
+) error {
+	return errBroken
+}
 
 func TestSuite_FlagsStoresThatDoNotKeepWhatTheyAccepted(t *testing.T) {
 	failed := failures(storeScenarios(), models.Store(hollowStore{Store: store.New()}))
@@ -140,18 +179,40 @@ func TestSuite_FlagsStoresThatFail(t *testing.T) {
 // forgetfulSnapshots drops every snapshot it is given.
 type forgetfulSnapshots struct{ models.SnapshotStore }
 
-func (forgetfulSnapshots) Put(context.Context, string, int64, []byte) error { return nil }
+func (forgetfulSnapshots) Put(
+	context.Context,
+	string,
+	int64,
+	[]byte,
+) error {
+	return nil
+}
 
 // failingSnapshots fails every operation.
 type failingSnapshots struct{ models.SnapshotStore }
 
-func (failingSnapshots) Put(context.Context, string, int64, []byte) error { return errBroken }
+func (failingSnapshots) Put(
+	context.Context,
+	string,
+	int64,
+	[]byte,
+) error {
+	return errBroken
+}
 
-func (failingSnapshots) Get(context.Context, string) ([]byte, bool, error) {
+func (failingSnapshots) Get(
+	context.Context,
+	string,
+) ([]byte, bool, error) {
 	return nil, false, errBroken
 }
 
-func (failingSnapshots) Delete(context.Context, string) error { return errBroken }
+func (failingSnapshots) Delete(
+	context.Context,
+	string,
+) error {
+	return errBroken
+}
 
 func TestSnapshotSuite_FlagsStoresThatDoNotKeepWhatTheyAccepted(t *testing.T) {
 	failed := failures(snapshotScenarios(), models.SnapshotStore(forgetfulSnapshots{SnapshotStore: store.NewSnapshots()}))

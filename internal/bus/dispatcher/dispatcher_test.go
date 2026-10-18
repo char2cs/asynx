@@ -30,9 +30,9 @@ func makeEvent(aggregateID string, version int64) asynxmd.Event[int] {
 
 // recordingBus records PublishSync calls in order.
 type recordingBus struct {
-	mu      sync.Mutex
-	calls   []asynxmd.Event[int]
-	delay   time.Duration
+	mu    sync.Mutex
+	calls []asynxmd.Event[int]
+	delay time.Duration
 }
 
 func (b *recordingBus) PublishSync(_ context.Context, e asynxmd.Event[int]) error {
@@ -45,13 +45,19 @@ func (b *recordingBus) PublishSync(_ context.Context, e asynxmd.Event[int]) erro
 	return nil
 }
 
-func (b *recordingBus) Publish(context.Context, asynxmd.Event[int]) error   { return nil }
+func (b *recordingBus) Publish(
+	context.Context,
+	asynxmd.Event[int],
+) error {
+	return nil
+}
+
 func (b *recordingBus) Subscribe(string, asynxmd.ProjectionHandler[int], ...asynxmd.SubscriptionOpt[int]) (string, error) {
 	return "", nil
 }
-func (b *recordingBus) Unsubscribe(string) error        { return nil }
-func (b *recordingBus) Close(context.Context) error      { return nil }
-func (b *recordingBus) WaitForHandlers()                 {}
+func (b *recordingBus) Unsubscribe(string) error    { return nil }
+func (b *recordingBus) Close(context.Context) error { return nil }
+func (b *recordingBus) WaitForHandlers()            {}
 
 func (b *recordingBus) snapshot() []asynxmd.Event[int] {
 	b.mu.Lock()
@@ -71,7 +77,7 @@ func (b *errBus) Publish(context.Context, asynxmd.Event[int]) error     { return
 func (b *errBus) Subscribe(string, asynxmd.ProjectionHandler[int], ...asynxmd.SubscriptionOpt[int]) (string, error) {
 	return "", nil
 }
-func (b *errBus) Unsubscribe(string) error   { return nil }
+func (b *errBus) Unsubscribe(string) error    { return nil }
 func (b *errBus) Close(context.Context) error { return nil }
 func (b *errBus) WaitForHandlers()            {}
 
@@ -87,7 +93,7 @@ func (b *callbackBus) Publish(context.Context, asynxmd.Event[int]) error { retur
 func (b *callbackBus) Subscribe(string, asynxmd.ProjectionHandler[int], ...asynxmd.SubscriptionOpt[int]) (string, error) {
 	return "", nil
 }
-func (b *callbackBus) Unsubscribe(string) error   { return nil }
+func (b *callbackBus) Unsubscribe(string) error    { return nil }
 func (b *callbackBus) Close(context.Context) error { return nil }
 func (b *callbackBus) WaitForHandlers()            {}
 
@@ -287,9 +293,9 @@ func TestDispatch_PublishErrorHandler(t *testing.T) {
 	bus := &errBus{err: publishErr}
 
 	var (
-		mu         sync.Mutex
-		gotEvent   asynxmd.Event[int]
-		gotErr     error
+		mu            sync.Mutex
+		gotEvent      asynxmd.Event[int]
+		gotErr        error
 		handlerCalled bool
 	)
 
@@ -496,8 +502,6 @@ func TestEnqueue_AckRunsAfterHandlersFinish(t *testing.T) {
 	}
 }
 
-
-
 func TestEnqueue_AckErrorIsReported(t *testing.T) {
 	ackErr := errors.New("ack failed")
 	var got atomic.Value
@@ -627,30 +631,6 @@ func TestClose_DrainsJobsQueuedBehindASlowHandler(t *testing.T) {
 	}
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 func TestHandle_DispatcherPanicIsReportedNotSwallowed(t *testing.T) {
 	var got atomic.Value
 	bus := &callbackBus{fn: func(context.Context, asynxmd.Event[int]) error { panic("bus exploded") }}
@@ -672,50 +652,6 @@ func TestHandle_DispatcherPanicIsReportedNotSwallowed(t *testing.T) {
 	}
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // blockingBus holds every PublishSync until release is closed.
 type blockingBus struct {
 	recordingBus
@@ -723,7 +659,10 @@ type blockingBus struct {
 	release chan struct{}
 }
 
-func (b *blockingBus) PublishSync(ctx context.Context, e asynxmd.Event[int]) error {
+func (b *blockingBus) PublishSync(
+	ctx context.Context,
+	e asynxmd.Event[int],
+) error {
 	b.entered <- struct{}{}
 	<-b.release
 	return b.recordingBus.PublishSync(ctx, e)
@@ -766,7 +705,12 @@ func TestTicketFor_FindsAnEventWhileItsDeliveryIsUnderWay(t *testing.T) {
 }
 
 func TestTicketFor_ForgetsEventsLeftBehindByAPark(t *testing.T) {
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error { return nil }}})
+	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return nil
+	}}})
 	d.Park("a")
 
 	ticket, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
@@ -780,7 +724,12 @@ func TestTicketFor_ForgetsEventsLeftBehindByAPark(t *testing.T) {
 }
 
 func TestUnrun_RemembersEventsLeftUndeliveredByAPark(t *testing.T) {
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error { return nil }}})
+	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return nil
+	}}})
 	d.Park("a")
 
 	ticket, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
@@ -856,7 +805,12 @@ func TestParkUndelivered_RemembersTheNamedVersionsUntilTheParkLifts(t *testing.T
 // An event whose handlers ran and failed until the attempts ran out is not
 // "unrun": a handler took it.
 func TestUnrun_DoesNotCountAnEventWhoseHandlersRanAndFailed(t *testing.T) {
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error { return errors.New("down") }}},
+	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return errors.New("down")
+	}}},
 		WithMaxAttempts[int](1))
 
 	ticket, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })

@@ -13,7 +13,6 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-
 func TestEnqueue_DurableDeliveryStillAcksWhenBusRejectsEvent(t *testing.T) {
 	var acked atomic.Bool
 	var reported atomic.Int32
@@ -1074,6 +1073,36 @@ func TestSupersede_AfterThePopStillSkipsTheSupersededJob(t *testing.T) {
 	}
 }
 
+// Whoever is told that a delivery gave up may act on it at once, for instance by
+// resuming; the aggregate must already be parked by then.
+func TestGiveUp_TheAggregateIsParkedBeforeTheErrorHandlerIsTold(t *testing.T) {
+	var d *Dispatcher[int]
+	parkedWhenTold := make(chan []string, 1)
+	d = newDurable(t,
+		[]DurableSub[int]{{Match: always, Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			return errors.New("down")
+		}}},
+		WithMaxAttempts[int](1),
+		WithDeliveryErrorHandler[int](func(
+			_ context.Context,
+			_ asynxmd.Event[int],
+			err error,
+			_ int,
+		) {
+			if errors.Is(err, asynxmd.ErrDeliveryParked) {
+				parkedWhenTold <- d.Halted()
+			}
+		}))
+
+	d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	if got := recv(t, parkedWhenTold, "the park to be reported"); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("parked aggregates when the handler was told = %v, want [a]", got)
+	}
+}
+
 func TestResume_ReportsWhetherItLiftedAPark(t *testing.T) {
 	d := newDurable(t, nil)
 	if d.Resume("a") {
@@ -1179,16 +1208,35 @@ func TestDurable_FailuresNameTheSubscriberAndDeadLetterGetsThemAll(t *testing.T)
 	var reported []error
 	deadLettered := make(chan error, 1)
 	d := newDurable(t, []DurableSub[int]{
-		{Name: "OrderUpdated#1", Match: always, Handler: func(context.Context, asynxmd.Event[int]) error { return billing }},
-		{Name: "OrderUpdated#2", Match: always, Handler: func(context.Context, asynxmd.Event[int]) error { return search }},
+		{Name: "OrderUpdated#1", Match: always, Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			return billing
+		}},
+		{Name: "OrderUpdated#2", Match: always, Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			return search
+		}},
 	},
 		WithMaxAttempts[int](2),
-		WithDeliveryErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error, _ int) {
+		WithDeliveryErrorHandler[int](func(
+			_ context.Context,
+			_ asynxmd.Event[int],
+			err error,
+			_ int,
+		) {
 			mu.Lock()
 			reported = append(reported, err)
 			mu.Unlock()
 		}),
-		WithDeadLetterHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error) error {
+		WithDeadLetterHandler[int](func(
+			_ context.Context,
+			_ asynxmd.Event[int],
+			err error,
+		) error {
 			deadLettered <- err
 			return nil
 		}),
@@ -1220,7 +1268,8 @@ func TestDurable_FailuresNameTheSubscriberAndDeadLetterGetsThemAll(t *testing.T)
 	mu.Lock()
 	defer mu.Unlock()
 	var sub *asynxmd.SubscriberError
-	if len(reported) == 0 || !errors.As(reported[0], &sub) || sub.Subscriber != "OrderUpdated#1" {
+	namesFirstSubscriber := len(reported) > 0 && errors.As(reported[0], &sub) && sub.Subscriber == "OrderUpdated#1"
+	if !namesFirstSubscriber {
 		t.Fatalf("delivery error handler got %v, want the first failure wrapped with its subscriber", reported)
 	}
 }
@@ -1240,8 +1289,21 @@ func TestDurable_ATimeoutNamesItsSubscriber(t *testing.T) {
 		Name:    "slow#1",
 		Match:   always,
 		Timeout: time.Millisecond,
-		Handler: func(context.Context, asynxmd.Event[int]) error { <-release; return nil },
-	}}, WithDeliveryErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error, _ int) { reported <- err }))
+		Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			<-release
+			return nil
+		},
+	}}, WithDeliveryErrorHandler[int](func(
+		_ context.Context,
+		_ asynxmd.Event[int],
+		err error,
+		_ int,
+	) {
+		reported <- err
+	}))
 
 	ticket, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
 	if err != nil {
@@ -1252,7 +1314,8 @@ func TestDurable_ATimeoutNamesItsSubscriber(t *testing.T) {
 	<-ticket.Final
 
 	var sub *asynxmd.SubscriberError
-	if !errors.As(got, &sub) || sub.Subscriber != "slow#1" || !errors.Is(got, asynxmd.ErrHandlerTimeout) {
+	namesSlow := errors.As(got, &sub) && sub.Subscriber == "slow#1"
+	if !namesSlow || !errors.Is(got, asynxmd.ErrHandlerTimeout) {
 		t.Fatalf("timeout reported as %q, want ErrHandlerTimeout from subscriber slow#1", got)
 	}
 }

@@ -20,7 +20,6 @@ import (
 	"github.com/char2cs/asynx/store"
 )
 
-
 func TestForget_ErasesStreamSnapshotAndPendingDeliveries(t *testing.T) {
 	ex, s, ss, d, _ := newEnv(t, WithDurableDelivery[order](func(string) bool { return true }))
 	ctx := context.Background()
@@ -655,7 +654,10 @@ func TestForget_DeliveryLogFailureInTheTombstoneTransactionAbortsIt(t *testing.T
 func TestForget_GivesUpWhenShutdownBegins(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
-	ex := durableEnv(t, func(_ context.Context, e asynxmd.Event[order]) error {
+	ex := durableEnv(t, func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) error {
 		if e.EventName != asynxmd.ForgetEventName {
 			entered <- struct{}{}
 			<-release

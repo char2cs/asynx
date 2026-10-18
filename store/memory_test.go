@@ -601,7 +601,8 @@ func TestGetReceipt_ReturnsWhatWasStored(t *testing.T) {
 	}
 
 	r, found, err := s.GetReceipt(ctx, "c1")
-	if err != nil || !found || !r.Accepted {
+	isStored := found && r.Accepted
+	if err != nil || !isStored {
 		t.Fatalf("GetReceipt = %+v, %v, %v", r, found, err)
 	}
 	if _, found, _ := s.GetReceipt(ctx, "other"); found {

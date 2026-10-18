@@ -344,8 +344,8 @@ func (d *Dispatcher[T]) giveUp(
 	}
 
 	parked := fmt.Errorf("%w after %d attempts: %w", asynxmd.ErrDeliveryParked, attempt, last)
-	d.reportDeliveryError(job, parked, attempt)
 	d.parkIfCurrent(agg, q, halt, job)
+	d.reportDeliveryError(job, parked, attempt)
 	return parked
 }
 

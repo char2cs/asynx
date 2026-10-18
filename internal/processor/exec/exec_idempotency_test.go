@@ -15,7 +15,6 @@ import (
 	"github.com/char2cs/asynx/store"
 )
 
-
 type idemUpdate struct {
 	mocks.UpdateOrderCmd
 	Cmd string
@@ -364,7 +363,10 @@ func TestExecute_Idempotent_RetryWaitsForTheOriginalEventsHandlers(t *testing.T)
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	if _, err := b.Subscribe("OrderUpdated", func(context.Context, asynxmd.Event[order]) {
+	if _, err := b.Subscribe("OrderUpdated", func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
 		entered <- struct{}{}
 		<-release
 	}); err != nil {
@@ -431,7 +433,12 @@ func TestExecute_Idempotent_RetryWithoutADispatcherHasNothingToWaitOn(t *testing
 // aggregate is parked is told so, as the first attempt was; the retry of one
 // that was delivered before the park is not.
 func TestExecute_Idempotent_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWasTold(t *testing.T) {
-	ex := durableEnv(t, func(context.Context, asynxmd.Event[order]) error { return nil })
+	ex := durableEnv(t, func(
+		context.Context,
+		asynxmd.Event[order],
+	) error {
+		return nil
+	})
 	ctx := context.Background()
 	delivered := idemUpdate{UpdateOrderCmd: update("agg", 1), Cmd: "cmd-1"}
 	_, wait, err := ex.ExecuteAsync(ctx, delivered)

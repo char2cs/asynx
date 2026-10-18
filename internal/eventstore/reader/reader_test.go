@@ -638,9 +638,18 @@ func (s *afterReadStore) ReadFrom(
 	return blobs, err
 }
 
-func upcastingReader(es asynxmd.Store, ss asynxmd.SnapshotStore) *Reader[order] {
+func upcastingReader(
+	es asynxmd.Store,
+	ss asynxmd.SnapshotStore,
+) *Reader[order] {
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(_ context.Context, _ string, p []byte) ([]byte, error) { return p, nil },
+		1: func(
+			_ context.Context,
+			_ string,
+			p []byte,
+		) ([]byte, error) {
+			return p, nil
+		},
 	}
 	return New[order](es, ss, replayer.New[order](es, upcasters, 2, order{}), 2, order{}, nil)
 }
@@ -721,7 +730,10 @@ func TestGet_AutoSnapshot_IsWrittenUnderTheGuard(t *testing.T) {
 
 	r := upcastingReader(mem, ss)
 	var guarded []string
-	r.SetSnapshotGuard(func(id string, fn func()) bool {
+	r.SetSnapshotGuard(func(
+		id string,
+		fn func(),
+	) bool {
 		guarded = append(guarded, id)
 		if _, found, _ := ss.Get(ctx, "agg1"); found {
 			t.Error("the snapshot was written before the guard ran")
@@ -748,7 +760,12 @@ func TestGet_AutoSnapshot_SkippedWhenTheGuardRefuses(t *testing.T) {
 	mem.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, json.RawMessage(`[]`))) //nolint:errcheck
 
 	r := upcastingReader(mem, ss)
-	r.SetSnapshotGuard(func(string, func()) bool { return false })
+	r.SetSnapshotGuard(func(
+		string,
+		func(),
+	) bool {
+		return false
+	})
 
 	if _, err := r.Get(ctx, "agg1"); err != nil {
 		t.Fatalf("Get: %v", err)
@@ -767,7 +784,10 @@ func TestLoad_AutoSnapshot_DoesNotUseTheGuard(t *testing.T) {
 	mem.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, json.RawMessage(`[]`))) //nolint:errcheck
 
 	r := upcastingReader(mem, ss)
-	r.SetSnapshotGuard(func(string, func()) bool {
+	r.SetSnapshotGuard(func(
+		string,
+		func(),
+	) bool {
 		t.Error("Load asked for the guard")
 		return false
 	})

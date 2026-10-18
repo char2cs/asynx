@@ -291,7 +291,10 @@ func (s *memory) removeEntry(
 	version int64,
 ) {
 	cur := s.streams[streamID]
-	i, found := slices.BinarySearchFunc(cur, version, func(e entry, v int64) int {
+	i, found := slices.BinarySearchFunc(cur, version, func(
+		e entry,
+		v int64,
+	) int {
 		return cmp.Compare(e.version, v)
 	})
 	if !found {

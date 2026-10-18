@@ -107,7 +107,8 @@ func TestProcessor_ParallelAggregates8Goroutines(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			cmd := mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0}
-			_, _err := p.Send(ctx, cmd); errs <- _err
+			_, _err := p.Send(ctx, cmd)
+			errs <- _err
 		}(i)
 	}
 
@@ -169,7 +170,8 @@ func TestProcessor_ContextCancelledWhileWaiting(t *testing.T) {
 	// Start send in background
 	done := make(chan error, 1)
 	go func() {
-		_, _err := p.Send(ctx, cmd); done <- _err
+		_, _err := p.Send(ctx, cmd)
+		done <- _err
 	}()
 
 	// Wait until Send is waiting for result
@@ -221,7 +223,8 @@ func TestProcessor_ShutdownDrains(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			cmd := mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0}
-			_, _err := p.Send(ctx, cmd); errs <- _err
+			_, _err := p.Send(ctx, cmd)
+			errs <- _err
 		}(i)
 	}
 
@@ -719,8 +722,7 @@ func (b *blockingTestBus[T]) Subscribe(_ string, _ asynxmd.ProjectionHandler[T],
 }
 func (b *blockingTestBus[T]) Unsubscribe(_ string) error    { return nil }
 func (b *blockingTestBus[T]) Close(_ context.Context) error { return nil }
-func (b *blockingTestBus[T]) WaitForHandlers()               {}
-
+func (b *blockingTestBus[T]) WaitForHandlers()              {}
 
 // TestProcessor_SendWait_ContextCancelledWhileWaiting verifies the second-select
 // ctx.Done branch in sendAndWait: context is cancelled after the command is enqueued
@@ -862,22 +864,6 @@ func TestProcessor_Options_SyncProjectionsDurableDeliverySnapshotErrors(t *testi
 	}
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 func TestProcessor_DurableDeliveryOptions_RetryReportAndPanicHandling(t *testing.T) {
 	var attempts, reports, panics atomic.Int32
 	s := store.New()
@@ -914,21 +900,7 @@ func TestProcessor_DurableDeliveryOptions_RetryReportAndPanicHandling(t *testing
 	}
 }
 
-
-
 func always(string) bool { return true }
-
-
-
-
-
-
-
-
-
-
-
-
 
 func TestProcessor_Options_DeadLetter(t *testing.T) {
 	var healthy atomic.Bool
@@ -1194,7 +1166,10 @@ func TestProcessor_WaitPublish_DoesNotFailCommandsSentWhileItWaits(t *testing.T)
 	ctx := context.Background()
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
-	holdSlow := func(_ context.Context, e asynxmd.Event[order]) {
+	holdSlow := func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) {
 		if e.AggregateID == "slow" {
 			entered <- struct{}{}
 			<-release
