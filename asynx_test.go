@@ -2588,36 +2588,52 @@ func TestFailure_DeadLetterLearnsEverySubscriberThatFailed(t *testing.T) {
 	}
 }
 
-// The retry of a command whose event is still pending behind a parked aggregate
-// is told so, as its first attempt was; the retry of one whose event was
-// delivered long ago is not.
-func TestSendWait_RetryOnAParkedAggregateReportsOnlyWhatIsStillPending(t *testing.T) {
+// A retry is told what its first attempt was told. The command whose own
+// handler failed until the aggregate parked ran a handler: success. A command
+// committed while the aggregate is parked, left undelivered, reports
+// ErrDeliveryParked, until the park lifts and its handler has run.
+func TestSendWait_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWasTold(t *testing.T) {
 	ctx := context.Background()
+	var down atomic.Bool
+	down.Store(true)
 	inst := build(t, eight(store.New()).
 		WithDeliveryMaxAttempts(1).
 		WithSubscriber("OrderUpdated", func(_ context.Context, e models.Event[mocks.Order]) error {
-			if e.Version == 2 {
+			if e.Version >= 2 && down.Load() {
 				return errors.New("downstream down")
 			}
 			return nil
 		}))
-	delivered := idemCreate{CreateOrderCmd: mocks.CreateOrderCmd{ID: "agg", Total: 1}, Cmd: "c-1"}
+	delivered := idemCmd{UpdateOrderCmd: upd("agg", 1), Cmd: "c-1"}
+	causedThePark := idemCmd{UpdateOrderCmd: upd("agg", 2), Cmd: "c-2"}
+	leftBehind := idemCmd{UpdateOrderCmd: upd("agg", 3), Cmd: "c-3"}
 	if _, err := inst.SendWait(ctx, delivered); err != nil {
-		t.Fatal(err)
+		t.Fatalf("delivered: %v", err)
 	}
-	if _, err := inst.Send(ctx, upd("agg", 2)); err != nil {
+	if _, err := inst.Send(ctx, causedThePark); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, "the aggregate to park", func() bool { return len(inst.PausedAggregates()) == 1 })
-	pending := idemCmd{UpdateOrderCmd: upd("agg", 3), Cmd: "c-3"}
-	if _, err := inst.SendWait(ctx, pending); !errors.Is(err, models.ErrDeliveryParked) {
+	if _, err := inst.SendWait(ctx, leftBehind); !errors.Is(err, models.ErrDeliveryParked) {
 		t.Fatalf("first SendWait on a parked aggregate = %v, want ErrDeliveryParked", err)
 	}
 
-	if _, err := inst.SendWait(ctx, pending); !errors.Is(err, models.ErrDeliveryParked) {
-		t.Fatalf("retry of a command still pending = %v, want ErrDeliveryParked", err)
-	}
 	if _, err := inst.SendWait(ctx, delivered); err != nil {
-		t.Fatalf("retry of a command whose event was delivered = %v, want nil", err)
+		t.Errorf("retry of a command delivered before the park = %v, want nil", err)
+	}
+	if _, err := inst.SendWait(ctx, causedThePark); err != nil {
+		t.Errorf("retry of the command whose own handler failed = %v, want nil: the handler ran", err)
+	}
+	if _, err := inst.SendWait(ctx, leftBehind); !errors.Is(err, models.ErrDeliveryParked) {
+		t.Errorf("retry of a command left undelivered = %v, want ErrDeliveryParked", err)
+	}
+
+	down.Store(false)
+	if err := inst.ResumeDeliveries(ctx); err != nil {
+		t.Fatal(err)
+	}
+	inst.WaitPublish()
+	if _, err := inst.SendWait(ctx, leftBehind); err != nil {
+		t.Errorf("retry after the park lifted and the handler ran = %v, want nil", err)
 	}
 }

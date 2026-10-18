@@ -34,6 +34,8 @@ import (
 // order. Commands for different aggregates run in parallel up to
 // Shards*WorkersPerShard: a command waiting for a busy aggregate does not hold
 // a worker, so one slow aggregate occupies at most one of its shard's workers.
+// Work inside a store transaction (WithSyncProjection) is not covered: a store
+// that runs one transaction at a time serialises every command behind it.
 // The lock is in-process: several processes sharing one
 // store are protected from corruption by the store's version check, but not
 // from conflicts.

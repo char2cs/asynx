@@ -129,8 +129,8 @@ Issues a command to the processor. Blocks until the event is durably written to 
      - Call Send() again (with same command struct or fresh one)
      - Do NOT retry by bumping version number (that corrupts the stream)
 
-3. **`ErrQueueFull`** — Shard queue depth exceeded
-   - Returned if `WithShardingOpts(QueueDepth=N)` is set and queue is full
+3. **`ErrQueueFull`** — Too many commands waiting
+   - Returned when more commands already wait for the same aggregate than `QueueDepth` allows (default `WorkersPerShard`), or when the shard's hand-off buffer is full
    - Command was rejected before processing
    - Signals: system is overloaded
    - **Recovery: Caller should NOT retry blindly**

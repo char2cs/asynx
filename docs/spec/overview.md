@@ -637,7 +637,7 @@ In a load-balanced multi-node deployment, shutting down one node causes the load
 These are the only errors Asynx surfaces. Everything else is the developer's concern.
 
 ```go
-var ErrQueueFull        = errors.New("asynx: shard queue full, command rejected")
+var ErrQueueFull        = errors.New("asynx: queue full")
 var ErrValidation       = errors.New("asynx: command validation failed")
 var ErrPipelineFailed   = errors.New("asynx: pipeline failed, event not written to stream")
 var ErrNotFound         = errors.New("asynx: aggregate not found")

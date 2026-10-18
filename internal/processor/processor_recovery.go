@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	asynxmd "github.com/char2cs/asynx/models"
 )
@@ -37,14 +38,15 @@ func (p *Processor[T]) Resume(
 		batch = 100
 	}
 	var errs []error
-	for _, agg := range p.dispatcher.Halted() {
-		err := p.executor.WithLock(ctx, agg, func() error {
-			return p.resumeAggregate(ctx, batch, agg)
+	halted := slices.Sorted(slices.Values(p.dispatcher.Halted()))
+	for group := range slices.Chunk(halted, resumeGroupSize) {
+		err := p.withLocks(ctx, group, func() error {
+			return p.resumeGroup(ctx, batch, group)
 		})
 		if err == nil {
 			continue
 		}
-		errs = append(errs, fmt.Errorf("asynx: resume %s: %w", agg, err))
+		errs = append(errs, err)
 		if ctx.Err() != nil {
 			break
 		}
@@ -52,27 +54,67 @@ func (p *Processor[T]) Resume(
 	return errors.Join(errs...)
 }
 
-// resumeAggregate lifts the aggregate's park and redelivers its pending
-// entries, leaving it parked when they cannot all be queued: a lifted park would
-// hide that from the next Resume. It does nothing if a concurrent Resume lifted
-// the park first. The caller holds the aggregate's command lock.
-func (p *Processor[T]) resumeAggregate(
+const resumeGroupSize = 64
+
+// withLocks runs fn holding the command locks of aggs, taken in the order given.
+// Callers pass them sorted, so concurrent callers cannot deadlock.
+func (p *Processor[T]) withLocks(
+	ctx context.Context,
+	aggs []string,
+	fn func() error,
+) error {
+	if len(aggs) == 0 {
+		return fn()
+	}
+	return p.executor.WithLock(ctx, aggs[0], func() error {
+		return p.withLocks(ctx, aggs[1:], fn)
+	})
+}
+
+// resumeGroup lifts the park of each aggregate in group that is still parked and
+// redelivers their pending entries, reading the delivery log once for the whole
+// group. An aggregate that cannot be redelivered is parked again, because a
+// lifted park would hide that from the next Resume; the others are still
+// resumed. The caller holds the command lock of every aggregate in group, so no
+// live event overtakes the redelivery and no entry appears behind the scan.
+func (p *Processor[T]) resumeGroup(
 	ctx context.Context,
 	batch int,
-	agg string,
+	group []string,
 ) error {
-	wasParked := p.dispatcher.Resume(agg)
-	if !wasParked {
+	stillParked := make(map[string]struct{}, len(group))
+	for _, agg := range group {
+		if p.dispatcher.Resume(agg) {
+			stillParked[agg] = struct{}{}
+		}
+	}
+	if len(stillParked) == 0 {
 		return nil
 	}
-	backlogs, _, err := p.pendingByAggregate(ctx, batch, func(id string) bool { return id == agg })
-	if err == nil {
-		err = p.redeliver(ctx, agg, backlogs[agg])
-	}
+
+	backlogs, order, err := p.pendingByAggregate(ctx, batch, func(id string) bool {
+		_, wanted := stillParked[id]
+		return wanted
+	})
 	if err != nil {
+		p.parkAll(stillParked)
+		return err
+	}
+
+	var errs []error
+	for _, agg := range order {
+		if err := p.redeliver(ctx, agg, backlogs[agg]); err != nil {
+			p.dispatcher.Park(agg)
+			errs = append(errs, fmt.Errorf("asynx: resume %s: %w", agg, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (p *Processor[T]) parkAll(aggs map[string]struct{}) {
+	for agg := range aggs {
 		p.dispatcher.Park(agg)
 	}
-	return err
 }
 
 // Recover re-enqueues every unacknowledged delivery, in enqueue order, on the

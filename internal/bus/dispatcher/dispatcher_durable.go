@@ -96,7 +96,7 @@ func (d *Dispatcher[T]) haltLocked(agg string) {
 			kept = append(kept, j)
 			continue
 		}
-		j.markUnrun(asynxmd.ErrDeliveryParked)
+		d.markParkedUnrun(j)
 		j.complete(asynxmd.ErrDeliveryParked)
 	}
 	q.jobs = kept
@@ -108,6 +108,7 @@ func (d *Dispatcher[T]) resumeLocked(agg string) {
 		return
 	}
 	delete(d.halted, agg)
+	d.forgetUnrun(agg)
 	if q, ok := d.queues[agg]; ok {
 		q.halt = make(chan struct{})
 	}
@@ -133,14 +134,6 @@ func (d *Dispatcher[T]) Halted() []string {
 		out = append(out, agg)
 	}
 	return out
-}
-
-// IsParked reports whether the aggregate's durable delivery is parked.
-func (d *Dispatcher[T]) IsParked(agg string) bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	_, parked := d.halted[agg]
-	return parked
 }
 
 // Resume lifts an aggregate's park and reports whether it was parked. The caller

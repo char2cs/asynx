@@ -3,6 +3,7 @@ package processor_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -519,6 +520,62 @@ func TestProcessor_Resume_ReplaysAnAggregatesStreamOnce(t *testing.T) {
 	}
 	if rows := s.rows.Load(); rows > 2*events {
 		t.Fatalf("resume read %d stream rows for %d pending entries, want a single pass", rows, events)
+	}
+}
+
+// logCountingStore counts the delivery-log rows its reads return.
+type logCountingStore struct {
+	store.Memory
+	rows atomic.Int64
+}
+
+func (s *logCountingStore) PendingDeliveries(
+	ctx context.Context,
+	limit int,
+) ([]asynxmd.Delivery, error) {
+	pending, err := s.Memory.PendingDeliveries(ctx, limit)
+	s.rows.Add(int64(len(pending)))
+	return pending, err
+}
+
+// Resuming many parked aggregates reads the delivery log once per group of them,
+// not once per aggregate: an outage that parks many chats must not make the
+// recovery quadratic in them.
+func TestProcessor_Resume_ReadsTheDeliveryLogOncePerGroupOfAggregates(t *testing.T) {
+	const aggregates, perAggregate = 130, 3
+	var healthy atomic.Bool
+	s := &logCountingStore{Memory: store.New()}
+	f := newFixture(t, s, parkingOpts(&healthy)...)
+	ctx := context.Background()
+	for i := range aggregates {
+		id := fmt.Sprintf("o%03d", i)
+		for v := range perAggregate {
+			if _, err := f.p.Send(ctx, updateCmd(id, float64(v+1))); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(f.p.Paused()) != aggregates {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of %d aggregates parked", len(f.p.Paused()), aggregates)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	healthy.Store(true)
+	s.rows.Store(0)
+	if err := f.p.Resume(ctx, 10); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	f.p.WaitPublish()
+
+	if len(f.p.Paused()) != 0 {
+		t.Fatalf("still parked: %v", f.p.Paused())
+	}
+	total := int64(aggregates * perAggregate)
+	if rows := s.rows.Load(); rows > 8*total {
+		t.Fatalf("resume read %d delivery-log rows for %d pending entries, want a few passes over the log", rows, total)
 	}
 }
 

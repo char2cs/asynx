@@ -779,6 +779,76 @@ func TestTicketFor_ForgetsEventsLeftBehindByAPark(t *testing.T) {
 	}
 }
 
+func TestUnrun_RemembersEventsLeftUndeliveredByAPark(t *testing.T) {
+	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error { return nil }}})
+	d.Park("a")
+
+	ticket, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-ticket.Final
+
+	if err := d.Unrun("a", 1); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("Unrun(a, 1) = %v, want ErrDeliveryParked", err)
+	}
+	if err := d.Unrun("a", 2); err != nil {
+		t.Fatalf("Unrun of an event nobody enqueued = %v, want nil", err)
+	}
+	if err := d.Unrun("b", 1); err != nil {
+		t.Fatalf("Unrun of another aggregate = %v, want nil", err)
+	}
+
+	d.Resume("a")
+	if err := d.Unrun("a", 1); err != nil {
+		t.Fatalf("Unrun after the park lifted = %v, want nil", err)
+	}
+}
+
+func TestUnrun_RemembersQueuedEventsThatParkingTookOutOfMemory(t *testing.T) {
+	bus := &blockingBus{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	d := New[int](bus)
+	defer d.Close(context.Background())
+	ack := func(context.Context) error { return nil }
+	if _, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), ack); err != nil {
+		t.Fatal(err)
+	}
+	<-bus.entered
+	queued, err := d.EnqueueTicket(context.Background(), makeEvent("a", 2), ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d.Park("a")
+	<-queued.Final
+	close(bus.release)
+
+	if err := d.Unrun("a", 2); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("Unrun(a, 2) = %v, want ErrDeliveryParked", err)
+	}
+	if err := d.Unrun("a", 1); err != nil {
+		t.Fatalf("Unrun of the event whose handlers ran = %v, want nil", err)
+	}
+}
+
+// An event whose handlers ran and failed until the attempts ran out is not
+// "unrun": a handler took it.
+func TestUnrun_DoesNotCountAnEventWhoseHandlersRanAndFailed(t *testing.T) {
+	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error { return errors.New("down") }}},
+		WithMaxAttempts[int](1))
+
+	ticket, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-ticket.Final
+	waitFor(t, "the aggregate to park", func() bool { return len(d.Halted()) == 1 })
+
+	if err := d.Unrun("a", 1); err != nil {
+		t.Fatalf("Unrun = %v, want nil: the handler ran", err)
+	}
+}
+
 func TestTicketFor_ForgetsQueuedEventsWhenTheyAreParked(t *testing.T) {
 	bus := &blockingBus{entered: make(chan struct{}, 4), release: make(chan struct{})}
 	d := New[int](bus)

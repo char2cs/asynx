@@ -56,6 +56,8 @@ type Dispatcher[T any] struct {
 	wg             sync.WaitGroup      // tracks goroutine lifetime (for Close)
 	inflight       sync.Map            // *dispatchJob -> struct{}: queued or running (for WaitIdle)
 	tickets        sync.Map            // ticketKey -> *dispatchJob: the same, by event (for TicketFor)
+	unrunMu        sync.Mutex
+	unrun          map[string]map[int64]error // aggregate -> version -> why no handler ran, until the park lifts
 	onPublishError asynxmd.PublishErrorHandler[T]
 	idleTimeout    time.Duration
 
@@ -168,6 +170,7 @@ func New[T any](bus asynxmd.Bus[T], opts ...Opt[T]) *Dispatcher[T] {
 		cancelBase:   cancelBase,
 		quit:         make(chan struct{}),
 		halted:       make(map[string]struct{}),
+		unrun:        make(map[string]map[int64]error),
 		maxAttempts:  defaultMaxAttempts,
 		idleTimeout:  defaultIdleTimeout,
 		retryInitial: defaultRetryInitial,
@@ -305,7 +308,7 @@ func (d *Dispatcher[T]) enqueue(
 	if ack != nil {
 		if _, parked := d.halted[agg]; parked {
 			d.mu.Unlock()
-			job.markUnrun(asynxmd.ErrDeliveryParked)
+			d.markParkedUnrun(job)
 			job.complete(asynxmd.ErrDeliveryParked)
 			return ticket, nil
 		}
@@ -338,6 +341,39 @@ func (d *Dispatcher[T]) track(job *dispatchJob[T]) {
 		d.inflight.Delete(job)
 		d.tickets.CompareAndDelete(key, job)
 	}
+}
+
+// markParkedUnrun settles a job whose handlers never ran because its aggregate
+// is parked, and remembers it until the park lifts, so a retry of the command
+// that produced it can be told.
+func (d *Dispatcher[T]) markParkedUnrun(job *dispatchJob[T]) {
+	job.markUnrun(asynxmd.ErrDeliveryParked)
+	d.unrunMu.Lock()
+	defer d.unrunMu.Unlock()
+	agg := job.event.AggregateID
+	if d.unrun[agg] == nil {
+		d.unrun[agg] = make(map[int64]error)
+	}
+	d.unrun[agg][job.event.Version] = asynxmd.ErrDeliveryParked
+}
+
+func (d *Dispatcher[T]) forgetUnrun(agg string) {
+	d.unrunMu.Lock()
+	defer d.unrunMu.Unlock()
+	delete(d.unrun, agg)
+}
+
+// Unrun reports why no handler ran for the event at (aggregateID, version):
+// ErrDeliveryParked while the aggregate is parked and the event was left
+// undelivered by it. It is nil for an event whose handlers ran, whatever their
+// outcome, and once the park has lifted.
+func (d *Dispatcher[T]) Unrun(
+	aggregateID string,
+	version int64,
+) error {
+	d.unrunMu.Lock()
+	defer d.unrunMu.Unlock()
+	return d.unrun[aggregateID][version]
 }
 
 // TicketFor returns the ticket of the event at (aggregateID, version) while its
@@ -506,7 +542,7 @@ func (d *Dispatcher[T]) handle(
 
 	if job.ack != nil && (d.isHalted(agg) || closed(halt)) {
 		outcome = asynxmd.ErrDeliveryParked
-		job.markUnrun(outcome)
+		d.markParkedUnrun(job)
 		return
 	}
 

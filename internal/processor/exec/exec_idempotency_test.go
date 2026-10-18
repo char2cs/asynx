@@ -426,3 +426,35 @@ func TestExecute_Idempotent_RetryWithoutADispatcherHasNothingToWaitOn(t *testing
 		t.Fatalf("retry: err = %v, wait set = %v", err, wait != nil)
 	}
 }
+
+// The retry of a command whose event the dispatcher left undelivered because its
+// aggregate is parked is told so, as the first attempt was; the retry of one
+// that was delivered before the park is not.
+func TestExecute_Idempotent_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWasTold(t *testing.T) {
+	ex := durableEnv(t, func(context.Context, asynxmd.Event[order]) error { return nil })
+	ctx := context.Background()
+	delivered := idemUpdate{UpdateOrderCmd: update("agg", 1), Cmd: "cmd-1"}
+	_, wait, err := ex.ExecuteAsync(ctx, delivered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ex.dispatcher.Park("agg")
+	leftBehind := idemUpdate{UpdateOrderCmd: update("agg", 2), Cmd: "cmd-2"}
+	if _, _, err := ex.ExecuteAsync(ctx, leftBehind); err != nil {
+		t.Fatal(err)
+	}
+
+	_, wait, err = ex.ExecuteAsync(ctx, leftBehind)
+	if err != nil || wait == nil {
+		t.Fatalf("retry of the command left undelivered: err = %v, wait set = %v", err, wait != nil)
+	}
+	if err := wait(ctx); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("wait = %v, want ErrDeliveryParked", err)
+	}
+	if _, wait, err := ex.ExecuteAsync(ctx, delivered); err != nil || wait != nil {
+		t.Fatalf("retry of the command delivered before the park: err = %v, wait set = %v; want nothing to report", err, wait != nil)
+	}
+}

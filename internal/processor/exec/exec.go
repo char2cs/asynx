@@ -18,8 +18,6 @@ package exec
 import (
 	"context"
 	"fmt"
-	"math"
-	"slices"
 	"sync"
 
 	"github.com/char2cs/asynx/internal/bus/dispatcher"
@@ -222,26 +220,21 @@ func (e *CommandExecutor[T]) waitForAnswered(
 	if underway {
 		return waitOn(t, event)
 	}
-	if e.isDurable(event.EventName) && e.dispatcher.IsParked(event.AggregateID) {
-		return e.waitForParkedEntry(event)
-	}
-	return nil
+	return unrunWait(e.dispatcher.Unrun(event.AggregateID, event.Version), event)
 }
 
-// waitForParkedEntry is the Wait of a retry whose aggregate is parked: if the
-// event is still pending in the delivery log no handler has taken it, which the
-// retry reports as the first attempt did, with ErrDeliveryParked.
-func (e *CommandExecutor[T]) waitForParkedEntry(event asynxmd.Event[T]) Wait {
-	return func(ctx context.Context) error {
-		pending, err := e.es.Store().PendingDeliveries(ctx, math.MaxInt32)
-		if err != nil {
-			return fmt.Errorf("%w: reading the delivery log: %w", asynxmd.ErrPipelineFailed, err)
-		}
-		entry := asynxmd.Delivery{AggregateID: event.AggregateID, Version: event.Version}
-		if slices.Contains(pending, entry) {
-			return fmt.Errorf("%w: event %s v%d is pending, no handler ran", asynxmd.ErrDeliveryParked, event.AggregateID, event.Version)
-		}
+// unrunWait is the Wait of a retry whose event the dispatcher left undelivered
+// because its aggregate is parked: no handler took it, which the retry reports
+// as the first attempt did. It is nil when there is nothing to report.
+func unrunWait[T any](
+	unrun error,
+	event asynxmd.Event[T],
+) Wait {
+	if unrun == nil {
 		return nil
+	}
+	return func(context.Context) error {
+		return fmt.Errorf("%w: event %s v%d is pending, no handler ran", unrun, event.AggregateID, event.Version)
 	}
 }
 

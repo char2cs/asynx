@@ -36,6 +36,10 @@ type Asynx[T any] interface {
     Replay(ctx context.Context, aggregateID string, fromVersion, toVersion int64,
         fn models.ProjectionHandler[T]) error
 
+    // Durable delivery
+    PausedAggregates() []string
+    ResumeDeliveries(ctx context.Context) error
+
     // Lifecycle
     Shutdown(ctx context.Context) error
     WaitPublish() // testing only
@@ -51,6 +55,25 @@ ax, err := asynx.New[Order]().
     WithBus(bus).
     Build()  // Returns Asynx[T]
 ```
+
+**Durable subscribers and synchronous projections (builder):**
+
+```go
+ax, err := asynx.New[Order]().
+    WithEventStore(store).
+    WithSnapshotStore(snapshotStore).
+    // Runs inside the event's transaction: commits or rolls back with it.
+    WithSyncProjection("Order.*", func(ctx context.Context, tx models.Tx, evt models.Event[Order]) error {
+        return readModel.ApplyInTx(ctx, tx, evt)
+    }).
+    // Durable, at-least-once, in order per aggregate; an error is retried with backoff.
+    WithSubscriber("Order.*", func(ctx context.Context, evt models.Event[Order]) error {
+        return search.Index(ctx, evt)
+    }).
+    Build()
+```
+
+See [Write-Path Guarantees](guarantees.md#durable-delivery) for retry, parking, dead-lettering and the deletion marker.
 
 ---
 
@@ -85,6 +108,20 @@ if errors.Is(err, models.ErrValidation) {
 event, err := ax.SendWait(ctx, createOrderCmd)
 // Read models are now consistent with this event
 ```
+
+---
+
+#### `PausedAggregates() []string`
+
+**Defined in:** `processor` module
+**Purpose:** Lists the aggregates whose durable delivery is parked: their attempts ran out (`WithDeliveryMaxAttempts`) with no dead-letter handler accepting the event, or a `Forget` could not deliver its marker. Their events stay pending in the store and `SendWait` on them returns `ErrDeliveryParked`. Parking never lifts by itself.
+
+---
+
+#### `ResumeDeliveries(ctx context.Context) error`
+
+**Defined in:** `processor` module
+**Purpose:** Lifts the park of every paused aggregate and redelivers its pending events, in order and ahead of any live event, to the durable subscribers only. Call it once the cause is fixed. An aggregate that cannot be redelivered stays parked and the others are still resumed; the errors are joined. The delivery log is read once per group of 64 paused aggregates.
 
 ---
 
@@ -341,7 +378,7 @@ All errors are sentinel values in the `models` package; match with `errors.Is`. 
 **Where the common ones come from:**
 - `ErrValidation` — from `cmd.Validate()` failure, or `Forget` on a missing aggregate
 - `ErrPipelineFailed` — from a store `Append` failure (e.g. version conflict)
-- `ErrQueueFull` — from processor shard queue hitting capacity
+- `ErrQueueFull` — from the processor when more commands wait for one aggregate than `QueueDepth` allows, or the shard's hand-off buffer is full
 - `ErrShuttingDown` — from processor during shutdown phase 1
 - `ErrAlreadyShuttingDown` — from a second concurrent `Shutdown` call
 - `ErrContextCancelled` — from context cancellation

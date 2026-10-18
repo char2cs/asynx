@@ -65,7 +65,7 @@ ax, err := asynx.New[Order]().
 | `ErrValidation` | The aggregate does not exist — nothing was written or deleted |
 | `ErrShuttingDown` | `Forget` was called after `Shutdown` |
 | `ErrContextCancelled` | The context was cancelled before the command reached the shard |
-| `ErrQueueFull` | The aggregate's shard queue was full — retry |
+| `ErrQueueFull` | More commands were already waiting for the aggregate than `QueueDepth` allows — back off and retry |
 | `ErrPipelineFailed` | The tombstone write to the store failed — nothing was deleted |
 | `ErrForgetFailed` | The tombstone was written and handlers ran, but the store deletion failed |
 
