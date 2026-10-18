@@ -82,7 +82,37 @@ func TestNew_KindsDecideRouting(t *testing.T) {
 			if (job.Ack() != nil) != (tt.request.Ack != nil) {
 				t.Fatalf("ack presence mismatch")
 			}
+			if job.Acked() != (tt.request.Ack != nil) {
+				t.Fatalf("acked = %v, want %v", job.Acked(), tt.request.Ack != nil)
+			}
 		})
+	}
+}
+
+func TestEnqueue_TheKindSelectsWhoReceivesTheEvent(
+	t *testing.T,
+) {
+	type routing struct {
+		forget   bool
+		skipLive bool
+	}
+	cases := []struct {
+		kind asynxmd.DispatchKind
+		name string
+		want routing
+	}{
+		{asynxmd.DispatchEvent, "test.event", routing{}},
+		{asynxmd.DispatchEvent, asynxmd.ForgetEventName, routing{}},
+		{asynxmd.DispatchRedelivery, "test.event", routing{skipLive: true}},
+		{asynxmd.DispatchRedelivery, asynxmd.ForgetEventName, routing{skipLive: true, forget: true}},
+		{asynxmd.DispatchTombstone, asynxmd.ForgetEventName, routing{forget: true}},
+	}
+	for _, c := range cases {
+		request := asynxmd.DispatchRequest[string]{Event: asynxmd.Event[string]{EventName: c.name}, Kind: c.kind}
+		job, _ := newJob(t, request)
+		if got := (routing{forget: job.Forget(), skipLive: job.SkipLive()}); got != c.want {
+			t.Errorf("kind %d, event %q: opts = %+v, want %+v", c.kind, c.name, got, c.want)
+		}
 	}
 }
 

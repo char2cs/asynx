@@ -8,11 +8,11 @@ type Item interface {
 	// Version is the version of the item's event, the key under which a park
 	// records it as undelivered.
 	Version() int64
-	// Durable reports whether a park holds the item back. It must be true
-	// exactly for a delivery that carries an Ack: the old dispatcher refused,
-	// dropped and settled as parked only those (a tombstone or redelivery with a
-	// nil Ack still flows through a park).
-	Durable() bool
+	// Acked reports whether the item carries an Ack, which is exactly when a
+	// park holds it back: a park refuses, drops and settles as parked only
+	// those, while a live event, or a tombstone or redelivery with a nil Ack,
+	// still flows through it.
+	Acked() bool
 	// MarkUnrun settles the item as one whose handlers never ran, with err as
 	// the reason. It is called under the registry mutex and must not call into
 	// the Registry; a second settle is a no-op.

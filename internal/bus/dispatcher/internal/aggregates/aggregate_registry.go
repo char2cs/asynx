@@ -39,7 +39,7 @@ func (r *aggregateRegistry[J]) enqueue(
 	}
 	agg := job.AggregateID()
 	current, exists := r.records[agg]
-	if exists && current.parked && job.Durable() {
+	if exists && current.parked && job.Acked() {
 		r.markParkedUnrun(current, job)
 		return Admission{Parked: true}, nil
 	}
@@ -291,7 +291,7 @@ func (r *aggregateRegistry[J]) keepLive(
 	job J,
 	kept []J,
 ) []J {
-	if !job.Durable() {
+	if !job.Acked() {
 		return append(kept, job)
 	}
 	r.markParkedUnrun(rec, job)

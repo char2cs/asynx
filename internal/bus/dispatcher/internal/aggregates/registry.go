@@ -10,7 +10,7 @@ type Registry[J Item] interface {
 	//
 	// After Close it returns ErrDispatcherClosed and does nothing else.
 	//
-	// A durable job (see Item.Durable) for a parked aggregate is not queued:
+	// A durable job (see Item.Acked) for a parked aggregate is not queued:
 	// its version is recorded as undelivered and it is marked unrun with
 	// ErrDeliveryParked, both under the mutex, so a Lift cannot run between the
 	// check and the record; then, after the mutex is released, it is completed

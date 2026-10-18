@@ -19,8 +19,8 @@
 //
 // # Park state table
 //
-// The code mirrors this table. "Durable" means a job whose Durable reports
-// true; live-only jobs are never held back by a park.
+// The code mirrors this table. "Durable" means a job whose Acked reports
+// true; any other job is never held back by a park.
 //
 //	| State             | Event                                         | Next state    | Effect                                                                                       |
 //	|-------------------|-----------------------------------------------|---------------|----------------------------------------------------------------------------------------------|

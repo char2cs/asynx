@@ -31,7 +31,7 @@ func (f *fakeItem) AggregateID() string { return f.aggregateID }
 
 func (f *fakeItem) Version() int64 { return f.version }
 
-func (f *fakeItem) Durable() bool { return f.durable }
+func (f *fakeItem) Acked() bool { return f.durable }
 
 func (f *fakeItem) MarkUnrun(
 	err error,

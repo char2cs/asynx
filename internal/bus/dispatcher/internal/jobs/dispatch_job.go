@@ -43,6 +43,10 @@ func (j *dispatchJob[T]) Durable() bool {
 	return j.ack != nil || j.forget
 }
 
+func (j *dispatchJob[T]) Acked() bool {
+	return j.ack != nil
+}
+
 func (j *dispatchJob[T]) Forget() bool {
 	return j.forget
 }
