@@ -1103,6 +1103,30 @@ func TestGiveUp_TheAggregateIsParkedBeforeTheErrorHandlerIsTold(t *testing.T) {
 	}
 }
 
+func TestAckFailure_TheAggregateIsParkedBeforeThePublishErrorHandlerIsTold(t *testing.T) {
+	var d *Dispatcher[int]
+	parkedWhenTold := make(chan []string, 1)
+	d = newDurable(t,
+		[]DurableSub[int]{{Match: always, Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			return nil
+		}}},
+		WithPublishErrorHandler[int](func(
+			context.Context,
+			asynxmd.Event[int],
+			error,
+		) {
+			parkedWhenTold <- d.Halted()
+		}))
+
+	d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return errors.New("store down") })
+	if got := recv(t, parkedWhenTold, "the ack failure to be reported"); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("parked aggregates when the handler was told = %v, want [a]", got)
+	}
+}
+
 func TestResume_ReportsWhetherItLiftedAPark(t *testing.T) {
 	d := newDurable(t, nil)
 	if d.Resume("a") {

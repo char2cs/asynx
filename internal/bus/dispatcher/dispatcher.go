@@ -585,9 +585,9 @@ func (d *Dispatcher[T]) handle(
 	}
 	if job.ack != nil {
 		if err := job.ack(job.ctx); err != nil {
-			d.reportPublishError(job, err)
 			outcome = err
 			d.parkIfCurrent(agg, q, halt, job)
+			d.reportPublishError(job, err)
 		}
 	}
 }
