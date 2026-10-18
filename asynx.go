@@ -26,7 +26,8 @@ type Asynx[T any] interface {
 	// Use Send when projection consistency is not required at the call site.
 	// The retry of an idempotent command (see IdempotentCommand) waits too, for
 	// the handlers of the event its first attempt produced, if they are still
-	// running.
+	// running, or reports ErrDeliveryParked if the event is still pending behind
+	// a parked aggregate.
 	SendWait(
 		ctx context.Context,
 		cmd models.Command[T],

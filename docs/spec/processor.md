@@ -431,7 +431,7 @@ asynx.New[Order]().
     WithEventStore(store).
     WithShardingOpts(asynx.ShardingOpts{
         Shards:     16,   // 16 workers for parallelism
-        QueueDepth: 1000, // Max 1000 commands per shard before backpressure
+        QueueDepth: 1000, // Max 1000 commands waiting per aggregate before backpressure
     }).
     Build()
 ```

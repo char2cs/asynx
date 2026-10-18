@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1034,5 +1035,35 @@ func TestWithLockIfFree_RunsWhenFreeAndSkipsWhenHeld(t *testing.T) {
 
 	if !executor.WithLockIfFree("agg", func() {}) {
 		t.Fatal("the lock was not released")
+	}
+}
+
+func within[V any](
+	t *testing.T,
+	ch <-chan V,
+	what string,
+) V {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		panic("unreachable")
+	}
+}
+
+func eventually(
+	t *testing.T,
+	what string,
+	cond func() bool,
+) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		runtime.Gosched()
 	}
 }

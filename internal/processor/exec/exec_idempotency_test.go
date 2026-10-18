@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -361,6 +362,8 @@ func TestExecute_Idempotent_RetryWaitsForTheOriginalEventsHandlers(t *testing.T)
 	ex, _, _, _, b := newEnv(t)
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
 	if _, err := b.Subscribe("OrderUpdated", func(context.Context, asynxmd.Event[order]) {
 		entered <- struct{}{}
 		<-release
@@ -374,7 +377,7 @@ func TestExecute_Idempotent_RetryWaitsForTheOriginalEventsHandlers(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	<-entered
+	within(t, entered, "the handler")
 
 	retried, wait, err := ex.ExecuteAsync(ctx, cmd)
 	if err != nil || retried.ID != first.ID {
@@ -389,7 +392,7 @@ func TestExecute_Idempotent_RetryWaitsForTheOriginalEventsHandlers(t *testing.T)
 		t.Fatalf("wait = %v while the handler runs, want ErrContextCancelled", err)
 	}
 
-	close(release)
+	releaseOnce.Do(func() { close(release) })
 	if err := wait(ctx); err != nil {
 		t.Fatalf("wait after the handler finished = %v", err)
 	}

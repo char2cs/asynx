@@ -2468,6 +2468,8 @@ func TestSendWait_RetryOfAnIdempotentCommandWaitsForTheOriginalHandlers(t *testi
 	inst := build(t, eight(store.New()))
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
 	var finished atomic.Bool
 	if _, err := inst.Subscribe("OrderCreated", func(context.Context, models.Event[mocks.Order]) {
 		entered <- struct{}{}
@@ -2493,7 +2495,7 @@ func TestSendWait_RetryOfAnIdempotentCommandWaitsForTheOriginalHandlers(t *testi
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	close(release)
+	releaseOnce.Do(func() { close(release) })
 	if err := within(t, retried, "the retry"); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -2509,11 +2511,19 @@ func TestShutdown_ReleasesAHandlerWaitingOnItsOwnAggregatesForget(t *testing.T) 
 	ctx := context.Background()
 	forgetResult := make(chan error, 1)
 	var inst asynx.Asynx[mocks.Order]
-	inst = build(t, eight(store.New()).
+	inst, err := eight(store.New()).
 		WithSubscriber("OrderCreated", func(_ context.Context, e models.Event[mocks.Order]) error {
 			forgetResult <- inst.Forget(context.Background(), e.AggregateID)
 			return nil
-		}))
+		}).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		inst.Shutdown(bounded)
+	})
 	if _, err := inst.Send(ctx, mocks.CreateOrderCmd{ID: "agg", Total: 1}); err != nil {
 		t.Fatal(err)
 	}
@@ -2527,7 +2537,7 @@ func TestShutdown_ReleasesAHandlerWaitingOnItsOwnAggregatesForget(t *testing.T) 
 	if err := inst.Shutdown(shutdown); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
-	err := within(t, forgetResult, "the Forget")
+	err = within(t, forgetResult, "the Forget")
 	if !errors.Is(err, models.ErrForgetFailed) || !errors.Is(err, models.ErrShuttingDown) {
 		t.Fatalf("Forget = %v, want ErrForgetFailed wrapping ErrShuttingDown", err)
 	}
@@ -2562,5 +2572,39 @@ func TestFailure_DeadLetterLearnsEverySubscriberThatFailed(t *testing.T) {
 	var sub *models.SubscriberError
 	if !errors.As(err, &sub) {
 		t.Fatal("errors.As does not find a SubscriberError")
+	}
+}
+
+// The retry of a command whose event is still pending behind a parked aggregate
+// is told so, as its first attempt was; the retry of one whose event was
+// delivered long ago is not.
+func TestSendWait_RetryOnAParkedAggregateReportsOnlyWhatIsStillPending(t *testing.T) {
+	ctx := context.Background()
+	inst := build(t, eight(store.New()).
+		WithDeliveryMaxAttempts(1).
+		WithSubscriber("OrderUpdated", func(_ context.Context, e models.Event[mocks.Order]) error {
+			if e.Version == 2 {
+				return errors.New("downstream down")
+			}
+			return nil
+		}))
+	delivered := idemCreate{CreateOrderCmd: mocks.CreateOrderCmd{ID: "agg", Total: 1}, Cmd: "c-1"}
+	if _, err := inst.SendWait(ctx, delivered); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inst.Send(ctx, upd("agg", 2)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the aggregate to park", func() bool { return len(inst.PausedAggregates()) == 1 })
+	pending := idemCmd{UpdateOrderCmd: upd("agg", 3), Cmd: "c-3"}
+	if _, err := inst.SendWait(ctx, pending); !errors.Is(err, models.ErrDeliveryParked) {
+		t.Fatalf("first SendWait on a parked aggregate = %v, want ErrDeliveryParked", err)
+	}
+
+	if _, err := inst.SendWait(ctx, pending); !errors.Is(err, models.ErrDeliveryParked) {
+		t.Fatalf("retry of a command still pending = %v, want ErrDeliveryParked", err)
+	}
+	if _, err := inst.SendWait(ctx, delivered); err != nil {
+		t.Fatalf("retry of a command whose event was delivered = %v, want nil", err)
 	}
 }

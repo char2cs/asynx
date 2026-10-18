@@ -135,6 +135,14 @@ func (d *Dispatcher[T]) Halted() []string {
 	return out
 }
 
+// IsParked reports whether the aggregate's durable delivery is parked.
+func (d *Dispatcher[T]) IsParked(agg string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, parked := d.halted[agg]
+	return parked
+}
+
 // Resume lifts an aggregate's park and reports whether it was parked. The caller
 // then redelivers its pending entries, holding the aggregate's command lock
 // across both so no live event slips ahead of them; when it was not parked,

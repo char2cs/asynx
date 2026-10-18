@@ -666,25 +666,23 @@ func TestForget_GivesUpWhenShutdownBegins(t *testing.T) {
 	if _, _, err := ex.ExecuteAsync(ctx, update("agg", 1)); err != nil {
 		t.Fatal(err)
 	}
-	<-entered
+	within(t, entered, "the handler")
 
 	got := make(chan error, 1)
 	go func() { got <- ex.Forget(ctx, "agg") }()
-	for !ex.isForgetting("agg") {
-		runtime.Gosched()
-	}
+	eventually(t, "the Forget to raise its fence", func() bool { return ex.isForgetting("agg") })
 	select {
 	case err := <-got:
 		t.Fatalf("Forget returned %v while the handler ahead of the tombstone was still running", err)
 	default:
 	}
 
+	t.Cleanup(func() { close(release) })
 	ex.dispatcher.Interrupt()
-	err := <-got
+	err := within(t, got, "the Forget to give up")
 	if !errors.Is(err, asynxmd.ErrForgetFailed) || !errors.Is(err, asynxmd.ErrShuttingDown) {
 		t.Fatalf("err = %v, want ErrForgetFailed wrapping ErrShuttingDown", err)
 	}
-	close(release)
 
 	if ex.isForgetting("agg") {
 		t.Fatal("aggregate left fenced by the abandoned Forget")

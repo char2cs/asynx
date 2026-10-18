@@ -769,11 +769,12 @@ func TestShardingOpts_ABusyAggregateDoesNotStallItsShard(t *testing.T) {
 	defer close(gate)
 	go inst.Send(ctx, gatedUpdate{UpdateOrderCmd: upd("hot", 2), entered: entered, gate: gate})
 	within(t, entered, "the hot command to start")
-	for i := range 6 {
+	for i := range 20 {
 		go inst.Send(ctx, upd("hot", float64(i+3)))
 	}
+	time.Sleep(100 * time.Millisecond)
 
-	cold, cancel := context.WithTimeout(ctx, 5*time.Second)
+	cold, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	if _, err := inst.SendWait(cold, mocks.CreateOrderCmd{ID: "cold", Total: 1}); err != nil {
 		t.Fatalf("an unrelated aggregate on the same shard: %v", err)

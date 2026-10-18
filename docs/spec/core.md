@@ -433,7 +433,7 @@ asynx.New[Order]().
     WithEventStore(eventStore).
     WithShardingOpts(asynx.ShardingOpts{
         Shards:     16,  // more parallelism
-        QueueDepth: 1000, // reject if queue hits 1000 cmds/shard
+        QueueDepth: 1000, // refuse once 1000 commands wait for one aggregate
     }).
     Build()
 ```
