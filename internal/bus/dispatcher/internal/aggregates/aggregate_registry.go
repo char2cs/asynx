@@ -39,7 +39,8 @@ func (r *aggregateRegistry[J]) enqueue(
 	}
 	agg := job.AggregateID()
 	current, exists := r.records[agg]
-	if exists && current.parked && job.Acked() {
+	parked := exists && current.parked
+	if parked && job.Acked() {
 		r.markParkedUnrun(current, job)
 		return Admission{Parked: true}, nil
 	}
@@ -165,7 +166,8 @@ func (r *aggregateRegistry[J]) Lift(
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec, ok := r.records[aggregateID]
-	if !ok || !rec.parked || rec.generation != generation {
+	current := ok && rec.parked && rec.generation == generation
+	if !current {
 		return false, nil
 	}
 	undelivered := slices.Sorted(maps.Keys(rec.undelivered))
@@ -322,7 +324,9 @@ func (r *aggregateRegistry[J]) discardIfEmpty(
 	agg string,
 	rec *record[J],
 ) {
-	if rec.worker || len(rec.jobs) > 0 || rec.parked || len(rec.undelivered) > 0 {
+	busy := rec.worker || len(rec.jobs) > 0
+	held := rec.parked || len(rec.undelivered) > 0
+	if busy || held {
 		return
 	}
 	delete(r.records, agg)

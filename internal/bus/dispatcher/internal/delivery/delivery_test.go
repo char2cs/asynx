@@ -23,10 +23,15 @@ func TestNew_TakesTheConfigAsFinal(t *testing.T) {
 
 	d := New(cfg, registry, &recordingReporter{registry: registry}, interrupted).(*durableDeliverer[int])
 
-	if d.retryInitial != time.Second || d.retryMax != time.Minute || d.maxAttempts != 7 {
-		t.Fatalf("retry settings = %v, %v, %d; want the config's", d.retryInitial, d.retryMax, d.maxAttempts)
+	retry := retrySettings{d.retryInitial, d.retryMax, d.maxAttempts}
+	if retry != (retrySettings{time.Second, time.Minute, 7}) {
+		t.Fatalf("retry settings = %+v; want the config's", retry)
 	}
-	if len(d.subs) != 1 || d.deadLetter != nil || d.interrupted != interrupted {
-		t.Fatal("New did not keep the subscribers, the dead-letter handler and the interrupt channel")
+	kept := len(d.subs) == 1 && d.deadLetter == nil
+	if !kept {
+		t.Fatal("New did not keep the subscribers and the dead-letter handler")
+	}
+	if d.interrupted != interrupted {
+		t.Fatal("New did not keep the interrupt channel")
 	}
 }

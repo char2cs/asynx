@@ -133,10 +133,10 @@ func TestTracker_IdleWaitsForJobsInFlight(t *testing.T) {
 
 func TestTracker_IdleIgnoresJobsTrackedAfterItStarted(t *testing.T) {
 	tr := tracker.New[string]()
-	early := newJob("a", 1)
+	early := observe(newJob("a", 1))
 	tr.Track(early)
 	returned := idleReturns(tr)
-	time.Sleep(20 * time.Millisecond)
+	<-early.asked
 	late := newJob("b", 1)
 	tr.Track(late)
 

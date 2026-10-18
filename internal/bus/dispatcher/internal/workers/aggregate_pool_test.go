@@ -75,6 +75,20 @@ func TestPool_ALiveJobRunsNoDurableDelivery(t *testing.T) {
 	}
 }
 
+func TestPool_ATombstoneWithoutAnAckIsDeliveredAndNeverAcked(t *testing.T) {
+	f := newFixture(t, time.Second)
+	request := event(1, nil)
+	request.Kind = asynxmd.DispatchTombstone
+	ticket := f.enqueue(t, request)
+
+	if err := final(t, ticket); err != nil {
+		t.Fatalf("final = %v", err)
+	}
+	if got := f.journal.list(); !slices.Equal(got, []string{"live", "deliver"}) {
+		t.Fatalf("steps = %v, want the live publish and the durable delivery", got)
+	}
+}
+
 func TestPool_ARedeliverySkipsTheLiveSubscribers(t *testing.T) {
 	f := newFixture(t, time.Second)
 	request := event(1, func(context.Context) error { return nil })

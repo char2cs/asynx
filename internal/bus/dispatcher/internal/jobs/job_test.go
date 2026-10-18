@@ -3,6 +3,7 @@ package jobs_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -76,7 +77,8 @@ func TestNew_KindsDecideRouting(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			job, _ := newJob(t, tt.request)
 
-			if job.Durable() != tt.durable || job.Forget() != tt.forget || job.SkipLive() != tt.skipLive {
+			got := [3]bool{job.Durable(), job.Forget(), job.SkipLive()}
+			if got != [3]bool{tt.durable, tt.forget, tt.skipLive} {
 				t.Fatalf("got durable=%v forget=%v skipLive=%v", job.Durable(), job.Forget(), job.SkipLive())
 			}
 			if (job.Ack() != nil) != (tt.request.Ack != nil) {
@@ -110,9 +112,23 @@ func TestEnqueue_TheKindSelectsWhoReceivesTheEvent(
 	for _, c := range cases {
 		request := asynxmd.DispatchRequest[string]{Event: asynxmd.Event[string]{EventName: c.name}, Kind: c.kind}
 		job, _ := newJob(t, request)
-		if got := (routing{forget: job.Forget(), skipLive: job.SkipLive()}); got != c.want {
-			t.Errorf("kind %d, event %q: opts = %+v, want %+v", c.kind, c.name, got, c.want)
-		}
+		got := routing{forget: job.Forget(), skipLive: job.SkipLive()}
+		t.Run(fmt.Sprintf("kind %d, event %q", c.kind, c.name), func(
+			t *testing.T,
+		) {
+			assertRouting(t, got, c.want)
+		})
+	}
+}
+
+func assertRouting[R comparable](
+	t *testing.T,
+	got R,
+	want R,
+) {
+	t.Helper()
+	if got != want {
+		t.Errorf("opts = %+v, want %+v", got, want)
 	}
 }
 
