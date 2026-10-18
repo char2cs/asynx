@@ -14,8 +14,9 @@ import "time"
 // DurableSubs are the durable subscribers the dispatcher runs itself, with
 // retry, for durable deliveries.
 //
-// OnPublishError is told of a failing live publish and of a failing Ack. It is
-// optional; a panic in it is swallowed.
+// OnPublishError is told of a failing live publish, of a failing Ack and of a
+// panic in the dispatcher itself while it handles an event. It is optional; a
+// panic in it is swallowed.
 //
 // OnDeliveryError is told of every failed durable delivery attempt, of a
 // timed-out handler, of a dead-lettered event and of a park after the attempts
@@ -26,7 +27,10 @@ import "time"
 //
 // DeadLetter, when set, may accept an event whose attempts ran out: returning
 // nil counts the event as delivered. Otherwise the aggregate is parked. A panic
-// in it is swallowed and counts as a refusal.
+// in it is swallowed and counts as a refusal. It applies only to requests that
+// carry an Ack and are not deletion markers: a DispatchTombstone, or a
+// redelivered event named ForgetEventName, is never dead-lettered, and running
+// out of attempts parks its aggregate when it carries an Ack.
 //
 // RetryInitial is the delay before the first retry of a failed durable
 // delivery; it doubles after every attempt up to RetryMax. Each delay is

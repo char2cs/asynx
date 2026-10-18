@@ -30,7 +30,7 @@ func BenchmarkDispatch_SingleAggregate(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		_ = dispatch(d, ctx, asynxmd.Event[string]{
+		_ = dispatch(ctx, d, asynxmd.Event[string]{
 			AggregateID: "agg1",
 			EventName:   "BenchEvent",
 			Version:     int64(i),
@@ -55,7 +55,7 @@ func BenchmarkDispatch_MultiAggregate(b *testing.B) {
 
 			for i := 0; i < b.N; i++ {
 				aggID := fmt.Sprintf("agg%d", i%n)
-				_ = dispatch(d, ctx, asynxmd.Event[string]{
+				_ = dispatch(ctx, d, asynxmd.Event[string]{
 					AggregateID: aggID,
 					EventName:   "BenchEvent",
 					Version:     int64(i),
@@ -80,7 +80,7 @@ func BenchmarkDispatch_Parallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := int64(0)
 		for pb.Next() {
-			_ = dispatch(d, ctx, asynxmd.Event[string]{
+			_ = dispatch(ctx, d, asynxmd.Event[string]{
 				AggregateID: "agg1",
 				EventName:   "BenchEvent",
 				Version:     i,
@@ -103,7 +103,7 @@ func BenchmarkDispatch_Sync(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		_ = dispatch(d, ctx, asynxmd.Event[string]{
+		_ = dispatch(ctx, d, asynxmd.Event[string]{
 			AggregateID: "agg1",
 			EventName:   "BenchEvent",
 			Version:     int64(i),

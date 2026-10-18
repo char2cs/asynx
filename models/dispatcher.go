@@ -4,8 +4,8 @@ import "context"
 
 // Dispatcher delivers committed events to the live and durable subscribers in
 // per-aggregate order. The in-memory default is the only implementation asynx
-// ships; another is built through a DispatcherFactory. The guarantees below are the
-// contract every implementation carries:
+// ships; another is built through a DispatcherFactory. The guarantees below
+// are the contract every implementation carries:
 //
 //  1. Per aggregate, events are handled in Enqueue order, one at a time;
 //     different aggregates are independent. Enqueue does not block on
@@ -19,13 +19,18 @@ import "context"
 //     all succeed, the attempt cap is hit, or Interrupt is called; then Ack
 //     runs, and only then the ticket's Final closes without error. The
 //     aggregate's later events wait for it.
-//  4. When the attempts run out, DeadLetter may accept the event, which then
-//     counts as delivered. Otherwise the aggregate is parked; so it is when
-//     Ack fails, on Interrupt, and on Park.
-//  5. While an aggregate is parked, a durable event for it is not queued: its
-//     ticket settles with Unrun() == ErrDeliveryParked and ends with
-//     ErrDeliveryParked, and its version is recorded as undelivered. Live
-//     events still flow.
+//  4. When the attempts of a request that carries an Ack run out, DeadLetter
+//     may accept the event, which then counts as delivered; a deletion marker
+//     (a DispatchTombstone, or a redelivered event named ForgetEventName) is
+//     never dead-lettered. Otherwise the aggregate is parked; so it is when
+//     Ack fails, on Interrupt while such a request is retrying, and on Park.
+//     A request without an Ack whose attempts run out, or that is
+//     interrupted, ends with an error but does not park the aggregate.
+//  5. While an aggregate is parked, a request carrying an Ack is not queued:
+//     its ticket settles with Unrun() == ErrDeliveryParked and ends with
+//     ErrDeliveryParked, and its version is recorded as undelivered. Requests
+//     without an Ack, live events and nil-Ack deletion markers alike, are
+//     still queued and run.
 //  6. ResumeUndelivered(aggregateID, generation) lifts only that generation's
 //     park and returns the recorded undelivered versions; a stale generation
 //     is a no-op. Park re-imposes a park with a new generation; on an already
@@ -39,7 +44,8 @@ import "context"
 //     for that aggregate; asynx uses it to refuse a SendWait or a Forget that
 //     would wait on the handler itself.
 //  10. Close waits for the workers to drain, honors ctx and may be retried;
-//     Interrupt makes retries give up and park; Interrupted closes once
+//     Interrupt makes retries give up, parking the aggregate of a request
+//     that carries an Ack; Interrupted closes once
 //     either has been called; WaitIdle waits for what was in flight when it
 //     was called.
 //
@@ -56,10 +62,10 @@ type Dispatcher[T any] interface {
 	// Enqueue puts the request on its aggregate's queue and returns its
 	// ticket. Enqueue order is delivery order, so callers that must keep
 	// versions ordered enqueue while holding their per-aggregate lock and wait
-	// on the ticket afterwards. A durable request for a parked aggregate is not
-	// queued: its ticket settles and ends with ErrDeliveryParked, and its
-	// version is recorded as undelivered (see Unrun). After Close, Enqueue
-	// fails with ErrDispatcherClosed.
+	// on the ticket afterwards. A request carrying an Ack for a parked
+	// aggregate is not queued: its ticket settles and ends with
+	// ErrDeliveryParked, and its version is recorded as undelivered (see
+	// Unrun). After Close, Enqueue fails with ErrDispatcherClosed.
 	Enqueue(
 		ctx context.Context,
 		request DispatchRequest[T],
@@ -85,9 +91,10 @@ type Dispatcher[T any] interface {
 	) error
 
 	// Park halts the aggregate's durable delivery, as exhausting its attempts
-	// does: queued durable deliveries leave memory and are recorded as
-	// undelivered, a retry in progress gives up, and later durable events are
-	// not queued until ResumeUndelivered lifts the park. The undelivered
+	// does: queued requests carrying an Ack leave memory and are recorded as
+	// undelivered, a durable retry in progress gives up, and later requests
+	// carrying an Ack are not queued until ResumeUndelivered lifts the park.
+	// Queued requests without an Ack stay queued. The undelivered
 	// versions, still pending in the delivery log, are added to the record, so
 	// a retry of the command that produced one is told so (see Unrun). Parking
 	// an aggregate that is already parked keeps its generation and merges the
@@ -133,8 +140,8 @@ type Dispatcher[T any] interface {
 	) bool
 
 	// Interrupt makes failing durable deliveries give up retrying, leaving
-	// them pending and parking their aggregates, without closing the
-	// dispatcher. It is called at the start of shutdown so callers waiting on
+	// them pending, without closing the dispatcher. The aggregate of a
+	// delivery that carries an Ack is parked; one without an Ack is not. It is called at the start of shutdown so callers waiting on
 	// a retrying event are released.
 	Interrupt()
 

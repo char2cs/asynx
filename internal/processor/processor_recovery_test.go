@@ -160,7 +160,9 @@ func seedUnrebuildable(
 	}
 }
 
-func TestProcessor_Recover_ReportsAnUnrebuildableEventToThePublishErrorHandler(t *testing.T) {
+func TestProcessor_Recover_ReportsAnUnrebuildableEventToThePublishErrorHandler(
+	t *testing.T,
+) {
 	ctx := context.Background()
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
@@ -198,7 +200,9 @@ func TestProcessor_Recover_ReportsAnUnrebuildableEventToThePublishErrorHandler(t
 	}
 }
 
-func TestProcessor_Recover_APanickingPublishErrorHandlerDoesNotCrash(t *testing.T) {
+func TestProcessor_Recover_APanickingPublishErrorHandlerDoesNotCrash(
+	t *testing.T,
+) {
 	ctx := context.Background()
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)

@@ -190,8 +190,9 @@ func New[T any](
 // whatever its pattern, and its ticket's Final reports whether they all
 // succeeded.
 //
-// A durable event for a parked aggregate is not queued: it stays pending in the
-// store's delivery log and its ticket ends with ErrDeliveryParked.
+// A request carrying an Ack for a parked aggregate is not queued: it stays
+// pending in the store's delivery log and its ticket ends with
+// ErrDeliveryParked.
 func (d *Dispatcher[T]) Enqueue(
 	ctx context.Context,
 	request asynxmd.DispatchRequest[T],
