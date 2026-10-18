@@ -121,7 +121,7 @@ event, err := ax.SendWait(ctx, createOrderCmd)
 #### `ResumeDeliveries(ctx context.Context) error`
 
 **Defined in:** `processor` module
-**Purpose:** Lifts the park of every paused aggregate and redelivers its pending events, in order and ahead of any live event, to the durable subscribers only. Call it once the cause is fixed. An aggregate that cannot be redelivered stays parked and the others are still resumed; the errors are joined. The delivery log is read once per group of 64 paused aggregates.
+**Purpose:** Lifts the park of every paused aggregate and redelivers its pending events, in order and ahead of any live event, to the durable subscribers only. Call it once the cause is fixed. An aggregate that cannot be redelivered stays parked and the others are still resumed; the errors are joined. The delivery log is read once per group of 512 paused aggregates.
 
 ---
 

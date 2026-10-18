@@ -54,7 +54,7 @@ func (p *Processor[T]) Resume(
 	return errors.Join(errs...)
 }
 
-const resumeGroupSize = 64
+const resumeGroupSize = 512
 
 // withLocks runs fn holding the command locks of aggs, taken in the order given.
 // Callers pass them sorted, so concurrent callers cannot deadlock.
@@ -104,7 +104,7 @@ func (p *Processor[T]) resumeGroup(
 	var errs []error
 	for _, agg := range order {
 		if err := p.redeliver(ctx, agg, backlogs[agg]); err != nil {
-			p.dispatcher.Park(agg)
+			p.dispatcher.ParkUndelivered(agg, versionsOf(backlogs[agg]))
 			errs = append(errs, fmt.Errorf("asynx: resume %s: %w", agg, err))
 		}
 	}
@@ -154,7 +154,7 @@ func (p *Processor[T]) Recover(
 		if ctx.Err() != nil || errors.Is(err, asynxmd.ErrDispatcherClosed) {
 			return fmt.Errorf("asynx: recovery: %w", err)
 		}
-		p.dispatcher.Park(agg)
+		p.dispatcher.ParkUndelivered(agg, versionsOf(backlogs[agg]))
 		p.dispatcher.ReportError(ctx, asynxmd.Event[T]{AggregateID: agg, Version: backlogs[agg][0].Version},
 			fmt.Errorf("recovery: %w", err))
 	}
@@ -291,4 +291,12 @@ func (p *Processor[T]) ackVanished(
 		}
 	}
 	return nil
+}
+
+func versionsOf(backlog []asynxmd.Delivery) []int64 {
+	versions := make([]int64, len(backlog))
+	for i, d := range backlog {
+		versions[i] = d.Version
+	}
+	return versions
 }

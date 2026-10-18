@@ -156,6 +156,24 @@ func (d *Dispatcher[T]) Park(agg string) {
 	d.mu.Unlock()
 }
 
+// ParkUndelivered parks the aggregate and remembers that the events at the
+// given versions, still pending in the delivery log, have not been handed to a
+// handler, so a retry of the command that produced one is told so (see Unrun).
+func (d *Dispatcher[T]) ParkUndelivered(
+	agg string,
+	versions []int64,
+) {
+	d.Park(agg)
+	d.unrunMu.Lock()
+	defer d.unrunMu.Unlock()
+	if d.unrun[agg] == nil {
+		d.unrun[agg] = make(map[int64]error)
+	}
+	for _, v := range versions {
+		d.unrun[agg][v] = asynxmd.ErrDeliveryParked
+	}
+}
+
 // Interrupt makes failing durable deliveries give up retrying (leaving them
 // pending and parking their aggregates) without closing the dispatcher. Call it
 // at the start of shutdown so callers waiting on a retrying event are released.

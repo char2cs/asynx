@@ -831,6 +831,28 @@ func TestUnrun_RemembersQueuedEventsThatParkingTookOutOfMemory(t *testing.T) {
 	}
 }
 
+func TestParkUndelivered_RemembersTheNamedVersionsUntilTheParkLifts(t *testing.T) {
+	d := newDurable(t, nil)
+
+	d.ParkUndelivered("a", []int64{3, 5})
+
+	if len(d.Halted()) != 1 {
+		t.Fatalf("halted = %v, want the aggregate parked", d.Halted())
+	}
+	for _, v := range []int64{3, 5} {
+		if err := d.Unrun("a", v); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+			t.Errorf("Unrun(a, %d) = %v, want ErrDeliveryParked", v, err)
+		}
+	}
+	if err := d.Unrun("a", 4); err != nil {
+		t.Errorf("Unrun(a, 4) = %v, want nil", err)
+	}
+	d.Resume("a")
+	if err := d.Unrun("a", 3); err != nil {
+		t.Errorf("Unrun after Resume = %v, want nil", err)
+	}
+}
+
 // An event whose handlers ran and failed until the attempts ran out is not
 // "unrun": a handler took it.
 func TestUnrun_DoesNotCountAnEventWhoseHandlersRanAndFailed(t *testing.T) {
