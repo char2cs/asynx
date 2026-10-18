@@ -135,10 +135,10 @@ func stillUndelivered(
 // per-aggregate dispatcher, for the durable subscribers (live subscribers never
 // see what happened while the process was down). It returns once they are all
 // queued, not once they are handled: a handler that keeps failing must not stop
-// the process from starting. Ordering against live commands is still
-// guaranteed, because a live event enqueues behind the recovered events of its
-// aggregate in the same FIFO. Handlers run, retry on failure and acknowledge
-// exactly as for live events.
+// the process from starting. It takes no aggregate lock, so it must run before
+// any command is sent, as Build does: then a live event enqueues behind the
+// recovered events of its aggregate in the same FIFO. Handlers run, retry on
+// failure and acknowledge exactly as for live events.
 //
 // Deliveries whose event no longer exists are acknowledged and skipped. An
 // aggregate whose event cannot be rebuilt (a corrupt record, an upcaster error)

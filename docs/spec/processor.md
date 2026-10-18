@@ -420,7 +420,7 @@ asynx.ShardingOpts{
 **Shards:** Typically set to number of CPU cores or higher for throughput. Each shard is independent.
 
 **QueueDepth:** Bounds the commands that may wait behind the one running for an aggregate (and the shard's hand-off buffer):
-- More waiting → Send() returns `ErrQueueFull` immediately; other aggregates are unaffected
+- More waiting → Send() returns `ErrQueueFull` immediately; other aggregates keep their workers, but share the shard's intake buffer, so a flood can make `Send` to them fail with `ErrQueueFull` too
 - Backpressure → caller must back off
 - 0 → `WorkersPerShard`; it is never unlimited
 

@@ -21,9 +21,11 @@ import (
 // Shards defaults to 8.
 //
 // QueueDepth bounds the commands that may wait behind the one running for an
-// aggregate: further commands to it are refused with ErrQueueFull, while other
-// aggregates are unaffected. It is also the size of the shard's hand-off
-// buffer. It defaults to WorkersPerShard when left zero, and is never less than
+// aggregate: further commands to it are refused with ErrQueueFull, and other
+// aggregates keep their workers. It is also the size of the shard's intake
+// buffer, which all of the shard's aggregates share: while a flood fills it, a
+// command to another aggregate on the same shard can be refused with
+// ErrQueueFull too, so size it for the bursts you expect. It defaults to WorkersPerShard when left zero, and is never less than
 // it. The queue is bounded: it is not unlimited when zero.
 //
 // WorkersPerShard controls how many workers drain each shard's queue and

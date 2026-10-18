@@ -589,8 +589,6 @@ func (d *Dispatcher[T]) handle(
 	}
 }
 
-// reportPublishError calls the publish error handler. A panic in it is
-// swallowed: it must not take down the worker or the process.
 // publishLive publishes through the bus. A panic in a custom bus becomes an
 // error, so it cannot skip the durable delivery that follows.
 func (d *Dispatcher[T]) publishLive(job *dispatchJob[T]) (err error) {
@@ -611,6 +609,8 @@ func closed(ch <-chan struct{}) bool {
 	}
 }
 
+// reportPublishError calls the publish error handler. A panic in it is
+// swallowed: it must not take down the worker or the process.
 func (d *Dispatcher[T]) reportPublishError(
 	job *dispatchJob[T],
 	err error,

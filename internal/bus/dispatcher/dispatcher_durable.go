@@ -207,7 +207,9 @@ func (d *Dispatcher[T]) ParkUndelivered(
 	agg string,
 	versions []int64,
 ) {
-	d.Park(agg)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.haltLocked(agg)
 	d.unrunMu.Lock()
 	defer d.unrunMu.Unlock()
 	if d.unrun[agg] == nil {
