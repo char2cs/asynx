@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/char2cs/asynx/internal/bus"
-	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor"
@@ -869,7 +868,7 @@ func TestProcessor_DurableDeliveryOptions_RetryReportAndPanicHandling(t *testing
 	s := store.New()
 	f := newFixture(t, s,
 		processor.WithDurableDelivery[order](func(name string) bool { return name == "OrderUpdated" }),
-		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+		processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 			Match: func(string) bool { return true },
 			Handler: func(context.Context, asynxmd.Event[order]) error {
 				switch attempts.Add(1) {

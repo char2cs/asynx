@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/char2cs/asynx/internal/bus"
-	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/bus/utils"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/processor"
@@ -413,12 +412,12 @@ func (b *Builder[T]) compileSyncProjections() ([]exec.SyncProjection[T], error) 
 // compileDurable validates the durable subscribers and returns them with a
 // predicate accepting the events at least one of them wants (nil when there are
 // none). Events nobody durable listens to get no delivery entry.
-func (b *Builder[T]) compileDurable() ([]dispatcher.DurableSub[T], func(string) bool, error) {
+func (b *Builder[T]) compileDurable() ([]models.DurableSub[T], func(string) bool, error) {
 	if len(b.subscribers) == 0 {
 		return nil, nil, nil
 	}
 
-	subs := make([]dispatcher.DurableSub[T], 0, len(b.subscribers))
+	subs := make([]models.DurableSub[T], 0, len(b.subscribers))
 	for i, def := range b.subscribers {
 		sub, err := compileSubscriber(i, def)
 		if err != nil {
@@ -433,12 +432,12 @@ func (b *Builder[T]) compileDurable() ([]dispatcher.DurableSub[T], func(string) 
 func compileSubscriber[T any](
 	index int,
 	def subscriberDef[T],
-) (dispatcher.DurableSub[T], error) {
+) (models.DurableSub[T], error) {
 	if def.pattern == "" {
-		return dispatcher.DurableSub[T]{}, models.ErrEmptyPattern
+		return models.DurableSub[T]{}, models.ErrEmptyPattern
 	}
 	if def.handler == nil {
-		return dispatcher.DurableSub[T]{}, models.ErrNilHandler
+		return models.DurableSub[T]{}, models.ErrNilHandler
 	}
 
 	cfg := &models.SubscriptionConfig[T]{}
@@ -446,20 +445,20 @@ func compileSubscriber[T any](
 		opt(cfg)
 	}
 	if cfg.Fallback != nil {
-		return dispatcher.DurableSub[T]{}, models.ErrFallbackUnsupported
+		return models.DurableSub[T]{}, models.ErrFallbackUnsupported
 	}
 
 	m, err := matcher(def.pattern)
 	if err != nil {
-		return dispatcher.DurableSub[T]{}, err
+		return models.DurableSub[T]{}, err
 	}
 	name := fmt.Sprintf("%s#%d", def.pattern, index+1)
-	return dispatcher.DurableSub[T]{Name: name, Match: m, Handler: def.handler, Timeout: cfg.Timeout}, nil
+	return models.DurableSub[T]{Name: name, Match: m, Handler: def.handler, Timeout: cfg.Timeout}, nil
 }
 
-func wantedBy[T any](subs []dispatcher.DurableSub[T]) func(string) bool {
+func wantedBy[T any](subs []models.DurableSub[T]) func(string) bool {
 	return func(name string) bool {
-		return slices.ContainsFunc(subs, func(sub dispatcher.DurableSub[T]) bool {
+		return slices.ContainsFunc(subs, func(sub models.DurableSub[T]) bool {
 			return sub.Match(name)
 		})
 	}

@@ -110,7 +110,7 @@ func TestForget_ErasePhaseFailureParksTheAggregate(t *testing.T) {
 	if err := ex.Forget(ctx, "agg"); !errors.Is(err, asynxmd.ErrForgetFailed) {
 		t.Fatalf("err = %v", err)
 	}
-	if got := d.Halted(); !slices.Equal(got, []string{"agg"}) {
+	if got := parked(d); !slices.Equal(got, []string{"agg"}) {
 		t.Fatalf("halted = %v, want [agg]", got)
 	}
 	if ex.isForgetting("agg") {
@@ -246,7 +246,7 @@ func TestForget_AfterDispatcherClosedFailsPipeline(t *testing.T) {
 	}
 	// The marker is committed and pending, and nothing may be delivered ahead
 	// of it.
-	if got := d.Halted(); !slices.Equal(got, []string{"agg"}) {
+	if got := parked(d); !slices.Equal(got, []string{"agg"}) {
 		t.Fatalf("halted = %v, want [agg]", got)
 	}
 	if pending, _ := ex.es.Store().PendingDeliveries(ctx, 10); len(pending) != 1 {
@@ -481,14 +481,20 @@ func TestForget_FailsWhenTheDispatcherIsClosed(t *testing.T) {
 	_ = s
 }
 
-func durableEnv(t *testing.T, handler asynxmd.DurableHandler[order], opts ...dispatcher.Opt[order]) *CommandExecutor[order] {
+func durableEnv(t *testing.T, handler asynxmd.DurableHandler[order], edits ...func(*asynxmd.DispatcherConfig[order])) *CommandExecutor[order] {
 	t.Helper()
 	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](bus.NewChannelBus[order](), append([]dispatcher.Opt[order]{
-		dispatcher.WithDurableSubs([]dispatcher.DurableSub[order]{{Match: func(string) bool { return true }, Handler: handler}}),
-		dispatcher.WithRetryBackoff[order](time.Millisecond, 2*time.Millisecond),
-		dispatcher.WithMaxAttempts[order](2),
-	}, opts...)...)
+	cfg := asynxmd.DispatcherConfig[order]{
+		Bus:          bus.NewChannelBus[order](),
+		DurableSubs:  []asynxmd.DurableSub[order]{{Match: func(string) bool { return true }, Handler: handler}},
+		RetryInitial: time.Millisecond,
+		RetryMax:     2 * time.Millisecond,
+		MaxAttempts:  2,
+	}
+	for _, edit := range edits {
+		edit(&cfg)
+	}
+	d := dispatcher.New(cfg)
 	t.Cleanup(func() { d.Close(context.Background()) })
 	return New(es, d, WithDurableDelivery[order](func(string) bool { return true }))
 }
@@ -511,7 +517,7 @@ func TestForget_DoesNotEraseWhenADurableSubscriberCannotTakeTheTombstone(t *test
 	if n := streamLen(t, ex.es.Store().(store.Memory), "agg"); n == 0 {
 		t.Fatal("aggregate erased although a durable subscriber never took the tombstone")
 	}
-	if got := ex.dispatcher.Halted(); !slices.Equal(got, []string{"agg"}) {
+	if got := parked(ex.dispatcher); !slices.Equal(got, []string{"agg"}) {
 		t.Fatalf("halted = %v, want [agg]: later events must wait behind the marker", got)
 	}
 	// The tombstone's transaction dropped the superseded delivery and left the
@@ -571,7 +577,9 @@ func TestForget_LetsAFailingDeliveryGoWhenTheTombstoneIsAccepted(t *testing.T) {
 		}
 		attempted <- struct{}{}
 		return errors.New("poison")
-	}, dispatcher.WithRetryBackoff[order](time.Hour, time.Hour), dispatcher.WithMaxAttempts[order](100))
+	}, func(cfg *asynxmd.DispatcherConfig[order]) {
+		cfg.RetryInitial, cfg.RetryMax, cfg.MaxAttempts = time.Hour, time.Hour, 100
+	})
 	ctx := context.Background()
 	if _, err := ex.Execute(ctx, update("agg", 1), false); err != nil {
 		t.Fatal(err)
@@ -689,7 +697,7 @@ func TestForget_GivesUpWhenShutdownBegins(t *testing.T) {
 	if ex.isForgetting("agg") {
 		t.Fatal("aggregate left fenced by the abandoned Forget")
 	}
-	if got := ex.dispatcher.Halted(); !slices.Equal(got, []string{"agg"}) {
+	if got := parked(ex.dispatcher); !slices.Equal(got, []string{"agg"}) {
 		t.Fatalf("halted = %v, want [agg]: the marker is still to be delivered", got)
 	}
 }
@@ -703,7 +711,7 @@ func TestAwaitTombstone_PrefersADeliveryThatFinished(t *testing.T) {
 	close(finished)
 
 	for range 50 {
-		err := ex.awaitTombstone(context.Background(), dispatcher.Ticket{Final: finished, Err: func() error { return nil }})
+		err := ex.awaitTombstone(context.Background(), asynxmd.Ticket{Final: finished, Err: func() error { return nil }})
 		if err != nil {
 			t.Fatalf("awaitTombstone = %v for a tombstone that was delivered", err)
 		}

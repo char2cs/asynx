@@ -11,72 +11,6 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-// DurableSub is a durable subscriber the dispatcher runs itself, with retry,
-// instead of publishing through the bus.
-type DurableSub[T any] struct {
-	// Name identifies the subscriber in the errors reported for it.
-	Name string
-	// Match reports whether the subscriber wants an event name.
-	Match func(eventName string) bool
-	// Handler delivers an event. A non-nil error, a panic, or a timeout then
-	// error keeps the delivery pending and retries.
-	Handler asynxmd.DurableHandler[T]
-	// Timeout, when positive, reports a slow handler as timed out. The handler
-	// is still waited for.
-	Timeout time.Duration
-}
-
-// WithDurableSubs registers the durable subscribers run for jobs enqueued with
-// an ack (durable deliveries).
-func WithDurableSubs[T any](subs []DurableSub[T]) Opt[T] {
-	return func(d *Dispatcher[T]) { d.durable = subs }
-}
-
-// WithDeliveryErrorHandler sets the callback invoked for each failed durable
-// delivery attempt.
-func WithDeliveryErrorHandler[T any](fn asynxmd.DeliveryErrorHandler[T]) Opt[T] {
-	return func(d *Dispatcher[T]) { d.onDeliveryError = fn }
-}
-
-// WithDeliveryPanicHandler sets the callback invoked when a durable handler
-// panics, in addition to the failure being reported and retried.
-func WithDeliveryPanicHandler[T any](fn asynxmd.PanicHandler[T]) Opt[T] {
-	return func(d *Dispatcher[T]) { d.onPanic = fn }
-}
-
-// WithRetryBackoff sets the delay before a failed durable delivery is retried:
-// it starts at initial and doubles up to max. Non-positive values are ignored.
-func WithRetryBackoff[T any](
-	initial time.Duration,
-	max time.Duration,
-) Opt[T] {
-	return func(d *Dispatcher[T]) {
-		if initial > 0 {
-			d.retryInitial = initial
-		}
-		if max > 0 {
-			d.retryMax = max
-		}
-	}
-}
-
-// WithMaxAttempts caps the attempts of a failing durable delivery. When the
-// cap is reached the delivery goes to the dead-letter handler if one is set and
-// accepts it; otherwise the aggregate is parked. Non-positive values are ignored.
-func WithMaxAttempts[T any](n int) Opt[T] {
-	return func(d *Dispatcher[T]) {
-		if n > 0 {
-			d.maxAttempts = n
-		}
-	}
-}
-
-// WithDeadLetterHandler sets the handler for deliveries that exhausted their
-// attempts.
-func WithDeadLetterHandler[T any](fn asynxmd.DeadLetterHandler[T]) Opt[T] {
-	return func(d *Dispatcher[T]) { d.deadLetter = fn }
-}
-
 // haltLocked parks an aggregate's durable delivery: queued durable jobs leave
 // memory (they stay pending in the store), the retry loop in progress gives up,
 // and later durable events are not queued. Callers hold d.mu.
@@ -128,26 +62,6 @@ func (d *Dispatcher[T]) Supersede(agg string) {
 	d.mu.Unlock()
 }
 
-// Halted lists the parked aggregates.
-func (d *Dispatcher[T]) Halted() []string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	out := make([]string, 0, len(d.halted))
-	for agg := range d.halted {
-		out = append(out, agg)
-	}
-	return out
-}
-
-// Resume lifts an aggregate's park and reports whether it was parked. The caller
-// then redelivers its pending entries, holding the aggregate's command lock
-// across both so no live event slips ahead of them; when it was not parked,
-// someone else has done that already and redelivering would repeat it.
-func (d *Dispatcher[T]) Resume(agg string) bool {
-	parked, _ := d.resumeParked(agg, func(uint64) bool { return true })
-	return parked
-}
-
 // Parks lists the parked aggregates with the generation of each park. A park
 // that is lifted and imposed again has a new generation.
 func (d *Dispatcher[T]) Parks() map[string]uint64 {
@@ -162,23 +76,16 @@ func (d *Dispatcher[T]) Parks() map[string]uint64 {
 // about it is stale. It also returns, in ascending order, the versions the park
 // left undelivered: the events no handler took, which a redelivery must cover
 // even when the caller's own scan of the delivery log predates them. Putting
-// them back if the redelivery fails is the caller's (see ParkUndelivered),
-// because lifting the park forgets them.
+// them back if the redelivery fails is the caller's (see Park), because lifting
+// the park forgets them.
 func (d *Dispatcher[T]) ResumeUndelivered(
 	agg string,
 	generation uint64,
 ) (lifted bool, undelivered []int64) {
-	return d.resumeParked(agg, func(g uint64) bool { return g == generation })
-}
-
-func (d *Dispatcher[T]) resumeParked(
-	agg string,
-	wanted func(generation uint64) bool,
-) (lifted bool, undelivered []int64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	generation, parked := d.halted[agg]
-	if !parked || !wanted(generation) {
+	current, parked := d.halted[agg]
+	if !parked || current != generation {
 		return false, nil
 	}
 	undelivered = d.undelivered(agg)
@@ -186,36 +93,34 @@ func (d *Dispatcher[T]) resumeParked(
 	return true, undelivered
 }
 
-func (d *Dispatcher[T]) undelivered(agg string) []int64 {
+func (d *Dispatcher[T]) undelivered(
+	agg string,
+) []int64 {
 	d.unrunMu.Lock()
 	defer d.unrunMu.Unlock()
 	return slices.Sorted(maps.Keys(d.unrun[agg]))
 }
 
-// Park halts an aggregate's durable delivery, as exhausting its attempts does.
-// Resume undoes it.
-func (d *Dispatcher[T]) Park(agg string) {
-	d.mu.Lock()
-	d.haltLocked(agg)
-	d.mu.Unlock()
-}
-
-// ParkUndelivered parks the aggregate and remembers that the events at the
-// given versions, still pending in the delivery log, have not been handed to a
-// handler, so a retry of the command that produced one is told so (see Unrun).
-func (d *Dispatcher[T]) ParkUndelivered(
+// Park halts an aggregate's durable delivery, as exhausting its attempts does,
+// and remembers that the events at the given versions, still pending in the
+// delivery log, have not been handed to a handler, so a retry of the command
+// that produced one is told so (see Unrun). ResumeUndelivered lifts it.
+func (d *Dispatcher[T]) Park(
 	agg string,
-	versions []int64,
+	undelivered ...int64,
 ) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.haltLocked(agg)
+	if len(undelivered) == 0 {
+		return
+	}
 	d.unrunMu.Lock()
 	defer d.unrunMu.Unlock()
 	if d.unrun[agg] == nil {
 		d.unrun[agg] = make(map[int64]error)
 	}
-	for _, v := range versions {
+	for _, v := range undelivered {
 		d.unrun[agg][v] = asynxmd.ErrDeliveryParked
 	}
 }
@@ -287,7 +192,7 @@ func jittered(delay time.Duration) time.Duration {
 
 // subscribersFor lists the durable subscribers that receive the job: all of
 // them for a deletion marker, the matching ones otherwise.
-func (d *Dispatcher[T]) subscribersFor(job *dispatchJob[T]) (subs []DurableSub[T]) {
+func (d *Dispatcher[T]) subscribersFor(job *dispatchJob[T]) (subs []asynxmd.DurableSub[T]) {
 	for _, sub := range d.durable {
 		receives := job.forget || sub.Match(job.event.EventName)
 		if receives {
@@ -301,9 +206,9 @@ func (d *Dispatcher[T]) subscribersFor(job *dispatchJob[T]) (subs []DurableSub[T
 // with their errors joined, so the dead-letter handler learns of every one.
 func (d *Dispatcher[T]) attempt(
 	job *dispatchJob[T],
-	pending []DurableSub[T],
+	pending []asynxmd.DurableSub[T],
 	attempt int,
-) (failed []DurableSub[T], lastErr error) {
+) (failed []asynxmd.DurableSub[T], lastErr error) {
 	var errs []error
 	for _, sub := range pending {
 		err := d.runDurable(job, sub, attempt)
@@ -412,7 +317,7 @@ func (d *Dispatcher[T]) notifyPanic(
 
 func (d *Dispatcher[T]) callRecovering(
 	job *dispatchJob[T],
-	sub DurableSub[T],
+	sub asynxmd.DurableSub[T],
 ) (err error) {
 	defer func() { d.errorFromPanic(job, recover(), &err) }()
 	return sub.Handler(job.ctx, job.event)
@@ -434,7 +339,7 @@ func (d *Dispatcher[T]) errorFromPanic(
 // handler is reported once as timed out and still waited for.
 func (d *Dispatcher[T]) runDurable(
 	job *dispatchJob[T],
-	sub DurableSub[T],
+	sub asynxmd.DurableSub[T],
 	attempt int,
 ) error {
 	call := func() error { return d.callRecovering(job, sub) }

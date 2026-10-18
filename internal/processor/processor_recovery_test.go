@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/char2cs/asynx/internal/bus"
-	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor"
@@ -40,7 +39,7 @@ func TestProcessor_Recover_RedeliversEveryPendingEventAndAcksIt(t *testing.T) {
 	var live atomic.Int32
 	b.Subscribe("OrderCreated", func(context.Context, asynxmd.Event[order]) { live.Add(1) })
 	var got atomic.Int32
-	p := processor.New(es, b, processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+	p := processor.New(es, b, processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 		Match:   always,
 		Handler: func(context.Context, asynxmd.Event[order]) error { got.Add(1); return nil },
 	}}))
@@ -111,7 +110,7 @@ func TestProcessor_Recover_ParksAnAggregateWhoseEventCannotBeRebuilt(t *testing.
 				reported <- err
 			}
 		}),
-		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+		processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 			Match:   always,
 			Handler: func(context.Context, asynxmd.Event[order]) error { got.Add(1); return nil },
 		}}))
@@ -142,6 +141,101 @@ func TestProcessor_Recover_ParksAnAggregateWhoseEventCannotBeRebuilt(t *testing.
 	}
 	if paused := p.Paused(); len(paused) != 1 {
 		t.Fatalf("Paused = %v after a failed Resume, want it still parked", paused)
+	}
+}
+
+func seedUnrebuildable(
+	t *testing.T,
+	s store.Memory,
+	aggregateID string,
+) {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.Append(ctx, "events:"+aggregateID, 1, []byte("!!!")); err != nil {
+		t.Fatal(err)
+	}
+	enqueue := func(tx asynxmd.Tx) error { return tx.EnqueueDelivery(ctx, aggregateID, 1) }
+	if err := s.Atomically(ctx, enqueue); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProcessor_Recover_ReportsAnUnrebuildableEventToThePublishErrorHandler(t *testing.T) {
+	ctx := context.Background()
+	s := store.New()
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	seedUnrebuildable(t, s, "bad")
+
+	type report struct {
+		event asynxmd.Event[order]
+		err   error
+	}
+	reported := make(chan report, 4)
+	p := processor.New(es, bus.NewChannelBus[order](),
+		processor.WithPublishErrorHandler(func(_ context.Context, e asynxmd.Event[order], err error) {
+			reported <- report{e, err}
+		}),
+		processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
+			Match:   always,
+			Handler: func(context.Context, asynxmd.Event[order]) error { return nil },
+		}}))
+	t.Cleanup(func() { p.Shutdown(ctx) })
+
+	if err := p.Recover(ctx, 10); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	var got report
+	select {
+	case got = <-reported:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the unrebuildable event was not reported")
+	}
+	if got.event.AggregateID != "bad" || got.event.Version != 1 {
+		t.Errorf("reported event = %s v%d, want bad v1", got.event.AggregateID, got.event.Version)
+	}
+	if got.err == nil || !strings.HasPrefix(got.err.Error(), "recovery: ") || errors.Unwrap(got.err) == nil {
+		t.Errorf("reported error = %v, want one wrapping the recovery error", got.err)
+	}
+}
+
+func TestProcessor_Recover_APanickingPublishErrorHandlerDoesNotCrash(t *testing.T) {
+	ctx := context.Background()
+	s := store.New()
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	seedPending(t, s, es, "a")
+	seedUnrebuildable(t, s, "bad")
+	seedPending(t, s, es, "z")
+
+	var called atomic.Int32
+	var delivered sync.Map
+	p := processor.New(es, bus.NewChannelBus[order](),
+		processor.WithPublishErrorHandler(func(context.Context, asynxmd.Event[order], error) {
+			called.Add(1)
+			panic("publish error handler exploded")
+		}),
+		processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
+			Match: always,
+			Handler: func(_ context.Context, e asynxmd.Event[order]) error {
+				delivered.Store(e.AggregateID, true)
+				return nil
+			},
+		}}))
+	t.Cleanup(func() { p.Shutdown(ctx) })
+
+	if err := p.Recover(ctx, 10); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	p.WaitPublish()
+	if called.Load() == 0 {
+		t.Fatal("the publish error handler was not called")
+	}
+	for _, id := range []string{"a", "z"} {
+		if _, ok := delivered.Load(id); !ok {
+			t.Errorf("aggregate %s was not recovered", id)
+		}
+	}
+	if paused := p.Paused(); !slices.Equal(paused, []string{"bad"}) {
+		t.Errorf("Paused = %v, want [bad]", paused)
 	}
 }
 
@@ -200,7 +294,7 @@ func updateCmd(id string, total float64) mocks.UpdateOrderCmd {
 func parkingOpts(healthy *atomic.Bool, extra ...processor.ProcessorOpt[order]) []processor.ProcessorOpt[order] {
 	return append([]processor.ProcessorOpt[order]{
 		processor.WithDurableDelivery[order](func(name string) bool { return name == "OrderUpdated" }),
-		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+		processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 			Match: always,
 			Handler: func(context.Context, asynxmd.Event[order]) error {
 				if healthy.Load() {
@@ -387,7 +481,7 @@ func TestProcessor_Resume_ConcurrentCallsRedeliverOnce(t *testing.T) {
 	release := make(chan struct{})
 	f := newFixture(t, store.New(),
 		processor.WithDurableDelivery[order](func(name string) bool { return name == "OrderUpdated" }),
-		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+		processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 			Match: always,
 			Handler: func(_ context.Context, e asynxmd.Event[order]) error {
 				if !healthy.Load() {
@@ -466,7 +560,7 @@ func TestProcessor_Recover_ReplaysAnAggregatesStreamOnce(t *testing.T) {
 
 	var mu sync.Mutex
 	var delivered []int64
-	p := processor.New(es, bus.NewChannelBus[order](), processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+	p := processor.New(es, bus.NewChannelBus[order](), processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 		Match: always,
 		Handler: func(
 			_ context.Context,
@@ -746,7 +840,7 @@ func TestProcessor_Resume_DeliversAnEventCommittedAfterItReadTheLog(t *testing.T
 				parked <- struct{}{}
 			}
 		}),
-		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+		processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 			Match: always,
 			Handler: func(
 				_ context.Context,
@@ -798,7 +892,7 @@ func TestProcessor_Resume_SkipsAnAggregateAnotherResumeLiftedMeanwhile(t *testin
 		}
 	}}
 	f := newFixture(t, s, parkingOpts(&healthy, parkedSignal(parked),
-		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+		processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 			Match: always,
 			Handler: func(
 				_ context.Context,
@@ -856,7 +950,7 @@ func TestProcessor_Resume_LeavesAParkImposedAgainSinceItReadTheLog(t *testing.T)
 		healthy.Store(true)
 	}}
 	f := newFixture(t, s, parkingOpts(&healthy, parkedSignal(parked),
-		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+		processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 			Match: always,
 			Handler: func(
 				_ context.Context,
@@ -1136,7 +1230,7 @@ func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(t
 		) {
 			reported <- struct{}{}
 		}),
-		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+		processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 			Match: always,
 			Handler: func(
 				context.Context,
@@ -1191,7 +1285,7 @@ func TestProcessor_Recover_DeliversWhatPrecedesAnUnreadableEvent(t *testing.T) {
 		) {
 			reported <- err
 		}),
-		processor.WithDurableSubscribers([]dispatcher.DurableSub[order]{{
+		processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 			Match: always,
 			Handler: func(
 				context.Context,

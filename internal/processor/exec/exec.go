@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/eventstore"
 	asynxmd "github.com/char2cs/asynx/models"
 )
@@ -57,7 +56,7 @@ func WithSnapshotErrorHandler[T any](fn func(context.Context, asynxmd.Event[T], 
 
 type CommandExecutor[T any] struct {
 	es              *eventstore.EventStore[T]
-	dispatcher      *dispatcher.Dispatcher[T]
+	dispatcher      asynxmd.Dispatcher[T]
 	locks           KeyedLock
 	forgetMu        sync.Mutex
 	forgetting      map[string]struct{} // aggregates between tombstone and erase
@@ -68,7 +67,7 @@ type CommandExecutor[T any] struct {
 
 func New[T any](
 	es *eventstore.EventStore[T],
-	d *dispatcher.Dispatcher[T],
+	d asynxmd.Dispatcher[T],
 	opts ...Opt[T],
 ) *CommandExecutor[T] {
 	e := &CommandExecutor[T]{es: es, dispatcher: d, forgetting: make(map[string]struct{})}
@@ -198,7 +197,11 @@ func (e *CommandExecutor[T]) enqueue(
 	if e.dispatcher == nil {
 		return nil, nil
 	}
-	t, err := e.dispatcher.EnqueueTicket(ctx, event, e.ackFor(event))
+	t, err := e.dispatcher.Enqueue(ctx, asynxmd.DispatchRequest[T]{
+		Event: event,
+		Ack:   e.ackFor(event),
+		Kind:  asynxmd.DispatchEvent,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +243,7 @@ func unrunWait[T any](
 
 // waitOn is the Wait for the handlers of the event ticket t tracks.
 func waitOn[T any](
-	t dispatcher.Ticket,
+	t asynxmd.Ticket,
 	event asynxmd.Event[T],
 ) Wait {
 	return func(ctx context.Context) error {
@@ -255,7 +258,7 @@ func waitOn[T any](
 
 // settledOutcome reports why a settled delivery ran no handler, if it did not.
 func settledOutcome[T any](
-	t dispatcher.Ticket,
+	t asynxmd.Ticket,
 	event asynxmd.Event[T],
 ) error {
 	err := t.Unrun()

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -26,6 +28,109 @@ func makeEvent(aggregateID string, version int64) asynxmd.Event[int] {
 		Version:     version,
 		OccurredAt:  time.Now(),
 	}
+}
+
+// testConfig is what the old option style set: the config New takes and the
+// in-memory options it still has.
+type testConfig[T any] struct {
+	cfg  asynxmd.DispatcherConfig[T]
+	opts []Opt[T]
+}
+
+type testOpt[T any] func(*testConfig[T])
+
+// newTestDispatcher builds a Dispatcher from the old option style, starting
+// from the defaults the processor applies, so tests keep their shape.
+func newTestDispatcher[T any](bus asynxmd.Bus[T], opts ...testOpt[T]) *Dispatcher[T] {
+	c := testConfig[T]{cfg: asynxmd.DispatcherConfig[T]{
+		Bus:          bus,
+		RetryInitial: 100 * time.Millisecond,
+		RetryMax:     30 * time.Second,
+		MaxAttempts:  20,
+	}}
+	for _, opt := range opts {
+		opt(&c)
+	}
+	return New(c.cfg, c.opts...)
+}
+
+func withIdleTimeout[T any](t time.Duration) testOpt[T] {
+	return func(c *testConfig[T]) { c.opts = append(c.opts, WithIdleTimeout[T](t)) }
+}
+
+func withPublishErrorHandler[T any](fn asynxmd.PublishErrorHandler[T]) testOpt[T] {
+	return func(c *testConfig[T]) { c.cfg.OnPublishError = fn }
+}
+
+func withDurableSubs[T any](subs []asynxmd.DurableSub[T]) testOpt[T] {
+	return func(c *testConfig[T]) { c.cfg.DurableSubs = subs }
+}
+
+func withDeliveryErrorHandler[T any](fn asynxmd.DeliveryErrorHandler[T]) testOpt[T] {
+	return func(c *testConfig[T]) { c.cfg.OnDeliveryError = fn }
+}
+
+func withDeliveryPanicHandler[T any](fn asynxmd.PanicHandler[T]) testOpt[T] {
+	return func(c *testConfig[T]) { c.cfg.OnPanic = fn }
+}
+
+func withDeadLetterHandler[T any](fn asynxmd.DeadLetterHandler[T]) testOpt[T] {
+	return func(c *testConfig[T]) { c.cfg.DeadLetter = fn }
+}
+
+func withRetryBackoff[T any](initial, max time.Duration) testOpt[T] {
+	return func(c *testConfig[T]) { c.cfg.RetryInitial, c.cfg.RetryMax = initial, max }
+}
+
+func withMaxAttempts[T any](n int) testOpt[T] {
+	return func(c *testConfig[T]) { c.cfg.MaxAttempts = n }
+}
+
+// dispatch enqueues a live event and, with waitHandlers, waits for its
+// handlers, as the removed Dispatch method did.
+func dispatch[T any](d *Dispatcher[T], ctx context.Context, event asynxmd.Event[T], waitHandlers bool) error {
+	t, err := d.Enqueue(ctx, asynxmd.DispatchRequest[T]{Event: event})
+	if err != nil {
+		return err
+	}
+	if waitHandlers {
+		<-t.Settled
+	}
+	return nil
+}
+
+// enqueueEvent enqueues a DispatchEvent and returns its Settled channel.
+func enqueueEvent[T any](d *Dispatcher[T], ctx context.Context, event asynxmd.Event[T], ack func(context.Context) error) (<-chan struct{}, error) {
+	t, err := enqueueTicket(d, ctx, event, ack)
+	return t.Settled, err
+}
+
+func enqueueTicket[T any](d *Dispatcher[T], ctx context.Context, event asynxmd.Event[T], ack func(context.Context) error) (asynxmd.Ticket, error) {
+	return d.Enqueue(ctx, asynxmd.DispatchRequest[T]{Event: event, Ack: ack, Kind: asynxmd.DispatchEvent})
+}
+
+func enqueueRedelivery[T any](d *Dispatcher[T], ctx context.Context, event asynxmd.Event[T], ack func(context.Context) error) (asynxmd.Ticket, error) {
+	return d.Enqueue(ctx, asynxmd.DispatchRequest[T]{Event: event, Ack: ack, Kind: asynxmd.DispatchRedelivery})
+}
+
+func enqueueForget[T any](d *Dispatcher[T], ctx context.Context, tombstone asynxmd.Event[T], ack func(context.Context) error) (asynxmd.Ticket, error) {
+	return d.Enqueue(ctx, asynxmd.DispatchRequest[T]{Event: tombstone, Ack: ack, Kind: asynxmd.DispatchTombstone})
+}
+
+// halted lists the parked aggregates, sorted.
+func halted[T any](d *Dispatcher[T]) []string {
+	return slices.Sorted(maps.Keys(d.Parks()))
+}
+
+// resume lifts the aggregate's current park, whatever its generation, and
+// reports whether there was one.
+func resume[T any](d *Dispatcher[T], agg string) bool {
+	generation, parked := d.Parks()[agg]
+	if !parked {
+		return false
+	}
+	lifted, _ := d.ResumeUndelivered(agg, generation)
+	return lifted
 }
 
 // recordingBus records PublishSync calls in order.
@@ -103,11 +208,11 @@ func (b *callbackBus) WaitForHandlers()            {}
 
 func TestDispatch_OrderingGuarantee(t *testing.T) {
 	bus := &recordingBus{}
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 
 	ctx := context.Background()
 	for i := int64(1); i <= 10; i++ {
-		if err := d.Dispatch(ctx, makeEvent("agg-1", i), false); err != nil {
+		if err := dispatch(d, ctx, makeEvent("agg-1", i), false); err != nil {
 			t.Fatalf("dispatch v%d: %v", i, err)
 		}
 	}
@@ -145,11 +250,11 @@ func TestDispatch_CrossAggregateIndependence(t *testing.T) {
 		return nil
 	}}
 
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 	ctx := context.Background()
 
-	_ = d.Dispatch(ctx, makeEvent("agg-slow", 1), false)
-	_ = d.Dispatch(ctx, makeEvent("agg-fast", 1), false)
+	_ = dispatch(d, ctx, makeEvent("agg-slow", 1), false)
+	_ = dispatch(d, ctx, makeEvent("agg-fast", 1), false)
 
 	_ = d.Close(ctx)
 
@@ -166,11 +271,11 @@ func TestDispatch_CrossAggregateIndependence(t *testing.T) {
 func TestDispatch_SyncBlocking(t *testing.T) {
 	delay := 30 * time.Millisecond
 	bus := &recordingBus{delay: delay}
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 	ctx := context.Background()
 
 	start := time.Now()
-	_ = d.Dispatch(ctx, makeEvent("agg-1", 1), true)
+	_ = dispatch(d, ctx, makeEvent("agg-1", 1), true)
 	elapsed := time.Since(start)
 
 	if elapsed < delay {
@@ -181,11 +286,11 @@ func TestDispatch_SyncBlocking(t *testing.T) {
 
 func TestDispatch_AsyncNonBlocking(t *testing.T) {
 	bus := &recordingBus{delay: 100 * time.Millisecond}
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 	ctx := context.Background()
 
 	start := time.Now()
-	_ = d.Dispatch(ctx, makeEvent("agg-1", 1), false)
+	_ = dispatch(d, ctx, makeEvent("agg-1", 1), false)
 	elapsed := time.Since(start)
 
 	if elapsed > 20*time.Millisecond {
@@ -196,10 +301,10 @@ func TestDispatch_AsyncNonBlocking(t *testing.T) {
 
 func TestDispatch_IdleCleanup(t *testing.T) {
 	bus := &recordingBus{}
-	d := New[int](bus, WithIdleTimeout[int](10*time.Millisecond))
+	d := newTestDispatcher[int](bus, withIdleTimeout[int](10*time.Millisecond))
 	ctx := context.Background()
 
-	_ = d.Dispatch(ctx, makeEvent("agg-1", 1), true)
+	_ = dispatch(d, ctx, makeEvent("agg-1", 1), true)
 
 	// WaitIdle returns once the job is handled; waitWorkers waits for the
 	// goroutine to exit after its idle timeout.
@@ -215,7 +320,7 @@ func TestDispatch_IdleCleanup(t *testing.T) {
 	}
 
 	// Dispatching again should still work (new worker spins up).
-	if err := d.Dispatch(ctx, makeEvent("agg-1", 2), true); err != nil {
+	if err := dispatch(d, ctx, makeEvent("agg-1", 2), true); err != nil {
 		t.Fatalf("dispatch after idle cleanup: %v", err)
 	}
 
@@ -229,11 +334,11 @@ func TestDispatch_IdleCleanup(t *testing.T) {
 
 func TestClose_DrainsAllEvents(t *testing.T) {
 	bus := &recordingBus{}
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 	ctx := context.Background()
 
 	for i := int64(1); i <= 20; i++ {
-		_ = d.Dispatch(ctx, makeEvent("agg-1", i), false)
+		_ = dispatch(d, ctx, makeEvent("agg-1", i), false)
 	}
 
 	if err := d.Close(ctx); err != nil {
@@ -253,7 +358,7 @@ func TestClose_DrainsAllEvents(t *testing.T) {
 
 func TestClose_Idempotent(t *testing.T) {
 	bus := &recordingBus{}
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 	ctx := context.Background()
 
 	if err := d.Close(ctx); err != nil {
@@ -267,22 +372,22 @@ func TestClose_Idempotent(t *testing.T) {
 
 func TestDispatch_AfterClose(t *testing.T) {
 	bus := &recordingBus{}
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 	ctx := context.Background()
 
 	_ = d.Close(ctx)
 
-	err := d.Dispatch(ctx, makeEvent("agg-1", 1), false)
+	err := dispatch(d, ctx, makeEvent("agg-1", 1), false)
 	if !errors.Is(err, asynxmd.ErrDispatcherClosed) {
 		t.Errorf("expected ErrDispatcherClosed, got %v", err)
 	}
 }
 
 func TestDispatch_NilBusNoPanic(t *testing.T) {
-	d := New[int](nil)
+	d := newTestDispatcher[int](nil)
 	ctx := context.Background()
 
-	if err := d.Dispatch(ctx, makeEvent("agg-1", 1), true); err != nil {
+	if err := dispatch(d, ctx, makeEvent("agg-1", 1), true); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	_ = d.Close(ctx)
@@ -307,11 +412,11 @@ func TestDispatch_PublishErrorHandler(t *testing.T) {
 		mu.Unlock()
 	}
 
-	d := New[int](bus, WithPublishErrorHandler[int](handler))
+	d := newTestDispatcher[int](bus, withPublishErrorHandler[int](handler))
 	ctx := context.Background()
 
 	ev := makeEvent("agg-1", 1)
-	_ = d.Dispatch(ctx, ev, true)
+	_ = dispatch(d, ctx, ev, true)
 	_ = d.Close(ctx)
 
 	mu.Lock()
@@ -329,13 +434,13 @@ func TestDispatch_PublishErrorHandler(t *testing.T) {
 
 func TestDispatch_MultipleAggregatesOrdered(t *testing.T) {
 	bus := &recordingBus{}
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 	ctx := context.Background()
 
 	// Interleave 3 aggregates, 5 events each.
 	for v := int64(1); v <= 5; v++ {
 		for _, agg := range []string{"a", "b", "c"} {
-			_ = d.Dispatch(ctx, makeEvent(agg, v), false)
+			_ = dispatch(d, ctx, makeEvent(agg, v), false)
 		}
 	}
 
@@ -373,10 +478,10 @@ func TestClose_ContextTimeout(t *testing.T) {
 		select {} // block forever
 	}}
 
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 	ctx := context.Background()
 
-	_ = d.Dispatch(ctx, makeEvent("agg-1", 1), false)
+	_ = dispatch(d, ctx, makeEvent("agg-1", 1), false)
 
 	// Wait until worker is actually inside PublishSync.
 	<-started
@@ -392,7 +497,7 @@ func TestClose_ContextTimeout(t *testing.T) {
 
 func TestDispatch_ConcurrentSameAggregate(t *testing.T) {
 	bus := &recordingBus{}
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 	ctx := context.Background()
 
 	const n = 100
@@ -401,7 +506,7 @@ func TestDispatch_ConcurrentSameAggregate(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func(v int64) {
 			defer wg.Done()
-			_ = d.Dispatch(ctx, makeEvent("agg-1", v), false)
+			_ = dispatch(d, ctx, makeEvent("agg-1", v), false)
 		}(int64(i))
 	}
 	wg.Wait()
@@ -425,10 +530,10 @@ func TestDispatch_ConcurrentSameAggregate(t *testing.T) {
 
 func TestDispatch_WithIdleTimeoutOption(t *testing.T) {
 	bus := &recordingBus{}
-	d := New[int](bus, WithIdleTimeout[int](10*time.Millisecond))
+	d := newTestDispatcher[int](bus, withIdleTimeout[int](10*time.Millisecond))
 	ctx := context.Background()
 
-	_ = d.Dispatch(ctx, makeEvent("agg-1", 1), true)
+	_ = dispatch(d, ctx, makeEvent("agg-1", 1), true)
 
 	// WaitIdle returns once the job is handled; waitWorkers waits for the
 	// goroutine to exit after its idle timeout.
@@ -446,6 +551,34 @@ func TestDispatch_WithIdleTimeoutOption(t *testing.T) {
 	_ = d.Close(ctx)
 }
 
+func TestWithIdleTimeout_IgnoresNonPositiveValues(t *testing.T) {
+	d := New(asynxmd.DispatcherConfig[int]{}, WithIdleTimeout[int](0), WithIdleTimeout[int](-time.Second))
+	defer d.Close(context.Background())
+	if d.idleTimeout != defaultIdleTimeout {
+		t.Fatalf("idleTimeout = %v, want the default", d.idleTimeout)
+	}
+}
+
+func TestEnqueue_TheKindSelectsWhoReceivesTheEvent(t *testing.T) {
+	cases := []struct {
+		kind asynxmd.DispatchKind
+		name string
+		want enqueueOpts
+	}{
+		{asynxmd.DispatchEvent, "test.event", enqueueOpts{}},
+		{asynxmd.DispatchEvent, asynxmd.ForgetEventName, enqueueOpts{}},
+		{asynxmd.DispatchRedelivery, "test.event", enqueueOpts{skipLive: true}},
+		{asynxmd.DispatchRedelivery, asynxmd.ForgetEventName, enqueueOpts{skipLive: true, forget: true}},
+		{asynxmd.DispatchTombstone, asynxmd.ForgetEventName, enqueueOpts{forget: true}},
+	}
+	for _, c := range cases {
+		request := asynxmd.DispatchRequest[int]{Event: asynxmd.Event[int]{EventName: c.name}, Kind: c.kind}
+		if got := optsFor(request); got != c.want {
+			t.Errorf("kind %d, event %q: opts = %+v, want %+v", c.kind, c.name, got, c.want)
+		}
+	}
+}
+
 func TestDispatch_WorkerSurvivesPanic(t *testing.T) {
 	var callCount atomic.Int64
 
@@ -457,12 +590,12 @@ func TestDispatch_WorkerSurvivesPanic(t *testing.T) {
 		return nil
 	}}
 
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 	ctx := context.Background()
 
 	// First event will panic inside handle; second should still be delivered.
-	_ = d.Dispatch(ctx, makeEvent("agg-1", 1), true)
-	_ = d.Dispatch(ctx, makeEvent("agg-1", 2), true)
+	_ = dispatch(d, ctx, makeEvent("agg-1", 1), true)
+	_ = dispatch(d, ctx, makeEvent("agg-1", 2), true)
 
 	_ = d.Close(ctx)
 
@@ -479,10 +612,10 @@ func TestEnqueue_AckRunsAfterHandlersFinish(t *testing.T) {
 		handled.Store(true)
 		return nil
 	}}
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 	defer d.Close(context.Background())
 
-	done, err := d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error {
+	done, err := enqueueEvent(d, context.Background(), makeEvent("a", 1), func(context.Context) error {
 		if !handled.Load() {
 			t.Error("ack ran before the handlers finished")
 		}
@@ -505,13 +638,13 @@ func TestEnqueue_AckRunsAfterHandlersFinish(t *testing.T) {
 func TestEnqueue_AckErrorIsReported(t *testing.T) {
 	ackErr := errors.New("ack failed")
 	var got atomic.Value
-	d := New(
+	d := newTestDispatcher(
 		asynxmd.Bus[int](&recordingBus{}),
-		WithPublishErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error) { got.Store(err) }),
+		withPublishErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error) { got.Store(err) }),
 	)
 	defer d.Close(context.Background())
 
-	done, _ := d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error { return ackErr })
+	done, _ := enqueueEvent(d, context.Background(), makeEvent("a", 1), func(context.Context) error { return ackErr })
 	<-done
 
 	if err, _ := got.Load().(error); !errors.Is(err, ackErr) {
@@ -521,12 +654,12 @@ func TestEnqueue_AckErrorIsReported(t *testing.T) {
 
 // A job enqueued while the idle worker is about to retire must still run.
 func TestEnqueue_NeverStrandedByIdleWorkerRetirement(t *testing.T) {
-	d := New[int](&recordingBus{}, WithIdleTimeout[int](time.Millisecond))
+	d := newTestDispatcher[int](&recordingBus{}, withIdleTimeout[int](time.Millisecond))
 	defer d.Close(context.Background())
 
 	for i := int64(1); i <= 300; i++ {
 		time.Sleep(time.Millisecond) // land right on the idle deadline
-		done, err := d.Enqueue(context.Background(), makeEvent("a", i), nil)
+		done, err := enqueueEvent(d, context.Background(), makeEvent("a", i), nil)
 		if err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
@@ -551,14 +684,14 @@ func TestEnqueue_NeverBlocksBehindASlowHandler(t *testing.T) {
 		mu.Unlock()
 		return nil
 	}}
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 	defer d.Close(context.Background())
 
 	const n = 200
 	enqueued := make(chan struct{})
 	go func() {
 		for i := int64(1); i <= n; i++ {
-			if _, err := d.Enqueue(context.Background(), makeEvent("a", i), nil); err != nil {
+			if _, err := enqueueEvent(d, context.Background(), makeEvent("a", i), nil); err != nil {
 				t.Errorf("Enqueue: %v", err)
 			}
 		}
@@ -596,10 +729,10 @@ func TestClose_DrainsJobsQueuedBehindASlowHandler(t *testing.T) {
 		handled.Add(1)
 		return nil
 	}}
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 
 	for i := int64(1); i <= 3; i++ {
-		if _, err := d.Enqueue(context.Background(), makeEvent("a", i), nil); err != nil {
+		if _, err := enqueueEvent(d, context.Background(), makeEvent("a", i), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -634,17 +767,17 @@ func TestClose_DrainsJobsQueuedBehindASlowHandler(t *testing.T) {
 func TestHandle_DispatcherPanicIsReportedNotSwallowed(t *testing.T) {
 	var got atomic.Value
 	bus := &callbackBus{fn: func(context.Context, asynxmd.Event[int]) error { panic("bus exploded") }}
-	d := New[int](bus, WithPublishErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error) { got.Store(err) }))
+	d := newTestDispatcher[int](bus, withPublishErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error) { got.Store(err) }))
 	defer d.Close(context.Background())
 
-	done, _ := d.Enqueue(context.Background(), makeEvent("a", 1), nil)
+	done, _ := enqueueEvent(d, context.Background(), makeEvent("a", 1), nil)
 	<-done
 	if err, _ := got.Load().(error); err == nil {
 		t.Fatal("a panic in the dispatcher was swallowed silently")
 	}
 
 	// The worker survives and keeps delivering.
-	done, _ = d.Enqueue(context.Background(), makeEvent("a", 2), nil)
+	done, _ = enqueueEvent(d, context.Background(), makeEvent("a", 2), nil)
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -670,14 +803,14 @@ func (b *blockingBus) PublishSync(
 
 func TestTicketFor_FindsAnEventWhileItsDeliveryIsUnderWay(t *testing.T) {
 	bus := &blockingBus{entered: make(chan struct{}, 4), release: make(chan struct{})}
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 	defer d.Close(context.Background())
 
 	if _, found := d.TicketFor("a", 1); found {
 		t.Fatal("TicketFor found an event that was never queued")
 	}
 
-	enqueued, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), nil)
+	enqueued, err := enqueueTicket(d, context.Background(), makeEvent("a", 1), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -705,7 +838,7 @@ func TestTicketFor_FindsAnEventWhileItsDeliveryIsUnderWay(t *testing.T) {
 }
 
 func TestTicketFor_ForgetsEventsLeftBehindByAPark(t *testing.T) {
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(
 		context.Context,
 		asynxmd.Event[int],
 	) error {
@@ -713,7 +846,7 @@ func TestTicketFor_ForgetsEventsLeftBehindByAPark(t *testing.T) {
 	}}})
 	d.Park("a")
 
-	ticket, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	ticket, err := enqueueTicket(d, context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -724,7 +857,7 @@ func TestTicketFor_ForgetsEventsLeftBehindByAPark(t *testing.T) {
 }
 
 func TestUnrun_RemembersEventsLeftUndeliveredByAPark(t *testing.T) {
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(
 		context.Context,
 		asynxmd.Event[int],
 	) error {
@@ -732,7 +865,7 @@ func TestUnrun_RemembersEventsLeftUndeliveredByAPark(t *testing.T) {
 	}}})
 	d.Park("a")
 
-	ticket, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	ticket, err := enqueueTicket(d, context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -748,7 +881,7 @@ func TestUnrun_RemembersEventsLeftUndeliveredByAPark(t *testing.T) {
 		t.Fatalf("Unrun of another aggregate = %v, want nil", err)
 	}
 
-	d.Resume("a")
+	resume(d, "a")
 	if err := d.Unrun("a", 1); err != nil {
 		t.Fatalf("Unrun after the park lifted = %v, want nil", err)
 	}
@@ -756,14 +889,14 @@ func TestUnrun_RemembersEventsLeftUndeliveredByAPark(t *testing.T) {
 
 func TestUnrun_RemembersQueuedEventsThatParkingTookOutOfMemory(t *testing.T) {
 	bus := &blockingBus{entered: make(chan struct{}, 4), release: make(chan struct{})}
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 	defer d.Close(context.Background())
 	ack := func(context.Context) error { return nil }
-	if _, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), ack); err != nil {
+	if _, err := enqueueTicket(d, context.Background(), makeEvent("a", 1), ack); err != nil {
 		t.Fatal(err)
 	}
 	<-bus.entered
-	queued, err := d.EnqueueTicket(context.Background(), makeEvent("a", 2), ack)
+	queued, err := enqueueTicket(d, context.Background(), makeEvent("a", 2), ack)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -783,10 +916,10 @@ func TestUnrun_RemembersQueuedEventsThatParkingTookOutOfMemory(t *testing.T) {
 func TestParkUndelivered_RemembersTheNamedVersionsUntilTheParkLifts(t *testing.T) {
 	d := newDurable(t, nil)
 
-	d.ParkUndelivered("a", []int64{3, 5})
+	d.Park("a", 3, 5)
 
-	if len(d.Halted()) != 1 {
-		t.Fatalf("halted = %v, want the aggregate parked", d.Halted())
+	if len(halted(d)) != 1 {
+		t.Fatalf("halted = %v, want the aggregate parked", halted(d))
 	}
 	for _, v := range []int64{3, 5} {
 		if err := d.Unrun("a", v); !errors.Is(err, asynxmd.ErrDeliveryParked) {
@@ -796,7 +929,7 @@ func TestParkUndelivered_RemembersTheNamedVersionsUntilTheParkLifts(t *testing.T
 	if err := d.Unrun("a", 4); err != nil {
 		t.Errorf("Unrun(a, 4) = %v, want nil", err)
 	}
-	d.Resume("a")
+	resume(d, "a")
 	if err := d.Unrun("a", 3); err != nil {
 		t.Errorf("Unrun after Resume = %v, want nil", err)
 	}
@@ -805,20 +938,20 @@ func TestParkUndelivered_RemembersTheNamedVersionsUntilTheParkLifts(t *testing.T
 // An event whose handlers ran and failed until the attempts ran out is not
 // "unrun": a handler took it.
 func TestUnrun_DoesNotCountAnEventWhoseHandlersRanAndFailed(t *testing.T) {
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(
 		context.Context,
 		asynxmd.Event[int],
 	) error {
 		return errors.New("down")
 	}}},
-		WithMaxAttempts[int](1))
+		withMaxAttempts[int](1))
 
-	ticket, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	ticket, err := enqueueTicket(d, context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
 	<-ticket.Final
-	waitFor(t, "the aggregate to park", func() bool { return len(d.Halted()) == 1 })
+	waitFor(t, "the aggregate to park", func() bool { return len(halted(d)) == 1 })
 
 	if err := d.Unrun("a", 1); err != nil {
 		t.Fatalf("Unrun = %v, want nil: the handler ran", err)
@@ -827,15 +960,15 @@ func TestUnrun_DoesNotCountAnEventWhoseHandlersRanAndFailed(t *testing.T) {
 
 func TestTicketFor_ForgetsQueuedEventsWhenTheyAreParked(t *testing.T) {
 	bus := &blockingBus{entered: make(chan struct{}, 4), release: make(chan struct{})}
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 	defer d.Close(context.Background())
 	ack := func(context.Context) error { return nil }
 
-	if _, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), ack); err != nil {
+	if _, err := enqueueTicket(d, context.Background(), makeEvent("a", 1), ack); err != nil {
 		t.Fatal(err)
 	}
 	<-bus.entered
-	queued, err := d.EnqueueTicket(context.Background(), makeEvent("a", 2), ack)
+	queued, err := enqueueTicket(d, context.Background(), makeEvent("a", 2), ack)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -852,10 +985,10 @@ func TestTicketFor_ForgetsQueuedEventsWhenTheyAreParked(t *testing.T) {
 // commands keep enqueueing while it waits.
 func TestWaitIdle_DoesNotRefuseEnqueuesWhileItWaits(t *testing.T) {
 	bus := &blockingBus{entered: make(chan struct{}, 4), release: make(chan struct{})}
-	d := New[int](bus)
+	d := newTestDispatcher[int](bus)
 	defer d.Close(context.Background())
 
-	first, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), nil)
+	first, err := enqueueTicket(d, context.Background(), makeEvent("a", 1), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -864,7 +997,7 @@ func TestWaitIdle_DoesNotRefuseEnqueuesWhileItWaits(t *testing.T) {
 	idle := make(chan struct{})
 	go func() { d.WaitIdle(); close(idle) }()
 
-	later, err := d.EnqueueTicket(context.Background(), makeEvent("b", 1), nil)
+	later, err := enqueueTicket(d, context.Background(), makeEvent("b", 1), nil)
 	if err != nil {
 		t.Fatalf("an enqueue during WaitIdle was refused: %v", err)
 	}
@@ -882,7 +1015,7 @@ func TestWaitIdle_DoesNotRefuseEnqueuesWhileItWaits(t *testing.T) {
 }
 
 func TestWaitIdle_ReturnsAtOnceWhenNothingIsQueued(t *testing.T) {
-	d := New[int](&recordingBus{})
+	d := newTestDispatcher[int](&recordingBus{})
 	defer d.Close(context.Background())
 	d.WaitIdle()
 }

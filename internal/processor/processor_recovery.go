@@ -10,13 +10,14 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-// Paused lists the aggregates whose durable delivery is parked: a delivery gave
-// up (see ErrDeliveryParked), or a Forget could not deliver its marker.
+// Paused lists, sorted, the aggregates whose durable delivery is parked: a
+// delivery gave up (see ErrDeliveryParked), or a Forget could not deliver its
+// marker.
 func (p *Processor[T]) Paused() []string {
 	if p.dispatcher == nil {
 		return nil
 	}
-	return p.dispatcher.Halted()
+	return slices.Sorted(maps.Keys(p.dispatcher.Parks()))
 }
 
 // Resume redelivers the parked aggregates, to the durable subscribers. For each
@@ -97,7 +98,7 @@ func (p *Processor[T]) resumeAggregate(
 		if err == nil {
 			return nil
 		}
-		p.dispatcher.ParkUndelivered(agg, stillUndelivered(undelivered, remaining))
+		p.dispatcher.Park(agg, stillUndelivered(undelivered, remaining)...)
 		return fmt.Errorf("asynx: resume %s: %w", agg, err)
 	})
 }
@@ -168,8 +169,8 @@ func (p *Processor[T]) Recover(
 		if ctx.Err() != nil || errors.Is(err, asynxmd.ErrDispatcherClosed) {
 			return fmt.Errorf("asynx: recovery: %w", err)
 		}
-		p.dispatcher.ParkUndelivered(agg, undelivered)
-		p.dispatcher.ReportError(ctx, asynxmd.Event[T]{AggregateID: agg, Version: backlogs[agg][0].Version},
+		p.dispatcher.Park(agg, undelivered...)
+		p.reportPublishError(ctx, asynxmd.Event[T]{AggregateID: agg, Version: backlogs[agg][0].Version},
 			fmt.Errorf("recovery: %w", err))
 	}
 	return nil
@@ -285,7 +286,11 @@ func (p *Processor[T]) enqueueBacklog(
 			if _, wanted := vanished[evt.Version]; !wanted || enqueueErr != nil {
 				return
 			}
-			_, enqueueErr = p.dispatcher.EnqueueRedelivery(ctx, evt, ack(evt.Version))
+			_, enqueueErr = p.dispatcher.Enqueue(ctx, asynxmd.DispatchRequest[T]{
+				Event: evt,
+				Ack:   ack(evt.Version),
+				Kind:  asynxmd.DispatchRedelivery,
+			})
 			if enqueueErr == nil {
 				delete(vanished, evt.Version)
 			}

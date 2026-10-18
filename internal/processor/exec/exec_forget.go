@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/commands"
 	"github.com/char2cs/asynx/internal/eventstore"
 	asynxmd "github.com/char2cs/asynx/models"
@@ -125,7 +124,7 @@ func (e *CommandExecutor[T]) erase(
 // only detected through the handler's context) cannot hold the shutdown open.
 func (e *CommandExecutor[T]) awaitTombstone(
 	ctx context.Context,
-	t dispatcher.Ticket,
+	t asynxmd.Ticket,
 ) error {
 	if t.Final == nil {
 		return nil
@@ -153,21 +152,21 @@ func (e *CommandExecutor[T]) awaitTombstone(
 func (e *CommandExecutor[T]) writeTombstone(
 	ctx context.Context,
 	aggregateID string,
-) (dispatcher.Ticket, error) {
+) (asynxmd.Ticket, error) {
 	unlock, err := e.locks.Lock(ctx, aggregateID)
 	if err != nil {
-		return dispatcher.Ticket{}, fmt.Errorf("%w: %w", asynxmd.ErrContextCancelled, err)
+		return asynxmd.Ticket{}, fmt.Errorf("%w: %w", asynxmd.ErrContextCancelled, err)
 	}
 	defer unlock()
 
 	if !e.setForgetting(aggregateID) {
-		return dispatcher.Ticket{}, fmt.Errorf("%w: %s", asynxmd.ErrForgetInProgress, aggregateID)
+		return asynxmd.Ticket{}, fmt.Errorf("%w: %s", asynxmd.ErrForgetInProgress, aggregateID)
 	}
 
 	ticket, err := e.commitTombstone(ctx, aggregateID)
 	if err != nil {
 		e.clearForgetting(aggregateID)
-		return dispatcher.Ticket{}, err
+		return asynxmd.Ticket{}, err
 	}
 	return ticket, nil
 }
@@ -175,26 +174,30 @@ func (e *CommandExecutor[T]) writeTombstone(
 func (e *CommandExecutor[T]) commitTombstone(
 	ctx context.Context,
 	aggregateID string,
-) (dispatcher.Ticket, error) {
+) (asynxmd.Ticket, error) {
 	tombstone, err := e.es.WriteTx(ctx, commands.NewForgetCommand[T](aggregateID), e.tombstoneHook())
 	if err != nil {
 		if errors.Is(err, asynxmd.ErrValidation) && !errors.Is(err, asynxmd.ErrSyncProjection) {
-			return dispatcher.Ticket{}, err
+			return asynxmd.Ticket{}, err
 		}
-		return dispatcher.Ticket{}, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
+		return asynxmd.Ticket{}, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 	}
 
 	if e.dispatcher == nil {
-		return dispatcher.Ticket{}, nil
+		return asynxmd.Ticket{}, nil
 	}
 	e.dispatcher.Supersede(aggregateID)
 	store := e.es.Store()
-	ticket, err := e.dispatcher.EnqueueForget(ctx, tombstone, func(ctx context.Context) error {
-		return store.AckDelivery(ctx, tombstone.AggregateID, tombstone.Version)
+	ticket, err := e.dispatcher.Enqueue(ctx, asynxmd.DispatchRequest[T]{
+		Event: tombstone,
+		Ack: func(ctx context.Context) error {
+			return store.AckDelivery(ctx, tombstone.AggregateID, tombstone.Version)
+		},
+		Kind: asynxmd.DispatchTombstone,
 	})
 	if err != nil {
 		e.dispatcher.Park(aggregateID)
-		return dispatcher.Ticket{}, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
+		return asynxmd.Ticket{}, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 	}
 	return ticket, nil
 }

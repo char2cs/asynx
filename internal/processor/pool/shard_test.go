@@ -24,7 +24,7 @@ func TestShard_SingleCommandSuccess(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -52,7 +52,7 @@ func TestShard_ValidationErrorDecrementVersionSingleWorker(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -105,7 +105,7 @@ func TestShard_ContextCancelledDuringExecution(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -135,7 +135,7 @@ func TestShard_MultipleWorkersNoCorrection(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -180,7 +180,7 @@ func TestShard_ResultCarriesEvent(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -213,7 +213,7 @@ func TestShard_ResultUsesCommandResult(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -243,7 +243,7 @@ func TestShard_NilEnvelopeClosesJobQueue(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -274,7 +274,7 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 

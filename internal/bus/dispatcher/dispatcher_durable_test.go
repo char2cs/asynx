@@ -16,13 +16,13 @@ import (
 func TestEnqueue_DurableDeliveryStillAcksWhenBusRejectsEvent(t *testing.T) {
 	var acked atomic.Bool
 	var reported atomic.Int32
-	d := New(
+	d := newTestDispatcher(
 		asynxmd.Bus[int](&errBus{err: errors.New("bus closed")}),
-		WithPublishErrorHandler[int](func(context.Context, asynxmd.Event[int], error) { reported.Add(1) }),
+		withPublishErrorHandler[int](func(context.Context, asynxmd.Event[int], error) { reported.Add(1) }),
 	)
 	defer d.Close(context.Background())
 
-	ticket, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error {
+	ticket, err := enqueueTicket(d, context.Background(), makeEvent("a", 1), func(context.Context) error {
 		acked.Store(true)
 		return nil
 	})
@@ -45,10 +45,10 @@ func TestEnqueue_DurableDeliveryStillAcksWhenBusRejectsEvent(t *testing.T) {
 
 func always(string) bool { return true }
 
-func newDurable(t *testing.T, subs []DurableSub[int], opts ...Opt[int]) *Dispatcher[int] {
+func newDurable(t *testing.T, subs []asynxmd.DurableSub[int], opts ...testOpt[int]) *Dispatcher[int] {
 	t.Helper()
-	all := append([]Opt[int]{WithDurableSubs(subs), WithRetryBackoff[int](time.Millisecond, 5*time.Millisecond)}, opts...)
-	d := New[int](&recordingBus{}, all...)
+	all := append([]testOpt[int]{withDurableSubs(subs), withRetryBackoff[int](time.Millisecond, 5*time.Millisecond)}, opts...)
+	d := newTestDispatcher[int](&recordingBus{}, all...)
 	t.Cleanup(func() { d.Close(context.Background()) })
 	return d
 }
@@ -71,7 +71,7 @@ func TestDurable_FailedHandlerRetriesAndHoldsBackLaterEventsOfTheAggregate(t *te
 	failuresLeft.Store(3)
 
 	var reports []int
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
 		mu.Lock()
 		defer mu.Unlock()
 		if e.AggregateID == "a" && e.Version == 1 && failuresLeft.Add(-1) >= 0 {
@@ -80,7 +80,7 @@ func TestDurable_FailedHandlerRetriesAndHoldsBackLaterEventsOfTheAggregate(t *te
 		}
 		order = append(order, e.AggregateID+string(rune('0'+e.Version)))
 		return nil
-	}}}, WithDeliveryErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], _ error, attempt int) {
+	}}}, withDeliveryErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], _ error, attempt int) {
 		mu.Lock()
 		reports = append(reports, attempt)
 		mu.Unlock()
@@ -89,9 +89,9 @@ func TestDurable_FailedHandlerRetriesAndHoldsBackLaterEventsOfTheAggregate(t *te
 	var acks atomic.Int32
 	ack := func(context.Context) error { acks.Add(1); return nil }
 	ctx := context.Background()
-	d.Enqueue(ctx, makeEvent("a", 1), ack)
-	d.Enqueue(ctx, makeEvent("a", 2), ack)
-	doneB, _ := d.Enqueue(ctx, makeEvent("b", 1), ack)
+	enqueueEvent(d, ctx, makeEvent("a", 1), ack)
+	enqueueEvent(d, ctx, makeEvent("a", 2), ack)
+	doneB, _ := enqueueEvent(d, ctx, makeEvent("b", 1), ack)
 
 	<-doneB // another aggregate is not held back by a's failure
 	waitFor(t, "all three deliveries acked", func() bool { return acks.Load() == 3 })
@@ -120,7 +120,7 @@ func TestDurable_FailedHandlerRetriesAndHoldsBackLaterEventsOfTheAggregate(t *te
 
 func TestDurable_DoneClosesAfterTheFirstAttemptEvenWhenItFails(t *testing.T) {
 	release := make(chan struct{})
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
 		select {
 		case <-release:
 			return nil
@@ -130,7 +130,7 @@ func TestDurable_DoneClosesAfterTheFirstAttemptEvenWhenItFails(t *testing.T) {
 	}}})
 
 	var acked atomic.Bool
-	done, err := d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	done, err := enqueueEvent(d, context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,18 +150,18 @@ func TestDurable_DoneClosesAfterTheFirstAttemptEvenWhenItFails(t *testing.T) {
 func TestDurable_PanicIsAFailureThatRetriesAndReachesThePanicHandler(t *testing.T) {
 	var attempts, panics atomic.Int32
 	var lastErr atomic.Value
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
 		if attempts.Add(1) == 1 {
 			panic("boom")
 		}
 		return nil
 	}}},
-		WithDeliveryPanicHandler[int](func(context.Context, asynxmd.Event[int], any) { panics.Add(1) }),
-		WithDeliveryErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error, _ int) { lastErr.Store(err) }),
+		withDeliveryPanicHandler[int](func(context.Context, asynxmd.Event[int], any) { panics.Add(1) }),
+		withDeliveryErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error, _ int) { lastErr.Store(err) }),
 	)
 
 	var acked atomic.Bool
-	d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	enqueueEvent(d, context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
 	waitFor(t, "ack after panic then success", acked.Load)
 
 	if panics.Load() != 1 {
@@ -174,15 +174,15 @@ func TestDurable_PanicIsAFailureThatRetriesAndReachesThePanicHandler(t *testing.
 
 func TestDurable_APanickingPanicHandlerCannotKillTheWorker(t *testing.T) {
 	var attempts atomic.Int32
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
 		if attempts.Add(1) == 1 {
 			panic("boom")
 		}
 		return nil
-	}}}, WithDeliveryPanicHandler[int](func(context.Context, asynxmd.Event[int], any) { panic("handler of handlers") }))
+	}}}, withDeliveryPanicHandler[int](func(context.Context, asynxmd.Event[int], any) { panic("handler of handlers") }))
 
 	var acked atomic.Bool
-	d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	enqueueEvent(d, context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
 	waitFor(t, "recovery from a panicking panic handler", acked.Load)
 }
 
@@ -190,7 +190,7 @@ func TestDurable_TimeoutIsReportedButTheHandlerIsStillWaitedFor(t *testing.T) {
 	var running, overlapped atomic.Bool
 	var timeouts atomic.Int32
 	timedOut := make(chan struct{}, 8)
-	d := newDurable(t, []DurableSub[int]{{
+	d := newDurable(t, []asynxmd.DurableSub[int]{{
 		Match:   always,
 		Timeout: 10 * time.Millisecond,
 		Handler: func(context.Context, asynxmd.Event[int]) error {
@@ -201,7 +201,7 @@ func TestDurable_TimeoutIsReportedButTheHandlerIsStillWaitedFor(t *testing.T) {
 			running.Store(false)
 			return nil
 		},
-	}}, WithDeliveryErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error, _ int) {
+	}}, withDeliveryErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error, _ int) {
 		if errors.Is(err, asynxmd.ErrHandlerTimeout) {
 			timeouts.Add(1)
 			timedOut <- struct{}{}
@@ -210,8 +210,8 @@ func TestDurable_TimeoutIsReportedButTheHandlerIsStillWaitedFor(t *testing.T) {
 
 	var acks atomic.Int32
 	ack := func(context.Context) error { acks.Add(1); return nil }
-	d.Enqueue(context.Background(), makeEvent("a", 1), ack)
-	d.Enqueue(context.Background(), makeEvent("a", 2), ack)
+	enqueueEvent(d, context.Background(), makeEvent("a", 1), ack)
+	enqueueEvent(d, context.Background(), makeEvent("a", 2), ack)
 	waitFor(t, "both acked", func() bool { return acks.Load() == 2 })
 
 	if overlapped.Load() {
@@ -224,7 +224,7 @@ func TestDurable_TimeoutIsReportedButTheHandlerIsStillWaitedFor(t *testing.T) {
 
 func TestDurable_OnlyFailedHandlersAreRetried(t *testing.T) {
 	var goodRuns, flakyRuns atomic.Int32
-	d := newDurable(t, []DurableSub[int]{
+	d := newDurable(t, []asynxmd.DurableSub[int]{
 		{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error { goodRuns.Add(1); return nil }},
 		{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
 			if flakyRuns.Add(1) < 3 {
@@ -239,7 +239,7 @@ func TestDurable_OnlyFailedHandlersAreRetried(t *testing.T) {
 	})
 
 	var acked atomic.Bool
-	d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	enqueueEvent(d, context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
 	waitFor(t, "ack", acked.Load)
 
 	if goodRuns.Load() != 1 || flakyRuns.Load() != 3 {
@@ -249,16 +249,16 @@ func TestDurable_OnlyFailedHandlersAreRetried(t *testing.T) {
 
 func TestDurable_CloseInterruptsRetriesAndLeavesTheDeliveryUnacked(t *testing.T) {
 	var attempts atomic.Int32
-	d := New[int](&recordingBus{},
-		WithDurableSubs([]DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
+	d := newTestDispatcher[int](&recordingBus{},
+		withDurableSubs([]asynxmd.DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
 			attempts.Add(1)
 			return errors.New("always failing")
 		}}}),
-		WithRetryBackoff[int](time.Hour, time.Hour),
+		withRetryBackoff[int](time.Hour, time.Hour),
 	)
 
 	var acked atomic.Bool
-	done, _ := d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	done, _ := enqueueEvent(d, context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
 	<-done
 
 	closed := make(chan error, 1)
@@ -277,42 +277,34 @@ func TestDurable_CloseInterruptsRetriesAndLeavesTheDeliveryUnacked(t *testing.T)
 }
 
 func TestDurable_NonDurableJobsSkipDurableSubscribers(t *testing.T) {
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
 		t.Error("durable handler ran for a job without an ack")
 		return nil
 	}}})
-	done, _ := d.Enqueue(context.Background(), makeEvent("a", 1), nil)
+	done, _ := enqueueEvent(d, context.Background(), makeEvent("a", 1), nil)
 	<-done
 }
 
 func TestDurable_DeliveryWithNoMatchingSubscriberIsStillAcked(t *testing.T) {
 	d := newDurable(t, nil)
 	var acked atomic.Bool
-	done, _ := d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	done, _ := enqueueEvent(d, context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
 	<-done
 	if !acked.Load() {
 		t.Fatal("delivery with nothing to deliver was not acknowledged")
 	}
 }
 
-func TestRetryBackoff_IgnoresNonPositiveValues(t *testing.T) {
-	d := New[int](&recordingBus{}, WithRetryBackoff[int](0, -1))
-	defer d.Close(context.Background())
-	if d.retryInitial != defaultRetryInitial || d.retryMax != defaultRetryMax {
-		t.Fatalf("backoff = %v..%v, want defaults", d.retryInitial, d.retryMax)
-	}
-}
-
 func TestDurable_HandlerFinishingBeforeItsTimeoutReportsNothing(t *testing.T) {
 	var reports atomic.Int32
-	d := newDurable(t, []DurableSub[int]{{
+	d := newDurable(t, []asynxmd.DurableSub[int]{{
 		Match:   always,
 		Timeout: time.Second,
 		Handler: func(context.Context, asynxmd.Event[int]) error { return nil },
-	}}, WithDeliveryErrorHandler[int](func(context.Context, asynxmd.Event[int], error, int) { reports.Add(1) }))
+	}}, withDeliveryErrorHandler[int](func(context.Context, asynxmd.Event[int], error, int) { reports.Add(1) }))
 
 	var acked atomic.Bool
-	d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	enqueueEvent(d, context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
 	waitFor(t, "ack", acked.Load)
 	if reports.Load() != 0 {
 		t.Fatalf("reports = %d, want 0", reports.Load())
@@ -322,7 +314,7 @@ func TestDurable_HandlerFinishingBeforeItsTimeoutReportsNothing(t *testing.T) {
 func TestDurable_ATimedOutHandlerThatThenFailsIsRetried(t *testing.T) {
 	var attempts atomic.Int32
 	timedOut := make(chan struct{}, 1)
-	d := newDurable(t, []DurableSub[int]{{
+	d := newDurable(t, []asynxmd.DurableSub[int]{{
 		Match:   always,
 		Timeout: 5 * time.Millisecond,
 		Handler: func(context.Context, asynxmd.Event[int]) error {
@@ -332,14 +324,14 @@ func TestDurable_ATimedOutHandlerThatThenFailsIsRetried(t *testing.T) {
 			}
 			return nil
 		},
-	}}, WithDeliveryErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error, _ int) {
+	}}, withDeliveryErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error, _ int) {
 		if errors.Is(err, asynxmd.ErrHandlerTimeout) {
 			timedOut <- struct{}{}
 		}
 	}))
 
 	var acked atomic.Bool
-	d.Enqueue(context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	enqueueEvent(d, context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
 	waitFor(t, "ack after the late failure was retried", acked.Load)
 	if attempts.Load() != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts.Load())
@@ -360,7 +352,7 @@ func recv[V any](t *testing.T, ch <-chan V, what string) V {
 }
 
 // final waits for a ticket's delivery to end and returns how it ended.
-func final(t *testing.T, tk Ticket, what string) error {
+func final(t *testing.T, tk asynxmd.Ticket, what string) error {
 	t.Helper()
 	recv(t, tk.Final, what)
 	return tk.Err()
@@ -392,8 +384,8 @@ func ackInto(acked *sync.Map, e asynxmd.Event[int]) func(context.Context) error 
 func TestShutdownDuringRetry_NeverDeliversALaterEventPastTheFailingOne(t *testing.T) {
 	var rec deliveries
 	attempted := make(chan struct{}, 64)
-	d := New[int](&recordingBus{},
-		WithDurableSubs([]DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
+	d := newTestDispatcher[int](&recordingBus{},
+		withDurableSubs([]asynxmd.DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
 			rec.add(e)
 			if e.Version == 1 {
 				attempted <- struct{}{}
@@ -401,13 +393,13 @@ func TestShutdownDuringRetry_NeverDeliversALaterEventPastTheFailingOne(t *testin
 			}
 			return nil
 		}}}),
-		WithRetryBackoff[int](time.Hour, time.Hour),
+		withRetryBackoff[int](time.Hour, time.Hour),
 	)
 
 	var acked sync.Map
 	ctx := context.Background()
-	t1, _ := d.EnqueueTicket(ctx, makeEvent("a", 1), ackInto(&acked, makeEvent("a", 1)))
-	t2, _ := d.EnqueueTicket(ctx, makeEvent("a", 2), ackInto(&acked, makeEvent("a", 2)))
+	t1, _ := enqueueTicket(d, ctx, makeEvent("a", 1), ackInto(&acked, makeEvent("a", 1)))
+	t2, _ := enqueueTicket(d, ctx, makeEvent("a", 2), ackInto(&acked, makeEvent("a", 2)))
 	recv(t, attempted, "first attempt of v1")
 
 	if err := d.Close(context.Background()); err != nil {
@@ -433,16 +425,16 @@ func TestShutdownDuringRetry_NeverDeliversALaterEventPastTheFailingOne(t *testin
 
 func TestInterrupt_ReleasesWaitersWithoutClosingTheDispatcher(t *testing.T) {
 	attempted := make(chan struct{}, 8)
-	d := New[int](&recordingBus{},
-		WithDurableSubs([]DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
+	d := newTestDispatcher[int](&recordingBus{},
+		withDurableSubs([]asynxmd.DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
 			attempted <- struct{}{}
 			return errors.New("poison")
 		}}}),
-		WithRetryBackoff[int](time.Hour, time.Hour),
+		withRetryBackoff[int](time.Hour, time.Hour),
 	)
 	defer d.Close(context.Background())
 
-	tk, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	tk, err := enqueueTicket(d, context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,7 +445,7 @@ func TestInterrupt_ReleasesWaitersWithoutClosingTheDispatcher(t *testing.T) {
 		t.Fatalf("final = %v, want ErrDispatcherClosed", got)
 	}
 	// Still open: a non-durable event is delivered normally.
-	done, err := d.Enqueue(context.Background(), makeEvent("b", 1), nil)
+	done, err := enqueueEvent(d, context.Background(), makeEvent("b", 1), nil)
 	if err != nil {
 		t.Fatalf("Enqueue after Interrupt: %v", err)
 	}
@@ -462,8 +454,8 @@ func TestInterrupt_ReleasesWaitersWithoutClosingTheDispatcher(t *testing.T) {
 
 func TestBusErrorDoesNotSkipTheDurableDelivery(t *testing.T) {
 	var rec deliveries
-	d := New[int](&errBus{err: errors.New("bus down")},
-		WithDurableSubs([]DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
+	d := newTestDispatcher[int](&errBus{err: errors.New("bus down")},
+		withDurableSubs([]asynxmd.DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
 			rec.add(e)
 			return nil
 		}}}),
@@ -471,9 +463,9 @@ func TestBusErrorDoesNotSkipTheDurableDelivery(t *testing.T) {
 	defer d.Close(context.Background())
 
 	var acked sync.Map
-	var last Ticket
+	var last asynxmd.Ticket
 	for v := int64(1); v <= 3; v++ {
-		last, _ = d.EnqueueTicket(context.Background(), makeEvent("a", v), ackInto(&acked, makeEvent("a", v)))
+		last, _ = enqueueTicket(d, context.Background(), makeEvent("a", v), ackInto(&acked, makeEvent("a", v)))
 	}
 	if err := final(t, last, "final"); err != nil {
 		t.Fatalf("final = %v", err)
@@ -488,7 +480,7 @@ func TestExhaustedAttempts_ParkTheAggregateAndLeaveOthersAlone(t *testing.T) {
 	var rec deliveries
 	var mu sync.Mutex
 	var reports []error
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
 		rec.add(e)
 		if e.AggregateID == "a" && e.Version == 1 {
 			attempts.Add(1)
@@ -496,8 +488,8 @@ func TestExhaustedAttempts_ParkTheAggregateAndLeaveOthersAlone(t *testing.T) {
 		}
 		return nil
 	}}},
-		WithMaxAttempts[int](4),
-		WithDeliveryErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error, _ int) {
+		withMaxAttempts[int](4),
+		withDeliveryErrorHandler[int](func(_ context.Context, _ asynxmd.Event[int], err error, _ int) {
 			mu.Lock()
 			reports = append(reports, err)
 			mu.Unlock()
@@ -506,8 +498,8 @@ func TestExhaustedAttempts_ParkTheAggregateAndLeaveOthersAlone(t *testing.T) {
 
 	var acked sync.Map
 	ctx := context.Background()
-	t1, _ := d.EnqueueTicket(ctx, makeEvent("a", 1), ackInto(&acked, makeEvent("a", 1)))
-	t2, _ := d.EnqueueTicket(ctx, makeEvent("a", 2), ackInto(&acked, makeEvent("a", 2)))
+	t1, _ := enqueueTicket(d, ctx, makeEvent("a", 1), ackInto(&acked, makeEvent("a", 1)))
+	t2, _ := enqueueTicket(d, ctx, makeEvent("a", 2), ackInto(&acked, makeEvent("a", 2)))
 
 	if err := final(t, t1, "v1 final"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
 		t.Fatalf("v1 final = %v, want ErrDeliveryParked", err)
@@ -518,7 +510,7 @@ func TestExhaustedAttempts_ParkTheAggregateAndLeaveOthersAlone(t *testing.T) {
 	if n := attempts.Load(); n != 4 {
 		t.Fatalf("attempts = %d, want exactly the cap (4)", n)
 	}
-	if got := d.Halted(); len(got) != 1 || got[0] != "a" {
+	if got := halted(d); len(got) != 1 || got[0] != "a" {
 		t.Fatalf("Halted = %v, want [a]", got)
 	}
 	for _, s := range rec.list() {
@@ -528,13 +520,13 @@ func TestExhaustedAttempts_ParkTheAggregateAndLeaveOthersAlone(t *testing.T) {
 	}
 
 	// A later event of the parked aggregate is not queued either.
-	t3, _ := d.EnqueueTicket(ctx, makeEvent("a", 3), ackInto(&acked, makeEvent("a", 3)))
+	t3, _ := enqueueTicket(d, ctx, makeEvent("a", 3), ackInto(&acked, makeEvent("a", 3)))
 	if err := final(t, t3, "v3 final"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
 		t.Fatalf("v3 final = %v, want ErrDeliveryParked", err)
 	}
 
 	// Another aggregate flows.
-	tb, _ := d.EnqueueTicket(ctx, makeEvent("b", 1), ackInto(&acked, makeEvent("b", 1)))
+	tb, _ := enqueueTicket(d, ctx, makeEvent("b", 1), ackInto(&acked, makeEvent("b", 1)))
 	if err := final(t, tb, "b final"); err != nil {
 		t.Fatalf("aggregate b held back: %v", err)
 	}
@@ -554,20 +546,20 @@ func TestExhaustedAttempts_ParkTheAggregateAndLeaveOthersAlone(t *testing.T) {
 
 func TestResume_LiftsAParkAndDeliversAgain(t *testing.T) {
 	var healthy atomic.Bool
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
 		if healthy.Load() {
 			return nil
 		}
 		return errors.New("down")
-	}}}, WithMaxAttempts[int](2))
+	}}}, withMaxAttempts[int](2))
 
 	var acked sync.Map
-	tk, _ := d.EnqueueTicket(context.Background(), makeEvent("a", 1), ackInto(&acked, makeEvent("a", 1)))
+	tk, _ := enqueueTicket(d, context.Background(), makeEvent("a", 1), ackInto(&acked, makeEvent("a", 1)))
 	final(t, tk, "parked")
 
 	healthy.Store(true)
-	d.Resume("a")
-	tk, err := d.EnqueueRedelivery(context.Background(), makeEvent("a", 1), ackInto(&acked, makeEvent("a", 1)))
+	resume(d, "a")
+	tk, err := enqueueRedelivery(d, context.Background(), makeEvent("a", 1), ackInto(&acked, makeEvent("a", 1)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,23 +569,23 @@ func TestResume_LiftsAParkAndDeliversAgain(t *testing.T) {
 	if _, ok := acked.Load(int64(1)); !ok {
 		t.Fatal("redelivered event was not acknowledged")
 	}
-	if len(d.Halted()) != 0 {
-		t.Fatalf("still halted: %v", d.Halted())
+	if len(halted(d)) != 0 {
+		t.Fatalf("still halted: %v", halted(d))
 	}
 }
 
 func TestDeadLetter_AcceptingTheEventSkipsItAndLetsLaterEventsFlow(t *testing.T) {
 	var rec deliveries
 	var dead atomic.Value
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
 		rec.add(e)
 		if e.Version == 1 {
 			return errors.New("poison")
 		}
 		return nil
 	}}},
-		WithMaxAttempts[int](3),
-		WithDeadLetterHandler[int](func(_ context.Context, e asynxmd.Event[int], err error) error {
+		withMaxAttempts[int](3),
+		withDeadLetterHandler[int](func(_ context.Context, e asynxmd.Event[int], err error) error {
 			dead.Store(e.Version)
 			return nil
 		}),
@@ -601,8 +593,8 @@ func TestDeadLetter_AcceptingTheEventSkipsItAndLetsLaterEventsFlow(t *testing.T)
 
 	var acked sync.Map
 	ctx := context.Background()
-	t1, _ := d.EnqueueTicket(ctx, makeEvent("a", 1), ackInto(&acked, makeEvent("a", 1)))
-	t2, _ := d.EnqueueTicket(ctx, makeEvent("a", 2), ackInto(&acked, makeEvent("a", 2)))
+	t1, _ := enqueueTicket(d, ctx, makeEvent("a", 1), ackInto(&acked, makeEvent("a", 1)))
+	t2, _ := enqueueTicket(d, ctx, makeEvent("a", 2), ackInto(&acked, makeEvent("a", 2)))
 
 	if err := final(t, t1, "v1"); err != nil {
 		t.Fatalf("dead-lettered event final = %v, want nil", err)
@@ -616,21 +608,21 @@ func TestDeadLetter_AcceptingTheEventSkipsItAndLetsLaterEventsFlow(t *testing.T)
 	if _, ok := acked.Load(int64(1)); !ok {
 		t.Fatal("dead-lettered event stayed pending")
 	}
-	if len(d.Halted()) != 0 {
-		t.Fatalf("aggregate parked despite the dead-letter handler: %v", d.Halted())
+	if len(halted(d)) != 0 {
+		t.Fatalf("aggregate parked despite the dead-letter handler: %v", halted(d))
 	}
 }
 
 func TestDeadLetter_RefusalParksTheAggregate(t *testing.T) {
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
 		return errors.New("poison")
 	}}},
-		WithMaxAttempts[int](2),
-		WithDeadLetterHandler[int](func(context.Context, asynxmd.Event[int], error) error {
+		withMaxAttempts[int](2),
+		withDeadLetterHandler[int](func(context.Context, asynxmd.Event[int], error) error {
 			panic("dead-letter store down")
 		}),
 	)
-	tk, _ := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	tk, _ := enqueueTicket(d, context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
 	if err := final(t, tk, "final"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
 		t.Fatalf("final = %v, want ErrDeliveryParked", err)
 	}
@@ -639,7 +631,7 @@ func TestDeadLetter_RefusalParksTheAggregate(t *testing.T) {
 func TestSupersede_LetsTheTombstoneThroughAFailingDelivery(t *testing.T) {
 	var seen deliveries
 	attempted := make(chan struct{}, 8)
-	d := newDurable(t, []DurableSub[int]{{Match: func(name string) bool { return name == "test.event" },
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: func(name string) bool { return name == "test.event" },
 		Handler: func(_ context.Context, e asynxmd.Event[int]) error {
 			seen.add(e)
 			if e.EventName == "test.event" {
@@ -647,26 +639,26 @@ func TestSupersede_LetsTheTombstoneThroughAFailingDelivery(t *testing.T) {
 				return errors.New("poison")
 			}
 			return nil
-		}}}, WithRetryBackoff[int](time.Hour, time.Hour))
+		}}}, withRetryBackoff[int](time.Hour, time.Hour))
 
 	var acked sync.Map
 	ctx := context.Background()
-	d.EnqueueTicket(ctx, makeEvent("a", 1), ackInto(&acked, makeEvent("a", 1)))
-	d.EnqueueTicket(ctx, makeEvent("a", 2), ackInto(&acked, makeEvent("a", 2)))
+	enqueueTicket(d, ctx, makeEvent("a", 1), ackInto(&acked, makeEvent("a", 1)))
+	enqueueTicket(d, ctx, makeEvent("a", 2), ackInto(&acked, makeEvent("a", 2)))
 	recv(t, attempted, "poison attempt")
 
 	d.Supersede("a")
 	tomb := makeEvent("a", 3)
 	tomb.EventName = asynxmd.ForgetEventName
-	tk, err := d.EnqueueForget(ctx, tomb, nil)
+	tk, err := enqueueForget(d, ctx, tomb, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := final(t, tk, "tombstone"); err != nil {
 		t.Fatalf("tombstone final = %v", err)
 	}
-	if len(d.Halted()) != 0 {
-		t.Fatalf("Supersede left the aggregate parked: %v", d.Halted())
+	if len(halted(d)) != 0 {
+		t.Fatalf("Supersede left the aggregate parked: %v", halted(d))
 	}
 	// The tombstone reached a subscriber whose pattern does not match it.
 	found := false
@@ -681,12 +673,12 @@ func TestSupersede_LetsTheTombstoneThroughAFailingDelivery(t *testing.T) {
 }
 
 func TestTombstone_FinalReportsADurableSubscriberThatKeepsFailing(t *testing.T) {
-	d := newDurable(t, []DurableSub[int]{{Match: func(string) bool { return false },
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: func(string) bool { return false },
 		Handler: func(context.Context, asynxmd.Event[int]) error { return errors.New("cannot forget") }}},
-		WithMaxAttempts[int](2))
+		withMaxAttempts[int](2))
 	tomb := makeEvent("a", 2)
 	tomb.EventName = asynxmd.ForgetEventName
-	tk, _ := d.EnqueueForget(context.Background(), tomb, nil)
+	tk, _ := enqueueForget(d, context.Background(), tomb, nil)
 	if err := final(t, tk, "final"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
 		t.Fatalf("final = %v, want ErrDeliveryParked", err)
 	}
@@ -697,10 +689,10 @@ func TestPark_OfAnAggregateWithoutAQueueStillBlocksItsDurableEvents(t *testing.T
 	d := newDurable(t, nil)
 	d.Park("ghost")
 	d.Park("ghost") // idempotent
-	d.Resume("never-parked")
+	resume(d, "never-parked")
 
 	var acked sync.Map
-	tk, _ := d.EnqueueTicket(context.Background(), makeEvent("ghost", 1), ackInto(&acked, makeEvent("ghost", 1)))
+	tk, _ := enqueueTicket(d, context.Background(), makeEvent("ghost", 1), ackInto(&acked, makeEvent("ghost", 1)))
 	if err := final(t, tk, "final"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
 		t.Fatalf("final = %v, want ErrDeliveryParked", err)
 	}
@@ -708,8 +700,8 @@ func TestPark_OfAnAggregateWithoutAQueueStillBlocksItsDurableEvents(t *testing.T
 		t.Fatal("event of a parked aggregate was acknowledged")
 	}
 
-	d.Resume("ghost")
-	tk, _ = d.EnqueueTicket(context.Background(), makeEvent("ghost", 1), ackInto(&acked, makeEvent("ghost", 1)))
+	resume(d, "ghost")
+	tk, _ = enqueueTicket(d, context.Background(), makeEvent("ghost", 1), ackInto(&acked, makeEvent("ghost", 1)))
 	if err := final(t, tk, "final after resume"); err != nil {
 		t.Fatalf("final after resume = %v", err)
 	}
@@ -718,7 +710,7 @@ func TestPark_OfAnAggregateWithoutAQueueStillBlocksItsDurableEvents(t *testing.T
 func TestPark_KeepsLiveOnlyJobsQueuedAndDropsDurableOnes(t *testing.T) {
 	gate := make(chan struct{})
 	started := make(chan struct{}, 1)
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
 		if e.Version == 1 {
 			started <- struct{}{}
 			<-gate
@@ -726,10 +718,10 @@ func TestPark_KeepsLiveOnlyJobsQueuedAndDropsDurableOnes(t *testing.T) {
 		return nil
 	}}})
 	ctx := context.Background()
-	d.EnqueueTicket(ctx, makeEvent("a", 1), func(context.Context) error { return nil })
+	enqueueTicket(d, ctx, makeEvent("a", 1), func(context.Context) error { return nil })
 	recv(t, started, "v1 running")
-	durable, _ := d.EnqueueTicket(ctx, makeEvent("a", 2), func(context.Context) error { return nil })
-	live, _ := d.EnqueueTicket(ctx, makeEvent("a", 3), nil)
+	durable, _ := enqueueTicket(d, ctx, makeEvent("a", 2), func(context.Context) error { return nil })
+	live, _ := enqueueTicket(d, ctx, makeEvent("a", 3), nil)
 
 	d.Park("a")
 	if err := final(t, durable, "durable ticket"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
@@ -741,17 +733,10 @@ func TestPark_KeepsLiveOnlyJobsQueuedAndDropsDurableOnes(t *testing.T) {
 	}
 }
 
-func TestOptions_NonPositiveBoundsAreIgnored(t *testing.T) {
-	d := New[int](nil, WithMaxAttempts[int](0))
-	if d.maxAttempts != defaultMaxAttempts {
-		t.Fatalf("maxAttempts=%d, want the default", d.maxAttempts)
-	}
-}
-
 func TestEnqueueRedelivery_GoesToTheDurableSubscribersOnly(t *testing.T) {
 	bus := &recordingBus{}
 	var seen deliveries
-	d := New[int](bus, WithDurableSubs([]DurableSub[int]{{Match: func(name string) bool { return name == "test.event" },
+	d := newTestDispatcher[int](bus, withDurableSubs([]asynxmd.DurableSub[int]{{Match: func(name string) bool { return name == "test.event" },
 		Handler: func(_ context.Context, e asynxmd.Event[int]) error {
 			seen.add(e)
 			return nil
@@ -761,11 +746,11 @@ func TestEnqueueRedelivery_GoesToTheDurableSubscribersOnly(t *testing.T) {
 	ack := func(context.Context) error { acked.Add(1); return nil }
 	ctx := context.Background()
 
-	tk, _ := d.EnqueueRedelivery(ctx, makeEvent("a", 1), ack)
+	tk, _ := enqueueRedelivery(d, ctx, makeEvent("a", 1), ack)
 	final(t, tk, "event")
 	marker := makeEvent("a", 2)
 	marker.EventName = asynxmd.ForgetEventName
-	tk, _ = d.EnqueueRedelivery(ctx, marker, ack)
+	tk, _ = enqueueRedelivery(d, ctx, marker, ack)
 	final(t, tk, "marker")
 
 	if got := len(bus.snapshot()); got != 0 {
@@ -781,15 +766,15 @@ func TestEnqueueRedelivery_GoesToTheDurableSubscribersOnly(t *testing.T) {
 
 func TestEnqueueForget_IsNeverDeadLettered(t *testing.T) {
 	var dead atomic.Int32
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
 		return errors.New("cannot forget")
-	}}}, WithMaxAttempts[int](2), WithDeadLetterHandler[int](func(context.Context, asynxmd.Event[int], error) error {
+	}}}, withMaxAttempts[int](2), withDeadLetterHandler[int](func(context.Context, asynxmd.Event[int], error) error {
 		dead.Add(1)
 		return nil
 	}))
 	marker := makeEvent("a", 2)
 	marker.EventName = asynxmd.ForgetEventName
-	tk, _ := d.EnqueueForget(context.Background(), marker, func(context.Context) error { return nil })
+	tk, _ := enqueueForget(d, context.Background(), marker, func(context.Context) error { return nil })
 	if err := final(t, tk, "marker"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
 		t.Fatalf("final = %v, want ErrDeliveryParked: a dead letter must not let Forget erase", err)
 	}
@@ -802,15 +787,15 @@ func TestGiveUp_AfterASupersedeDoesNotParkTheAggregateAgain(t *testing.T) {
 	inHandler := make(chan struct{})
 	release := make(chan struct{})
 	var dead atomic.Int32
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
 		inHandler <- struct{}{}
 		<-release
 		return errors.New("down")
-	}}}, WithMaxAttempts[int](1), WithDeadLetterHandler[int](func(context.Context, asynxmd.Event[int], error) error {
+	}}}, withMaxAttempts[int](1), withDeadLetterHandler[int](func(context.Context, asynxmd.Event[int], error) error {
 		dead.Add(1)
 		return nil
 	}))
-	tk, _ := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	tk, _ := enqueueTicket(d, context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
 	recv(t, inHandler, "last attempt running")
 
 	d.Supersede("a") // a Forget abandons the delivery while its last attempt runs
@@ -818,7 +803,7 @@ func TestGiveUp_AfterASupersedeDoesNotParkTheAggregateAgain(t *testing.T) {
 	if err := final(t, tk, "superseded delivery"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
 		t.Fatalf("final = %v", err)
 	}
-	if got := d.Halted(); len(got) != 0 {
+	if got := halted(d); len(got) != 0 {
 		t.Fatalf("halted = %v: the exhausted attempt re-parked an aggregate that was superseded", got)
 	}
 	if dead.Load() != 0 {
@@ -828,16 +813,16 @@ func TestGiveUp_AfterASupersedeDoesNotParkTheAggregateAgain(t *testing.T) {
 
 func TestInterrupt_AfterASupersedeDoesNotParkTheAggregate(t *testing.T) {
 	attempted := make(chan struct{}, 4)
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
 		attempted <- struct{}{}
 		return errors.New("down")
-	}}}, WithRetryBackoff[int](time.Hour, time.Hour), WithMaxAttempts[int](100))
-	tk, _ := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	}}}, withRetryBackoff[int](time.Hour, time.Hour), withMaxAttempts[int](100))
+	tk, _ := enqueueTicket(d, context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
 	recv(t, attempted, "first attempt")
 	d.Supersede("a")
 	final(t, tk, "superseded")
 	d.Interrupt()
-	if got := d.Halted(); len(got) != 0 {
+	if got := halted(d); len(got) != 0 {
 		t.Fatalf("halted = %v", got)
 	}
 }
@@ -845,10 +830,10 @@ func TestInterrupt_AfterASupersedeDoesNotParkTheAggregate(t *testing.T) {
 func TestBusPanicDoesNotSkipTheDurableDelivery(t *testing.T) {
 	var acked atomic.Bool
 	var reported atomic.Int32
-	d := New[int](&panicBus{}, WithDurableSubs([]DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error { return nil }}}),
-		WithPublishErrorHandler[int](func(context.Context, asynxmd.Event[int], error) { reported.Add(1) }))
+	d := newTestDispatcher[int](&panicBus{}, withDurableSubs([]asynxmd.DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error { return nil }}}),
+		withPublishErrorHandler[int](func(context.Context, asynxmd.Event[int], error) { reported.Add(1) }))
 	t.Cleanup(func() { d.Close(context.Background()) })
-	tk, _ := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	tk, _ := enqueueTicket(d, context.Background(), makeEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
 	if err := final(t, tk, "delivery"); err != nil {
 		t.Fatalf("final = %v", err)
 	}
@@ -861,25 +846,15 @@ type panicBus struct{ recordingBus }
 
 func (*panicBus) PublishSync(context.Context, asynxmd.Event[int]) error { panic("bus exploded") }
 
-func TestReportError_ReachesThePublishErrorHandler(t *testing.T) {
-	var got atomic.Pointer[error]
-	d := New[int](nil, WithPublishErrorHandler[int](func(_ context.Context, e asynxmd.Event[int], err error) { got.Store(&err) }))
-	want := errors.New("bad record")
-	d.ReportError(context.Background(), makeEvent("a", 1), want)
-	if p := got.Load(); p == nil || !errors.Is(*p, want) {
-		t.Fatalf("handler got %v", p)
-	}
-}
-
 func TestClose_CalledAgainStillWaitsForTheWorkers(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{})
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error {
 		close(started)
 		<-release
 		return nil
 	}}})
-	d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	enqueueTicket(d, context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
 	recv(t, started, "handler running")
 
 	short, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -899,18 +874,18 @@ func TestClose_CalledAgainStillWaitsForTheWorkers(t *testing.T) {
 }
 
 func TestTicket_UnrunSaysWhyNoHandlerRan(t *testing.T) {
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error { return nil }}})
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(context.Context, asynxmd.Event[int]) error { return nil }}})
 	ctx := context.Background()
 	ack := func(context.Context) error { return nil }
 
-	ran, _ := d.EnqueueTicket(ctx, makeEvent("a", 1), ack)
+	ran, _ := enqueueTicket(d, ctx, makeEvent("a", 1), ack)
 	final(t, ran, "ran")
 	if err := ran.Unrun(); err != nil {
 		t.Fatalf("Unrun = %v for a delivered event", err)
 	}
 
 	d.Park("a")
-	parked, _ := d.EnqueueTicket(ctx, makeEvent("a", 2), ack)
+	parked, _ := enqueueTicket(d, ctx, makeEvent("a", 2), ack)
 	recv(t, parked.Settled, "settled")
 	if err := parked.Unrun(); !errors.Is(err, asynxmd.ErrDeliveryParked) {
 		t.Fatalf("Unrun = %v, want ErrDeliveryParked", err)
@@ -920,7 +895,7 @@ func TestTicket_UnrunSaysWhyNoHandlerRan(t *testing.T) {
 func TestPark_QueuedDurableJobsReportThemselvesUnrun(t *testing.T) {
 	gate := make(chan struct{})
 	started := make(chan struct{}, 1)
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
 		if e.Version == 1 {
 			started <- struct{}{}
 			<-gate
@@ -929,9 +904,9 @@ func TestPark_QueuedDurableJobsReportThemselvesUnrun(t *testing.T) {
 	}}})
 	ctx := context.Background()
 	ack := func(context.Context) error { return nil }
-	d.EnqueueTicket(ctx, makeEvent("a", 1), ack)
+	enqueueTicket(d, ctx, makeEvent("a", 1), ack)
 	recv(t, started, "v1 running")
-	queued, _ := d.EnqueueTicket(ctx, makeEvent("a", 2), ack)
+	queued, _ := enqueueTicket(d, ctx, makeEvent("a", 2), ack)
 
 	d.Park("a")
 	recv(t, queued.Settled, "settled")
@@ -945,18 +920,18 @@ func TestDeliveryErrorHandlerPanicDoesNotReleaseTheHold(t *testing.T) {
 	var rec deliveries
 	var failures atomic.Int32
 	failures.Store(2)
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
 		rec.add(e)
 		if e.Version == 1 && failures.Add(-1) >= 0 {
 			return errors.New("down")
 		}
 		return nil
-	}}}, WithDeliveryErrorHandler[int](func(context.Context, asynxmd.Event[int], error, int) { panic("boom") }))
+	}}}, withDeliveryErrorHandler[int](func(context.Context, asynxmd.Event[int], error, int) { panic("boom") }))
 
 	ctx := context.Background()
 	ack := func(context.Context) error { return nil }
-	d.EnqueueTicket(ctx, makeEvent("a", 1), ack)
-	last, _ := d.EnqueueTicket(ctx, makeEvent("a", 2), ack)
+	enqueueTicket(d, ctx, makeEvent("a", 1), ack)
+	last, _ := enqueueTicket(d, ctx, makeEvent("a", 2), ack)
 	if err := final(t, last, "v2"); err != nil {
 		t.Fatalf("v2 = %v", err)
 	}
@@ -967,21 +942,21 @@ func TestDeliveryErrorHandlerPanicDoesNotReleaseTheHold(t *testing.T) {
 }
 
 func TestPublishErrorHandlerPanicDoesNotCrashTheWorker(t *testing.T) {
-	d := New[int](&errBus{err: errors.New("down")}, WithPublishErrorHandler[int](func(context.Context, asynxmd.Event[int], error) { panic("boom") }))
+	d := newTestDispatcher[int](&errBus{err: errors.New("down")}, withPublishErrorHandler[int](func(context.Context, asynxmd.Event[int], error) { panic("boom") }))
 	t.Cleanup(func() { d.Close(context.Background()) })
-	done, err := d.Enqueue(context.Background(), makeEvent("a", 1), nil)
+	done, err := enqueueEvent(d, context.Background(), makeEvent("a", 1), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	recv(t, done, "settled")
-	done, _ = d.Enqueue(context.Background(), makeEvent("a", 2), nil)
+	done, _ = enqueueEvent(d, context.Background(), makeEvent("a", 2), nil)
 	recv(t, done, "the worker survives")
 }
 
 func TestHandlerContext_MarksItsAggregateAndEndsWithTheDelivery(t *testing.T) {
 	var got context.Context
 	var d, other *Dispatcher[int]
-	d = newDurable(t, []DurableSub[int]{{Match: always, Handler: func(ctx context.Context, e asynxmd.Event[int]) error {
+	d = newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(ctx context.Context, e asynxmd.Event[int]) error {
 		got = ctx
 		if other.InHandler(ctx, "a") {
 			t.Error("another dispatcher's InHandler is true for this handler's context: same ID, different instance")
@@ -992,7 +967,7 @@ func TestHandlerContext_MarksItsAggregateAndEndsWithTheDelivery(t *testing.T) {
 		return nil
 	}}})
 	other = newDurable(t, nil)
-	tk, _ := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	tk, _ := enqueueTicket(d, context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
 	final(t, tk, "final")
 	if got.Err() == nil {
 		t.Fatal("handler context still live after the delivery ended")
@@ -1004,12 +979,12 @@ func TestHandlerContext_MarksItsAggregateAndEndsWithTheDelivery(t *testing.T) {
 
 func TestClose_GivingUpCancelsRunningHandlers(t *testing.T) {
 	started := make(chan context.Context, 1)
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(ctx context.Context, _ asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(ctx context.Context, _ asynxmd.Event[int]) error {
 		started <- ctx
 		<-ctx.Done()
 		return ctx.Err()
-	}}}, WithMaxAttempts[int](1))
-	d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	}}}, withMaxAttempts[int](1))
+	enqueueTicket(d, context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
 	hctx := recv(t, started, "handler running")
 
 	short, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -1042,23 +1017,23 @@ func (b *gateBus) PublishSync(ctx context.Context, e asynxmd.Event[int]) error {
 func TestSupersede_AfterThePopStillSkipsTheSupersededJob(t *testing.T) {
 	bus := &gateBus{entered: make(chan struct{}), release: make(chan struct{})}
 	var oldRuns atomic.Int32
-	d := New[int](bus, WithDurableSubs([]DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
+	d := newTestDispatcher[int](bus, withDurableSubs([]asynxmd.DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
 		if e.EventName != asynxmd.ForgetEventName {
 			oldRuns.Add(1)
 			return errors.New("down")
 		}
 		return nil
-	}}}), WithRetryBackoff[int](50*time.Millisecond, 50*time.Millisecond), WithMaxAttempts[int](5))
+	}}}), withRetryBackoff[int](50*time.Millisecond, 50*time.Millisecond), withMaxAttempts[int](5))
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	ctx := context.Background()
-	d.EnqueueTicket(ctx, makeEvent("a", 1), func(context.Context) error { return nil })
+	enqueueTicket(d, ctx, makeEvent("a", 1), func(context.Context) error { return nil })
 	recv(t, bus.entered, "v1 popped and publishing")
 
 	d.Supersede("a")
 	marker := makeEvent("a", 2)
 	marker.EventName = asynxmd.ForgetEventName
-	tk, _ := d.EnqueueForget(ctx, marker, func(context.Context) error { return nil })
+	tk, _ := enqueueForget(d, ctx, marker, func(context.Context) error { return nil })
 	close(bus.release)
 
 	start := time.Now()
@@ -1068,7 +1043,7 @@ func TestSupersede_AfterThePopStillSkipsTheSupersededJob(t *testing.T) {
 	if time.Since(start) > 40*time.Millisecond || oldRuns.Load() != 0 {
 		t.Fatalf("the superseded job ran %d attempts and held the marker back %v", oldRuns.Load(), time.Since(start))
 	}
-	if got := d.Halted(); len(got) != 0 {
+	if got := halted(d); len(got) != 0 {
 		t.Fatalf("halted = %v", got)
 	}
 }
@@ -1079,25 +1054,25 @@ func TestGiveUp_TheAggregateIsParkedBeforeTheErrorHandlerIsTold(t *testing.T) {
 	var d *Dispatcher[int]
 	parkedWhenTold := make(chan []string, 1)
 	d = newDurable(t,
-		[]DurableSub[int]{{Match: always, Handler: func(
+		[]asynxmd.DurableSub[int]{{Match: always, Handler: func(
 			context.Context,
 			asynxmd.Event[int],
 		) error {
 			return errors.New("down")
 		}}},
-		WithMaxAttempts[int](1),
-		WithDeliveryErrorHandler[int](func(
+		withMaxAttempts[int](1),
+		withDeliveryErrorHandler[int](func(
 			_ context.Context,
 			_ asynxmd.Event[int],
 			err error,
 			_ int,
 		) {
 			if errors.Is(err, asynxmd.ErrDeliveryParked) {
-				parkedWhenTold <- d.Halted()
+				parkedWhenTold <- halted(d)
 			}
 		}))
 
-	d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	enqueueTicket(d, context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
 	if got := recv(t, parkedWhenTold, "the park to be reported"); !slices.Equal(got, []string{"a"}) {
 		t.Fatalf("parked aggregates when the handler was told = %v, want [a]", got)
 	}
@@ -1107,21 +1082,21 @@ func TestAckFailure_TheAggregateIsParkedBeforeThePublishErrorHandlerIsTold(t *te
 	var d *Dispatcher[int]
 	parkedWhenTold := make(chan []string, 1)
 	d = newDurable(t,
-		[]DurableSub[int]{{Match: always, Handler: func(
+		[]asynxmd.DurableSub[int]{{Match: always, Handler: func(
 			context.Context,
 			asynxmd.Event[int],
 		) error {
 			return nil
 		}}},
-		WithPublishErrorHandler[int](func(
+		withPublishErrorHandler[int](func(
 			context.Context,
 			asynxmd.Event[int],
 			error,
 		) {
-			parkedWhenTold <- d.Halted()
+			parkedWhenTold <- halted(d)
 		}))
 
-	d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return errors.New("store down") })
+	enqueueTicket(d, context.Background(), makeEvent("a", 1), func(context.Context) error { return errors.New("store down") })
 	if got := recv(t, parkedWhenTold, "the ack failure to be reported"); !slices.Equal(got, []string{"a"}) {
 		t.Fatalf("parked aggregates when the handler was told = %v, want [a]", got)
 	}
@@ -1129,11 +1104,11 @@ func TestAckFailure_TheAggregateIsParkedBeforeThePublishErrorHandlerIsTold(t *te
 
 func TestResume_ReportsWhetherItLiftedAPark(t *testing.T) {
 	d := newDurable(t, nil)
-	if d.Resume("a") {
+	if resume(d, "a") {
 		t.Fatal("Resume of an aggregate that is not parked reported a lift")
 	}
 	d.Park("a")
-	if !d.Resume("a") || d.Resume("a") {
+	if !resume(d, "a") || resume(d, "a") {
 		t.Fatal("Resume must report the lift once")
 	}
 }
@@ -1143,7 +1118,7 @@ func TestResumeUndelivered_ReturnsWhatTheParkLeftUndeliveredAndForgetsIt(t *test
 	if lifted, undelivered := d.ResumeUndelivered("a", 1); lifted || undelivered != nil {
 		t.Fatalf("not parked: got %v, %v", lifted, undelivered)
 	}
-	d.ParkUndelivered("a", []int64{7, 3, 5})
+	d.Park("a", 7, 3, 5)
 	lifted, undelivered := d.ResumeUndelivered("a", d.Parks()["a"])
 	if !lifted || !slices.Equal(undelivered, []int64{3, 5, 7}) {
 		t.Fatalf("ResumeUndelivered = %v, %v; want true, [3 5 7]", lifted, undelivered)
@@ -1160,13 +1135,13 @@ func TestResumeUndelivered_LeavesAParkImposedAgainSinceItWasListed(t *testing.T)
 	d := newDurable(t, nil)
 	d.Park("a")
 	listed := d.Parks()["a"]
-	d.Resume("a")
-	d.ParkUndelivered("a", []int64{4})
+	resume(d, "a")
+	d.Park("a", 4)
 
 	if lifted, _ := d.ResumeUndelivered("a", listed); lifted {
 		t.Fatal("lifted a park other than the one listed")
 	}
-	if got := d.Halted(); !slices.Equal(got, []string{"a"}) {
+	if got := halted(d); !slices.Equal(got, []string{"a"}) {
 		t.Fatalf("halted = %v, want a still parked", got)
 	}
 	if err := d.Unrun("a", 4); !errors.Is(err, asynxmd.ErrDeliveryParked) {
@@ -1181,14 +1156,14 @@ func TestResumeUndelivered_LeavesAParkImposedAgainSinceItWasListed(t *testing.T)
 func TestAckFailure_ParksTheAggregateSoALaterEventDoesNotOvertake(t *testing.T) {
 	var rec deliveries
 	var reported atomic.Int32
-	d := newDurable(t, []DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
+	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(_ context.Context, e asynxmd.Event[int]) error {
 		rec.add(e)
 		return nil
-	}}}, WithPublishErrorHandler[int](func(context.Context, asynxmd.Event[int], error) { reported.Add(1) }))
+	}}}, withPublishErrorHandler[int](func(context.Context, asynxmd.Event[int], error) { reported.Add(1) }))
 
 	ctx := context.Background()
-	t1, _ := d.EnqueueTicket(ctx, makeEvent("a", 1), func(context.Context) error { return errors.New("store down") })
-	t2, _ := d.EnqueueTicket(ctx, makeEvent("a", 2), func(context.Context) error { return nil })
+	t1, _ := enqueueTicket(d, ctx, makeEvent("a", 1), func(context.Context) error { return errors.New("store down") })
+	t2, _ := enqueueTicket(d, ctx, makeEvent("a", 2), func(context.Context) error { return nil })
 	if err := final(t, t1, "v1"); err == nil {
 		t.Fatal("v1 ended as acknowledged")
 	}
@@ -1198,7 +1173,7 @@ func TestAckFailure_ParksTheAggregateSoALaterEventDoesNotOvertake(t *testing.T) 
 	if got := rec.list(); !slices.Equal(got, []string{"a/1"}) {
 		t.Fatalf("delivered %v, want only v1", got)
 	}
-	if got := d.Halted(); !slices.Equal(got, []string{"a"}) || reported.Load() != 1 {
+	if got := halted(d); !slices.Equal(got, []string{"a"}) || reported.Load() != 1 {
 		t.Fatalf("halted=%v reported=%d", got, reported.Load())
 	}
 }
@@ -1231,7 +1206,7 @@ func TestDurable_FailuresNameTheSubscriberAndDeadLetterGetsThemAll(t *testing.T)
 	var mu sync.Mutex
 	var reported []error
 	deadLettered := make(chan error, 1)
-	d := newDurable(t, []DurableSub[int]{
+	d := newDurable(t, []asynxmd.DurableSub[int]{
 		{Name: "OrderUpdated#1", Match: always, Handler: func(
 			context.Context,
 			asynxmd.Event[int],
@@ -1245,8 +1220,8 @@ func TestDurable_FailuresNameTheSubscriberAndDeadLetterGetsThemAll(t *testing.T)
 			return search
 		}},
 	},
-		WithMaxAttempts[int](2),
-		WithDeliveryErrorHandler[int](func(
+		withMaxAttempts[int](2),
+		withDeliveryErrorHandler[int](func(
 			_ context.Context,
 			_ asynxmd.Event[int],
 			err error,
@@ -1256,7 +1231,7 @@ func TestDurable_FailuresNameTheSubscriberAndDeadLetterGetsThemAll(t *testing.T)
 			reported = append(reported, err)
 			mu.Unlock()
 		}),
-		WithDeadLetterHandler[int](func(
+		withDeadLetterHandler[int](func(
 			_ context.Context,
 			_ asynxmd.Event[int],
 			err error,
@@ -1266,7 +1241,7 @@ func TestDurable_FailuresNameTheSubscriberAndDeadLetterGetsThemAll(t *testing.T)
 		}),
 	)
 
-	ticket, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	ticket, err := enqueueTicket(d, context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1309,7 +1284,7 @@ func unjoin(err error) []error {
 func TestDurable_ATimeoutNamesItsSubscriber(t *testing.T) {
 	release := make(chan struct{})
 	reported := make(chan error, 4)
-	d := newDurable(t, []DurableSub[int]{{
+	d := newDurable(t, []asynxmd.DurableSub[int]{{
 		Name:    "slow#1",
 		Match:   always,
 		Timeout: time.Millisecond,
@@ -1320,7 +1295,7 @@ func TestDurable_ATimeoutNamesItsSubscriber(t *testing.T) {
 			<-release
 			return nil
 		},
-	}}, WithDeliveryErrorHandler[int](func(
+	}}, withDeliveryErrorHandler[int](func(
 		_ context.Context,
 		_ asynxmd.Event[int],
 		err error,
@@ -1329,7 +1304,7 @@ func TestDurable_ATimeoutNamesItsSubscriber(t *testing.T) {
 		reported <- err
 	}))
 
-	ticket, err := d.EnqueueTicket(context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
+	ticket, err := enqueueTicket(d, context.Background(), makeEvent("a", 1), func(context.Context) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1345,7 +1320,7 @@ func TestDurable_ATimeoutNamesItsSubscriber(t *testing.T) {
 }
 
 func TestInterrupted_ClosesWhenTheDispatcherIsInterrupted(t *testing.T) {
-	d := New[int](&recordingBus{})
+	d := newTestDispatcher[int](&recordingBus{})
 	defer d.Close(context.Background())
 
 	select {

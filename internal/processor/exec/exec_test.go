@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -169,7 +171,7 @@ func TestExecute_DispatchCalledAsync(t *testing.T) {
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 
 	trackBus := &recordingBus[order]{}
-	d := dispatcher.New[order](trackBus)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: trackBus})
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(es, d)
@@ -274,7 +276,7 @@ func TestExecute_WaitHandlersTrue_HandlersDoneBeforeReturn(t *testing.T) {
 			handlerDone.Store(true)
 		},
 	}
-	d := dispatcher.New[order](callbackBus)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: callbackBus})
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(es, d)
@@ -296,7 +298,7 @@ func TestExecute_WaitHandlersFalse_DispatchCalled(t *testing.T) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	trackBus := &recordingBus[order]{}
-	d := dispatcher.New[order](trackBus)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: trackBus})
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(es, d)
@@ -349,13 +351,13 @@ func TestPublishErrorHandler_CalledOnPublishError(t *testing.T) {
 	var gotErr error
 	called := false
 
-	d := dispatcher.New[order](errBus, dispatcher.WithPublishErrorHandler[order](func(_ context.Context, event asynxmd.Event[order], err error) {
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: errBus, OnPublishError: func(_ context.Context, event asynxmd.Event[order], err error) {
 		mu.Lock()
 		defer mu.Unlock()
 		gotEvent = event
 		gotErr = err
 		called = true
-	}))
+	}})
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(es, d)
@@ -388,9 +390,9 @@ func TestPublishErrorHandler_NotCalledOnSuccess(t *testing.T) {
 	successBus := &recordingBus[order]{}
 
 	called := false
-	d := dispatcher.New[order](successBus, dispatcher.WithPublishErrorHandler[order](func(_ context.Context, _ asynxmd.Event[order], _ error) {
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: successBus, OnPublishError: func(_ context.Context, _ asynxmd.Event[order], _ error) {
 		called = true
-	}))
+	}})
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(es, d)
@@ -416,7 +418,7 @@ func TestPublishErrorHandler_NilHandlerDoesNotPanic(t *testing.T) {
 		publishSyncErr: errors.New("bus error"),
 	}
 
-	d := dispatcher.New[order](errBus) // no error handler — must not panic
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: errBus}) // no error handler — must not panic
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(es, d)
@@ -469,9 +471,13 @@ func newEnvOn(t *testing.T, s store.Memory, opts ...Opt[order]) (*CommandExecuto
 	ss := store.NewSnapshots()
 	es := eventstore.New[order](s, ss, nil, 1, nil)
 	b := bus.NewChannelBus[order]()
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	return New(es, d, opts...), s, ss, d, b
+}
+
+func parked(d asynxmd.Dispatcher[order]) []string {
+	return slices.Sorted(maps.Keys(d.Parks()))
 }
 
 func update(id string, total float64) mocks.UpdateOrderCmd {
@@ -1009,7 +1015,7 @@ func TestExecute_EnqueueFailureAfterCommitParksTheAggregate(t *testing.T) {
 	if !errors.Is(err, asynxmd.ErrPipelineFailed) || evt.Version != 1 {
 		t.Fatalf("Execute = v%d, %v; want the committed v1 with ErrPipelineFailed", evt.Version, err)
 	}
-	if got := d.Halted(); len(got) != 1 || got[0] != "agg" {
+	if got := parked(d); len(got) != 1 || got[0] != "agg" {
 		t.Fatalf("halted = %v, want [agg]", got)
 	}
 }

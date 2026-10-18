@@ -12,6 +12,7 @@ import (
 	"github.com/char2cs/asynx/internal/processor/exec"
 	"github.com/char2cs/asynx/internal/processor/models"
 	"github.com/char2cs/asynx/internal/processor/pool"
+	asynxmd "github.com/char2cs/asynx/models"
 	"github.com/char2cs/asynx/store"
 )
 
@@ -19,7 +20,7 @@ func BenchmarkPool_Send_SingleShard(b *testing.B) {
 	s := store.New()
 	bu := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](bu)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: bu})
 	defer d.Close(context.Background())
 	executor := exec.New(es, d)
 
@@ -50,7 +51,7 @@ func BenchmarkPool_Send_MultiShard(b *testing.B) {
 			s := store.New()
 			bu := bus.NewChannelBus[order]()
 			es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-			d := dispatcher.New[order](bu)
+			d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: bu})
 			defer d.Close(context.Background())
 			executor := exec.New(es, d)
 
@@ -83,7 +84,7 @@ func BenchmarkPool_Send_Parallel(b *testing.B) {
 	s := store.New()
 	bu := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](bu)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: bu})
 	defer d.Close(context.Background())
 	executor := exec.New(es, d)
 
