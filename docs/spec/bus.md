@@ -6,6 +6,8 @@ The `bus` package provides the default in-process event dispatcher for Asynx. It
 
 The Bus interface (`Bus[T]`) is defined in `core` — the bus package provides the concrete in-process implementation. Developers can replace it with an external broker (Kafka, NATS, Redis Streams) for multi-node deployments by implementing the `Bus[T]` interface and passing it to `WithBus()` on the builder.
 
+The bus is the transport for **live** subscribers only (`Subscribe`, `Listen`). Durable subscribers (`WithSubscriber`) are not registered on the bus: the dispatcher runs them, with retry and parking, and uses the bus's `PublishSync` for the live path. Replacing the bus does not change durable delivery; replacing the dispatcher (`WithDispatcher`) does. See [dispatcher.md](./dispatcher.md). The library ships only the in-memory bus and the in-memory dispatcher; it contains no broker clients.
+
 The default bus is suitable for single-node applications and tests. For multi-node deployments, developers implement or use an external bus that provides durable, cross-node event delivery.
 
 ## Default In-Process Bus Implementation

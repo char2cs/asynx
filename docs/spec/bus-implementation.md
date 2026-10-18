@@ -6,6 +6,8 @@ This specification details the **internal architecture and mechanics** of the bu
 
 The bus is the event dispatcher that connects the processor (which publishes events) to projections (which subscribe to events). The bus interface is pluggable, but this spec documents the default `ChannelBus[T]` implementation suitable for single-node applications.
 
+The bus does not own ordering, retry or parking of durable deliveries. The dispatcher (see [dispatcher.md](./dispatcher.md)) does, and it is handed the bus as its live-subscriber transport: it calls `PublishSync` for `DispatchEvent` and `DispatchTombstone` requests and never for `DispatchRedelivery`.
+
 **Key Design Principles:**
 - **Lazy pattern compilation** — patterns compiled on first use, cached
 - **Recover & continue** — handler panic doesn't block other handlers

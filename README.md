@@ -308,6 +308,7 @@ func upcastOrderV1toV2(ctx context.Context, eventName string, patches []byte) ([
 | `WithSubscriber(pattern, handler, opts...)` | Durable subscriber; handler returns `error`, failures retry with backoff (at-least-once) | — | No |
 | `WithDeliveryErrorHandler(fn)` / `WithDeliveryRetry(initial, max)` | Observe failed durable deliveries / tune retry backoff | silent / 100ms→30s | No |
 | `WithDeliveryMaxAttempts(n)` / `WithDeadLetterHandler(fn)` | Stop retrying after `n` attempts; dead-letter or park the aggregate | 20 / park | No |
+| `WithDispatcher(factory)` | Replace the delivery dispatcher ([contract](./docs/spec/dispatcher.md)) | In-memory dispatcher | No |
 | `WithSnapshotErrorHandler(fn)` | Observe failed (non-fatal) snapshot writes | Silently dropped | No |
 
 **Configure concurrency:**
@@ -511,6 +512,12 @@ ax, _ := asynx.New[Order]().
 Both in-memory stores also support one-shot failure injection for tests via `SetError(id, err)`. The in-memory event store additionally offers `Append`/`Delete` helpers for seeding test data.
 
 See [docs/spec/guarantees.md](./docs/spec/guarantees.md#store-contract) for the `Store` contract and SQL schema, and [docs/spec/store.md](./docs/spec/store.md) for stream semantics and the `SnapshotStore` contract.
+
+## Pluggable Dispatcher and Inspect
+
+Durable delivery (per-aggregate ordering, retry with backoff, dead-lettering, parking) is done by a dispatcher, a public interface `models.Dispatcher[T]` with a written ten-rule contract. `Builder.WithDispatcher(factory)` replaces it; `dispatchertest.Run` checks an implementation against the contract, as `storetest.Run` does for stores. **The library ships only the in-memory implementation and no broker clients**; a Kafka or NATS dispatcher is yours to write. It is still single-process: a custom dispatcher changes where handlers run, not who may write.
+
+To see why an aggregate is parked, ask: `ax.InspectDelivery("order-42")` returns a `models.DeliveryStatus` with `Parked`, `Generation`, `Cause` and `Undelivered`. Details: [docs/spec/dispatcher.md](./docs/spec/dispatcher.md).
 
 ## Guarantees
 

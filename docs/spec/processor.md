@@ -14,6 +14,8 @@ The `processor` package owns the sharded worker pool, shard routing, and the `Se
 
 The processor depends on `core`, `eventstore`, and `bus`.
 
+Event delivery after the commit goes through a `models.Dispatcher[T]`: the processor enqueues each committed event (`DispatchEvent`), each tombstone (`DispatchTombstone`) and each recovered or resumed log entry (`DispatchRedelivery`). The dispatcher owns per-aggregate ordering, durable retry, dead-lettering and parking; the processor keeps the aggregate lock, the delivery log and the recovery/resume orchestration (`Build()` recovery and `ResumeDeliveries` read the log and enqueue redeliveries under the aggregate's lock). The implementation is chosen with `Builder.WithDispatcher`; the contract is in [dispatcher.md](./dispatcher.md).
+
 ---
 
 ## Command Execution Pipeline

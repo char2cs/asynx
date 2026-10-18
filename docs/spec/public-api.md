@@ -39,6 +39,7 @@ type Asynx[T any] interface {
     // Durable delivery
     PausedAggregates() []string
     ResumeDeliveries(ctx context.Context) error
+    InspectDelivery(aggregateID string) models.DeliveryStatus
 
     // Lifecycle
     Shutdown(ctx context.Context) error
@@ -53,6 +54,7 @@ ax, err := asynx.New[Order]().
     WithEventStore(store).
     WithSnapshotStore(snapshotStore).
     WithBus(bus).
+    WithDispatcher(factory). // optional; the in-memory dispatcher is the default
     Build()  // Returns Asynx[T]
 ```
 
@@ -74,6 +76,8 @@ ax, err := asynx.New[Order]().
 ```
 
 See [Write-Path Guarantees](guarantees.md#durable-delivery) for retry, parking, dead-lettering and the deletion marker.
+
+`WithDispatcher(models.DispatcherFactory[T])` replaces the component that orders, retries and parks durable deliveries. The library ships only the in-memory implementation; see [dispatcher.md](./dispatcher.md) for the contract a replacement must carry. A factory error fails `Build`.
 
 ---
 
@@ -296,6 +300,30 @@ err := ax.Replay(ctx, "order_123", 0, 0, func(ctx context.Context, e models.Even
 
 ---
 
+### Delivery State
+
+#### `InspectDelivery(aggregateID string) models.DeliveryStatus`
+
+**Defined in:** `processor` over the dispatcher
+**Purpose:** Read-only view of an aggregate's durable delivery state, answering why it is parked.
+
+```go
+st := ax.InspectDelivery("order-42")
+if st.Parked {
+    log.Printf("order-42 parked (generation %d): %v; undelivered versions %v",
+        st.Generation, st.Cause, st.Undelivered)
+}
+```
+
+- `Parked` — the aggregate's durable deliveries are parked.
+- `Generation` — changes each time a park is imposed.
+- `Cause` — the error that parked it (an error matching `ErrDeliveryParked` with the last handler error and attempt count, a failed ack, `ErrDispatcherClosed`, or the error a `Park` call carried); nil when not parked.
+- `Undelivered` — ascending versions that no handler took while parked.
+
+An aggregate the dispatcher knows nothing about returns the zero status. `PausedAggregates()` lists the parked aggregates and `ResumeDeliveries(ctx)` lifts the parks and redelivers the pending events in order. See [dispatcher.md](./dispatcher.md#inspect).
+
+---
+
 ### Test Synchronization
 
 #### `WaitPublish()`
@@ -318,6 +346,7 @@ err := ax.Replay(ctx, "order_123", 0, 0, func(ctx context.Context, e models.Even
 | `Subscribe()` / `Unsubscribe()` / `OnForget()` | `bus` | — |
 | `Listen()` / `SubscribeWait()` | `asynx` over `bus` | — |
 | `Replay()` | `eventstore` | `replayer` |
+| `InspectDelivery()` / `PausedAggregates()` / `ResumeDeliveries()` | `processor` | `dispatcher` |
 | `WaitPublish()` | `processor` + `bus` | — |
 
 **Developer view:** None of this is visible. The API is unified on `Asynx[T]`.
