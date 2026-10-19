@@ -6031,3 +6031,2147 @@ func TestViews_ParksAndResume(t *testing.T) {
 		t.Fatal("resume must lift a park once, and an open channel is not closed")
 	}
 }
+
+// Event a2 comes after a1 finally succeeded, which took 3 failed attempts,
+// and another aggregate is not held back by a's failure.
+func TestDurable_FailedHandlerRetriesAndHoldsBackLaterEventsOfTheAggregate(t *testing.T) {
+	var mu sync.Mutex
+	var order []string
+	var failuresLeft atomic.Int32
+	failuresLeft.Store(3)
+
+	var reports []int
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
+		_ context.Context,
+		e asynxmd.Event[int],
+	) error {
+		mu.Lock()
+		defer mu.Unlock()
+		isFirstOfA := e.AggregateID == "a" && e.Version == 1
+		if isFirstOfA && failuresLeft.Add(-1) >= 0 {
+			order = append(order, "a1-fail")
+			return errors.New("transient")
+		}
+		order = append(order, e.AggregateID+string(rune('0'+e.Version)))
+		return nil
+	}}}, withDeliveryErrorHandler[int](func(
+		_ context.Context,
+		_ asynxmd.Event[int],
+		_ error,
+		attempt int,
+	) {
+		mu.Lock()
+		reports = append(reports, attempt)
+		mu.Unlock()
+	}))
+
+	var acks atomic.Int32
+	ack := func(context.Context) error { acks.Add(1); return nil }
+	ctx := context.Background()
+	enqueueDeliveryEvent(ctx, d, makeDeliveryEvent("a", 1), ack)
+	enqueueDeliveryEvent(ctx, d, makeDeliveryEvent("a", 2), ack)
+	doneB, _ := enqueueDeliveryEvent(ctx, d, makeDeliveryEvent("b", 1), ack)
+
+	<-doneB
+	waitForDelivery(t, "all three deliveries acked", func() bool { return acks.Load() == 3 })
+
+	mu.Lock()
+	defer mu.Unlock()
+	idx := map[string]int{}
+	for i, name := range order {
+		idx[name] = i
+	}
+	a1, ok1 := idx["a1"]
+	a2, ok2 := idx["a2"]
+	deliveredInOrder := ok1 && ok2 && a2 >= a1
+	if !deliveredInOrder {
+		t.Fatalf("a2 was delivered before a1 succeeded: %v", order)
+	}
+	if slices.ContainsFunc(order[:a1], deliveredBeforeA1) {
+		t.Fatalf("unexpected delivery before a1 succeeded: %v", order)
+	}
+	if !slices.Equal(reports, []int{1, 2, 3}) {
+		t.Fatalf("delivery error reports = %v, want attempts [1 2 3]", reports)
+	}
+}
+
+func TestDurable_DoneClosesAfterTheFirstAttemptEvenWhenItFails(t *testing.T) {
+	release := make(chan struct{})
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		select {
+		case <-release:
+			return nil
+		default:
+			return errors.New("not yet")
+		}
+	}}})
+
+	var acked atomic.Bool
+	done, err := enqueueDeliveryEvent(context.Background(), d, makeDeliveryEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("done did not close after the first (failed) attempt")
+	}
+	if acked.Load() {
+		t.Fatal("acked a delivery whose handler failed")
+	}
+
+	close(release)
+	waitForDelivery(t, "ack after the retry succeeded", acked.Load)
+}
+
+func TestDurable_PanicIsAFailureThatRetriesAndReachesThePanicHandler(t *testing.T) {
+	var attempts, panics atomic.Int32
+	var lastErr atomic.Value
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		if attempts.Add(1) == 1 {
+			panic("boom")
+		}
+		return nil
+	}}},
+		withDeliveryPanicHandler[int](func(
+			context.Context,
+			asynxmd.Event[int],
+			any,
+		) {
+			panics.Add(1)
+		}),
+		withDeliveryErrorHandler[int](func(
+			_ context.Context,
+			_ asynxmd.Event[int],
+			err error,
+			_ int,
+		) {
+			lastErr.Store(err)
+		}),
+	)
+
+	var acked atomic.Bool
+	enqueueDeliveryEvent(context.Background(), d, makeDeliveryEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	waitForDelivery(t, "ack after panic then success", acked.Load)
+
+	if panics.Load() != 1 {
+		t.Errorf("panic handler calls = %d, want 1", panics.Load())
+	}
+	if err, _ := lastErr.Load().(error); !errors.Is(err, asynxmd.ErrHandlerPanic) {
+		t.Errorf("reported error = %v, want ErrHandlerPanic", err)
+	}
+}
+
+func TestDurable_APanickingPanicHandlerCannotKillTheWorker(t *testing.T) {
+	var attempts atomic.Int32
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		if attempts.Add(1) == 1 {
+			panic("boom")
+		}
+		return nil
+	}}}, withDeliveryPanicHandler[int](func(
+		context.Context,
+		asynxmd.Event[int],
+		any,
+	) {
+		panic("handler of handlers")
+	}))
+
+	var acked atomic.Bool
+	enqueueDeliveryEvent(context.Background(), d, makeDeliveryEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	waitForDelivery(t, "recovery from a panicking panic handler", acked.Load)
+}
+
+// The timeout is reported, and the delivery still waits for a handler that
+// outlives it.
+func TestDurable_TimeoutIsReportedButTheHandlerIsStillWaitedFor(t *testing.T) {
+	var running, overlapped atomic.Bool
+	var timeouts atomic.Int32
+	timedOut := make(chan struct{}, 8)
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{{
+		Match:   alwaysDelivery,
+		Timeout: 10 * time.Millisecond,
+		Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			if !running.CompareAndSwap(false, true) {
+				overlapped.Store(true)
+			}
+			<-timedOut
+			running.Store(false)
+			return nil
+		},
+	}}, withDeliveryErrorHandler[int](func(
+		_ context.Context,
+		_ asynxmd.Event[int],
+		err error,
+		_ int,
+	) {
+		if errors.Is(err, asynxmd.ErrHandlerTimeout) {
+			timeouts.Add(1)
+			timedOut <- struct{}{}
+		}
+	}))
+
+	var acks atomic.Int32
+	ack := func(context.Context) error { acks.Add(1); return nil }
+	enqueueDeliveryEvent(context.Background(), d, makeDeliveryEvent("a", 1), ack)
+	enqueueDeliveryEvent(context.Background(), d, makeDeliveryEvent("a", 2), ack)
+	waitForDelivery(t, "both acked", func() bool { return acks.Load() == 2 })
+
+	if overlapped.Load() {
+		t.Error("the next event's handler started while the timed-out one was still running")
+	}
+	if timeouts.Load() != 2 {
+		t.Errorf("timeouts reported = %d, want 2", timeouts.Load())
+	}
+}
+
+func TestDurable_OnlyFailedHandlersAreRetried(t *testing.T) {
+	var goodRuns, flakyRuns atomic.Int32
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{
+		{Match: alwaysDelivery, Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			goodRuns.Add(1)
+			return nil
+		}},
+		{Match: alwaysDelivery, Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			if flakyRuns.Add(1) < 3 {
+				return errors.New("flaky")
+			}
+			return nil
+		}},
+		{Match: func(string) bool { return false }, Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			t.Error("a non-matching subscriber ran")
+			return nil
+		}},
+	})
+
+	var acked atomic.Bool
+	enqueueDeliveryEvent(context.Background(), d, makeDeliveryEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	waitForDelivery(t, "ack", acked.Load)
+
+	if goodRuns.Load() != 1 || flakyRuns.Load() != 3 {
+		t.Fatalf("good ran %d times, flaky %d; want 1 and 3", goodRuns.Load(), flakyRuns.Load())
+	}
+}
+
+func TestDurable_CloseInterruptsRetriesAndLeavesTheDeliveryUnacked(t *testing.T) {
+	var attempts atomic.Int32
+	d := newDeliveryTestDispatcher[int](&recordingDeliveryBus{},
+		withDeliveryDurableSubs([]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			attempts.Add(1)
+			return errors.New("always failing")
+		}}}),
+		withDeliveryRetryBackoff[int](time.Hour, time.Hour),
+	)
+
+	var acked atomic.Bool
+	done, _ := enqueueDeliveryEvent(context.Background(), d, makeDeliveryEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	<-done
+
+	closed := make(chan error, 1)
+	go func() { closed <- d.Close(context.Background()) }()
+	select {
+	case err := <-closed:
+		checkClosed(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close hung on a retrying delivery")
+	}
+	if acked.Load() {
+		t.Fatal("a failing delivery was acknowledged on close")
+	}
+}
+
+func TestDurable_DeliveryWithNoMatchingSubscriberIsStillAcked(t *testing.T) {
+	d := newDeliveryDurable(t, nil)
+	var acked atomic.Bool
+	done, _ := enqueueDeliveryEvent(context.Background(), d, makeDeliveryEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	<-done
+	if !acked.Load() {
+		t.Fatal("delivery with nothing to deliver was not acknowledged")
+	}
+}
+
+func TestDurable_HandlerFinishingBeforeItsTimeoutReportsNothing(t *testing.T) {
+	var reports atomic.Int32
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{{
+		Match:   alwaysDelivery,
+		Timeout: time.Second,
+		Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			return nil
+		},
+	}}, withDeliveryErrorHandler[int](func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+		int,
+	) {
+		reports.Add(1)
+	}))
+
+	var acked atomic.Bool
+	enqueueDeliveryEvent(context.Background(), d, makeDeliveryEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	waitForDelivery(t, "ack", acked.Load)
+	if reports.Load() != 0 {
+		t.Fatalf("reports = %d, want 0", reports.Load())
+	}
+}
+
+func TestDurable_ATimedOutHandlerThatThenFailsIsRetried(t *testing.T) {
+	var attempts atomic.Int32
+	timedOut := make(chan struct{}, 1)
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{{
+		Match:   alwaysDelivery,
+		Timeout: 5 * time.Millisecond,
+		Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			if attempts.Add(1) == 1 {
+				<-timedOut
+				return errors.New("failed late")
+			}
+			return nil
+		},
+	}}, withDeliveryErrorHandler[int](func(
+		_ context.Context,
+		_ asynxmd.Event[int],
+		err error,
+		_ int,
+	) {
+		if errors.Is(err, asynxmd.ErrHandlerTimeout) {
+			timedOut <- struct{}{}
+		}
+	}))
+
+	var acked atomic.Bool
+	enqueueDeliveryEvent(context.Background(), d, makeDeliveryEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	waitForDelivery(t, "ack after the late failure was retried", acked.Load)
+	if attempts.Load() != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts.Load())
+	}
+}
+
+func TestShutdownDuringRetry_NeverDeliversALaterEventPastTheFailingOne(t *testing.T) {
+	var rec deliveriesDelivery
+	attempted := make(chan struct{}, 64)
+	d := newDeliveryTestDispatcher[int](&recordingDeliveryBus{},
+		withDeliveryDurableSubs([]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
+			_ context.Context,
+			e asynxmd.Event[int],
+		) error {
+			rec.add(e)
+			if e.Version == 1 {
+				attempted <- struct{}{}
+				return errors.New("poison")
+			}
+			return nil
+		}}}),
+		withDeliveryRetryBackoff[int](time.Hour, time.Hour),
+	)
+
+	var acked sync.Map
+	ctx := context.Background()
+	t1, _ := enqueueDeliveryTicket(ctx, d, makeDeliveryEvent("a", 1), ackDeliveryInto(&acked, makeDeliveryEvent("a", 1)))
+	t2, _ := enqueueDeliveryTicket(ctx, d, makeDeliveryEvent("a", 2), ackDeliveryInto(&acked, makeDeliveryEvent("a", 2)))
+	recvDelivery(t, attempted, "first attempt of v1")
+
+	if err := d.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	for v, got := range map[int]error{1: finalDelivery(t, t1, "v1 final"), 2: finalDelivery(t, t2, "v2 final")} {
+		checkNotDelivered(t, v, got)
+	}
+	for _, v := range []int64{1, 2} {
+		checkNotAcked(t, &acked, v)
+	}
+	if slices.Contains(rec.list(), "a/2") {
+		t.Fatalf("v2 was delivered while v1 was still pending: %v", rec.list())
+	}
+}
+
+// A later event of the parked aggregate is not queued either, while another
+// aggregate keeps flowing.
+func TestExhaustedAttempts_ParkTheAggregateAndLeaveOthersAlone(t *testing.T) {
+	var attempts atomic.Int32
+	var rec deliveriesDelivery
+	var mu sync.Mutex
+	var reports []error
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
+		_ context.Context,
+		e asynxmd.Event[int],
+	) error {
+		rec.add(e)
+		if e.AggregateID == "a" && e.Version == 1 {
+			attempts.Add(1)
+			return errors.New("poison")
+		}
+		return nil
+	}}},
+		withDeliveryMaxAttempts[int](4),
+		withDeliveryErrorHandler[int](func(
+			_ context.Context,
+			_ asynxmd.Event[int],
+			err error,
+			_ int,
+		) {
+			mu.Lock()
+			reports = append(reports, err)
+			mu.Unlock()
+		}),
+	)
+
+	var acked sync.Map
+	ctx := context.Background()
+	t1, _ := enqueueDeliveryTicket(ctx, d, makeDeliveryEvent("a", 1), ackDeliveryInto(&acked, makeDeliveryEvent("a", 1)))
+	t2, _ := enqueueDeliveryTicket(ctx, d, makeDeliveryEvent("a", 2), ackDeliveryInto(&acked, makeDeliveryEvent("a", 2)))
+
+	if err := finalDelivery(t, t1, "v1 final"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("v1 final = %v, want ErrDeliveryParked", err)
+	}
+	if err := finalDelivery(t, t2, "v2 final"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("v2 final = %v, want ErrDeliveryParked", err)
+	}
+	if n := attempts.Load(); n != 4 {
+		t.Fatalf("attempts = %d, want exactly the cap (4)", n)
+	}
+	if got := haltedDelivery(d); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("Halted = %v, want [a]", got)
+	}
+	if slices.Contains(rec.list(), "a/2") {
+		t.Fatal("v2 delivered although v1 was parked")
+	}
+
+	t3, _ := enqueueDeliveryTicket(ctx, d, makeDeliveryEvent("a", 3), ackDeliveryInto(&acked, makeDeliveryEvent("a", 3)))
+	if err := finalDelivery(t, t3, "v3 final"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("v3 final = %v, want ErrDeliveryParked", err)
+	}
+
+	tb, _ := enqueueDeliveryTicket(ctx, d, makeDeliveryEvent("b", 1), ackDeliveryInto(&acked, makeDeliveryEvent("b", 1)))
+	if err := finalDelivery(t, tb, "b final"); err != nil {
+		t.Fatalf("aggregate b held back: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	parkedReports := len(slices.DeleteFunc(slices.Clone(reports), notParked))
+	if parkedReports != 1 {
+		t.Fatalf("parked reports = %d, want 1 (%v)", parkedReports, reports)
+	}
+}
+
+func TestDeadLetter_AcceptingTheEventSkipsItAndLetsLaterEventsFlow(t *testing.T) {
+	var rec deliveriesDelivery
+	var dead atomic.Value
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
+		_ context.Context,
+		e asynxmd.Event[int],
+	) error {
+		rec.add(e)
+		if e.Version == 1 {
+			return errors.New("poison")
+		}
+		return nil
+	}}},
+		withDeliveryMaxAttempts[int](3),
+		withDeadLetterHandler[int](func(
+			_ context.Context,
+			e asynxmd.Event[int],
+			err error,
+		) error {
+			dead.Store(e.Version)
+			return nil
+		}),
+	)
+
+	var acked sync.Map
+	ctx := context.Background()
+	t1, _ := enqueueDeliveryTicket(ctx, d, makeDeliveryEvent("a", 1), ackDeliveryInto(&acked, makeDeliveryEvent("a", 1)))
+	t2, _ := enqueueDeliveryTicket(ctx, d, makeDeliveryEvent("a", 2), ackDeliveryInto(&acked, makeDeliveryEvent("a", 2)))
+
+	if err := finalDelivery(t, t1, "v1"); err != nil {
+		t.Fatalf("dead-lettered event final = %v, want nil", err)
+	}
+	if err := finalDelivery(t, t2, "v2"); err != nil {
+		t.Fatalf("v2 final = %v", err)
+	}
+	if dead.Load() != int64(1) {
+		t.Fatalf("dead letter saw %v, want v1", dead.Load())
+	}
+	if _, ok := acked.Load(int64(1)); !ok {
+		t.Fatal("dead-lettered event stayed pending")
+	}
+	if len(haltedDelivery(d)) != 0 {
+		t.Fatalf("aggregate parked despite the dead-letter handler: %v", haltedDelivery(d))
+	}
+}
+
+func TestDeadLetter_RefusalParksTheAggregate(t *testing.T) {
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return errors.New("poison")
+	}}},
+		withDeliveryMaxAttempts[int](2),
+		withDeadLetterHandler[int](func(
+			context.Context,
+			asynxmd.Event[int],
+			error,
+		) error {
+			panic("dead-letter store down")
+		}),
+	)
+	tk, _ := enqueueDeliveryTicket(context.Background(), d, makeDeliveryEvent("a", 1), func(context.Context) error { return nil })
+	if err := finalDelivery(t, tk, "final"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("final = %v, want ErrDeliveryParked", err)
+	}
+}
+
+// Parking after a failed tombstone is Forget's job, not the dispatcher's, so
+// the final ticket only reports the failure.
+func TestTombstone_FinalReportsADurableSubscriberThatKeepsFailing(t *testing.T) {
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{{Match: func(string) bool { return false },
+		Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			return errors.New("cannot forget")
+		}}},
+		withDeliveryMaxAttempts[int](2))
+	tomb := makeDeliveryEvent("a", 2)
+	tomb.EventName = asynxmd.ForgetEventName
+	tk, _ := enqueueDeliveryForget(context.Background(), d, tomb, nil)
+	if err := finalDelivery(t, tk, "final"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("final = %v, want ErrDeliveryParked", err)
+	}
+}
+
+func TestEnqueueForget_IsNeverDeadLettered(t *testing.T) {
+	var dead atomic.Int32
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return errors.New("cannot forget")
+	}}}, withDeliveryMaxAttempts[int](2), withDeadLetterHandler[int](func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+	) error {
+		dead.Add(1)
+		return nil
+	}))
+	marker := makeDeliveryEvent("a", 2)
+	marker.EventName = asynxmd.ForgetEventName
+	tk, _ := enqueueDeliveryForget(context.Background(), d, marker, func(context.Context) error { return nil })
+	if err := finalDelivery(t, tk, "marker"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("final = %v, want ErrDeliveryParked: a dead letter must not let Forget erase", err)
+	}
+	if dead.Load() != 0 {
+		t.Fatalf("dead-letter handler called %d times for the marker", dead.Load())
+	}
+}
+
+// A Forget that abandons the delivery while its last attempt runs leaves the
+// aggregate unparked.
+func TestGiveUp_AfterASupersedeDoesNotParkTheAggregateAgain(t *testing.T) {
+	inHandler := make(chan struct{})
+	release := make(chan struct{})
+	var dead atomic.Int32
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		inHandler <- struct{}{}
+		<-release
+		return errors.New("down")
+	}}}, withDeliveryMaxAttempts[int](1), withDeadLetterHandler[int](func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+	) error {
+		dead.Add(1)
+		return nil
+	}))
+	tk, _ := enqueueDeliveryTicket(context.Background(), d, makeDeliveryEvent("a", 1), func(context.Context) error { return nil })
+	recvDelivery(t, inHandler, "last attempt running")
+
+	d.Supersede("a")
+	close(release)
+	if err := finalDelivery(t, tk, "superseded delivery"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("final = %v", err)
+	}
+	if got := haltedDelivery(d); len(got) != 0 {
+		t.Fatalf("halted = %v: the exhausted attempt re-parked an aggregate that was superseded", got)
+	}
+	if dead.Load() != 0 {
+		t.Fatal("a superseded delivery was dead-lettered")
+	}
+}
+
+func TestInterrupt_AfterASupersedeDoesNotParkTheAggregate(t *testing.T) {
+	attempted := make(chan struct{}, 4)
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		attempted <- struct{}{}
+		return errors.New("down")
+	}}}, withDeliveryRetryBackoff[int](time.Hour, time.Hour), withDeliveryMaxAttempts[int](100))
+	tk, _ := enqueueDeliveryTicket(context.Background(), d, makeDeliveryEvent("a", 1), func(context.Context) error { return nil })
+	recvDelivery(t, attempted, "first attempt")
+	d.Supersede("a")
+	finalDelivery(t, tk, "superseded")
+	d.Interrupt()
+	if got := haltedDelivery(d); len(got) != 0 {
+		t.Fatalf("halted = %v", got)
+	}
+}
+
+func TestDeliveryErrorHandlerPanicDoesNotReleaseTheHold(t *testing.T) {
+	var rec deliveriesDelivery
+	var failures atomic.Int32
+	failures.Store(2)
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
+		_ context.Context,
+		e asynxmd.Event[int],
+	) error {
+		rec.add(e)
+		if e.Version == 1 && failures.Add(-1) >= 0 {
+			return errors.New("down")
+		}
+		return nil
+	}}}, withDeliveryErrorHandler[int](func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+		int,
+	) {
+		panic("boom")
+	}))
+
+	ctx := context.Background()
+	ack := func(context.Context) error { return nil }
+	enqueueDeliveryTicket(ctx, d, makeDeliveryEvent("a", 1), ack)
+	last, _ := enqueueDeliveryTicket(ctx, d, makeDeliveryEvent("a", 2), ack)
+	if err := finalDelivery(t, last, "v2"); err != nil {
+		t.Fatalf("v2 = %v", err)
+	}
+	want := []string{"a/1", "a/1", "a/1", "a/2"}
+	if got := rec.list(); !slices.Equal(got, want) {
+		t.Fatalf("delivered %v, want %v: a panicking handler released the hold", got, want)
+	}
+}
+
+// Whoever is told that a delivery gave up may act on it at once, for instance by
+// resuming; the aggregate must already be parked by then.
+func TestGiveUp_TheAggregateIsParkedBeforeTheErrorHandlerIsTold(t *testing.T) {
+	var d asynxmd.Dispatcher[int]
+	parkedWhenTold := make(chan []string, 1)
+	d = newDeliveryDurable(t,
+		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			return errors.New("down")
+		}}},
+		withDeliveryMaxAttempts[int](1),
+		withDeliveryErrorHandler[int](func(
+			_ context.Context,
+			_ asynxmd.Event[int],
+			err error,
+			_ int,
+		) {
+			if errors.Is(err, asynxmd.ErrDeliveryParked) {
+				parkedWhenTold <- haltedDelivery(d)
+			}
+		}))
+
+	enqueueDeliveryTicket(context.Background(), d, makeDeliveryEvent("a", 1), func(context.Context) error { return nil })
+	if got := recvDelivery(t, parkedWhenTold, "the park to be reported"); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("parked aggregates when the handler was told = %v, want [a]", got)
+	}
+}
+
+func TestDurable_FailuresNameTheSubscriberAndDeadLetterGetsThemAll(t *testing.T) {
+	billing, search := errors.New("billing down"), errors.New("search down")
+	var mu sync.Mutex
+	var reported []error
+	deadLettered := make(chan error, 1)
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{
+		{Name: "OrderUpdated#1", Match: alwaysDelivery, Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			return billing
+		}},
+		{Name: "OrderUpdated#2", Match: alwaysDelivery, Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			return search
+		}},
+	},
+		withDeliveryMaxAttempts[int](2),
+		withDeliveryErrorHandler[int](func(
+			_ context.Context,
+			_ asynxmd.Event[int],
+			err error,
+			_ int,
+		) {
+			mu.Lock()
+			reported = append(reported, err)
+			mu.Unlock()
+		}),
+		withDeadLetterHandler[int](func(
+			_ context.Context,
+			_ asynxmd.Event[int],
+			err error,
+		) error {
+			deadLettered <- err
+			return nil
+		}),
+	)
+
+	ticket, err := enqueueDeliveryTicket(context.Background(), d, makeDeliveryEvent("a", 1), func(context.Context) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := finalDelivery(t, ticket, "dead-lettered delivery"); err != nil {
+		t.Fatalf("delivery ended with %v", err)
+	}
+
+	got := recvDelivery(t, deadLettered, "the dead-letter handler")
+	if !errors.Is(got, billing) || !errors.Is(got, search) {
+		t.Fatalf("dead-letter handler learned of %q, want both failures", got)
+	}
+	var names []string
+	for _, part := range unjoinDelivery(got) {
+		names = appendDeliverySubscriber(names, part)
+	}
+	if !slices.Equal(names, []string{"OrderUpdated#1", "OrderUpdated#2"}) {
+		t.Fatalf("subscribers named in the dead-letter error = %v", names)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var sub *asynxmd.SubscriberError
+	namesFirstSubscriber := len(reported) > 0 && errors.As(reported[0], &sub) && sub.Subscriber == "OrderUpdated#1"
+	if !namesFirstSubscriber {
+		t.Fatalf("delivery error handler got %v, want the first failure wrapped with its subscriber", reported)
+	}
+}
+
+func TestDurable_ATimeoutNamesItsSubscriber(t *testing.T) {
+	release := make(chan struct{})
+	reported := make(chan error, 4)
+	d := newDeliveryDurable(t, []asynxmd.DurableSub[int]{{
+		Name:    "slow#1",
+		Match:   alwaysDelivery,
+		Timeout: time.Millisecond,
+		Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			<-release
+			return nil
+		},
+	}}, withDeliveryErrorHandler[int](func(
+		_ context.Context,
+		_ asynxmd.Event[int],
+		err error,
+		_ int,
+	) {
+		reported <- err
+	}))
+
+	ticket, err := enqueueDeliveryTicket(context.Background(), d, makeDeliveryEvent("a", 1), func(context.Context) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := recvDelivery(t, reported, "the timeout report")
+	close(release)
+	<-ticket.Final
+
+	var sub *asynxmd.SubscriberError
+	namesSlow := errors.As(got, &sub) && sub.Subscriber == "slow#1"
+	if !namesSlow || !errors.Is(got, asynxmd.ErrHandlerTimeout) {
+		t.Fatalf("timeout reported as %q, want ErrHandlerTimeout from subscriber slow#1", got)
+	}
+}
+
+func makeDeliveryEvent(
+	aggregateID string,
+	version int64,
+) asynxmd.Event[int] {
+	return asynxmd.Event[int]{
+		ID:          fmt.Sprintf("%s-v%d", aggregateID, version),
+		AggregateID: aggregateID,
+		EventName:   "test.event",
+		Version:     version,
+		OccurredAt:  time.Now(),
+	}
+}
+
+func newDeliveryTestDispatcher[T any](
+	bus asynxmd.Bus[T],
+	opts ...testDeliveryOpt[T],
+) asynxmd.Dispatcher[T] {
+	c := testDeliveryConfig[T]{cfg: asynxmd.DispatcherConfig[T]{
+		Bus:          bus,
+		RetryInitial: 100 * time.Millisecond,
+		RetryMax:     30 * time.Second,
+		MaxAttempts:  20,
+	}}
+	for _, opt := range opts {
+		opt(&c)
+	}
+	return New(c.cfg, c.opts...)
+}
+
+func withDeliveryDurableSubs[T any](
+	subs []asynxmd.DurableSub[T],
+) testDeliveryOpt[T] {
+	return func(
+		c *testDeliveryConfig[T],
+	) {
+		c.cfg.DurableSubs = subs
+	}
+}
+
+func withDeliveryErrorHandler[T any](
+	fn asynxmd.DeliveryErrorHandler[T],
+) testDeliveryOpt[T] {
+	return func(
+		c *testDeliveryConfig[T],
+	) {
+		c.cfg.OnDeliveryError = fn
+	}
+}
+
+func withDeliveryPanicHandler[T any](
+	fn asynxmd.PanicHandler[T],
+) testDeliveryOpt[T] {
+	return func(
+		c *testDeliveryConfig[T],
+	) {
+		c.cfg.OnPanic = fn
+	}
+}
+
+func withDeadLetterHandler[T any](
+	fn asynxmd.DeadLetterHandler[T],
+) testDeliveryOpt[T] {
+	return func(
+		c *testDeliveryConfig[T],
+	) {
+		c.cfg.DeadLetter = fn
+	}
+}
+
+func withDeliveryRetryBackoff[T any](
+	initial time.Duration,
+	max time.Duration,
+) testDeliveryOpt[T] {
+	return func(
+		c *testDeliveryConfig[T],
+	) {
+		c.cfg.RetryInitial, c.cfg.RetryMax = initial, max
+	}
+}
+
+func withDeliveryMaxAttempts[T any](
+	n int,
+) testDeliveryOpt[T] {
+	return func(
+		c *testDeliveryConfig[T],
+	) {
+		c.cfg.MaxAttempts = n
+	}
+}
+
+func enqueueDeliveryEvent[T any](
+	ctx context.Context,
+	d asynxmd.Dispatcher[T],
+	event asynxmd.Event[T],
+	ack func(context.Context) error,
+) (<-chan struct{}, error) {
+	t, err := enqueueDeliveryTicket(ctx, d, event, ack)
+	return t.Settled, err
+}
+
+func enqueueDeliveryTicket[T any](
+	ctx context.Context,
+	d asynxmd.Dispatcher[T],
+	event asynxmd.Event[T],
+	ack func(context.Context) error,
+) (asynxmd.Ticket, error) {
+	return d.Enqueue(ctx, asynxmd.DispatchRequest[T]{Event: event, Ack: ack, Kind: asynxmd.DispatchEvent})
+}
+
+func enqueueDeliveryForget[T any](
+	ctx context.Context,
+	d asynxmd.Dispatcher[T],
+	tombstone asynxmd.Event[T],
+	ack func(context.Context) error,
+) (asynxmd.Ticket, error) {
+	return d.Enqueue(ctx, asynxmd.DispatchRequest[T]{Event: tombstone, Ack: ack, Kind: asynxmd.DispatchTombstone})
+}
+
+func haltedDelivery[T any](
+	d asynxmd.Dispatcher[T],
+) []string {
+	return slices.Sorted(maps.Keys(d.Parks()))
+}
+
+func alwaysDelivery(string) bool { return true }
+
+func newDeliveryDurable(
+	t *testing.T,
+	subs []asynxmd.DurableSub[int],
+	opts ...testDeliveryOpt[int],
+) asynxmd.Dispatcher[int] {
+	t.Helper()
+	all := append([]testDeliveryOpt[int]{withDeliveryDurableSubs(subs), withDeliveryRetryBackoff[int](time.Millisecond, 5*time.Millisecond)}, opts...)
+	d := newDeliveryTestDispatcher[int](&recordingDeliveryBus{}, all...)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	return d
+}
+
+func waitForDelivery(
+	t *testing.T,
+	what string,
+	cond func() bool,
+) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !cond() {
+		failPastDelivery(t, deadline, what)
+		runtime.Gosched()
+	}
+}
+
+func recvDelivery[V any](
+	t *testing.T,
+	ch <-chan V,
+	what string,
+) V {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		panic("unreachable")
+	}
+}
+
+func finalDelivery(
+	t *testing.T,
+	tk asynxmd.Ticket,
+	what string,
+) error {
+	t.Helper()
+	recvDelivery(t, tk.Final, what)
+	return tk.Err()
+}
+
+func ackDeliveryInto(
+	acked *sync.Map,
+	e asynxmd.Event[int],
+) func(context.Context) error {
+	return func(context.Context) error { acked.Store(e.Version, true); return nil }
+}
+
+func unjoinDelivery(err error) []error {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		return joined.Unwrap()
+	}
+	return []error{err}
+}
+
+func failPastDelivery(
+	t *testing.T,
+	deadline time.Time,
+	what string,
+) {
+	t.Helper()
+	if time.Now().After(deadline) {
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+func deliveredBeforeA1(
+	name string,
+) bool {
+	return name != "a1-fail" && name != "b1"
+}
+
+func checkClosed(
+	t *testing.T,
+	err error,
+) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func checkNotDelivered(
+	t *testing.T,
+	v int,
+	got error,
+) {
+	t.Helper()
+	if got == nil {
+		t.Errorf("v%d ended as delivered", v)
+	}
+}
+
+func checkNotAcked(
+	t *testing.T,
+	acked *sync.Map,
+	v int64,
+) {
+	t.Helper()
+	if _, ok := acked.Load(v); ok {
+		t.Errorf("v%d was acknowledged although v1 never succeeded", v)
+	}
+}
+
+func notParked(
+	err error,
+) bool {
+	return !errors.Is(err, asynxmd.ErrDeliveryParked)
+}
+
+func appendDeliverySubscriber(
+	names []string,
+	part error,
+) []string {
+	var sub *asynxmd.SubscriberError
+	if !errors.As(part, &sub) {
+		return names
+	}
+	return append(names, sub.Subscriber)
+}
+
+type recordingDeliveryBus struct {
+	mu    sync.Mutex
+	calls []asynxmd.Event[int]
+	delay time.Duration
+}
+
+func (b *recordingDeliveryBus) PublishSync(
+	_ context.Context,
+	e asynxmd.Event[int],
+) error {
+	if b.delay > 0 {
+		time.Sleep(b.delay)
+	}
+	b.mu.Lock()
+	b.calls = append(b.calls, e)
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *recordingDeliveryBus) Publish(
+	context.Context,
+	asynxmd.Event[int],
+) error {
+	return nil
+}
+
+func (b *recordingDeliveryBus) Subscribe(
+	string,
+	asynxmd.ProjectionHandler[int],
+	...asynxmd.SubscriptionOpt[int],
+) (string, error) {
+	return "", nil
+}
+
+func (b *recordingDeliveryBus) Unsubscribe(string) error { return nil }
+
+func (b *recordingDeliveryBus) Close(context.Context) error { return nil }
+
+func (b *recordingDeliveryBus) WaitForHandlers() {}
+
+func (b *recordingDeliveryBus) snapshot() []asynxmd.Event[int] {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]asynxmd.Event[int], len(b.calls))
+	copy(out, b.calls)
+	return out
+}
+
+type deliveriesDelivery struct {
+	mu   sync.Mutex
+	seen []string
+}
+
+func (r *deliveriesDelivery) add(e asynxmd.Event[int]) {
+	r.mu.Lock()
+	r.seen = append(r.seen, e.AggregateID+"/"+string(rune('0'+e.Version)))
+	r.mu.Unlock()
+}
+
+func (r *deliveriesDelivery) list() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.seen...)
+}
+
+type testDeliveryConfig[T any] struct {
+	cfg  asynxmd.DispatcherConfig[T]
+	opts []Opt[T]
+}
+
+type testDeliveryOpt[T any] func(
+	c *testDeliveryConfig[T],
+)
+
+func TestDispatch_OrderingGuarantee(t *testing.T) {
+	bus := &recordingWorkerBus{}
+	d := newWorkerTestDispatcher[int](bus)
+
+	ctx := context.Background()
+	for i := int64(1); i <= 10; i++ {
+		dispatchOrFail(t, d, i)
+	}
+
+	if err := d.Close(ctx); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	calls := bus.snapshot()
+	if len(calls) != 10 {
+		t.Fatalf("expected 10 calls, got %d", len(calls))
+	}
+	for i, e := range calls {
+		checkWorkerCallVersion(t, i, e)
+	}
+}
+
+// agg-fast, dispatched second, finishes before agg-slow, which has a 50ms
+// delay.
+func TestDispatch_CrossAggregateIndependence(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		finished []string
+	)
+
+	bus := &callbackWorkerBus{fn: func(
+		_ context.Context,
+		e asynxmd.Event[int],
+	) error {
+		if e.AggregateID == "agg-slow" {
+			time.Sleep(50 * time.Millisecond)
+		}
+		mu.Lock()
+		finished = append(finished, e.AggregateID)
+		mu.Unlock()
+		return nil
+	}}
+
+	d := newWorkerTestDispatcher[int](bus)
+	ctx := context.Background()
+
+	_ = dispatchWorker(ctx, d, makeWorkerEvent("agg-slow", 1), false)
+	_ = dispatchWorker(ctx, d, makeWorkerEvent("agg-fast", 1), false)
+
+	_ = d.Close(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(finished) != 2 {
+		t.Fatalf("expected 2 finished, got %d", len(finished))
+	}
+	if finished[0] != "agg-fast" {
+		t.Errorf("expected agg-fast to finish first, got %v", finished)
+	}
+}
+
+func TestDispatch_SyncBlocking(t *testing.T) {
+	delay := 30 * time.Millisecond
+	bus := &recordingWorkerBus{delay: delay}
+	d := newWorkerTestDispatcher[int](bus)
+	ctx := context.Background()
+
+	start := time.Now()
+	_ = dispatchWorker(ctx, d, makeWorkerEvent("agg-1", 1), true)
+	elapsed := time.Since(start)
+
+	if elapsed < delay {
+		t.Errorf("expected blocking for at least %v, returned in %v", delay, elapsed)
+	}
+	_ = d.Close(ctx)
+}
+
+func TestDispatch_AsyncNonBlocking(t *testing.T) {
+	bus := &recordingWorkerBus{delay: 100 * time.Millisecond}
+	d := newWorkerTestDispatcher[int](bus)
+	ctx := context.Background()
+
+	start := time.Now()
+	_ = dispatchWorker(ctx, d, makeWorkerEvent("agg-1", 1), false)
+	elapsed := time.Since(start)
+
+	if elapsed > 20*time.Millisecond {
+		t.Errorf("expected non-blocking return, took %v", elapsed)
+	}
+	_ = d.Close(ctx)
+}
+
+func TestDispatch_NilBusNoPanic(t *testing.T) {
+	d := newWorkerTestDispatcher[int](nil)
+	ctx := context.Background()
+
+	if err := dispatchWorker(ctx, d, makeWorkerEvent("agg-1", 1), true); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_ = d.Close(ctx)
+}
+
+func TestDispatch_PublishErrorHandler(t *testing.T) {
+	publishErr := errors.New("publish failed")
+	bus := &errBus{err: publishErr}
+
+	var (
+		mu            sync.Mutex
+		gotEvent      asynxmd.Event[int]
+		gotErr        error
+		handlerCalled bool
+	)
+
+	handler := func(
+		_ context.Context,
+		e asynxmd.Event[int],
+		err error,
+	) {
+		mu.Lock()
+		gotEvent = e
+		gotErr = err
+		handlerCalled = true
+		mu.Unlock()
+	}
+
+	d := newWorkerTestDispatcher[int](bus, withPublishErrorHandler[int](handler))
+	ctx := context.Background()
+
+	ev := makeWorkerEvent("agg-1", 1)
+	_ = dispatchWorker(ctx, d, ev, true)
+	_ = d.Close(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !handlerCalled {
+		t.Fatal("error handler was not called")
+	}
+	if !errors.Is(gotErr, publishErr) {
+		t.Errorf("expected %v, got %v", publishErr, gotErr)
+	}
+	if gotEvent.AggregateID != "agg-1" {
+		t.Errorf("expected agg-1, got %s", gotEvent.AggregateID)
+	}
+}
+
+// Three aggregates interleave five events each, and each aggregate sees its
+// own events in order.
+func TestDispatch_MultipleAggregatesOrdered(t *testing.T) {
+	bus := &recordingWorkerBus{}
+	d := newWorkerTestDispatcher[int](bus)
+	ctx := context.Background()
+
+	for v := int64(1); v <= 5; v++ {
+		dispatchToEach(ctx, d, v, "a", "b", "c")
+	}
+
+	_ = d.Close(ctx)
+
+	calls := bus.snapshot()
+	if len(calls) != 15 {
+		t.Fatalf("expected 15 calls, got %d", len(calls))
+	}
+
+	byAgg := make(map[string][]int64)
+	for _, e := range calls {
+		byAgg[e.AggregateID] = append(byAgg[e.AggregateID], e.Version)
+	}
+
+	for agg, versions := range byAgg {
+		checkAggregateOrdered(t, agg, versions)
+	}
+}
+
+// Events of one aggregate dispatched concurrently are each delivered once.
+func TestDispatch_ConcurrentSameAggregate(t *testing.T) {
+	bus := &recordingWorkerBus{}
+	d := newWorkerTestDispatcher[int](bus)
+	ctx := context.Background()
+
+	const n = 100
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(v int64) {
+			defer wg.Done()
+			_ = dispatchWorker(ctx, d, makeWorkerEvent("agg-1", v), false)
+		}(int64(i))
+	}
+	wg.Wait()
+
+	_ = d.Close(ctx)
+
+	calls := bus.snapshot()
+	if len(calls) != n {
+		t.Fatalf("expected %d calls, got %d", n, len(calls))
+	}
+
+	seen := make(map[int64]bool)
+	for _, e := range calls {
+		checkNotSeen(t, seen, e.Version)
+		seen[e.Version] = true
+	}
+}
+
+// A panic while handling the first event does not stop the second from being
+// delivered.
+func TestDispatch_WorkerSurvivesPanic(t *testing.T) {
+	var callCount atomic.Int64
+
+	bus := &callbackWorkerBus{fn: func(
+		_ context.Context,
+		e asynxmd.Event[int],
+	) error {
+		n := callCount.Add(1)
+		if n == 1 {
+			panic("boom")
+		}
+		return nil
+	}}
+
+	d := newWorkerTestDispatcher[int](bus)
+	ctx := context.Background()
+
+	_ = dispatchWorker(ctx, d, makeWorkerEvent("agg-1", 1), true)
+	_ = dispatchWorker(ctx, d, makeWorkerEvent("agg-1", 2), true)
+
+	_ = d.Close(ctx)
+
+	if got := callCount.Load(); got != 2 {
+		t.Errorf("expected 2 PublishSync calls (panic recovered), got %d", got)
+	}
+}
+
+func TestEnqueue_AckRunsAfterHandlersFinish(t *testing.T) {
+	var handled, acked atomic.Bool
+	gate := make(chan struct{})
+	bus := &callbackWorkerBus{fn: func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		<-gate
+		handled.Store(true)
+		return nil
+	}}
+	d := newWorkerTestDispatcher[int](bus)
+	defer d.Close(context.Background())
+
+	done, err := enqueueWorkerEvent(context.Background(), d, makeWorkerEvent("a", 1), func(context.Context) error {
+		if !handled.Load() {
+			t.Error("ack ran before the handlers finished")
+		}
+		acked.Store(true)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if acked.Load() {
+		t.Fatal("ack ran while the handler was still blocked")
+	}
+	close(gate)
+	<-done
+	if !acked.Load() {
+		t.Fatal("ack did not run before done closed")
+	}
+}
+
+func TestEnqueue_AckErrorIsReported(t *testing.T) {
+	ackErr := errors.New("ack failed")
+	var got atomic.Value
+	d := newWorkerTestDispatcher(
+		asynxmd.Bus[int](&recordingWorkerBus{}),
+		withPublishErrorHandler[int](func(
+			_ context.Context,
+			_ asynxmd.Event[int],
+			err error,
+		) {
+			got.Store(err)
+		}),
+	)
+	defer d.Close(context.Background())
+
+	done, _ := enqueueWorkerEvent(context.Background(), d, makeWorkerEvent("a", 1), func(context.Context) error { return ackErr })
+	<-done
+
+	if err, _ := got.Load().(error); !errors.Is(err, ackErr) {
+		t.Fatalf("reported error = %v, want ack error", err)
+	}
+}
+
+// A job enqueued while the idle worker is about to retire must still run: each
+// enqueue sleeps the idle timeout first, to land right on the idle deadline.
+func TestEnqueue_NeverStrandedByIdleWorkerRetirement(t *testing.T) {
+	d := newWorkerTestDispatcher[int](&recordingWorkerBus{}, withWorkerIdleTimeout[int](time.Millisecond))
+	defer d.Close(context.Background())
+
+	for i := int64(1); i <= 300; i++ {
+		time.Sleep(time.Millisecond)
+		enqueueOnTheIdleDeadline(t, d, i)
+	}
+}
+
+// A panic of the dispatcher itself is reported, and the worker survives and
+// keeps delivering.
+func TestHandle_DispatcherPanicIsReportedNotSwallowed(t *testing.T) {
+	var got atomic.Value
+	bus := &callbackWorkerBus{fn: func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		panic("bus exploded")
+	}}
+	d := newWorkerTestDispatcher[int](bus, withPublishErrorHandler[int](func(
+		_ context.Context,
+		_ asynxmd.Event[int],
+		err error,
+	) {
+		got.Store(err)
+	}))
+	defer d.Close(context.Background())
+
+	done, _ := enqueueWorkerEvent(context.Background(), d, makeWorkerEvent("a", 1), nil)
+	<-done
+	if err, _ := got.Load().(error); err == nil {
+		t.Fatal("a panic in the dispatcher was swallowed silently")
+	}
+
+	done, _ = enqueueWorkerEvent(context.Background(), d, makeWorkerEvent("a", 2), nil)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker died after a panic")
+	}
+}
+
+// A failing live subscriber must not skip the durable delivery: the next
+// event of the aggregate would otherwise overtake this one.
+func TestEnqueue_DurableDeliveryStillAcksWhenBusRejectsEvent(t *testing.T) {
+	var acked atomic.Bool
+	var reported atomic.Int32
+	d := newWorkerTestDispatcher(
+		asynxmd.Bus[int](&errBus{err: errors.New("bus closed")}),
+		withPublishErrorHandler[int](func(
+			context.Context,
+			asynxmd.Event[int],
+			error,
+		) {
+			reported.Add(1)
+		}),
+	)
+	defer d.Close(context.Background())
+
+	ticket, err := enqueueWorkerTicket(context.Background(), d, makeWorkerEvent("a", 1), func(context.Context) error {
+		acked.Store(true)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	if err := finalWorker(t, ticket, "final"); err != nil {
+		t.Fatalf("delivery ended with %v", err)
+	}
+	if !acked.Load() {
+		t.Error("ack did not run after the bus rejected the event")
+	}
+	if reported.Load() != 1 {
+		t.Errorf("publish errors reported = %d, want 1", reported.Load())
+	}
+}
+
+func TestDurable_NonDurableJobsSkipDurableSubscribers(t *testing.T) {
+	d := newWorkerDurable(t, []asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		t.Error("durable handler ran for a job without an ack")
+		return nil
+	}}})
+	done, _ := enqueueWorkerEvent(context.Background(), d, makeWorkerEvent("a", 1), nil)
+	<-done
+}
+
+func TestBusErrorDoesNotSkipTheDurableDelivery(t *testing.T) {
+	var rec deliveriesWorker
+	d := newWorkerTestDispatcher[int](&errBus{err: errors.New("bus down")},
+		withWorkerDurableSubs([]asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: func(
+			_ context.Context,
+			e asynxmd.Event[int],
+		) error {
+			rec.add(e)
+			return nil
+		}}}),
+	)
+	defer d.Close(context.Background())
+
+	var acked sync.Map
+	var last asynxmd.Ticket
+	for v := int64(1); v <= 3; v++ {
+		last, _ = enqueueWorkerTicket(context.Background(), d, makeWorkerEvent("a", v), ackWorkerInto(&acked, makeWorkerEvent("a", v)))
+	}
+	if err := finalWorker(t, last, "final"); err != nil {
+		t.Fatalf("final = %v", err)
+	}
+	got := rec.list()
+	inOrder := len(got) == 3 && got[0] == "a/1" && got[2] == "a/3"
+	if !inOrder {
+		t.Fatalf("durable deliveries = %v, want a/1 a/2 a/3 in order", got)
+	}
+}
+
+func TestEnqueueRedelivery_GoesToTheDurableSubscribersOnly(t *testing.T) {
+	bus := &recordingWorkerBus{}
+	var seen deliveriesWorker
+	d := newWorkerTestDispatcher[int](bus, withWorkerDurableSubs([]asynxmd.DurableSub[int]{{Match: func(name string) bool { return name == "test.event" },
+		Handler: func(
+			_ context.Context,
+			e asynxmd.Event[int],
+		) error {
+			seen.add(e)
+			return nil
+		}}}))
+	t.Cleanup(func() { d.Close(context.Background()) })
+	var acked atomic.Int32
+	ack := func(context.Context) error { acked.Add(1); return nil }
+	ctx := context.Background()
+
+	tk, _ := enqueueWorkerRedelivery(ctx, d, makeWorkerEvent("a", 1), ack)
+	finalWorker(t, tk, "event")
+	marker := makeWorkerEvent("a", 2)
+	marker.EventName = asynxmd.ForgetEventName
+	tk, _ = enqueueWorkerRedelivery(ctx, d, marker, ack)
+	finalWorker(t, tk, "marker")
+
+	if got := len(bus.snapshot()); got != 0 {
+		t.Fatalf("live subscribers got %d events from redeliveries", got)
+	}
+	if got := seen.list(); !slices.Equal(got, []string{"a/1", "a/2"}) {
+		t.Fatalf("durable subscriber saw %v, want the event and the marker (whatever its pattern)", got)
+	}
+	if acked.Load() != 2 {
+		t.Fatalf("acked %d, want 2", acked.Load())
+	}
+}
+
+func TestBusPanicDoesNotSkipTheDurableDelivery(t *testing.T) {
+	var acked atomic.Bool
+	var reported atomic.Int32
+	d := newWorkerTestDispatcher[int](&panicBus{}, withWorkerDurableSubs([]asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return nil
+	}}}),
+		withPublishErrorHandler[int](func(
+			context.Context,
+			asynxmd.Event[int],
+			error,
+		) {
+			reported.Add(1)
+		}))
+	t.Cleanup(func() { d.Close(context.Background()) })
+	tk, _ := enqueueWorkerTicket(context.Background(), d, makeWorkerEvent("a", 1), func(context.Context) error { acked.Store(true); return nil })
+	if err := finalWorker(t, tk, "delivery"); err != nil {
+		t.Fatalf("final = %v", err)
+	}
+	if !acked.Load() || reported.Load() != 1 {
+		t.Fatalf("acked=%v reported=%d, want the panic reported and the delivery completed", acked.Load(), reported.Load())
+	}
+}
+
+func TestPublishErrorHandlerPanicDoesNotCrashTheWorker(t *testing.T) {
+	d := newWorkerTestDispatcher[int](&errBus{err: errors.New("down")}, withPublishErrorHandler[int](func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+	) {
+		panic("boom")
+	}))
+	t.Cleanup(func() { d.Close(context.Background()) })
+	done, err := enqueueWorkerEvent(context.Background(), d, makeWorkerEvent("a", 1), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recvWorker(t, done, "settled")
+	done, _ = enqueueWorkerEvent(context.Background(), d, makeWorkerEvent("a", 2), nil)
+	recvWorker(t, done, "the worker survives")
+}
+
+// A job popped just before a Forget supersedes its aggregate belongs to the old
+// generation: it must not run its retry loop ahead of the marker.
+func TestSupersede_AfterThePopStillSkipsTheSupersededJob(t *testing.T) {
+	bus := &gateBus{entered: make(chan struct{}), release: make(chan struct{})}
+	var oldRuns atomic.Int32
+	d := newWorkerTestDispatcher[int](bus, withWorkerDurableSubs([]asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: func(
+		_ context.Context,
+		e asynxmd.Event[int],
+	) error {
+		if e.EventName != asynxmd.ForgetEventName {
+			oldRuns.Add(1)
+			return errors.New("down")
+		}
+		return nil
+	}}}), withWorkerRetryBackoff[int](50*time.Millisecond, 50*time.Millisecond), withWorkerMaxAttempts[int](5))
+	t.Cleanup(func() { d.Close(context.Background()) })
+
+	ctx := context.Background()
+	enqueueWorkerTicket(ctx, d, makeWorkerEvent("a", 1), func(context.Context) error { return nil })
+	recvWorker(t, bus.entered, "v1 popped and publishing")
+
+	d.Supersede("a")
+	marker := makeWorkerEvent("a", 2)
+	marker.EventName = asynxmd.ForgetEventName
+	tk, _ := enqueueWorkerForget(ctx, d, marker, func(context.Context) error { return nil })
+	close(bus.release)
+
+	start := time.Now()
+	if err := finalWorker(t, tk, "marker"); err != nil {
+		t.Fatalf("marker = %v", err)
+	}
+	if time.Since(start) > 40*time.Millisecond || oldRuns.Load() != 0 {
+		t.Fatalf("the superseded job ran %d attempts and held the marker back %v", oldRuns.Load(), time.Since(start))
+	}
+	if got := haltedWorker(d); len(got) != 0 {
+		t.Fatalf("halted = %v", got)
+	}
+}
+
+func TestAckFailure_TheAggregateIsParkedBeforeThePublishErrorHandlerIsTold(t *testing.T) {
+	var d asynxmd.Dispatcher[int]
+	parkedWhenTold := make(chan []string, 1)
+	d = newWorkerDurable(t,
+		[]asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: func(
+			context.Context,
+			asynxmd.Event[int],
+		) error {
+			return nil
+		}}},
+		withPublishErrorHandler[int](func(
+			context.Context,
+			asynxmd.Event[int],
+			error,
+		) {
+			parkedWhenTold <- haltedWorker(d)
+		}))
+
+	enqueueWorkerTicket(context.Background(), d, makeWorkerEvent("a", 1), func(context.Context) error { return errors.New("store down") })
+	if got := recvWorker(t, parkedWhenTold, "the ack failure to be reported"); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("parked aggregates when the handler was told = %v, want [a]", got)
+	}
+}
+
+// If the ack of v1 fails, v2 must not be delivered and acknowledged ahead of it.
+func TestAckFailure_ParksTheAggregateSoALaterEventDoesNotOvertake(t *testing.T) {
+	var rec deliveriesWorker
+	var reported atomic.Int32
+	d := newWorkerDurable(t, []asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: func(
+		_ context.Context,
+		e asynxmd.Event[int],
+	) error {
+		rec.add(e)
+		return nil
+	}}}, withPublishErrorHandler[int](func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+	) {
+		reported.Add(1)
+	}))
+
+	ctx := context.Background()
+	t1, _ := enqueueWorkerTicket(ctx, d, makeWorkerEvent("a", 1), func(context.Context) error { return errors.New("store down") })
+	t2, _ := enqueueWorkerTicket(ctx, d, makeWorkerEvent("a", 2), func(context.Context) error { return nil })
+	if err := finalWorker(t, t1, "v1"); err == nil {
+		t.Fatal("v1 ended as acknowledged")
+	}
+	if err := finalWorker(t, t2, "v2"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("v2 = %v, want ErrDeliveryParked", err)
+	}
+	if got := rec.list(); !slices.Equal(got, []string{"a/1"}) {
+		t.Fatalf("delivered %v, want only v1", got)
+	}
+	if got := haltedWorker(d); !slices.Equal(got, []string{"a"}) || reported.Load() != 1 {
+		t.Fatalf("halted=%v reported=%d", got, reported.Load())
+	}
+}
+
+func makeWorkerEvent(
+	aggregateID string,
+	version int64,
+) asynxmd.Event[int] {
+	return asynxmd.Event[int]{
+		ID:          fmt.Sprintf("%s-v%d", aggregateID, version),
+		AggregateID: aggregateID,
+		EventName:   "test.event",
+		Version:     version,
+		OccurredAt:  time.Now(),
+	}
+}
+
+func newWorkerTestDispatcher[T any](
+	bus asynxmd.Bus[T],
+	opts ...testWorkerOpt[T],
+) asynxmd.Dispatcher[T] {
+	c := testWorkerConfig[T]{cfg: asynxmd.DispatcherConfig[T]{
+		Bus:          bus,
+		RetryInitial: 100 * time.Millisecond,
+		RetryMax:     30 * time.Second,
+		MaxAttempts:  20,
+	}}
+	for _, opt := range opts {
+		opt(&c)
+	}
+	return New(c.cfg, c.opts...)
+}
+
+func withWorkerIdleTimeout[T any](
+	t time.Duration,
+) testWorkerOpt[T] {
+	return func(
+		c *testWorkerConfig[T],
+	) {
+		c.opts = append(c.opts, WithIdleTimeout[T](t))
+	}
+}
+
+func withPublishErrorHandler[T any](
+	fn asynxmd.PublishErrorHandler[T],
+) testWorkerOpt[T] {
+	return func(
+		c *testWorkerConfig[T],
+	) {
+		c.cfg.OnPublishError = fn
+	}
+}
+
+func withWorkerDurableSubs[T any](
+	subs []asynxmd.DurableSub[T],
+) testWorkerOpt[T] {
+	return func(
+		c *testWorkerConfig[T],
+	) {
+		c.cfg.DurableSubs = subs
+	}
+}
+
+func withWorkerRetryBackoff[T any](
+	initial time.Duration,
+	max time.Duration,
+) testWorkerOpt[T] {
+	return func(
+		c *testWorkerConfig[T],
+	) {
+		c.cfg.RetryInitial, c.cfg.RetryMax = initial, max
+	}
+}
+
+func withWorkerMaxAttempts[T any](
+	n int,
+) testWorkerOpt[T] {
+	return func(
+		c *testWorkerConfig[T],
+	) {
+		c.cfg.MaxAttempts = n
+	}
+}
+
+func dispatchWorker[T any](
+	ctx context.Context,
+	d asynxmd.Dispatcher[T],
+	event asynxmd.Event[T],
+	waitHandlers bool,
+) error {
+	t, err := d.Enqueue(ctx, asynxmd.DispatchRequest[T]{Event: event})
+	if err != nil {
+		return err
+	}
+	if waitHandlers {
+		<-t.Settled
+	}
+	return nil
+}
+
+func enqueueWorkerEvent[T any](
+	ctx context.Context,
+	d asynxmd.Dispatcher[T],
+	event asynxmd.Event[T],
+	ack func(context.Context) error,
+) (<-chan struct{}, error) {
+	t, err := enqueueWorkerTicket(ctx, d, event, ack)
+	return t.Settled, err
+}
+
+func enqueueWorkerTicket[T any](
+	ctx context.Context,
+	d asynxmd.Dispatcher[T],
+	event asynxmd.Event[T],
+	ack func(context.Context) error,
+) (asynxmd.Ticket, error) {
+	return d.Enqueue(ctx, asynxmd.DispatchRequest[T]{Event: event, Ack: ack, Kind: asynxmd.DispatchEvent})
+}
+
+func enqueueWorkerRedelivery[T any](
+	ctx context.Context,
+	d asynxmd.Dispatcher[T],
+	event asynxmd.Event[T],
+	ack func(context.Context) error,
+) (asynxmd.Ticket, error) {
+	return d.Enqueue(ctx, asynxmd.DispatchRequest[T]{Event: event, Ack: ack, Kind: asynxmd.DispatchRedelivery})
+}
+
+func enqueueWorkerForget[T any](
+	ctx context.Context,
+	d asynxmd.Dispatcher[T],
+	tombstone asynxmd.Event[T],
+	ack func(context.Context) error,
+) (asynxmd.Ticket, error) {
+	return d.Enqueue(ctx, asynxmd.DispatchRequest[T]{Event: tombstone, Ack: ack, Kind: asynxmd.DispatchTombstone})
+}
+
+func haltedWorker[T any](
+	d asynxmd.Dispatcher[T],
+) []string {
+	return slices.Sorted(maps.Keys(d.Parks()))
+}
+
+func alwaysWorker(string) bool { return true }
+
+func newWorkerDurable(
+	t *testing.T,
+	subs []asynxmd.DurableSub[int],
+	opts ...testWorkerOpt[int],
+) asynxmd.Dispatcher[int] {
+	t.Helper()
+	all := append([]testWorkerOpt[int]{withWorkerDurableSubs(subs), withWorkerRetryBackoff[int](time.Millisecond, 5*time.Millisecond)}, opts...)
+	d := newWorkerTestDispatcher[int](&recordingWorkerBus{}, all...)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	return d
+}
+
+func recvWorker[V any](
+	t *testing.T,
+	ch <-chan V,
+	what string,
+) V {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		panic("unreachable")
+	}
+}
+
+func finalWorker(
+	t *testing.T,
+	tk asynxmd.Ticket,
+	what string,
+) error {
+	t.Helper()
+	recvWorker(t, tk.Final, what)
+	return tk.Err()
+}
+
+func ackWorkerInto(
+	acked *sync.Map,
+	e asynxmd.Event[int],
+) func(context.Context) error {
+	return func(context.Context) error { acked.Store(e.Version, true); return nil }
+}
+
+func dispatchOrFail(
+	t *testing.T,
+	d asynxmd.Dispatcher[int],
+	i int64,
+) {
+	t.Helper()
+	if err := dispatchWorker(context.Background(), d, makeWorkerEvent("agg-1", i), false); err != nil {
+		t.Fatalf("dispatch v%d: %v", i, err)
+	}
+}
+
+func checkWorkerCallVersion(
+	t *testing.T,
+	i int,
+	e asynxmd.Event[int],
+) {
+	t.Helper()
+	if e.Version != int64(i+1) {
+		t.Errorf("call[%d] version=%d, want %d", i, e.Version, i+1)
+	}
+}
+
+func dispatchToEach(
+	ctx context.Context,
+	d asynxmd.Dispatcher[int],
+	v int64,
+	aggs ...string,
+) {
+	for _, agg := range aggs {
+		_ = dispatchWorker(ctx, d, makeWorkerEvent(agg, v), false)
+	}
+}
+
+func checkAggregateOrdered(
+	t *testing.T,
+	agg string,
+	versions []int64,
+) {
+	t.Helper()
+	if len(versions) != 5 {
+		t.Errorf("aggregate %s: expected 5 events, got %d", agg, len(versions))
+	}
+	i := 1
+	for i < len(versions) && versions[i] > versions[i-1] {
+		i++
+	}
+	if i < len(versions) {
+		t.Errorf("aggregate %s: out of order at index %d: %v", agg, i, versions)
+	}
+}
+
+func checkNotSeen(
+	t *testing.T,
+	seen map[int64]bool,
+	version int64,
+) {
+	t.Helper()
+	if seen[version] {
+		t.Errorf("duplicate version %d", version)
+	}
+}
+
+func enqueueOnTheIdleDeadline(
+	t *testing.T,
+	d asynxmd.Dispatcher[int],
+	i int64,
+) {
+	t.Helper()
+	done, err := enqueueWorkerEvent(context.Background(), d, makeWorkerEvent("a", i), nil)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("event %d was stranded on a retired queue", i)
+	}
+}
+
+type callbackWorkerBus struct {
+	fn func(
+		context.Context,
+		asynxmd.Event[int],
+	) error
+}
+
+func (b *callbackWorkerBus) PublishSync(
+	ctx context.Context,
+	e asynxmd.Event[int],
+) error {
+	return b.fn(ctx, e)
+}
+
+func (b *callbackWorkerBus) Publish(
+	context.Context,
+	asynxmd.Event[int],
+) error {
+	return nil
+}
+
+func (b *callbackWorkerBus) Subscribe(
+	string,
+	asynxmd.ProjectionHandler[int],
+	...asynxmd.SubscriptionOpt[int],
+) (string, error) {
+	return "", nil
+}
+
+func (b *callbackWorkerBus) Unsubscribe(string) error { return nil }
+
+func (b *callbackWorkerBus) Close(context.Context) error { return nil }
+
+func (b *callbackWorkerBus) WaitForHandlers() {}
+
+type deliveriesWorker struct {
+	mu   sync.Mutex
+	seen []string
+}
+
+func (r *deliveriesWorker) add(e asynxmd.Event[int]) {
+	r.mu.Lock()
+	r.seen = append(r.seen, e.AggregateID+"/"+string(rune('0'+e.Version)))
+	r.mu.Unlock()
+}
+
+func (r *deliveriesWorker) list() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.seen...)
+}
+
+type errBus struct {
+	err error
+}
+
+func (b *errBus) PublishSync(
+	context.Context,
+	asynxmd.Event[int],
+) error {
+	return b.err
+}
+
+func (b *errBus) Publish(
+	context.Context,
+	asynxmd.Event[int],
+) error {
+	return nil
+}
+
+func (b *errBus) Subscribe(
+	string,
+	asynxmd.ProjectionHandler[int],
+	...asynxmd.SubscriptionOpt[int],
+) (string, error) {
+	return "", nil
+}
+
+func (b *errBus) Unsubscribe(string) error { return nil }
+
+func (b *errBus) Close(context.Context) error { return nil }
+
+func (b *errBus) WaitForHandlers() {}
+
+type gateBus struct {
+	recordingWorkerBus
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *gateBus) PublishSync(
+	ctx context.Context,
+	e asynxmd.Event[int],
+) error {
+	b.once.Do(func() {
+		close(b.entered)
+		<-b.release
+	})
+	return nil
+}
+
+type panicBus struct{ recordingWorkerBus }
+
+func (*panicBus) PublishSync(
+	context.Context,
+	asynxmd.Event[int],
+) error {
+	panic("bus exploded")
+}
+
+type recordingWorkerBus struct {
+	mu    sync.Mutex
+	calls []asynxmd.Event[int]
+	delay time.Duration
+}
+
+func (b *recordingWorkerBus) PublishSync(
+	_ context.Context,
+	e asynxmd.Event[int],
+) error {
+	if b.delay > 0 {
+		time.Sleep(b.delay)
+	}
+	b.mu.Lock()
+	b.calls = append(b.calls, e)
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *recordingWorkerBus) Publish(
+	context.Context,
+	asynxmd.Event[int],
+) error {
+	return nil
+}
+
+func (b *recordingWorkerBus) Subscribe(
+	string,
+	asynxmd.ProjectionHandler[int],
+	...asynxmd.SubscriptionOpt[int],
+) (string, error) {
+	return "", nil
+}
+
+func (b *recordingWorkerBus) Unsubscribe(string) error { return nil }
+
+func (b *recordingWorkerBus) Close(context.Context) error { return nil }
+
+func (b *recordingWorkerBus) WaitForHandlers() {}
+
+func (b *recordingWorkerBus) snapshot() []asynxmd.Event[int] {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]asynxmd.Event[int], len(b.calls))
+	copy(out, b.calls)
+	return out
+}
+
+type testWorkerConfig[T any] struct {
+	cfg  asynxmd.DispatcherConfig[T]
+	opts []Opt[T]
+}
+
+type testWorkerOpt[T any] func(
+	c *testWorkerConfig[T],
+)
