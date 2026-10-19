@@ -515,7 +515,7 @@ See [docs/spec/guarantees.md](./docs/spec/guarantees.md#store-contract) for the 
 
 ## Pluggable Dispatcher and Inspect
 
-Durable delivery (per-aggregate ordering, retry with backoff, dead-lettering, parking) is done by a dispatcher, a public interface `models.Dispatcher[T]` with a written ten-rule contract. `Builder.WithDispatcher(factory)` replaces it; `dispatchertest.Run` checks an implementation against the contract, as `storetest.Run` does for stores. **The library ships only the in-memory implementation and no broker clients**; a Kafka or NATS dispatcher is yours to write. It is still single-process: a custom dispatcher changes where handlers run, not who may write.
+Durable delivery (per-aggregate ordering, retry with backoff, dead-lettering, parking) is done by a dispatcher, a public interface `models.Dispatcher[T]` with a written ten-rule contract. `Builder.WithDispatcher(factory)` replaces it; the conformance suite in `tests/dispatchertest` (`dispatchertest.Run`) checks an implementation against the contract. **The library ships only the in-memory implementation and no broker clients**; a Kafka or NATS dispatcher is yours to write. It is still single-process: a custom dispatcher changes where handlers run, not who may write.
 
 To see why an aggregate is parked, ask: `ax.InspectDelivery("order-42")` returns a `models.DeliveryStatus` with `Parked`, `Generation`, `Cause` and `Undelivered`. Details: [docs/spec/dispatcher.md](./docs/spec/dispatcher.md).
 

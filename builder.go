@@ -244,8 +244,8 @@ func (b *Builder[T]) WithSnapshotErrorHandler(fn func(context.Context, models.Ev
 // is the component that takes each committed event and runs the subscribers'
 // handlers in order per aggregate, retrying and parking an aggregate when the
 // attempts run out. The library ships only the in-memory implementation; the
-// contract a replacement must keep is models.Dispatcher, and the
-// dispatchertest package (dispatchertest.Run) verifies an implementation
+// contract a replacement must keep is models.Dispatcher, and the conformance
+// suite in tests/dispatchertest (dispatchertest.Run) verifies an implementation
 // against it. The factory
 // is called once per Build, with the configuration the instance was built with:
 // the bus, the durable subscribers, the handlers, and the retry and attempt
