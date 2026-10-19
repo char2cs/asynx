@@ -35,3 +35,9 @@ func TestNew_TakesTheConfigAsFinal(t *testing.T) {
 		t.Fatal("New did not keep the interrupt channel")
 	}
 }
+
+type retrySettings struct {
+	initial     time.Duration
+	max         time.Duration
+	maxAttempts int
+}
