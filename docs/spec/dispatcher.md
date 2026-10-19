@@ -81,7 +81,7 @@ type DispatcherFactory[T any] func(DispatcherConfig[T]) (Dispatcher[T], error)
 
 ## The contract
 
-An implementation carries these ten rules. They are what `dispatchertest.Run` checks.
+An implementation carries these ten rules. The library's own tests check the in-memory default against them.
 
 1. **Order.** Per aggregate, events are handled in `Enqueue` order, one at a time. Different aggregates are independent. `Enqueue` does not block on handlers and never fails because a queue is full.
 2. **Live and durable paths.** `DispatchEvent` and `DispatchTombstone` reach the live subscribers; `DispatchRedelivery` never does. A failing live subscriber (an error from `PublishSync`) does not skip the durable delivery. A tombstone, and a redelivered event named `ForgetEventName`, reach every durable subscriber; any other event reaches the matching ones, when it carries an `Ack`.
@@ -153,19 +153,9 @@ When `WithDispatcher` is not called the in-memory default is used. If the factor
 
 What it must not do is change the observable behavior in the ten rules, or write to the delivery log itself.
 
-## Conformance suite
+## Tests of the default
 
-`dispatchertest.Run(t, factory)`, in `internal/tests/dispatchertest`, checks the contract against an implementation. It is an internal test kit, so only code inside this module can import it; a replacement living elsewhere cannot run it. It covers ordering, durable retry and ack, dead-letter, park/resume/supersede, the causes and undelivered versions `Inspect` reports, tickets, `Unrun` answers, interrupt and close, `InHandler`, and panics in handlers. The suite runs on its own aggregate type, so the factory is a `models.DispatcherFactory[dispatchertest.Aggregate]`, and it must return a fresh, independent dispatcher on every call. Run it from your implementation's tests:
-
-```go
-func TestConformance(t *testing.T) {
-    dispatchertest.Run(t, func(cfg models.DispatcherConfig[dispatchertest.Aggregate]) (models.Dispatcher[dispatchertest.Aggregate], error) {
-        return newMyDispatcher(cfg), nil
-    })
-}
-```
-
-It does not test goroutine retirement or idle timeouts: those belong to the default implementation's own tests.
+The library ships no suite for third-party implementations. The in-memory default is checked against the contract by its own tests in `internal/bus/dispatcher`, which also cover goroutine retirement and idle timeouts.
 
 ## The in-memory default
 
