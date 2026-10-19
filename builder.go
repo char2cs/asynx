@@ -1,7 +1,6 @@
 package asynx
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"maps"
@@ -437,14 +436,12 @@ const recoveryBatch = 100
 
 func (b *Builder[T]) compileSyncProjections() ([]exec.SyncProjection[T], error) {
 	out := make([]exec.SyncProjection[T], 0, len(b.syncProjections))
-	var failure error
 	for _, def := range b.syncProjections {
 		sp, err := compileSyncProjection(def)
-		failure = cmp.Or(failure, err)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, sp)
-	}
-	if failure != nil {
-		return nil, failure
 	}
 	return out, nil
 }
@@ -484,14 +481,12 @@ func (b *Builder[T]) compileDurable() ([]models.DurableSub[T], func(string) bool
 
 func (b *Builder[T]) compileSubscribers() ([]models.DurableSub[T], error) {
 	subs := make([]models.DurableSub[T], 0, len(b.subscribers))
-	var failure error
 	for i, def := range b.subscribers {
 		sub, err := compileSubscriber(i, def)
-		failure = cmp.Or(failure, err)
+		if err != nil {
+			return nil, err
+		}
 		subs = append(subs, sub)
-	}
-	if failure != nil {
-		return nil, failure
 	}
 	return subs, nil
 }

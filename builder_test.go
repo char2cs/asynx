@@ -1096,3 +1096,30 @@ func TestBuild_ATypedNilDispatcherFailsBuild(t *testing.T) {
 		t.Fatalf("Build = (%v, %v), want the no-dispatcher error and no instance", inst, err)
 	}
 }
+
+func TestBuild_AnInvalidSubscriberStopsTheValidationOfTheNextOnes(t *testing.T) {
+	handler := func(
+		context.Context,
+		models.Event[mocks.Order],
+	) error {
+		return nil
+	}
+	optionRan := false
+	option := func(
+		*models.SubscriptionConfig[mocks.Order],
+	) {
+		optionRan = true
+	}
+
+	inst, err := eight(store.New()).
+		WithSubscriber("", handler).
+		WithSubscriber("OrderCreated", handler, option).
+		Build()
+
+	if inst != nil || !errors.Is(err, models.ErrEmptyPattern) {
+		t.Fatalf("Build = (%v, %v), want ErrEmptyPattern and no instance", inst, err)
+	}
+	if optionRan {
+		t.Error("the options of a later subscriber ran after an earlier one was rejected")
+	}
+}
