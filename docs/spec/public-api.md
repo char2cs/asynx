@@ -36,6 +36,11 @@ type Asynx[T any] interface {
     Replay(ctx context.Context, aggregateID string, fromVersion, toVersion int64,
         fn models.ProjectionHandler[T]) error
 
+    // Durable delivery
+    PausedAggregates() []string
+    ResumeDeliveries(ctx context.Context) error
+    InspectDelivery(aggregateID string) models.DeliveryStatus
+
     // Lifecycle
     Shutdown(ctx context.Context) error
     WaitPublish() // testing only
@@ -49,8 +54,30 @@ ax, err := asynx.New[Order]().
     WithEventStore(store).
     WithSnapshotStore(snapshotStore).
     WithBus(bus).
+    WithDispatcher(factory). // optional; the in-memory dispatcher is the default
     Build()  // Returns Asynx[T]
 ```
+
+**Durable subscribers and synchronous projections (builder):**
+
+```go
+ax, err := asynx.New[Order]().
+    WithEventStore(store).
+    WithSnapshotStore(snapshotStore).
+    // Runs inside the event's transaction: commits or rolls back with it.
+    WithSyncProjection("Order.*", func(ctx context.Context, tx models.Tx, evt models.Event[Order]) error {
+        return readModel.ApplyInTx(ctx, tx, evt)
+    }).
+    // Durable, at-least-once, in order per aggregate; an error is retried with backoff.
+    WithSubscriber("Order.*", func(ctx context.Context, evt models.Event[Order]) error {
+        return search.Index(ctx, evt)
+    }).
+    Build()
+```
+
+See [Write-Path Guarantees](guarantees.md#durable-delivery) for retry, parking, dead-lettering and the deletion marker.
+
+`WithDispatcher(models.DispatcherFactory[T])` replaces the component that orders, retries and parks durable deliveries. The library ships only the in-memory implementation; see [dispatcher.md](./dispatcher.md) for the contract a replacement must carry. A factory error (wrapped as `asynx: dispatcher factory: ...`), or a factory that returns no dispatcher, fails `Build`; a nil factory is ignored.
 
 ---
 
@@ -85,6 +112,20 @@ if errors.Is(err, models.ErrValidation) {
 event, err := ax.SendWait(ctx, createOrderCmd)
 // Read models are now consistent with this event
 ```
+
+---
+
+#### `PausedAggregates() []string`
+
+**Defined in:** `processor` module
+**Purpose:** Lists, sorted, the aggregates whose durable delivery is parked: their attempts ran out (`WithDeliveryMaxAttempts`) with no dead-letter handler accepting the event, or a `Forget` could not deliver its marker. Their events stay pending in the store and `SendWait` on them returns `ErrDeliveryParked`. Parking never lifts by itself.
+
+---
+
+#### `ResumeDeliveries(ctx context.Context) error`
+
+**Defined in:** `processor` module
+**Purpose:** Lifts the park of every paused aggregate and redelivers its pending events, in order and ahead of any live event, to the durable subscribers only. Call it once the cause is fixed. An aggregate that cannot be redelivered stays parked and the others are still resumed; the errors are joined. The delivery log is read once for all paused aggregates, before any park is lifted and without holding a lock; each aggregate is then redelivered under its own command lock, one at a time (so a command that sends to another aggregate from inside its validation cannot deadlock with a resume). If the log cannot be read, nothing changes. An aggregate whose park was lifted, or lifted and imposed again, while the call was under way is left for the next call.
 
 ---
 
@@ -259,6 +300,30 @@ err := ax.Replay(ctx, "order_123", 0, 0, func(ctx context.Context, e models.Even
 
 ---
 
+### Delivery State
+
+#### `InspectDelivery(aggregateID string) models.DeliveryStatus`
+
+**Defined in:** `processor` over the dispatcher
+**Purpose:** Read-only view of an aggregate's durable delivery state, answering why it is parked.
+
+```go
+st := ax.InspectDelivery("order-42")
+if st.Parked {
+    log.Printf("order-42 parked (generation %d): %v; undelivered versions %v",
+        st.Generation, st.Cause, st.Undelivered)
+}
+```
+
+- `Parked` — the aggregate's durable deliveries are parked.
+- `Generation` — changes each time a park is imposed; zero when not parked.
+- `Cause` — the error that parked it (an error matching `ErrDeliveryParked` with the last handler error and attempt count, a failed ack, `ErrDispatcherClosed`, or the error a `Park` call carried, such as the error of a failed `Forget`, enqueue or redelivery); nil when not parked. Parking an already parked aggregate keeps the first non-nil cause.
+- `Undelivered` — ascending versions that no handler took while parked.
+
+An aggregate that is not parked, or that the dispatcher knows nothing about, returns the zero status. `PausedAggregates()` lists the parked aggregates and `ResumeDeliveries(ctx)` lifts the parks and redelivers the pending events in order. See [dispatcher.md](./dispatcher.md#inspect).
+
+---
+
 ### Test Synchronization
 
 #### `WaitPublish()`
@@ -281,6 +346,7 @@ err := ax.Replay(ctx, "order_123", 0, 0, func(ctx context.Context, e models.Even
 | `Subscribe()` / `Unsubscribe()` / `OnForget()` | `bus` | — |
 | `Listen()` / `SubscribeWait()` | `asynx` over `bus` | — |
 | `Replay()` | `eventstore` | `replayer` |
+| `InspectDelivery()` / `PausedAggregates()` / `ResumeDeliveries()` | `processor` | `dispatcher` |
 | `WaitPublish()` | `processor` + `bus` | — |
 
 **Developer view:** None of this is visible. The API is unified on `Asynx[T]`.
@@ -341,7 +407,7 @@ All errors are sentinel values in the `models` package; match with `errors.Is`. 
 **Where the common ones come from:**
 - `ErrValidation` — from `cmd.Validate()` failure, or `Forget` on a missing aggregate
 - `ErrPipelineFailed` — from a store `Append` failure (e.g. version conflict)
-- `ErrQueueFull` — from processor shard queue hitting capacity
+- `ErrQueueFull` — from the processor when more commands wait for one aggregate than `QueueDepth` allows, or the shard's hand-off buffer is full
 - `ErrShuttingDown` — from processor during shutdown phase 1
 - `ErrAlreadyShuttingDown` — from a second concurrent `Shutdown` call
 - `ErrContextCancelled` — from context cancellation

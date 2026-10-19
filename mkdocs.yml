@@ -25,6 +25,7 @@ nav:
   - Specification:
     - Overview: spec/overview.md
     - Write-Path Guarantees: spec/guarantees.md
+    - Dispatcher: spec/dispatcher.md
 
 plugins:
   - search

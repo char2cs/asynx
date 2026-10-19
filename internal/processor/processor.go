@@ -15,6 +15,8 @@ package processor
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,7 +35,8 @@ type Processor[T any] struct {
 	pool          *pool.ShardPool[T]
 	router        *queue.Router
 	executor      *exec.CommandExecutor[T]
-	dispatcher    *dispatcher.Dispatcher[T]
+	dispatcher    asynxmd.Dispatcher[T]
+	onPublishErr  asynxmd.PublishErrorHandler[T]
 	bus           asynxmd.Bus[T]
 	shuttingDown  atomic.Bool
 	lifeMu        sync.Mutex     // orders Shutdown against Send and Forget calls starting
@@ -53,6 +56,14 @@ const (
 	shutDown
 )
 
+const (
+	defaultRetryInitial = 100 * time.Millisecond
+	defaultRetryMax     = 30 * time.Second
+	defaultMaxAttempts  = 20
+)
+
+var errNilDispatcher = errors.New("asynx: the dispatcher factory returned no dispatcher")
+
 type ProcessorOpt[T any] func(*processorConfig[T])
 
 type processorConfig[T any] struct {
@@ -61,53 +72,100 @@ type processorConfig[T any] struct {
 	workersPerShard     int
 	publishErrorHandler asynxmd.PublishErrorHandler[T]
 	executorOpts        []exec.Opt[T]
-	dispatcherOpts      []dispatcher.Opt[T]
+	dispatcher          asynxmd.DispatcherConfig[T]
+	dispatcherFactory   asynxmd.DispatcherFactory[T]
 }
 
 // WithDurableSubscribers registers the durable subscribers the dispatcher runs,
 // with retry, for durable deliveries.
-func WithDurableSubscribers[T any](subs []dispatcher.DurableSub[T]) ProcessorOpt[T] {
-	return func(cfg *processorConfig[T]) {
-		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithDurableSubs(subs))
+func WithDurableSubscribers[T any](
+	subs []asynxmd.DurableSub[T],
+) ProcessorOpt[T] {
+	return func(
+		cfg *processorConfig[T],
+	) {
+		cfg.dispatcher.DurableSubs = subs
 	}
 }
 
 // WithDeliveryErrorHandler observes failed durable delivery attempts.
-func WithDeliveryErrorHandler[T any](fn asynxmd.DeliveryErrorHandler[T]) ProcessorOpt[T] {
-	return func(cfg *processorConfig[T]) {
-		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithDeliveryErrorHandler(fn))
+func WithDeliveryErrorHandler[T any](
+	fn asynxmd.DeliveryErrorHandler[T],
+) ProcessorOpt[T] {
+	return func(
+		cfg *processorConfig[T],
+	) {
+		cfg.dispatcher.OnDeliveryError = fn
 	}
 }
 
 // WithDeliveryPanicHandler is called when a durable handler panics.
-func WithDeliveryPanicHandler[T any](fn asynxmd.PanicHandler[T]) ProcessorOpt[T] {
-	return func(cfg *processorConfig[T]) {
-		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithDeliveryPanicHandler(fn))
+func WithDeliveryPanicHandler[T any](
+	fn asynxmd.PanicHandler[T],
+) ProcessorOpt[T] {
+	return func(
+		cfg *processorConfig[T],
+	) {
+		cfg.dispatcher.OnPanic = fn
 	}
 }
 
-// WithDeliveryMaxAttempts caps the attempts of a failing durable delivery.
-func WithDeliveryMaxAttempts[T any](n int) ProcessorOpt[T] {
-	return func(cfg *processorConfig[T]) {
-		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithMaxAttempts[T](n))
+// WithDeliveryMaxAttempts caps the attempts of a failing durable delivery. When
+// the cap is reached the delivery goes to the dead-letter handler if one is set
+// and accepts it; otherwise the aggregate is parked. Non-positive values are
+// ignored, leaving the default of 20.
+func WithDeliveryMaxAttempts[T any](
+	n int,
+) ProcessorOpt[T] {
+	if n <= 0 {
+		return ignored[T]
+	}
+	return func(
+		cfg *processorConfig[T],
+	) {
+		cfg.dispatcher.MaxAttempts = n
 	}
 }
 
 // WithDeadLetterHandler sets the handler for deliveries that ran out of attempts.
-func WithDeadLetterHandler[T any](fn asynxmd.DeadLetterHandler[T]) ProcessorOpt[T] {
-	return func(cfg *processorConfig[T]) {
-		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithDeadLetterHandler(fn))
+func WithDeadLetterHandler[T any](
+	fn asynxmd.DeadLetterHandler[T],
+) ProcessorOpt[T] {
+	return func(
+		cfg *processorConfig[T],
+	) {
+		cfg.dispatcher.DeadLetter = fn
 	}
 }
 
-// WithDeliveryRetry sets the retry backoff of failed durable deliveries.
+// WithDeliveryRetry sets the delay before a failed durable delivery is retried:
+// it starts at initial and doubles up to max. Non-positive values are ignored,
+// each leaving its default (100ms and 30s).
 func WithDeliveryRetry[T any](
 	initial time.Duration,
 	max time.Duration,
 ) ProcessorOpt[T] {
-	return func(cfg *processorConfig[T]) {
-		cfg.dispatcherOpts = append(cfg.dispatcherOpts, dispatcher.WithRetryBackoff[T](initial, max))
+	return func(
+		cfg *processorConfig[T],
+	) {
+		cfg.dispatcher.RetryInitial = positiveOr(initial, cfg.dispatcher.RetryInitial)
+		cfg.dispatcher.RetryMax = positiveOr(max, cfg.dispatcher.RetryMax)
 	}
+}
+
+func ignored[T any](
+	*processorConfig[T],
+) {
+}
+
+func positiveOr(
+	value time.Duration,
+	fallback time.Duration,
+) time.Duration {
+	if value <= 0 {
+		return fallback
+	}
+	return value
 }
 
 // WithSyncProjections registers projections that run inside each event's
@@ -166,34 +224,40 @@ func WithPublishErrorHandler[T any](fn asynxmd.PublishErrorHandler[T]) Processor
 	}
 }
 
+// WithDispatcherFactory sets the factory that builds the dispatcher the
+// processor delivers through, from the configuration with the defaults applied.
+// A nil factory is ignored, leaving the in-memory default. When set, the
+// factory runs even without a bus.
+func WithDispatcherFactory[T any](
+	f asynxmd.DispatcherFactory[T],
+) ProcessorOpt[T] {
+	if f == nil {
+		return ignored[T]
+	}
+	return func(
+		cfg *processorConfig[T],
+	) {
+		cfg.dispatcherFactory = f
+	}
+}
+
+// New builds a Processor. The dispatcher comes from the factory given by
+// WithDispatcherFactory, or from the in-memory default when there is none and a
+// bus is present. A factory error, or a factory that returns no dispatcher,
+// fails New and nothing is left running.
 func New[T any](
 	es *eventstore.EventStore[T],
 	bus asynxmd.Bus[T],
 	opts ...ProcessorOpt[T],
-) *Processor[T] {
-	cfg := &processorConfig[T]{
-		shards:          8,
-		queueDepth:      -1,
-		workersPerShard: 8,
-	}
-	for _, opt := range opts {
-		opt(cfg)
-	}
-	if cfg.queueDepth <= 0 {
-		cfg.queueDepth = cfg.workersPerShard
-	}
-
-	dispatcherOpts := cfg.dispatcherOpts
-	if cfg.publishErrorHandler != nil {
-		dispatcherOpts = append(dispatcherOpts, dispatcher.WithPublishErrorHandler[T](cfg.publishErrorHandler))
-	}
-
-	var d *dispatcher.Dispatcher[T]
-	if bus != nil {
-		d = dispatcher.New(bus, dispatcherOpts...)
+) (*Processor[T], error) {
+	cfg := configure(opts...)
+	d, err := newDispatcher(cfg, bus)
+	if err != nil {
+		return nil, err
 	}
 
 	executor := exec.New(es, d, cfg.executorOpts...)
+	es.GuardAutoSnapshots(executor.WithLockIfFree)
 	return &Processor[T]{
 		es: es,
 		pool: pool.New(
@@ -205,10 +269,93 @@ func New[T any](
 		router: queue.New(
 			cfg.shards,
 		),
-		executor:   executor,
-		dispatcher: d,
-		bus:        bus,
+		executor:     executor,
+		dispatcher:   d,
+		onPublishErr: cfg.publishErrorHandler,
+		bus:          bus,
+	}, nil
+}
+
+func newDispatcher[T any](
+	cfg *processorConfig[T],
+	bus asynxmd.Bus[T],
+) (asynxmd.Dispatcher[T], error) {
+	factory := cfg.dispatcherFactory
+	if factory == nil && bus == nil {
+		return nil, nil
 	}
+	if factory == nil {
+		factory = defaultDispatcher[T]
+	}
+	cfg.dispatcher.Bus = bus
+	cfg.dispatcher.OnPublishError = cfg.publishErrorHandler
+	d, err := factory(cfg.dispatcher)
+	if err != nil {
+		return nil, fmt.Errorf("asynx: dispatcher factory: %w", err)
+	}
+	if isNil(d) {
+		return nil, errNilDispatcher
+	}
+	return d, nil
+}
+
+func isNil(
+	value any,
+) bool {
+	if value == nil {
+		return true
+	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Pointer,
+		reflect.Map,
+		reflect.Func,
+		reflect.Slice,
+		reflect.Chan,
+		reflect.Interface:
+		return rv.IsNil()
+	}
+	return false
+}
+
+func configure[T any](
+	opts ...ProcessorOpt[T],
+) *processorConfig[T] {
+	cfg := &processorConfig[T]{
+		shards:          8,
+		queueDepth:      -1,
+		workersPerShard: 8,
+		dispatcher: asynxmd.DispatcherConfig[T]{
+			RetryInitial: defaultRetryInitial,
+			RetryMax:     defaultRetryMax,
+			MaxAttempts:  defaultMaxAttempts,
+		},
+	}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	if cfg.queueDepth <= 0 {
+		cfg.queueDepth = cfg.workersPerShard
+	}
+	return cfg
+}
+
+func defaultDispatcher[T any](
+	cfg asynxmd.DispatcherConfig[T],
+) (asynxmd.Dispatcher[T], error) {
+	return dispatcher.New(cfg), nil
+}
+
+func (p *Processor[T]) reportPublishError(
+	ctx context.Context,
+	event asynxmd.Event[T],
+	err error,
+) {
+	if p.onPublishErr == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	p.onPublishErr(ctx, event, err)
 }
 
 func (p *Processor[T]) Send(
@@ -304,19 +451,24 @@ func (p *Processor[T]) sendAndWait(
 
 	select {
 	case result := <-envelope.ResultChan:
-		if result.Err != nil || result.Wait == nil {
-			return result.Event, result.Err
-		}
-		if err := result.Wait(ctx); err != nil {
-			if errors.Is(err, asynxmd.ErrContextCancelled) {
-				return result.Event, asynxmd.ErrContextCancelled
-			}
-			return result.Event, err
-		}
-		return result.Event, nil
+		return awaitHandlers(ctx, result)
 	case <-ctx.Done():
 		return asynxmd.Event[T]{}, asynxmd.ErrContextCancelled
 	}
+}
+
+func awaitHandlers[T any](
+	ctx context.Context,
+	result models.CommandResult[T],
+) (asynxmd.Event[T], error) {
+	if result.Err != nil || result.Wait == nil {
+		return result.Event, result.Err
+	}
+	err := result.Wait(ctx)
+	if errors.Is(err, asynxmd.ErrContextCancelled) {
+		return result.Event, asynxmd.ErrContextCancelled
+	}
+	return result.Event, err
 }
 
 // Shutdown stops accepting work, waits for the commands and Forgets in flight,

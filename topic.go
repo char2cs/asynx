@@ -20,15 +20,20 @@ import (
 func Topic(pattern string) string {
 	parts := strings.SplitN(pattern, ".", 3)
 	for i, p := range parts {
-		if p == "*" {
-			if i == len(parts)-1 {
-				parts[i] = ".*"
-			} else {
-				parts[i] = "[^.]+"
-			}
-		} else {
-			parts[i] = regexp.QuoteMeta(p)
-		}
+		parts[i] = segmentPattern(p, i == len(parts)-1)
 	}
 	return "^" + strings.Join(parts, `\.`) + "$"
+}
+
+func segmentPattern(
+	segment string,
+	isLast bool,
+) string {
+	if segment != "*" {
+		return regexp.QuoteMeta(segment)
+	}
+	if isLast {
+		return ".*"
+	}
+	return "[^.]+"
 }

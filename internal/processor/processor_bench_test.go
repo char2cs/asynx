@@ -9,8 +9,8 @@ import (
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor"
-	"github.com/char2cs/asynx/store"
 	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/store"
 )
 
 func BenchmarkSend_MultiShard(b *testing.B) {
@@ -20,7 +20,7 @@ func BenchmarkSend_MultiShard(b *testing.B) {
 			channelBus := bus.NewChannelBus[order]()
 			es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-			p := processor.New(es, channelBus, processor.WithShards[order](shards))
+			p := mustNew(b, es, channelBus, processor.WithShards[order](shards))
 			defer p.Shutdown(context.Background())
 
 			ctx := context.Background()
@@ -41,7 +41,7 @@ func BenchmarkSend_Parallel(b *testing.B) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(es, channelBus, processor.WithShards[order](8))
+	p := mustNew(b, es, channelBus, processor.WithShards[order](8))
 	defer p.Shutdown(context.Background())
 
 	ctx := context.Background()
@@ -69,7 +69,7 @@ func BenchmarkSend_WithBusFanout(b *testing.B) {
 		})
 	}
 
-	p := processor.New(es, channelBus)
+	p := mustNew(b, es, channelBus)
 	defer p.Shutdown(context.Background())
 
 	ctx := context.Background()

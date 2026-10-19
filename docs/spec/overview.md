@@ -295,7 +295,7 @@ This means `nil` from `Send()` is a guarantee: the event is in the stream, safe,
 
 Commands are routed to shards by hashing `cmd.AggregateID()` — all commands for the same aggregate always land in the same shard, guaranteeing serial ordering per aggregate without dedicating a goroutine per aggregate. Each shard is protected by a `sync.RWMutex`.
 
-On queue full, the processor drops the command and returns `ErrQueueFull` synchronously. The default queue depth is `0` (unbounded) — see Configuration. If `ErrQueueFull` is occurring, the queue must be reconfigured or more nodes added. It is not a signal to retry blindly — it is a signal that the system is undersized for the current load.
+On queue full, the processor drops the command and returns `ErrQueueFull` synchronously. `QueueDepth` bounds the commands that may wait behind a running one for an aggregate (default `0` = `WorkersPerShard`; never unlimited) — see Configuration. If `ErrQueueFull` is occurring, the queue must be reconfigured or more nodes added. It is not a signal to retry blindly — it is a signal that the system is undersized for the current load.
 
 Version numbers are generated and incremented by the processor atomically as part of the same write operation as the stream append. Version generation and write are indivisible — this is what makes out-of-sync detection reliable.
 
@@ -637,7 +637,7 @@ In a load-balanced multi-node deployment, shutting down one node causes the load
 These are the only errors Asynx surfaces. Everything else is the developer's concern.
 
 ```go
-var ErrQueueFull        = errors.New("asynx: shard queue full, command rejected")
+var ErrQueueFull        = errors.New("asynx: queue full")
 var ErrValidation       = errors.New("asynx: command validation failed")
 var ErrPipelineFailed   = errors.New("asynx: pipeline failed, event not written to stream")
 var ErrNotFound         = errors.New("asynx: aggregate not found")
@@ -693,10 +693,9 @@ instance, err := asynx.New[Order]().
 ```go
 asynx.ShardingOpts{
     Shards:     8,  // number of shard queues, default 8
-    QueueDepth: 0,  // 0 = unbounded (default). Set a positive integer to cap
-                    // per-shard buffering and enable ErrQueueFull backpressure.
-                    // Note: unbounded queues are memory-limited — size them
-                    // consciously for high-throughput workloads.
+    QueueDepth: 0,  // commands that may wait per aggregate; 0 = WorkersPerShard
+                    // (default). More than that gets ErrQueueFull, the
+                    // backpressure signal. The queue is never unlimited.
 }
 ```
 

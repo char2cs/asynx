@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
 	asynxmd "github.com/char2cs/asynx/models"
 	"github.com/char2cs/asynx/store"
 )
-
 
 type idemUpdate struct {
 	mocks.UpdateOrderCmd
@@ -309,5 +312,178 @@ func TestExecute_Idempotent_RetryAfterForgetAndRecreateDoesNotReturnTheNewAggreg
 	}
 	if retry.Aggregate.Total == 99 {
 		t.Fatal("retry returned the re-created aggregate's state")
+	}
+}
+
+// readFailStore fails the reads of event streams once switched on.
+type readFailStore struct {
+	store.Memory
+	fail atomic.Bool
+}
+
+func (s *readFailStore) ReadFrom(
+	ctx context.Context,
+	streamID string,
+	fromVersion int64,
+) ([][]byte, error) {
+	if s.fail.Load() {
+		return nil, errors.New("stream unreadable")
+	}
+	return s.Memory.ReadFrom(ctx, streamID, fromVersion)
+}
+
+// A retry that cannot read the original event back must say so, not hand the
+// caller a hollow event as if all were well.
+func TestExecute_Idempotent_RetryFailsWhenTheOriginalEventCannotBeRead(t *testing.T) {
+	s := &readFailStore{Memory: store.New()}
+	ex, _, _, _, _ := newEnvOn(t, s)
+	cmd := idemUpdate{UpdateOrderCmd: update("agg", 5), Cmd: "cmd-1"}
+	if _, err := ex.Execute(context.Background(), cmd, false); err != nil {
+		t.Fatal(err)
+	}
+
+	s.fail.Store(true)
+	evt, err := ex.Execute(context.Background(), cmd, false)
+	if !errors.Is(err, asynxmd.ErrPipelineFailed) {
+		t.Fatalf("retry = %+v, %v; want ErrPipelineFailed", evt, err)
+	}
+
+	s.fail.Store(false)
+	if evt, err := ex.Execute(context.Background(), cmd, false); err != nil || evt.Aggregate.Total != 5 {
+		t.Fatalf("retry once the stream is readable = %+v, %v; want the original event", evt, err)
+	}
+}
+
+// The retry of a command whose handlers are still running waits for them, as
+// the first attempt would have: read-your-writes must not depend on whether the
+// caller is on its first attempt or its second.
+func TestExecute_Idempotent_RetryWaitsForTheOriginalEventsHandlers(t *testing.T) {
+	ex, _, _, _, b := newEnv(t)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	if _, err := b.Subscribe("OrderUpdated", func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		entered <- struct{}{}
+		<-release
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cmd := idemUpdate{UpdateOrderCmd: update("agg", 5), Cmd: "cmd-1"}
+	ctx := context.Background()
+
+	first, _, err := ex.ExecuteAsync(ctx, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	within(t, entered, "the handler")
+
+	retried, wait, err := ex.ExecuteAsync(ctx, cmd)
+	if err != nil || retried.ID != first.ID {
+		t.Fatalf("retry = %+v, %v; want the original event", retried, err)
+	}
+	if wait == nil {
+		t.Fatal("the retry has nothing to wait on although the handler is still running")
+	}
+	short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	if err := wait(short); !errors.Is(err, asynxmd.ErrContextCancelled) {
+		t.Fatalf("wait = %v while the handler runs, want ErrContextCancelled", err)
+	}
+
+	releaseOnce.Do(func() { close(release) })
+	if err := wait(ctx); err != nil {
+		t.Fatalf("wait after the handler finished = %v", err)
+	}
+	awaitNothingToWaitOn(t, ex, cmd)
+}
+
+func TestExecute_Idempotent_RejectedRetryHasNothingToWaitOn(t *testing.T) {
+	ex, _, _, _, _ := newEnv(t)
+	bad := idemCreate{CreateOrderCmd: mocks.CreateOrderCmd{ID: "agg", Total: -1}, Cmd: "cmd-bad"}
+	if _, _, err := ex.ExecuteAsync(context.Background(), bad); !errors.Is(err, asynxmd.ErrValidation) {
+		t.Fatalf("first err = %v", err)
+	}
+
+	_, wait, err := ex.ExecuteAsync(context.Background(), bad)
+	if !errors.Is(err, asynxmd.ErrValidation) || wait != nil {
+		t.Fatalf("retry: err = %v, wait set = %v; want ErrValidation and no wait", err, wait != nil)
+	}
+}
+
+func TestExecute_Idempotent_RetryWithoutADispatcherHasNothingToWaitOn(t *testing.T) {
+	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
+	ex := New(es, nil)
+	cmd := idemUpdate{UpdateOrderCmd: update("agg", 5), Cmd: "cmd-1"}
+	if _, _, err := ex.ExecuteAsync(context.Background(), cmd); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, wait, err := ex.ExecuteAsync(context.Background(), cmd); err != nil || wait != nil {
+		t.Fatalf("retry: err = %v, wait set = %v", err, wait != nil)
+	}
+}
+
+// The retry of a command whose event the dispatcher left undelivered because its
+// aggregate is parked is told so, as the first attempt was; the retry of one
+// that was delivered before the park is not.
+func TestExecute_Idempotent_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWasTold(t *testing.T) {
+	ex := durableEnv(t, func(
+		context.Context,
+		asynxmd.Event[order],
+	) error {
+		return nil
+	})
+	ctx := context.Background()
+	delivered := idemUpdate{UpdateOrderCmd: update("agg", 1), Cmd: "cmd-1"}
+	_, wait, err := ex.ExecuteAsync(ctx, delivered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ex.dispatcher.Park("agg", errors.New("parked by the test"))
+	leftBehind := idemUpdate{UpdateOrderCmd: update("agg", 2), Cmd: "cmd-2"}
+	if _, _, err := ex.ExecuteAsync(ctx, leftBehind); err != nil {
+		t.Fatal(err)
+	}
+
+	_, wait, err = ex.ExecuteAsync(ctx, leftBehind)
+	if err != nil || wait == nil {
+		t.Fatalf("retry of the command left undelivered: err = %v, wait set = %v", err, wait != nil)
+	}
+	if err := wait(ctx); !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("wait = %v, want ErrDeliveryParked", err)
+	}
+	awaitNothingToWaitOn(t, ex, delivered)
+}
+
+func awaitNothingToWaitOn(
+	t *testing.T,
+	ex *CommandExecutor[order],
+	cmd asynxmd.Command[order],
+) {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, wait, err := ex.ExecuteAsync(ctx, cmd)
+		if err != nil {
+			t.Fatalf("retry of a delivered command: err = %v", err)
+		}
+		if wait == nil {
+			return
+		}
+		if err := wait(ctx); err != nil {
+			t.Fatalf("a retry that still finds the finished delivery must not wait: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("retry of a delivered command: still something to wait on after 5s; want nothing")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

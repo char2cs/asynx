@@ -1,341 +1,185 @@
+// Package dispatcher is asynx's default, in-memory models.Dispatcher: it
+// delivers committed events to the live subscribers (the bus) and to the
+// durable subscribers, in per-aggregate order, on one worker goroutine per
+// aggregate with work.
+//
+// The implementation is split into subsystems under internal/: jobs (the unit
+// of work), aggregates (the one registry, under the one mutex, of every
+// aggregate's queue, halt channel and park), tracker (the deliveries in
+// flight, for WaitIdle and TicketFor), reporter (the error and panic
+// handlers), delivery (the durable attempt loop) and workers (the
+// per-aggregate goroutines). This package wires them together and owns the
+// lifecycle: Close, Interrupt and WaitIdle.
 package dispatcher
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
 	asynxmd "github.com/char2cs/asynx/models"
+
+	"github.com/char2cs/asynx/internal/bus/dispatcher/internal/aggregates"
+	"github.com/char2cs/asynx/internal/bus/dispatcher/internal/delivery"
+	"github.com/char2cs/asynx/internal/bus/dispatcher/internal/jobs"
+	"github.com/char2cs/asynx/internal/bus/dispatcher/internal/reporter"
+	"github.com/char2cs/asynx/internal/bus/dispatcher/internal/tracker"
+	"github.com/char2cs/asynx/internal/bus/dispatcher/internal/workers"
 )
 
-const (
-	defaultIdleTimeout  = 5 * time.Second
-	defaultRetryInitial = 100 * time.Millisecond
-	defaultRetryMax     = 30 * time.Second
+const defaultIdleTimeout = 5 * time.Second
 
-	// defaultMaxAttempts caps a failing durable delivery: with the default
-	// backoff that is about six minutes of retrying.
-	defaultMaxAttempts = 20
-)
+var _ asynxmd.Dispatcher[int] = (*dispatcher[int])(nil)
 
-// Opt is a functional option for configuring a Dispatcher.
-type Opt[T any] func(*Dispatcher[T])
-
-// WithPublishErrorHandler sets the callback invoked when bus.PublishSync
-// returns a non-nil error. When nil (the default), errors are silently dropped.
-func WithPublishErrorHandler[T any](fn asynxmd.PublishErrorHandler[T]) Opt[T] {
-	return func(d *Dispatcher[T]) { d.onPublishError = fn }
+type dispatcher[T any] struct {
+	registry    aggregates.Registry[jobs.Job[T]]
+	tracker     tracker.Tracker[T]
+	workers     workers.Pool[T]
+	quit        chan struct{}
+	quitOnce    sync.Once
+	base        context.Context
+	cancelBase  context.CancelFunc
+	idleTimeout time.Duration
 }
 
-// WithIdleTimeout sets how long a per-aggregate worker goroutine waits for new
-// events before cleaning itself up. Zero or negative values are ignored.
-func WithIdleTimeout[T any](t time.Duration) Opt[T] {
-	return func(d *Dispatcher[T]) {
-		if t > 0 {
-			d.idleTimeout = t
-		}
-	}
+// New creates the in-memory Dispatcher from cfg, whose values it takes as
+// final: the caller applies the retry defaults. Durable deliveries run the
+// subscribers in cfg.DurableSubs on per-aggregate worker goroutines; live
+// events are published through cfg.Bus (nil publishes nothing). It implements
+// the whole contract documented on models.Dispatcher. opts tune what
+// DispatcherConfig does not carry, such as the idle timeout of a worker.
+func New[T any](
+	cfg asynxmd.DispatcherConfig[T],
+	opts ...Opt[T],
+) asynxmd.Dispatcher[T] {
+	return newDispatcher(cfg, opts...)
 }
 
-// Dispatcher provides per-aggregate ordered event delivery by maintaining a
-// FIFO channel and dedicated worker goroutine for each aggregate that has
-// in-flight events. Events for the same aggregate are delivered sequentially
-// via bus.PublishSync; different aggregates are delivered concurrently.
-type Dispatcher[T any] struct {
-	bus            asynxmd.Bus[T]
-	mu             sync.Mutex
-	queues         map[string]*aggregateQueue[T]
-	closed         bool
-	waiting        bool          // prevents new Dispatch calls during WaitIdle
-	stopCh         chan struct{} // closed on Close to signal workers to drain and exit
-	quit           chan struct{} // closed by Interrupt/Close: retry loops give up
-	quitOnce       sync.Once
-	base           context.Context // cancelled when Close gives up: stops handler contexts
-	cancelBase     context.CancelFunc
-	halted         map[string]struct{} // aggregates whose durable delivery is parked
-	wg             sync.WaitGroup      // tracks goroutine lifetime (for Close)
-	jobsWg         sync.WaitGroup      // tracks in-flight jobs (for WaitIdle)
-	onPublishError asynxmd.PublishErrorHandler[T]
-	idleTimeout    time.Duration
-
-	durable         []DurableSub[T]
-	onDeliveryError asynxmd.DeliveryErrorHandler[T]
-	onPanic         asynxmd.PanicHandler[T]
-	retryInitial    time.Duration
-	retryMax        time.Duration
-	maxAttempts     int
-	deadLetter      asynxmd.DeadLetterHandler[T]
-}
-
-// aggregateQueue is one aggregate's FIFO of jobs. Enqueue never blocks, because
-// callers enqueue while holding the aggregate's command lock, and a handler
-// that sends a command back to its own aggregate would otherwise deadlock
-// against a full queue. The queue is therefore unbounded: it grows with the
-// commands sent to an aggregate whose handlers are slower than its writers.
-type aggregateQueue[T any] struct {
-	jobs []*dispatchJob[T] // protected by Dispatcher.mu
-	wake chan struct{}     // capacity 1: signals the worker that jobs is non-empty
-	// halt is closed when the aggregate is halted, interrupting a retry loop in
-	// progress. Protected by Dispatcher.mu; replaced when the halt is lifted.
-	halt chan struct{}
-}
-
-// Ticket tracks one enqueued event.
-type Ticket struct {
-	// Settled closes once every handler has run at least once. A failing
-	// durable handler keeps retrying after it closes.
-	Settled <-chan struct{}
-	// Final closes when the event's delivery is over. Err then says how it
-	// ended: nil if every handler succeeded (and the ack ran), else
-	// ErrDeliveryParked, ErrDispatcherClosed or an ack failure.
-	Final <-chan struct{}
-	// Err is valid once Final is closed.
-	Err func() error
-	// Unrun, once Settled is closed, reports why no handler ran at all: the
-	// event was not queued, or left the queue, because its aggregate is parked.
-	// It is nil when the handlers ran.
-	Unrun func() error
-}
-
-type dispatchJob[T any] struct {
-	event asynxmd.Event[T]
-	ctx   context.Context
-	// done closes once the event has been handled at least once.
-	done   chan struct{}
-	settle sync.Once
-	unrun  error // set before done closes
-	final  chan struct{}
-	err    error // set before final closes
-	finish sync.Once
-	cancel context.CancelFunc
-	// ack, when non-nil, marks a durable delivery: durable subscribers run and
-	// ack is called once they have all succeeded.
-	ack func(context.Context) error
-	// forget marks the tombstone: every durable subscriber receives it,
-	// whatever its pattern, and Final reports whether they all succeeded.
-	forget bool
-	// skipLive keeps the live subscribers (the bus) out of a redelivery.
-	skipLive bool
-}
-
-func (j *dispatchJob[T]) markSettled() { j.settle.Do(func() { close(j.done) }) }
-
-// markUnrun settles a job whose handlers never ran.
-func (j *dispatchJob[T]) markUnrun(err error) {
-	j.settle.Do(func() { j.unrun = err; close(j.done) })
-}
-
-func (j *dispatchJob[T]) complete(err error) {
-	j.finish.Do(func() {
-		j.err = err
-		j.cancel()
-		close(j.final)
-	})
-}
-
-// durable reports whether the job runs durable subscribers.
-func (j *dispatchJob[T]) durable() bool { return j.ack != nil || j.forget }
-
-// New creates a Dispatcher that publishes events through bus.
-func New[T any](bus asynxmd.Bus[T], opts ...Opt[T]) *Dispatcher[T] {
+func newDispatcher[T any](
+	cfg asynxmd.DispatcherConfig[T],
+	opts ...Opt[T],
+) *dispatcher[T] {
 	base, cancelBase := context.WithCancel(context.Background())
-	d := &Dispatcher[T]{
-		bus:          bus,
-		queues:       make(map[string]*aggregateQueue[T]),
-		stopCh:       make(chan struct{}),
-		base:         base,
-		cancelBase:   cancelBase,
-		quit:         make(chan struct{}),
-		halted:       make(map[string]struct{}),
-		maxAttempts:  defaultMaxAttempts,
-		idleTimeout:  defaultIdleTimeout,
-		retryInitial: defaultRetryInitial,
-		retryMax:     defaultRetryMax,
+	d := &dispatcher[T]{
+		quit:        make(chan struct{}),
+		base:        base,
+		cancelBase:  cancelBase,
+		idleTimeout: defaultIdleTimeout,
+		tracker:     tracker.New[T](),
 	}
 	for _, opt := range opts {
 		opt(d)
 	}
+	d.registry = aggregates.New(aggregates.Hooks[jobs.Job[T]]{Spawn: d.spawn, Admit: d.tracker.Track})
+	reports := reporter.New(cfg.OnPublishError, cfg.OnDeliveryError, cfg.OnPanic)
+	deliverer := delivery.New(cfg, d.registry, reports, d.quit)
+	d.workers = workers.New(cfg.Bus, d.registry, deliverer, reports, d.idleTimeout)
 	return d
 }
 
-// Dispatch enqueues an event for ordered delivery. The enqueue itself is
-// synchronous (establishes ordering). If waitHandlers is true the call blocks
-// until the event's handlers have completed.
-func (d *Dispatcher[T]) Dispatch(ctx context.Context, event asynxmd.Event[T], waitHandlers bool) error {
-	done, err := d.Enqueue(ctx, event, nil)
-	if err != nil {
-		return err
-	}
-	if waitHandlers {
-		<-done
-	}
-	return nil
-}
-
-// Enqueue puts an event on its aggregate's queue and returns a channel that is
-// closed once every handler for the event has been run at least once. Enqueue order is
-// delivery order, so callers that must keep versions ordered enqueue while
-// holding their per-aggregate lock and wait on the channel afterwards.
-//
-// ack, when non-nil, marks a durable delivery: the durable subscribers matching
-// the event run (with retry, holding back the aggregate's later events until
-// they succeed) and ack runs once they all have. An ack error is reported to the
-// publish error handler. A failing live subscriber (bus error) does not skip
-// the durable delivery.
-//
-// A durable event for a parked aggregate is not queued: it stays pending in the
-// store's delivery log and its ticket ends with ErrDeliveryParked.
-func (d *Dispatcher[T]) Enqueue(
-	ctx context.Context,
-	event asynxmd.Event[T],
-	ack func(context.Context) error,
-) (<-chan struct{}, error) {
-	t, err := d.enqueue(ctx, event, ack, enqueueOpts{})
-	return t.Settled, err
-}
-
-// EnqueueTicket is Enqueue returning the full Ticket.
-func (d *Dispatcher[T]) EnqueueTicket(
-	ctx context.Context,
-	event asynxmd.Event[T],
-	ack func(context.Context) error,
-) (Ticket, error) {
-	return d.enqueue(ctx, event, ack, enqueueOpts{})
-}
-
-// EnqueueRedelivery enqueues an event read back from the delivery log. Only the
-// durable subscribers receive it: live subscribers are fire-and-forget, they
-// either saw the event or never will, and a replay would reorder their stream.
-// A deletion marker is delivered to every durable subscriber, as the original
-// was.
-func (d *Dispatcher[T]) EnqueueRedelivery(
-	ctx context.Context,
-	event asynxmd.Event[T],
-	ack func(context.Context) error,
-) (Ticket, error) {
-	return d.enqueue(ctx, event, ack, enqueueOpts{
-		skipLive: true,
-		forget:   event.EventName == asynxmd.ForgetEventName,
-	})
-}
-
-// ReportError hands err, which concerns event, to the publish error handler.
-func (d *Dispatcher[T]) ReportError(
-	ctx context.Context,
-	event asynxmd.Event[T],
-	err error,
+func (d *dispatcher[T]) spawn(
+	aggregateID string,
 ) {
-	d.reportPublishError(&dispatchJob[T]{ctx: ctx, event: event}, err)
+	d.workers.Spawn(aggregateID)
 }
 
-// EnqueueForget enqueues a tombstone. Every durable subscriber receives it
-// (whatever its pattern) and ack runs, before the ticket's Final closes without
-// an error.
-func (d *Dispatcher[T]) EnqueueForget(
+func (d *dispatcher[T]) Enqueue(
 	ctx context.Context,
-	tombstone asynxmd.Event[T],
-	ack func(context.Context) error,
-) (Ticket, error) {
-	return d.enqueue(ctx, tombstone, ack, enqueueOpts{forget: true})
-}
-
-type enqueueOpts struct {
-	forget   bool // the deletion marker
-	skipLive bool // durable subscribers only
-}
-
-func (d *Dispatcher[T]) enqueue(
-	ctx context.Context,
-	event asynxmd.Event[T],
-	ack func(context.Context) error,
-	o enqueueOpts,
-) (Ticket, error) {
-	d.mu.Lock()
-	if d.closed || d.waiting {
-		d.mu.Unlock()
-		return Ticket{}, asynxmd.ErrDispatcherClosed
+	request asynxmd.DispatchRequest[T],
+) (asynxmd.Ticket, error) {
+	job, release := d.newJob(ctx, request)
+	_, err := d.registry.Enqueue(job)
+	if err != nil {
+		release()
+		return asynxmd.Ticket{}, err
 	}
-	// Track this dispatch call immediately after checking not-waiting/not-closed.
-	// This ensures WaitIdle() cannot return with jobsWg==0 while a goroutine
-	// is still inside this function (potentially accessing d.mu/d.queues).
-	d.jobsWg.Add(1)
-	d.mu.Unlock()
+	return job.Ticket(), nil
+}
 
-	jobCtx, cancel := context.WithCancel(context.WithValue(context.WithoutCancel(ctx), inHandlerKey[T]{d}, event.AggregateID))
+func (d *dispatcher[T]) newJob(
+	ctx context.Context,
+	request asynxmd.DispatchRequest[T],
+) (jobs.Job[T], context.CancelFunc) {
+	marked := context.WithValue(context.WithoutCancel(ctx), inHandlerKey[T]{d}, request.Event.AggregateID)
+	jobCtx, cancel := context.WithCancel(marked)
 	stop := context.AfterFunc(d.base, cancel)
-	job := &dispatchJob[T]{
-		event:    event,
-		ctx:      jobCtx,
-		done:     make(chan struct{}),
-		final:    make(chan struct{}),
-		ack:      ack,
-		forget:   o.forget,
-		skipLive: o.skipLive,
-		cancel:   func() { stop(); cancel() },
+	release := func() {
+		stop()
+		cancel()
 	}
-	ticket := Ticket{
-		Settled: job.done,
-		Final:   job.final,
-		Err:     func() error { return job.err },
-		Unrun:   func() error { return job.unrun },
-	}
-
-	d.mu.Lock()
-	if d.closed {
-		d.mu.Unlock()
-		// Undo the Add(1) since we're not enqueueing a job.
-		job.cancel()
-		d.jobsWg.Done()
-		return Ticket{}, asynxmd.ErrDispatcherClosed
-	}
-
-	agg := event.AggregateID
-	q, exists := d.queues[agg]
-
-	if ack != nil {
-		if _, parked := d.halted[agg]; parked {
-			d.mu.Unlock()
-			job.markUnrun(asynxmd.ErrDeliveryParked)
-			job.complete(asynxmd.ErrDeliveryParked)
-			d.jobsWg.Done()
-			return ticket, nil
-		}
-	}
-
-	if !exists {
-		q = &aggregateQueue[T]{wake: make(chan struct{}, 1), halt: make(chan struct{})}
-		d.queues[agg] = q
-		d.wg.Add(1)
-		go d.worker(agg, q)
-	}
-
-	q.jobs = append(q.jobs, job)
-	select {
-	case q.wake <- struct{}{}:
-	default:
-	}
-	d.mu.Unlock()
-
-	return ticket, nil
+	return jobs.New(jobCtx, request, release), release
 }
 
-// Close marks the dispatcher as closed, closes all per-aggregate channels, and
-// waits for every worker to drain its queue. If ctx expires before all workers
-// finish, the context error is returned.
-func (d *Dispatcher[T]) Close(ctx context.Context) error {
-	d.mu.Lock()
-	if !d.closed {
-		d.closed = true
-		d.waiting = false // allow any remaining Dispatch calls to fail cleanly
-		close(d.stopCh)   // signal all workers to drain and exit
+func (d *dispatcher[T]) TicketFor(
+	aggregateID string,
+	version int64,
+) (asynxmd.Ticket, bool) {
+	return d.tracker.For(aggregateID, version)
+}
+
+func (d *dispatcher[T]) Unrun(
+	aggregateID string,
+	version int64,
+) error {
+	return d.registry.Unrun(aggregateID, version)
+}
+
+func (d *dispatcher[T]) Park(
+	aggregateID string,
+	cause error,
+	undelivered ...int64,
+) {
+	d.registry.Park(aggregateID, cause, undelivered...)
+}
+
+func (d *dispatcher[T]) Supersede(
+	aggregateID string,
+) {
+	d.registry.Supersede(aggregateID)
+}
+
+func (d *dispatcher[T]) Parks() map[string]uint64 {
+	return d.registry.Parks()
+}
+
+func (d *dispatcher[T]) ResumeUndelivered(
+	aggregateID string,
+	generation uint64,
+) (bool, []int64) {
+	return d.registry.Lift(aggregateID, generation)
+}
+
+func (d *dispatcher[T]) Inspect(
+	aggregateID string,
+) asynxmd.DeliveryStatus {
+	return d.registry.Inspect(aggregateID)
+}
+
+func (d *dispatcher[T]) InHandler(
+	ctx context.Context,
+	aggregateID string,
+) bool {
+	id, ok := ctx.Value(inHandlerKey[T]{d}).(string)
+	return ok && id == aggregateID
+}
+
+func (d *dispatcher[T]) Interrupt() {
+	d.quitOnce.Do(func() { close(d.quit) })
+}
+
+func (d *dispatcher[T]) Interrupted() <-chan struct{} {
+	return d.quit
+}
+
+func (d *dispatcher[T]) Close(
+	ctx context.Context,
+) error {
+	if d.registry.Close() {
+		d.workers.Stop()
 	}
-	d.mu.Unlock()
 	d.Interrupt()
-
 	done := make(chan struct{})
-	go func() { d.wg.Wait(); close(done) }()
-
+	go d.awaitWorkers(done)
 	select {
 	case <-done:
 		return nil
@@ -345,194 +189,13 @@ func (d *Dispatcher[T]) Close(ctx context.Context) error {
 	}
 }
 
-// WaitIdle blocks until all in-flight jobs have been handled. The per-aggregate
-// worker goroutines may still be alive (waiting for their idle timeout), but
-// every dispatched event has been delivered to the bus. New Dispatch calls are
-// rejected during WaitIdle to prevent the race where a new goroutine enters
-// Dispatch while WaitIdle is checking idleness.
-func (d *Dispatcher[T]) WaitIdle() {
-	d.mu.Lock()
-	d.waiting = true
-	d.mu.Unlock()
-
-	d.jobsWg.Wait()
-
-	d.mu.Lock()
-	d.waiting = false
-	d.mu.Unlock()
-}
-
-// waitWorkers blocks until all per-aggregate worker goroutines have exited
-// (i.e. after their idle timeout elapses). Only for use in tests.
-func (d *Dispatcher[T]) waitWorkers() { d.wg.Wait() }
-
-func (d *Dispatcher[T]) worker(
-	aggregateID string,
-	q *aggregateQueue[T],
+func (d *dispatcher[T]) awaitWorkers(
+	done chan<- struct{},
 ) {
-	defer d.wg.Done()
-	for {
-		d.drain(aggregateID, q)
-
-		select {
-		case <-q.wake:
-		case <-d.stopCh:
-			d.drain(aggregateID, q)
-			return
-		case <-time.After(d.idleTimeout):
-			if d.retire(aggregateID, q) {
-				return
-			}
-		}
-	}
+	d.workers.Wait()
+	close(done)
 }
 
-// drain handles every job queued for the aggregate, in order.
-func (d *Dispatcher[T]) drain(
-	aggregateID string,
-	q *aggregateQueue[T],
-) {
-	for {
-		job, halt, ok := d.pop(q)
-		if !ok {
-			return
-		}
-		d.handle(aggregateID, q, halt, job)
-	}
-}
-
-// retire removes an idle aggregate's queue and reports whether it did. A job
-// appended under d.mu keeps the queue alive, so a queue with a job in flight is
-// never retired.
-func (d *Dispatcher[T]) retire(
-	aggregateID string,
-	q *aggregateQueue[T],
-) bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	hasJobs := len(q.jobs) > 0
-	if hasJobs {
-		return false
-	}
-	delete(d.queues, aggregateID)
-	return true
-}
-
-// pop removes and returns the oldest queued job together with the halt
-// generation it is delivered under. Reading both under one hold of d.mu is what
-// lets a park or supersede that follows be recognised as concerning this job:
-// a halt channel read later could already be the next generation's.
-func (d *Dispatcher[T]) pop(q *aggregateQueue[T]) (*dispatchJob[T], <-chan struct{}, bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if len(q.jobs) == 0 {
-		return nil, nil, false
-	}
-	job := q.jobs[0]
-	q.jobs[0] = nil
-	q.jobs = q.jobs[1:]
-	return job, q.halt, true
-}
-
-// handle delivers one job: live subscribers through the bus, then (for a
-// durable delivery) the durable subscribers, retrying the failed ones until they
-// succeed, the attempt cap is reached, or the dispatcher is interrupted. A panic
-// in the dispatcher itself never kills the worker; it is reported to the
-// publish error handler. A failing live subscriber does not skip the durable
-// delivery, and a failed ack parks the aggregate: either way the next event of
-// the aggregate would otherwise be delivered ahead of this one.
-func (d *Dispatcher[T]) handle(
-	agg string,
-	q *aggregateQueue[T],
-	halt <-chan struct{},
-	job *dispatchJob[T],
-) {
-	defer d.jobsWg.Done()
-	var outcome error
-	defer func() {
-		job.markSettled()
-		job.complete(outcome)
-	}()
-	defer func() {
-		if r := recover(); r != nil {
-			err := fmt.Errorf("asynx: dispatcher panic: %v", r)
-			d.reportPublishError(job, err)
-			outcome = err
-		}
-	}()
-
-	if job.ack != nil && (d.isHalted(agg) || closed(halt)) {
-		outcome = asynxmd.ErrDeliveryParked
-		job.markUnrun(outcome)
-		return
-	}
-
-	if d.bus != nil && !job.skipLive {
-		if err := d.publishLive(job); err != nil {
-			d.reportPublishError(job, err)
-		}
-	}
-
-	if !job.durable() {
-		return
-	}
-	if outcome = d.deliverDurable(agg, q, halt, job); outcome != nil {
-		return
-	}
-	if job.ack != nil {
-		if err := job.ack(job.ctx); err != nil {
-			d.reportPublishError(job, err)
-			outcome = err
-			d.parkIfCurrent(agg, q, halt, job)
-		}
-	}
-}
-
-// reportPublishError calls the publish error handler. A panic in it is
-// swallowed: it must not take down the worker or the process.
-// publishLive publishes through the bus. A panic in a custom bus becomes an
-// error, so it cannot skip the durable delivery that follows.
-func (d *Dispatcher[T]) publishLive(job *dispatchJob[T]) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("asynx: bus panic: %v", r)
-		}
-	}()
-	return d.bus.PublishSync(job.ctx, job.event)
-}
-
-func closed(ch <-chan struct{}) bool {
-	select {
-	case <-ch:
-		return true
-	default:
-		return false
-	}
-}
-
-func (d *Dispatcher[T]) reportPublishError(
-	job *dispatchJob[T],
-	err error,
-) {
-	if d.onPublishError == nil {
-		return
-	}
-	defer func() { _ = recover() }()
-	d.onPublishError(job.ctx, job.event, err)
-}
-
-// inHandlerKey keys the context value by dispatcher: applications commonly use
-// one aggregate ID across several instances (an arrow and its runtime), and a
-// handler of one waiting on another is no deadlock.
-type inHandlerKey[T any] struct{ d *Dispatcher[T] }
-
-// InHandler reports whether ctx belongs to a handler this dispatcher is running
-// for aggregate agg. Waiting on that aggregate's deliveries from there would
-// wait on the handler itself.
-func (d *Dispatcher[T]) InHandler(
-	ctx context.Context,
-	agg string,
-) bool {
-	id, ok := ctx.Value(inHandlerKey[T]{d}).(string)
-	return ok && id == agg
+func (d *dispatcher[T]) WaitIdle() {
+	d.tracker.Idle()
 }

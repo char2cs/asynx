@@ -415,17 +415,17 @@ Configures the processor's sharded worker pool.
 ```go
 type ShardingOpts struct {
     Shards     int // Number of shard queues, default 8
-    QueueDepth int // Max commands per shard (0 = unbounded, default 0)
+    QueueDepth int // Commands that may wait per aggregate (0 = WorkersPerShard)
 }
 ```
 
 **Defaults**
 - `Shards: 8` — 8 parallel worker pools
-- `QueueDepth: 0` — unbounded queue per shard
+- `QueueDepth: 0` — defaults to `WorkersPerShard`; the queue is bounded, never unlimited
 
 **Use Case**
 - Increase shards for high-concurrency workloads
-- Set QueueDepth to cap in-memory buffering and get `ErrQueueFull` backpressure when overloaded
+- QueueDepth caps the commands waiting behind a busy aggregate and gives `ErrQueueFull` backpressure when overloaded
 
 **Example**
 ```go
@@ -433,7 +433,7 @@ asynx.New[Order]().
     WithEventStore(eventStore).
     WithShardingOpts(asynx.ShardingOpts{
         Shards:     16,  // more parallelism
-        QueueDepth: 1000, // reject if queue hits 1000 cmds/shard
+        QueueDepth: 1000, // refuse once 1000 commands wait for one aggregate
     }).
     Build()
 ```

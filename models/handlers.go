@@ -46,14 +46,16 @@ type ForgetHandler[T any] func(context.Context, Event[T])
 // Unlike a ProjectionHandler it reports failure: a non-nil error, a panic or
 // ErrHandlerTimeout-then-error leaves the delivery pending, holds back the
 // aggregate's later events, and retries the handler with backoff until it
-// succeeds. Because delivery is at-least-once, a handler must be idempotent
-// (dedupe on AggregateID and Version).
+// succeeds, the attempt cap is reached (see WithDeliveryMaxAttempts: then the
+// event is dead-lettered or the aggregate parked), or the process shuts down.
+// Because delivery is at-least-once, a handler must be idempotent (dedupe on
+// AggregateID and Version).
 type DurableHandler[T any] func(context.Context, Event[T]) error
 
 // DeliveryErrorHandler observes a failed durable delivery attempt. attempt
-// counts from 1 for the event's current failing streak. Its error matches
-// ErrHandlerPanic or ErrHandlerTimeout for those failures, or is the handler's
-// own error.
+// counts from 1 for the event's current failing streak. Its error is a
+// *SubscriberError naming the subscriber that failed; it matches ErrHandlerPanic
+// or ErrHandlerTimeout for those failures, or wraps the handler's own error.
 type DeliveryErrorHandler[T any] func(
 	ctx context.Context,
 	event Event[T],
@@ -62,8 +64,9 @@ type DeliveryErrorHandler[T any] func(
 )
 
 // DeadLetterHandler is called when a durable delivery exhausted its attempts
-// (Builder.WithDeliveryMaxAttempts). It receives the event and the last
-// handler error. Returning nil records the event as dealt with: the delivery is
+// (Builder.WithDeliveryMaxAttempts). It receives the event and the errors of
+// the last attempt: one *SubscriberError per subscriber that failed, joined
+// (errors.As finds the first; unwrap with Unwrap() []error for each). Returning nil records the event as dealt with: the delivery is
 // acknowledged, skipped, and the aggregate's later events flow again. Returning
 // an error parks the aggregate instead (see ErrDeliveryParked).
 type DeadLetterHandler[T any] func(context.Context, Event[T], error) error

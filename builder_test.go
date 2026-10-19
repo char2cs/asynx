@@ -3,7 +3,10 @@ package asynx_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -739,5 +742,384 @@ func eventually(t *testing.T, what string, cond func() bool) {
 			t.Fatalf("timed out waiting for %s", what)
 		}
 		runtime.Gosched()
+	}
+}
+
+type gatedUpdate struct {
+	mocks.UpdateOrderCmd
+	entered chan<- struct{}
+	gate    <-chan struct{}
+}
+
+func (c gatedUpdate) Validate(*mocks.Order) error {
+	c.entered <- struct{}{}
+	<-c.gate
+	return nil
+}
+
+// A busy aggregate holds one worker, however many commands are queued behind
+// it: the others keep running, as WorkersPerShard promises.
+func TestShardingOpts_ABusyAggregateDoesNotStallItsShard(t *testing.T) {
+	ctx := context.Background()
+	inst := build(t, asynx.New[mocks.Order]().WithEventStore(store.New()).WithSnapshotStore(store.NewSnapshots()).
+		WithShardingOpts(asynx.ShardingOpts{Shards: 1, WorkersPerShard: 2, QueueDepth: 1000}))
+	if _, err := inst.SendWait(ctx, mocks.CreateOrderCmd{ID: "hot", Total: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	defer close(gate)
+	go inst.Send(ctx, gatedUpdate{UpdateOrderCmd: upd("hot", 2), entered: entered, gate: gate})
+	within(t, entered, "the hot command to start")
+	var flooding sync.WaitGroup
+	for i := range 20 {
+		flooding.Add(1)
+		go func() {
+			flooding.Done()
+			inst.Send(ctx, upd("hot", float64(i+3)))
+		}()
+	}
+	flooding.Wait()
+
+	for i := range 50 {
+		cold, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_, err := inst.SendWait(cold, mocks.CreateOrderCmd{ID: fmt.Sprintf("cold-%d", i), Total: 1})
+		cancel()
+		if err != nil {
+			t.Fatalf("an unrelated aggregate on the same shard, probe %d: %v", i, err)
+		}
+	}
+}
+
+func sendHot(
+	ctx context.Context,
+	inst asynx.Asynx[mocks.Order],
+	refused chan<- struct{},
+) {
+	_, err := inst.Send(ctx, upd("hot", 3))
+	if errors.Is(err, models.ErrQueueFull) {
+		refused <- struct{}{}
+	}
+}
+
+// QueueDepth bounds the commands that may wait behind a running one, per
+// aggregate: a flood to one aggregate is refused with ErrQueueFull, and other
+// aggregates are unaffected.
+func TestShardingOpts_QueueDepthBoundsTheBacklogOfOneAggregate(t *testing.T) {
+	ctx := context.Background()
+	inst := build(t, asynx.New[mocks.Order]().WithEventStore(store.New()).WithSnapshotStore(store.NewSnapshots()).
+		WithShardingOpts(asynx.ShardingOpts{Shards: 1, WorkersPerShard: 2}))
+	if _, err := inst.SendWait(ctx, mocks.CreateOrderCmd{ID: "hot", Total: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	defer close(gate)
+	go inst.Send(ctx, gatedUpdate{UpdateOrderCmd: upd("hot", 2), entered: entered, gate: gate})
+	within(t, entered, "the hot command to start")
+
+	refused := make(chan struct{}, 32)
+	for range 20 {
+		go sendHot(ctx, inst, refused)
+	}
+	for range 18 {
+		within(t, refused, "a hot Send to be refused with ErrQueueFull")
+	}
+
+	if _, err := inst.Send(ctx, mocks.CreateOrderCmd{ID: "cold", Total: 1}); err != nil {
+		t.Fatalf("an unrelated aggregate got %v while another was flooded", err)
+	}
+}
+
+func noopDurable(
+	context.Context,
+	models.Event[mocks.Order],
+) error {
+	return nil
+}
+
+func TestBuild_UsesTheSuppliedDispatcher(t *testing.T) {
+	ctx := context.Background()
+	s := store.New()
+	fake := mocks.NewDispatcher[mocks.Order]()
+	inst := build(t, eight(s).WithDispatcher(fake.Factory()).WithSubscriber("OrderCreated", noopDurable))
+
+	if _, err := inst.Send(ctx, mocks.CreateOrderCmd{ID: "a", Total: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := fake.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(requests))
+	}
+	request := requests[0]
+	wrongRequest := request.Kind != models.DispatchEvent || request.Event.AggregateID != "a" || request.Event.Version != 1
+	if wrongRequest {
+		t.Errorf("request = %+v, want the DispatchEvent of a v1", request)
+	}
+	if request.Ack == nil {
+		t.Fatal("a durable event was enqueued without an Ack")
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 1 {
+		t.Fatalf("pending before the Ack = %v, want the entry", pending)
+	}
+	if err := request.Ack(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 10); len(pending) != 0 {
+		t.Errorf("pending after the Ack = %v, want none", pending)
+	}
+}
+
+func TestBuild_RecoverEnqueuesRedeliveries(t *testing.T) {
+	s := store.New()
+	stuck := make(chan struct{})
+	first := build(t, eight(s).WithSubscriber("OrderUpdated", func(
+		context.Context,
+		models.Event[mocks.Order],
+	) error {
+		<-stuck
+		return nil
+	}))
+	t.Cleanup(func() { close(stuck) })
+	sendAll(
+		t,
+		first,
+		mocks.CreateOrderCmd{ID: "a", Total: 1},
+		upd("a", 2),
+		upd("a", 3),
+	)
+
+	fake := mocks.NewDispatcher[mocks.Order]()
+	build(t, eight(s).WithDispatcher(fake.Factory()).WithSubscriber("OrderUpdated", noopDurable))
+
+	requests := fake.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("requests = %d, want the 2 pending deliveries", len(requests))
+	}
+	for i, request := range requests {
+		assertRedelivery(t, i, request)
+	}
+}
+
+func sendAll(
+	t *testing.T,
+	inst asynx.Asynx[mocks.Order],
+	cmds ...models.Command[mocks.Order],
+) {
+	t.Helper()
+	for _, cmd := range cmds {
+		mustSend(t, inst, cmd)
+	}
+}
+
+func mustSend(
+	t *testing.T,
+	inst asynx.Asynx[mocks.Order],
+	cmd models.Command[mocks.Order],
+) {
+	t.Helper()
+	_, err := inst.Send(context.Background(), cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertRedelivery(
+	t *testing.T,
+	i int,
+	request models.DispatchRequest[mocks.Order],
+) {
+	t.Helper()
+	wrongRedelivery := request.Kind != models.DispatchRedelivery || request.Event.Version != int64(i+2) || request.Ack == nil
+	if wrongRedelivery {
+		t.Errorf("request %d = %+v, want the redelivery of v%d with an Ack", i, request, i+2)
+	}
+}
+
+func TestForget_SupersedesThenEnqueuesATombstone(t *testing.T) {
+	ctx := context.Background()
+	fake := mocks.NewDispatcher[mocks.Order]()
+	inst := build(t, eight(store.New()).WithDispatcher(fake.Factory()))
+	if _, err := inst.Send(ctx, mocks.CreateOrderCmd{ID: "a", Total: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := inst.Forget(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := fake.Calls()
+	supersede := slices.Index(calls, "Supersede")
+	if supersede < 0 || calls[supersede+1] != "Enqueue" {
+		t.Fatalf("calls = %v, want Supersede immediately followed by Enqueue", calls)
+	}
+	requests := fake.Requests()
+	tombstone := requests[len(requests)-1]
+	wrongTombstone := tombstone.Kind != models.DispatchTombstone || tombstone.Event.AggregateID != "a" || tombstone.Ack == nil
+	if wrongTombstone {
+		t.Errorf("last request = %+v, want a tombstone of a with an Ack", tombstone)
+	}
+}
+
+func TestBuild_ADispatcherFactoryErrorFailsBuild(t *testing.T) {
+	sentinel := errors.New("no dispatcher today")
+	factory := func(
+		models.DispatcherConfig[mocks.Order],
+	) (models.Dispatcher[mocks.Order], error) {
+		return nil, sentinel
+	}
+	bus := &closingBus{}
+
+	inst, err := eight(store.New()).WithBus(bus).WithDispatcher(factory).Build()
+
+	if !errors.Is(err, sentinel) || inst != nil {
+		t.Fatalf("Build = (%v, %v), want the factory error and no instance", inst, err)
+	}
+	if !strings.HasPrefix(err.Error(), "asynx: dispatcher factory: ") {
+		t.Errorf("error = %q, want the %q prefix", err, "asynx: dispatcher factory: ")
+	}
+	if got := bus.closed.Load(); got != 1 {
+		t.Errorf("bus closed %d times, want 1", got)
+	}
+}
+
+func TestShutdown_InterruptsThenClosesTheDispatcher(t *testing.T) {
+	fake := mocks.NewDispatcher[mocks.Order]()
+	inst, err := eight(store.New()).WithDispatcher(fake.Factory()).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := inst.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	got := slices.DeleteFunc(fake.Calls(), func(call string) bool { return call != "Interrupt" && call != "Close" })
+	if !slices.Equal(got, []string{"Interrupt", "Close"}) {
+		t.Errorf("shutdown calls = %v, want Interrupt then Close", got)
+	}
+}
+
+func TestSend_AnEnqueueFailureAfterCommitParksThroughTheSuppliedDispatcher(t *testing.T) {
+	ctx := context.Background()
+	sentinel := errors.New("enqueue refused")
+	fake := mocks.NewDispatcher[mocks.Order]()
+	fake.FailEnqueue(sentinel)
+	inst := build(t, eight(store.New()).WithDispatcher(fake.Factory()).WithSubscriber("OrderCreated", noopDurable))
+
+	_, err := inst.Send(ctx, mocks.CreateOrderCmd{ID: "a", Total: 1})
+
+	if !errors.Is(err, models.ErrPipelineFailed) || !errors.Is(err, sentinel) {
+		t.Fatalf("Send = %v, want ErrPipelineFailed wrapping the enqueue failure", err)
+	}
+	if got := fake.ParkCalls(); len(got) != 1 || got[0].AggregateID != "a" {
+		t.Errorf("Park calls = %v, want the one park of a", got)
+	}
+	if got := inst.PausedAggregates(); !slices.Equal(got, []string{"a"}) {
+		t.Errorf("PausedAggregates = %v, want [a]", got)
+	}
+}
+
+func TestBuild_DefaultsAreAppliedBeforeTheFactoryRuns(t *testing.T) {
+	defaults := models.DispatcherConfig[mocks.Order]{MaxAttempts: 20, RetryInitial: 100 * time.Millisecond, RetryMax: 30 * time.Second}
+	tests := []struct {
+		name     string
+		retry    [2]time.Duration
+		attempts int
+		want     models.DispatcherConfig[mocks.Order]
+	}{
+		{
+			name:     "non-positive builder values are ignored",
+			retry:    [2]time.Duration{-1, 0},
+			attempts: -3,
+			want:     defaults,
+		},
+		{
+			name: "unset builder values keep the defaults",
+			want: defaults,
+		},
+		{
+			name:     "positive builder values are carried",
+			retry:    [2]time.Duration{5 * time.Millisecond, 50 * time.Millisecond},
+			attempts: 3,
+			want:     models.DispatcherConfig[mocks.Order]{MaxAttempts: 3, RetryInitial: 5 * time.Millisecond, RetryMax: 50 * time.Millisecond},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertFactoryConfig(t, tt.retry, tt.attempts, tt.want)
+		})
+	}
+}
+
+func assertFactoryConfig(
+	t *testing.T,
+	retry [2]time.Duration,
+	attempts int,
+	want models.DispatcherConfig[mocks.Order],
+) {
+	t.Helper()
+	fake := mocks.NewDispatcher[mocks.Order]()
+	b := eight(store.New()).
+		WithDispatcher(fake.Factory()).
+		WithSubscriber("OrderUpdated", noopDurable).
+		WithDeliveryRetry(retry[0], retry[1]).
+		WithDeliveryMaxAttempts(attempts)
+	build(t, b)
+
+	got := fake.Config()
+	configDiffers := got.MaxAttempts != want.MaxAttempts || got.RetryInitial != want.RetryInitial || got.RetryMax != want.RetryMax
+	if configDiffers {
+		t.Errorf("config = (%d, %v, %v), want (%d, %v, %v)", got.MaxAttempts, got.RetryInitial, got.RetryMax,
+			want.MaxAttempts, want.RetryInitial, want.RetryMax)
+	}
+	if got.Bus == nil || len(got.DurableSubs) != 1 {
+		t.Errorf("config = %+v, want the bus and the one durable subscriber", got)
+	}
+}
+
+func TestBuild_ATypedNilDispatcherFailsBuild(t *testing.T) {
+	factory := func(
+		models.DispatcherConfig[mocks.Order],
+	) (models.Dispatcher[mocks.Order], error) {
+		var d *mocks.Dispatcher[mocks.Order]
+		return d, nil
+	}
+
+	inst, err := eight(store.New()).WithBus(&closingBus{}).WithDispatcher(factory).Build()
+
+	notRejected := inst != nil || err == nil || !strings.Contains(err.Error(), "returned no dispatcher")
+	if notRejected {
+		t.Fatalf("Build = (%v, %v), want the no-dispatcher error and no instance", inst, err)
+	}
+}
+
+func TestBuild_AnInvalidSubscriberStopsTheValidationOfTheNextOnes(t *testing.T) {
+	handler := func(
+		context.Context,
+		models.Event[mocks.Order],
+	) error {
+		return nil
+	}
+	optionRan := false
+	option := func(
+		*models.SubscriptionConfig[mocks.Order],
+	) {
+		optionRan = true
+	}
+
+	inst, err := eight(store.New()).
+		WithSubscriber("", handler).
+		WithSubscriber("OrderCreated", handler, option).
+		Build()
+
+	if inst != nil || !errors.Is(err, models.ErrEmptyPattern) {
+		t.Fatalf("Build = (%v, %v), want ErrEmptyPattern and no instance", inst, err)
+	}
+	if optionRan {
+		t.Error("the options of a later subscriber ran after an earlier one was rejected")
 	}
 }

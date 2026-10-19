@@ -282,15 +282,25 @@ func (t *memoryTx) Append(
 	}
 
 	s.streams[streamID] = slices.Insert(entries, idx, entry{version: version, data: data})
-	t.undo = append(t.undo, func() {
-		cur := s.streams[streamID]
-		if i, ok := slices.BinarySearchFunc(cur, version, func(e entry, v int64) int {
-			return cmp.Compare(e.version, v)
-		}); ok {
-			s.streams[streamID] = slices.Delete(cur, i, i+1)
-		}
-	})
+	t.undo = append(t.undo, func() { s.removeEntry(streamID, version) })
 	return nil
+}
+
+func (s *memory) removeEntry(
+	streamID string,
+	version int64,
+) {
+	cur := s.streams[streamID]
+	i, found := slices.BinarySearchFunc(cur, version, func(
+		e entry,
+		v int64,
+	) int {
+		return cmp.Compare(e.version, v)
+	})
+	if !found {
+		return
+	}
+	s.streams[streamID] = slices.Delete(cur, i, i+1)
 }
 
 func (t *memoryTx) DeleteStream(

@@ -49,13 +49,43 @@ func (k *KeyedLock) Lock(
 		return nil, ctx.Err()
 	}
 
+	return k.unlocker(key, e), nil
+}
+
+// TryLock takes the key if it is free right now and reports whether it did. It
+// never waits.
+func (k *KeyedLock) TryLock(key string) (unlock func(), ok bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.entries == nil {
+		k.entries = make(map[string]*lockEntry)
+	}
+	e, exists := k.entries[key]
+	if !exists {
+		e = &lockEntry{ch: make(chan struct{}, 1)}
+		e.ch <- struct{}{}
+		k.entries[key] = e
+	}
+	select {
+	case <-e.ch:
+		e.refs++
+		return k.unlocker(key, e), true
+	default:
+		return nil, false
+	}
+}
+
+func (k *KeyedLock) unlocker(
+	key string,
+	e *lockEntry,
+) func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			e.ch <- struct{}{}
 			k.release(key, e)
 		})
-	}, nil
+	}
 }
 
 func (k *KeyedLock) release(

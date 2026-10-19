@@ -4,17 +4,34 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 
+	"github.com/char2cs/asynx/internal/utils"
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-// Paused lists the aggregates whose durable delivery is parked: a delivery gave
-// up (see ErrDeliveryParked), or a Forget could not deliver its marker.
+// Paused lists, sorted, the aggregates whose durable delivery is parked: a
+// delivery gave up (see ErrDeliveryParked), or a Forget could not deliver its
+// marker.
 func (p *Processor[T]) Paused() []string {
 	if p.dispatcher == nil {
 		return nil
 	}
-	return p.dispatcher.Halted()
+	return slices.Sorted(maps.Keys(p.dispatcher.Parks()))
+}
+
+// Inspect reports the aggregate's delivery status as the dispatcher sees it:
+// whether it is parked, the park's generation, the error that parked it and
+// the versions the park left undelivered. Without a dispatcher it is the zero
+// DeliveryStatus.
+func (p *Processor[T]) Inspect(
+	aggregateID string,
+) asynxmd.DeliveryStatus {
+	if p.dispatcher == nil {
+		return asynxmd.DeliveryStatus{}
+	}
+	return p.dispatcher.Inspect(aggregateID)
 }
 
 // Resume redelivers the parked aggregates, to the durable subscribers. For each
@@ -24,8 +41,15 @@ func (p *Processor[T]) Paused() []string {
 // which therefore goes out before anything that followed it. Call it once the
 // cause (a bad handler, a downstream outage) is fixed.
 //
+// The delivery log is read once for all of them, before any park is lifted and
+// without holding a lock; the store has no per-aggregate query. Each aggregate
+// is then redelivered under its own lock, never holding another one, so a
+// command that sends to a second aggregate from inside its validation cannot
+// deadlock with a resume. Events committed after the read are covered because
+// the dispatcher remembers the ones a park left undelivered.
+//
 // An aggregate that cannot be redelivered stays parked and the others are still
-// resumed; the errors are joined.
+// resumed; the errors are joined. If the log cannot be read nothing changes.
 func (p *Processor[T]) Resume(
 	ctx context.Context,
 	batch int,
@@ -36,56 +60,97 @@ func (p *Processor[T]) Resume(
 	if batch <= 0 {
 		batch = 100
 	}
-	var errs []error
-	for _, agg := range p.dispatcher.Halted() {
-		err := p.executor.WithLock(ctx, agg, func() error {
-			return p.resumeAggregate(ctx, batch, agg)
-		})
-		if err == nil {
-			continue
-		}
-		errs = append(errs, fmt.Errorf("asynx: resume %s: %w", agg, err))
-		if ctx.Err() != nil {
-			break
-		}
+	parks := p.dispatcher.Parks()
+	halted := slices.Sorted(maps.Keys(parks))
+	if len(halted) == 0 {
+		return nil
 	}
+	wanted := make(map[string]struct{}, len(halted))
+	for _, agg := range halted {
+		wanted[agg] = struct{}{}
+	}
+	backlogs, _, err := p.pendingByAggregate(ctx, batch, func(id string) bool {
+		_, isParked := wanted[id]
+		return isParked
+	})
+	if err != nil {
+		return err
+	}
+
+	var errs []error
+	_ = slices.IndexFunc(halted, func(agg string) bool {
+		errs = append(errs, p.resumeAggregate(ctx, agg, parks[agg], backlogs[agg]))
+		return ctx.Err() != nil
+	})
 	return errors.Join(errs...)
 }
 
-// resumeAggregate lifts the aggregate's park and redelivers its pending
-// entries, leaving it parked when they cannot all be queued: a lifted park would
-// hide that from the next Resume. It does nothing if a concurrent Resume lifted
-// the park first. The caller holds the aggregate's command lock.
+// resumeAggregate lifts the park of agg, the one listed as generation park, and
+// redelivers what is pending for it:
+// the entries the log read found and the events committed since. A park that
+// has been lifted, or lifted and imposed again, since Resume listed it is left
+// to the next Resume: the log read does not describe it. It holds agg's command
+// lock, and only that one. When the redelivery fails the aggregate is
+// parked again, with the redelivery error as the cause Inspect reports,
+// remembering which of its events no handler has taken, because a
+// lifted park would hide the failure from the next Resume.
 func (p *Processor[T]) resumeAggregate(
 	ctx context.Context,
-	batch int,
 	agg string,
+	park uint64,
+	scanned []asynxmd.Delivery,
 ) error {
-	wasParked := p.dispatcher.Resume(agg)
-	if !wasParked {
-		return nil
-	}
-	err := p.scanPending(ctx, batch, func(d asynxmd.Delivery) error {
-		isOtherAggregate := d.AggregateID != agg
-		if isOtherAggregate {
+	return p.executor.WithLock(ctx, agg, func() error {
+		lifted, undelivered := p.dispatcher.ResumeUndelivered(agg, park)
+		if !lifted {
 			return nil
 		}
-		return p.redeliver(ctx, d)
+		remaining, err := p.redeliver(ctx, agg, withUndelivered(agg, scanned, undelivered))
+		if err == nil {
+			return nil
+		}
+		p.dispatcher.Park(agg, err, stillUndelivered(undelivered, remaining)...)
+		return fmt.Errorf("asynx: resume %s: %w", agg, err)
 	})
-	if err != nil {
-		p.dispatcher.Park(agg)
+}
+
+// withUndelivered adds the undelivered versions to the scanned entries. The
+// order does not matter, and a version named twice is redelivered once: the
+// stream is replayed in version order and each version is taken from it once.
+func withUndelivered(
+	agg string,
+	scanned []asynxmd.Delivery,
+	undelivered []int64,
+) []asynxmd.Delivery {
+	backlog := slices.Clone(scanned)
+	for _, v := range undelivered {
+		backlog = append(backlog, asynxmd.Delivery{AggregateID: agg, Version: v})
 	}
-	return err
+	return backlog
+}
+
+// stillUndelivered keeps the versions of undelivered that remaining names: the
+// ones that were undelivered before the redelivery and still are. An event that
+// had been handed to a handler before the park stays out, as does one the
+// redelivery enqueued.
+func stillUndelivered(
+	undelivered []int64,
+	remaining []int64,
+) []int64 {
+	return slices.DeleteFunc(slices.Clone(undelivered), func(v int64) bool {
+		_, notEnqueued := slices.BinarySearch(remaining, v)
+		return !notEnqueued
+	})
 }
 
 // Recover re-enqueues every unacknowledged delivery, in enqueue order, on the
 // per-aggregate dispatcher, for the durable subscribers (live subscribers never
 // see what happened while the process was down). It returns once they are all
 // queued, not once they are handled: a handler that keeps failing must not stop
-// the process from starting. Ordering against live commands is still
-// guaranteed, because a live event enqueues behind the recovered events of its
-// aggregate in the same FIFO. Handlers run, retry on failure and acknowledge
-// exactly as for live events.
+// the process from starting. It takes no aggregate lock, so it must run before
+// any command is sent, as Build does: then a live event enqueues behind the
+// recovered events of its aggregate in the same FIFO. Handlers run, retry on
+// failure and acknowledge exactly as for live events.
 //
 // Deliveries whose event no longer exists are acknowledged and skipped. An
 // aggregate whose event cannot be rebuilt (a corrupt record, an upcaster error)
@@ -103,24 +168,44 @@ func (p *Processor[T]) Recover(
 	if batch <= 0 {
 		batch = 100
 	}
-	failed := make(map[string]struct{})
-	return p.scanPending(ctx, batch, func(d asynxmd.Delivery) error {
-		if _, skip := failed[d.AggregateID]; skip {
-			return nil // behind a failed event of its aggregate: stays pending
-		}
-		err := p.redeliver(ctx, d)
-		if err == nil {
-			return nil
-		}
-		if ctx.Err() != nil || errors.Is(err, asynxmd.ErrDispatcherClosed) {
-			return err
-		}
-		failed[d.AggregateID] = struct{}{}
-		p.dispatcher.Park(d.AggregateID)
-		p.dispatcher.ReportError(ctx, asynxmd.Event[T]{AggregateID: d.AggregateID, Version: d.Version},
-			fmt.Errorf("recovery: %w", err))
-		return nil
+	backlogs, order, err := p.pendingByAggregate(ctx, batch, func(string) bool { return true })
+	if err != nil {
+		return err
+	}
+	return utils.FirstError(order, func(agg string) error {
+		return p.recoverAggregate(ctx, agg, backlogs[agg])
 	})
+}
+
+func (p *Processor[T]) recoverAggregate(
+	ctx context.Context,
+	agg string,
+	backlog []asynxmd.Delivery,
+) error {
+	undelivered, err := p.redeliver(ctx, agg, backlog)
+	if err == nil {
+		return nil
+	}
+	if recoveryMustStop(ctx, err) {
+		return fmt.Errorf("asynx: recovery: %w", err)
+	}
+	p.dispatcher.Park(agg, err, undelivered...)
+	p.reportPublishError(
+		ctx,
+		asynxmd.Event[T]{AggregateID: agg, Version: backlog[0].Version},
+		fmt.Errorf("recovery: %w", err),
+	)
+	return nil
+}
+
+func recoveryMustStop(
+	ctx context.Context,
+	err error,
+) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	return errors.Is(err, asynxmd.ErrDispatcherClosed)
 }
 
 // scanPending calls visit for every pending delivery once, in enqueue order. It
@@ -132,54 +217,130 @@ func (p *Processor[T]) scanPending(
 	batch int,
 	visit func(asynxmd.Delivery) error,
 ) error {
-	store := p.es.Store()
-	seen := make(map[asynxmd.Delivery]struct{})
-	for limit := batch; ; limit *= 2 {
-		pending, err := store.PendingDeliveries(ctx, limit)
-		if err != nil {
-			return fmt.Errorf("asynx: recovery: %w", err)
-		}
-		for _, d := range pending {
-			if _, again := seen[d]; again {
-				continue
-			}
-			seen[d] = struct{}{}
-			if err := visit(d); err != nil {
-				return fmt.Errorf("asynx: recovery: %w", err)
-			}
-		}
-		if len(pending) < limit {
-			return nil
-		}
-	}
+	return p.scanFrom(ctx, batch, make(map[asynxmd.Delivery]struct{}), visit)
 }
 
-// redeliver rebuilds the event behind d and enqueues it. When the event no
-// longer exists the delivery is acknowledged instead.
+func (p *Processor[T]) scanFrom(
+	ctx context.Context,
+	limit int,
+	seen map[asynxmd.Delivery]struct{},
+	visit func(asynxmd.Delivery) error,
+) error {
+	pending, err := p.es.Store().PendingDeliveries(ctx, limit)
+	if err != nil {
+		return fmt.Errorf("asynx: recovery: %w", err)
+	}
+	err = visitUnseen(pending, seen, visit)
+	if err != nil {
+		return fmt.Errorf("asynx: recovery: %w", err)
+	}
+	if len(pending) < limit {
+		return nil
+	}
+	return p.scanFrom(ctx, limit*2, seen, visit)
+}
+
+func visitUnseen(
+	pending []asynxmd.Delivery,
+	seen map[asynxmd.Delivery]struct{},
+	visit func(asynxmd.Delivery) error,
+) error {
+	unseen := slices.DeleteFunc(slices.Clone(pending), func(d asynxmd.Delivery) bool {
+		_, again := seen[d]
+		seen[d] = struct{}{}
+		return again
+	})
+	return utils.FirstError(unseen, visit)
+}
+
+// pendingByAggregate reads the delivery log and groups the entries of the
+// aggregates that want selects by aggregate, in enqueue order. order lists the
+// aggregates by first appearance.
+func (p *Processor[T]) pendingByAggregate(
+	ctx context.Context,
+	batch int,
+	want func(aggregateID string) bool,
+) (backlogs map[string][]asynxmd.Delivery, order []string, err error) {
+	backlogs = make(map[string][]asynxmd.Delivery)
+	err = p.scanPending(ctx, batch, func(d asynxmd.Delivery) error {
+		if !want(d.AggregateID) {
+			return nil
+		}
+		if _, known := backlogs[d.AggregateID]; !known {
+			order = append(order, d.AggregateID)
+		}
+		backlogs[d.AggregateID] = append(backlogs[d.AggregateID], d)
+		return nil
+	})
+	return backlogs, order, err
+}
+
+// redeliver rebuilds the events behind one aggregate's pending deliveries and
+// enqueues them in version order. The stream is replayed once, however many
+// entries are pending, so a long backlog costs one pass over the stream rather
+// than one per entry. Entries whose event no longer exists are acknowledged
+// instead. On an error the entries not yet enqueued stay pending, and their
+// versions, ascending, are returned.
 func (p *Processor[T]) redeliver(
 	ctx context.Context,
-	d asynxmd.Delivery,
-) error {
-	store := p.es.Store()
-
-	var event asynxmd.Event[T]
-	found := false
-	err := p.es.Replay(ctx, d.AggregateID, d.Version, d.Version,
-		func(_ context.Context, evt asynxmd.Event[T]) {
-			if evt.Version == d.Version {
-				event, found = evt, true
-			}
-		})
+	agg string,
+	backlog []asynxmd.Delivery,
+) (notEnqueued []int64, err error) {
+	if len(backlog) == 0 {
+		return nil, nil
+	}
+	vanished, err := p.enqueueBacklog(ctx, agg, backlog)
 	if err != nil {
-		return err
+		return slices.Sorted(maps.Keys(vanished)), err
+	}
+	return nil, p.ackVanished(ctx, agg, backlog, vanished)
+}
+
+// enqueueBacklog replays the stream once and enqueues the events the backlog
+// names. It returns the versions whose event was not found.
+func (p *Processor[T]) enqueueBacklog(
+	ctx context.Context,
+	agg string,
+	backlog []asynxmd.Delivery,
+) (vanished map[int64]struct{}, err error) {
+	vanished = make(map[int64]struct{}, len(backlog))
+	lowest, highest := backlog[0].Version, backlog[0].Version
+	for _, d := range backlog {
+		vanished[d.Version] = struct{}{}
+		lowest, highest = min(lowest, d.Version), max(highest, d.Version)
 	}
 
-	if !found {
-		return store.AckDelivery(ctx, d.AggregateID, d.Version)
+	enqueuer := &backlogEnqueuer[T]{
+		dispatcher: p.dispatcher,
+		store:      p.es.Store(),
+		aggregate:  agg,
+		vanished:   vanished,
 	}
+	replayErr := p.es.Replay(
+		ctx,
+		agg,
+		lowest,
+		highest,
+		func(
+			_ context.Context,
+			evt asynxmd.Event[T],
+		) {
+			enqueuer.enqueue(ctx, evt)
+		},
+	)
+	return vanished, errors.Join(replayErr, enqueuer.err)
+}
 
-	_, err = p.dispatcher.EnqueueRedelivery(ctx, event, func(ctx context.Context) error {
-		return store.AckDelivery(ctx, d.AggregateID, d.Version)
+func (p *Processor[T]) ackVanished(
+	ctx context.Context,
+	agg string,
+	backlog []asynxmd.Delivery,
+	vanished map[int64]struct{},
+) error {
+	return utils.FirstError(backlog, func(d asynxmd.Delivery) error {
+		if _, isVanished := vanished[d.Version]; !isVanished {
+			return nil
+		}
+		return p.es.Store().AckDelivery(ctx, agg, d.Version)
 	})
-	return err
 }

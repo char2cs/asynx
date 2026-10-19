@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/eventstore"
+	"github.com/char2cs/asynx/internal/utils"
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
@@ -57,7 +57,7 @@ func WithSnapshotErrorHandler[T any](fn func(context.Context, asynxmd.Event[T], 
 
 type CommandExecutor[T any] struct {
 	es              *eventstore.EventStore[T]
-	dispatcher      *dispatcher.Dispatcher[T]
+	dispatcher      asynxmd.Dispatcher[T]
 	locks           KeyedLock
 	forgetMu        sync.Mutex
 	forgetting      map[string]struct{} // aggregates between tombstone and erase
@@ -68,7 +68,7 @@ type CommandExecutor[T any] struct {
 
 func New[T any](
 	es *eventstore.EventStore[T],
-	d *dispatcher.Dispatcher[T],
+	d asynxmd.Dispatcher[T],
 	opts ...Opt[T],
 ) *CommandExecutor[T] {
 	e := &CommandExecutor[T]{es: es, dispatcher: d, forgetting: make(map[string]struct{})}
@@ -135,41 +135,91 @@ func (e *CommandExecutor[T]) WithLock(
 	return fn()
 }
 
+// WithLockIfFree runs fn holding the aggregate's command lock, unless someone
+// holds it: then fn is not run and false is returned. It never waits.
+func (e *CommandExecutor[T]) WithLockIfFree(
+	id string,
+	fn func(),
+) bool {
+	unlock, ok := e.locks.TryLock(id)
+	if !ok {
+		return false
+	}
+	defer unlock()
+	fn()
+	return true
+}
+
 // run executes the pipeline. The caller holds the aggregate lock.
 func (e *CommandExecutor[T]) run(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
 ) (asynxmd.Event[T], Wait, error) {
 	commandID := idempotencyKey(cmd)
-	if commandID != "" {
-		if event, handled, err := e.answerFromReceipt(ctx, commandID); handled {
-			return event, nil, err
-		}
+	event, handled, err := e.answerRetry(ctx, commandID)
+	if handled {
+		return event, e.waitForAnswered(event, err), err
 	}
 
-	event, err := e.es.WriteTx(ctx, cmd, e.txHook(commandID))
+	event, err = e.es.WriteTx(ctx, cmd, e.txHook(commandID))
 	if err != nil {
-		event, handled, err := e.writeFailed(ctx, commandID, err)
-		if handled {
-			return event, nil, err
-		}
-		return asynxmd.Event[T]{}, nil, err
+		return e.failedWrite(ctx, commandID, err)
 	}
 
-	if cmd.ShouldSnapshot() {
-		if err := e.es.Snapshot(ctx, event); err != nil && e.onSnapshotError != nil {
-			e.onSnapshotError(ctx, event, err)
-		}
-	}
+	e.snapshotIfDue(ctx, cmd, event)
 
 	wait, err := e.enqueue(ctx, event)
 	if err != nil {
-		if e.isDurable(event.EventName) {
-			e.dispatcher.Park(event.AggregateID)
-		}
+		e.parkIfDurable(event, err)
 		return event, nil, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 	}
 	return event, wait, nil
+}
+
+func (e *CommandExecutor[T]) parkIfDurable(
+	event asynxmd.Event[T],
+	cause error,
+) {
+	if !e.isDurable(event.EventName) {
+		return
+	}
+	e.dispatcher.Park(event.AggregateID, cause)
+}
+
+func (e *CommandExecutor[T]) answerRetry(
+	ctx context.Context,
+	commandID string,
+) (asynxmd.Event[T], bool, error) {
+	if commandID == "" {
+		return asynxmd.Event[T]{}, false, nil
+	}
+	return e.answerFromReceipt(ctx, commandID)
+}
+
+func (e *CommandExecutor[T]) failedWrite(
+	ctx context.Context,
+	commandID string,
+	cause error,
+) (asynxmd.Event[T], Wait, error) {
+	event, handled, err := e.writeFailed(ctx, commandID, cause)
+	if handled {
+		return event, e.waitForAnswered(event, err), err
+	}
+	return asynxmd.Event[T]{}, nil, err
+}
+
+func (e *CommandExecutor[T]) snapshotIfDue(
+	ctx context.Context,
+	cmd asynxmd.Command[T],
+	event asynxmd.Event[T],
+) {
+	if !cmd.ShouldSnapshot() {
+		return
+	}
+	err := e.es.Snapshot(ctx, event)
+	if err != nil && e.onSnapshotError != nil {
+		e.onSnapshotError(ctx, event, err)
+	}
 }
 
 // enqueue hands the event to the dispatcher. With durable delivery on, the
@@ -183,21 +233,75 @@ func (e *CommandExecutor[T]) enqueue(
 	if e.dispatcher == nil {
 		return nil, nil
 	}
-	t, err := e.dispatcher.EnqueueTicket(ctx, event, e.ackFor(event))
+	t, err := e.dispatcher.Enqueue(ctx, asynxmd.DispatchRequest[T]{
+		Event: event,
+		Ack:   e.ackFor(event),
+		Kind:  asynxmd.DispatchEvent,
+	})
 	if err != nil {
 		return nil, err
 	}
+	return waitOn(t, event), nil
+}
+
+// waitForAnswered gives the retry of an idempotent command the same wait as the
+// original: for the handlers of the event the first attempt produced, if its
+// delivery is still under way. Once that is over, or when the answer is an
+// error, there is nothing to wait for.
+func (e *CommandExecutor[T]) waitForAnswered(
+	event asynxmd.Event[T],
+	answer error,
+) Wait {
+	if answer != nil || e.dispatcher == nil {
+		return nil
+	}
+	t, underway := e.dispatcher.TicketFor(event.AggregateID, event.Version)
+	if underway {
+		return waitOn(t, event)
+	}
+	return unrunWait(e.dispatcher.Unrun(event.AggregateID, event.Version), event)
+}
+
+// unrunWait is the Wait of a retry whose event the dispatcher left undelivered
+// because its aggregate is parked: no handler took it, which the retry reports
+// as the first attempt did. It is nil when there is nothing to report.
+func unrunWait[T any](
+	unrun error,
+	event asynxmd.Event[T],
+) Wait {
+	if unrun == nil {
+		return nil
+	}
+	return func(context.Context) error {
+		return fmt.Errorf("%w: event %s v%d is pending, no handler ran", unrun, event.AggregateID, event.Version)
+	}
+}
+
+// waitOn is the Wait for the handlers of the event ticket t tracks.
+func waitOn[T any](
+	t asynxmd.Ticket,
+	event asynxmd.Event[T],
+) Wait {
 	return func(ctx context.Context) error {
 		select {
 		case <-t.Settled:
-			if err := t.Unrun(); err != nil {
-				return fmt.Errorf("%w: event %s v%d is pending, no handler ran", err, event.AggregateID, event.Version)
-			}
-			return nil
+			return settledOutcome(t, event)
 		case <-ctx.Done():
 			return fmt.Errorf("%w: waiting for handlers: %w", asynxmd.ErrContextCancelled, ctx.Err())
 		}
-	}, nil
+	}
+}
+
+// settledOutcome reports why a settled delivery ran no handler, if it did not.
+func settledOutcome[T any](
+	t asynxmd.Ticket,
+	event asynxmd.Event[T],
+) error {
+	err := t.Unrun()
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: event %s v%d is pending, no handler ran", err, event.AggregateID, event.Version)
 }
 
 // isDurable reports whether the event gets a delivery entry.
@@ -221,14 +325,17 @@ func (e *CommandExecutor[T]) runSyncProjections(
 	tx asynxmd.Tx,
 	evt asynxmd.Event[T],
 ) error {
-	for _, p := range e.syncs {
-		matches := p.Match(evt.EventName)
-		if !matches {
-			continue
-		}
-		if err := p.Fn(ctx, tx, evt); err != nil {
-			return fmt.Errorf("%w: %w", asynxmd.ErrSyncProjection, err)
-		}
+	err := utils.FirstError(
+		e.syncs,
+		func(p SyncProjection[T]) error {
+			if !p.Match(evt.EventName) {
+				return nil
+			}
+			return p.Fn(ctx, tx, evt)
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("%w: %w", asynxmd.ErrSyncProjection, err)
 	}
 	return nil
 }
@@ -245,16 +352,8 @@ func (e *CommandExecutor[T]) txHook(commandID string) eventstore.TxHook[T] {
 			return err
 		}
 
-		if commandID != "" {
-			receipt := asynxmd.Receipt{
-				Accepted:    true,
-				AggregateID: evt.AggregateID,
-				EventID:     evt.ID,
-				Version:     evt.Version,
-			}
-			if err := tx.PutReceipt(ctx, commandID, receipt); err != nil {
-				return err
-			}
+		if err := putAcceptedReceipt(ctx, tx, commandID, evt); err != nil {
+			return err
 		}
 
 		if e.isDurable(evt.EventName) {
@@ -262,4 +361,23 @@ func (e *CommandExecutor[T]) txHook(commandID string) eventstore.TxHook[T] {
 		}
 		return nil
 	}
+}
+
+// putAcceptedReceipt records the command's receipt, unless it has no id.
+func putAcceptedReceipt[T any](
+	ctx context.Context,
+	tx asynxmd.Tx,
+	commandID string,
+	evt asynxmd.Event[T],
+) error {
+	if commandID == "" {
+		return nil
+	}
+	receipt := asynxmd.Receipt{
+		Accepted:    true,
+		AggregateID: evt.AggregateID,
+		EventID:     evt.ID,
+		Version:     evt.Version,
+	}
+	return tx.PutReceipt(ctx, commandID, receipt)
 }

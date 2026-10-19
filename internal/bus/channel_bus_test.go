@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/char2cs/asynx/models"
 	"github.com/char2cs/asynx/internal/bus"
+	"github.com/char2cs/asynx/models"
 )
 
 func newBus[T any]() *bus.ChannelBus[T] {
@@ -1053,4 +1053,35 @@ func TestPublish_StillAbandonsATimedOutHandler(t *testing.T) {
 	}
 	close(release)
 	closeAndWait(t, b)
+}
+
+// A panic handler that itself panics must not take the process down: handlers
+// run in goroutines nobody recovers.
+func TestChannelBus_APanicHandlerThatPanicsDoesNotCrashTheProcess(t *testing.T) {
+	called := make(chan struct{}, 1)
+	b := bus.NewChannelBus[string](
+		bus.WithPanicHandler[string](func(
+			_ context.Context,
+			_ models.Event[string],
+			_ any,
+		) {
+			called <- struct{}{}
+			panic("observer panic")
+		}),
+	)
+
+	b.Subscribe("test", func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		panic("handler panic")
+	})
+	b.Publish(context.Background(), ev("test"))
+	closeAndWait(t, b)
+
+	select {
+	case <-called:
+	default:
+		t.Fatal("the panic handler was not called")
+	}
 }

@@ -14,6 +14,8 @@ The `processor` package owns the sharded worker pool, shard routing, and the `Se
 
 The processor depends on `core`, `eventstore`, and `bus`.
 
+Event delivery after the commit goes through a `models.Dispatcher[T]`: the processor enqueues each committed event (`DispatchEvent`), each tombstone (`DispatchTombstone`) and each recovered or resumed log entry (`DispatchRedelivery`). The dispatcher owns per-aggregate ordering, durable retry, dead-lettering and parking; the processor keeps the aggregate lock, the delivery log and the recovery/resume orchestration (`Build()` recovery and `ResumeDeliveries` read the log and enqueue redeliveries under the aggregate's lock). The implementation is chosen with `Builder.WithDispatcher`; the contract is in [dispatcher.md](./dispatcher.md).
+
 ---
 
 ## Command Execution Pipeline
@@ -129,8 +131,8 @@ Issues a command to the processor. Blocks until the event is durably written to 
      - Call Send() again (with same command struct or fresh one)
      - Do NOT retry by bumping version number (that corrupts the stream)
 
-3. **`ErrQueueFull`** — Shard queue depth exceeded
-   - Returned if `WithShardingOpts(QueueDepth=N)` is set and queue is full
+3. **`ErrQueueFull`** — Too many commands waiting
+   - Returned when more commands already wait for the same aggregate than `QueueDepth` allows (default `WorkersPerShard`), or when the shard's hand-off buffer is full
    - Command was rejected before processing
    - Signals: system is overloaded
    - **Recovery: Caller should NOT retry blindly**
@@ -413,16 +415,16 @@ Sharding provides parallelism without allocating a goroutine per aggregate. The 
 ```go
 asynx.ShardingOpts{
     Shards:     8,       // Number of shard queues (default 8)
-    QueueDepth: 0,       // Max items per shard (0 = unbounded, default 0)
+    QueueDepth: 0,       // Commands waiting per aggregate (0 = WorkersPerShard)
 }
 ```
 
 **Shards:** Typically set to number of CPU cores or higher for throughput. Each shard is independent.
 
-**QueueDepth:** Limits memory usage. If set:
-- Full queue → Send() returns `ErrQueueFull` immediately
+**QueueDepth:** Bounds the commands that may wait behind the one running for an aggregate (and the shard's hand-off buffer):
+- More waiting → Send() returns `ErrQueueFull` immediately; other aggregates keep their workers, but share the shard's intake buffer, so a flood can make `Send` to them fail with `ErrQueueFull` too
 - Backpressure → caller must back off
-- Unbounded (0) → queue grows until memory exhausted (monitor memory usage)
+- 0 → `WorkersPerShard`; it is never unlimited
 
 ### Example Configuration
 
@@ -431,7 +433,7 @@ asynx.New[Order]().
     WithEventStore(store).
     WithShardingOpts(asynx.ShardingOpts{
         Shards:     16,   // 16 workers for parallelism
-        QueueDepth: 1000, // Max 1000 commands per shard before backpressure
+        QueueDepth: 1000, // Max 1000 commands waiting per aggregate before backpressure
     }).
     Build()
 ```

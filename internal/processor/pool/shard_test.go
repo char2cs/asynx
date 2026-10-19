@@ -3,6 +3,9 @@ package pool_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,15 +16,15 @@ import (
 	"github.com/char2cs/asynx/internal/processor/exec"
 	"github.com/char2cs/asynx/internal/processor/models"
 	"github.com/char2cs/asynx/internal/processor/pool"
-	"github.com/char2cs/asynx/store"
 	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/store"
 )
 
 func TestShard_SingleCommandSuccess(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -49,7 +52,7 @@ func TestShard_ValidationErrorDecrementVersionSingleWorker(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -102,7 +105,7 @@ func TestShard_ContextCancelledDuringExecution(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -132,7 +135,7 @@ func TestShard_MultipleWorkersNoCorrection(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -177,7 +180,7 @@ func TestShard_ResultCarriesEvent(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -210,7 +213,7 @@ func TestShard_ResultUsesCommandResult(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -240,7 +243,7 @@ func TestShard_NilEnvelopeClosesJobQueue(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -271,7 +274,7 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -324,7 +327,7 @@ func TestPool_Drain_AnswersEnvelopesLeftInTheQueue(t *testing.T) {
 	executor := exec.New[order](es, nil)
 	p := pool.New(executor, 1, 8, 1)
 
-	gate := make(chan struct{})
+	gate, release := gateReleasedOnCleanup(t)
 	entered := make(chan struct{}, 1)
 	send := func(cmd asynxmd.Command[order]) *models.CommandEnvelope[order] {
 		env := &models.CommandEnvelope[order]{Cmd: cmd, Ctx: context.Background(), ResultChan: make(chan models.CommandResult[order], 1)}
@@ -341,8 +344,8 @@ func TestPool_Drain_AnswersEnvelopesLeftInTheQueue(t *testing.T) {
 
 	drained := make(chan error, 1)
 	go func() { drained <- p.Drain(context.Background()) }()
-	time.Sleep(10 * time.Millisecond) // let the stop signal land
-	close(gate)
+	<-p.Shards()[0].Stopping()
+	release()
 
 	for i, env := range envs {
 		select {
@@ -366,4 +369,201 @@ func (c gatedUpdate) Validate(*order) error {
 	c.entered <- struct{}{}
 	<-c.gate
 	return nil
+}
+
+// A command waiting for a busy aggregate must not hold a worker: the rest of the
+// shard keeps running while that aggregate is blocked.
+func TestShard_ABusyAggregateLeavesTheOtherWorkersFree(t *testing.T) {
+	s := store.New()
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	executor := exec.New[order](es, nil)
+	p := pool.New(executor, 1, 8, 2)
+	t.Cleanup(func() { p.Drain(context.Background()) })
+
+	gate, release := gateReleasedOnCleanup(t)
+	entered := make(chan struct{}, 1)
+	send := func(cmd asynxmd.Command[order]) *models.CommandEnvelope[order] {
+		env := &models.CommandEnvelope[order]{Cmd: cmd, Ctx: context.Background(), ResultChan: make(chan models.CommandResult[order], 1)}
+		p.Shards()[0].CommandChan() <- env
+		return env
+	}
+
+	hot := send(gatedUpdate{UpdateOrderCmd: mocks.UpdateOrderCmd{ID: "hot", NewState: order{ID: "hot"}}, entered: entered, gate: gate})
+	<-entered
+	queued := send(mocks.UpdateOrderCmd{ID: "hot", NewState: order{ID: "hot", Total: 2}})
+	cold := send(mocks.CreateOrderCmd{ID: "cold", Total: 1})
+
+	select {
+	case res := <-cold.ResultChan:
+		if res.Err != nil {
+			t.Fatalf("cold aggregate: %v", res.Err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("an unrelated aggregate stalled behind the busy one")
+	}
+
+	release()
+	for name, env := range map[string]*models.CommandEnvelope[order]{"running": hot, "queued": queued} {
+		if res := resultWithin(t, env, name+" hot command"); res.Err != nil {
+			t.Fatalf("%s hot command: %v", name, res.Err)
+		}
+	}
+}
+
+// gateReleasedOnCleanup returns a gate and the function that opens it. The gate
+// is also opened when the test ends, before any cleanup registered earlier (such
+// as a Drain) runs, so a test that fails with a command still held does not
+// leave that Drain waiting for it.
+func gateReleasedOnCleanup(t *testing.T) (gate chan struct{}, release func()) {
+	t.Helper()
+	gate = make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	return gate, release
+}
+
+func resultWithin(
+	t *testing.T,
+	env *models.CommandEnvelope[order],
+	what string,
+) models.CommandResult[order] {
+	t.Helper()
+	select {
+	case res := <-env.ResultChan:
+		return res
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s never finished", what)
+		panic("unreachable")
+	}
+}
+
+// The commands queued behind a busy aggregate run in the order they arrived.
+func TestShard_AMailboxKeepsTheOrderOfItsCommands(t *testing.T) {
+	s := store.New()
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	executor := exec.New[order](es, nil)
+	p := pool.New(executor, 1, 8, 4)
+	t.Cleanup(func() { p.Drain(context.Background()) })
+
+	gate, release := gateReleasedOnCleanup(t)
+	entered := make(chan struct{}, 1)
+	send := func(cmd asynxmd.Command[order]) *models.CommandEnvelope[order] {
+		env := &models.CommandEnvelope[order]{Cmd: cmd, Ctx: context.Background(), ResultChan: make(chan models.CommandResult[order], 1)}
+		p.Shards()[0].CommandChan() <- env
+		return env
+	}
+
+	envs := []*models.CommandEnvelope[order]{
+		send(gatedCreate{CreateOrderCmd: mocks.CreateOrderCmd{ID: "a", Total: 1}, entered: entered, gate: gate}),
+	}
+	<-entered
+	for i := 2; i <= 4; i++ {
+		envs = append(envs, send(mocks.UpdateOrderCmd{ID: "a", NewState: order{ID: "a", Total: float64(i)}}))
+		waitForBacklog(t, p.Shards()[0], len(envs)-1)
+	}
+	release()
+
+	for i, env := range envs {
+		res := resultWithin(t, env, fmt.Sprintf("command %d", i))
+		if res.Err != nil || res.Event.Version != int64(i+1) {
+			t.Fatalf("command %d = v%d, %v; want v%d", i, res.Event.Version, res.Err, i+1)
+		}
+	}
+}
+
+// One aggregate cannot queue more commands than the queue depth allows: the
+// overflow is refused at once, and other aggregates are unaffected.
+func TestShard_AMailboxRefusesWhatExceedsTheQueueDepth(t *testing.T) {
+	s := store.New()
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	executor := exec.New[order](es, nil)
+	p := pool.New(executor, 1, 2, 2)
+	t.Cleanup(func() { p.Drain(context.Background()) })
+
+	gate, release := gateReleasedOnCleanup(t)
+	entered := make(chan struct{}, 1)
+	send := func(cmd asynxmd.Command[order]) *models.CommandEnvelope[order] {
+		env := &models.CommandEnvelope[order]{Cmd: cmd, Ctx: context.Background(), ResultChan: make(chan models.CommandResult[order], 1)}
+		p.Shards()[0].CommandChan() <- env
+		return env
+	}
+
+	running := send(gatedUpdate{UpdateOrderCmd: mocks.UpdateOrderCmd{ID: "hot", NewState: order{ID: "hot"}}, entered: entered, gate: gate})
+	<-entered
+	var waiting []*models.CommandEnvelope[order]
+	for i := range 2 {
+		waiting = append(waiting, send(mocks.UpdateOrderCmd{ID: "hot", NewState: order{ID: "hot", Total: float64(i)}}))
+		waitForBacklog(t, p.Shards()[0], i+1)
+	}
+
+	overflow := send(mocks.UpdateOrderCmd{ID: "hot", NewState: order{ID: "hot", Total: 9}})
+	select {
+	case res := <-overflow.ResultChan:
+		if !errors.Is(res.Err, asynxmd.ErrQueueFull) {
+			t.Fatalf("overflow = %v, want ErrQueueFull", res.Err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("overflow was neither queued nor refused")
+	}
+
+	release()
+	for _, env := range append(waiting, running) {
+		if res := <-env.ResultChan; res.Err != nil {
+			t.Fatalf("queued command: %v", res.Err)
+		}
+	}
+}
+
+// A command whose caller has already given up is not executed.
+func TestShard_SkipsACommandWhoseContextEnded(t *testing.T) {
+	s := store.New()
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	executor := exec.New[order](es, nil)
+	p := pool.New(executor, 1, 8, 1)
+	t.Cleanup(func() { p.Drain(context.Background()) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	env := &models.CommandEnvelope[order]{
+		Cmd:        mocks.CreateOrderCmd{ID: "gone", Total: 1},
+		Ctx:        ctx,
+		ResultChan: make(chan models.CommandResult[order], 1),
+	}
+	p.Shards()[0].CommandChan() <- env
+
+	if res := <-env.ResultChan; !errors.Is(res.Err, asynxmd.ErrContextCancelled) {
+		t.Fatalf("result = %v, want ErrContextCancelled", res.Err)
+	}
+	if exists, _ := es.Exists(context.Background(), "gone"); exists {
+		t.Fatal("a cancelled command was executed")
+	}
+}
+
+type gatedCreate struct {
+	mocks.CreateOrderCmd
+	entered chan<- struct{}
+	gate    <-chan struct{}
+}
+
+func (c gatedCreate) Validate(current *order) error {
+	c.entered <- struct{}{}
+	<-c.gate
+	return c.CreateOrderCmd.Validate(current)
+}
+
+// waitForBacklog returns once the shard holds n commands behind a running one.
+func waitForBacklog[T any](
+	t *testing.T,
+	s *pool.Shard[T],
+	n int,
+) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for s.Backlog() < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("backlog stayed below %d", n)
+		}
+		runtime.Gosched()
+	}
 }

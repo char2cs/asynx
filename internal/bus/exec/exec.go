@@ -33,50 +33,72 @@ type HandlerJob[T any] struct {
 
 // ExecuteHandler runs job.Handler (via ExecuteWithTimeout), recovers from any
 // panic, and optionally calls job.FallbackHandler. It calls wg.Done() when it
-// returns. Intended to be called as a goroutine.
-func ExecuteHandler[T any](wg *sync.WaitGroup, job *HandlerJob[T]) {
+// returns. Intended to be called as a goroutine. The panic and timeout callbacks
+// run in goroutines nobody recovers, so a panic inside one is swallowed: a
+// misbehaving observer must not take the process down.
+func ExecuteHandler[T any](
+	wg *sync.WaitGroup,
+	job *HandlerJob[T],
+) {
 	defer wg.Done()
 
-	// Build resolved callbacks — job-level overrides the package default.
-	panicFn := func(v any) {
-		if job.OnPanic != nil {
-			job.OnPanic(job.Ctx, job.Event, v)
-		} else {
-			OnHandlerPanic(v, job)
-		}
-	}
-	timeoutFn := func() {
-		if job.OnTimeout != nil {
-			job.OnTimeout(job.Ctx, job.Event, job.Timeout)
-		} else {
-			OnHandlerTimeout(job.Event, job.Timeout)
-		}
-	}
-
-	defer func() {
-		r := recover()
-		if r == nil {
-			return
-		}
-
-		panicFn(r)
-		if job.FallbackHandler == nil {
-			return
-		}
-
-		// Wrap the fallback call in its own recover so a second panic (Bug 1)
-		// never escapes this defer function and crash the process.
-		func() {
-			defer func() {
-				if r2 := recover(); r2 != nil {
-					panicFn(r2)
-				}
-			}()
-			executeWithTimeout(job.Ctx, job.FallbackHandler, job.Event, job.Timeout, panicFn, timeoutFn, job.WaitAfterTimeout)
-		}()
-	}()
+	panicFn := panicCallback(job)
+	timeoutFn := timeoutCallback(job)
+	defer fallBackOnPanic(job, panicFn, timeoutFn)
 
 	executeWithTimeout(job.Ctx, job.Handler, job.Event, job.Timeout, panicFn, timeoutFn, job.WaitAfterTimeout)
+}
+
+func panicCallback[T any](job *HandlerJob[T]) func(any) {
+	return func(v any) {
+		defer func() { _ = recover() }()
+		if job.OnPanic == nil {
+			OnHandlerPanic(v, job)
+			return
+		}
+		job.OnPanic(job.Ctx, job.Event, v)
+	}
+}
+
+func timeoutCallback[T any](job *HandlerJob[T]) func() {
+	return func() {
+		defer func() { _ = recover() }()
+		if job.OnTimeout == nil {
+			OnHandlerTimeout(job.Event, job.Timeout)
+			return
+		}
+		job.OnTimeout(job.Ctx, job.Event, job.Timeout)
+	}
+}
+
+func fallBackOnPanic[T any](
+	job *HandlerJob[T],
+	panicFn func(any),
+	timeoutFn func(),
+) {
+	recovered := recover()
+	if recovered == nil {
+		return
+	}
+
+	panicFn(recovered)
+	if job.FallbackHandler == nil {
+		return
+	}
+	runFallback(job, panicFn, timeoutFn)
+}
+
+func runFallback[T any](
+	job *HandlerJob[T],
+	panicFn func(any),
+	timeoutFn func(),
+) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			panicFn(recovered)
+		}
+	}()
+	executeWithTimeout(job.Ctx, job.FallbackHandler, job.Event, job.Timeout, panicFn, timeoutFn, job.WaitAfterTimeout)
 }
 
 // ExecuteWithTimeout calls handler inline when timeout is zero, or in a
@@ -111,36 +133,49 @@ func executeWithTimeout[T any](
 	}
 
 	done := make(chan struct{})
+	go runGuarded(ctx, handler, event, onPanic, done)
 
-	go func() {
-		defer close(done)
-		defer func() {
-			if r := recover(); r != nil {
-				if onPanic != nil {
-					func() {
-						defer func() { recover() }()
-						onPanic(r)
-					}()
-				}
-			}
-		}()
-		handler(ctx, event)
-	}()
-
-	// Use NewTimer so Stop() can release the timer before it fires.
-	// time.After would leak the timer for the full duration when <-done wins.
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
 	select {
 	case <-done:
 	case <-timer.C:
-		if onTimeout != nil {
-			onTimeout()
-		}
-		if waitAfterTimeout {
-			<-done
-		}
+		afterTimeout(onTimeout, waitAfterTimeout, done)
+	}
+}
+
+func runGuarded[T any](
+	ctx context.Context,
+	handler asynxmd.ProjectionHandler[T],
+	event asynxmd.Event[T],
+	onPanic func(any),
+	done chan<- struct{},
+) {
+	defer close(done)
+	defer reportPanic(onPanic)
+	handler(ctx, event)
+}
+
+func reportPanic(onPanic func(any)) {
+	recovered := recover()
+	if recovered == nil || onPanic == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	onPanic(recovered)
+}
+
+func afterTimeout(
+	onTimeout func(),
+	waitAfterTimeout bool,
+	done <-chan struct{},
+) {
+	if onTimeout != nil {
+		onTimeout()
+	}
+	if waitAfterTimeout {
+		<-done
 	}
 }
 

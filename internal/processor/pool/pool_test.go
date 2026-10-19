@@ -13,8 +13,8 @@ import (
 	"github.com/char2cs/asynx/internal/processor/exec"
 	"github.com/char2cs/asynx/internal/processor/models"
 	"github.com/char2cs/asynx/internal/processor/pool"
-	"github.com/char2cs/asynx/store"
 	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/store"
 )
 
 // blockingBus is a test bus whose PublishSync blocks until unblockCh is closed.
@@ -32,7 +32,7 @@ func (b *blockingBus[T]) Subscribe(_ string, _ asynxmd.ProjectionHandler[T], _ .
 }
 func (b *blockingBus[T]) Unsubscribe(_ string) error    { return nil }
 func (b *blockingBus[T]) Close(_ context.Context) error { return nil }
-func (b *blockingBus[T]) WaitForHandlers()               {}
+func (b *blockingBus[T]) WaitForHandlers()              {}
 
 type order = mocks.Order
 
@@ -40,7 +40,7 @@ func TestPool_SingleCommandSuccess(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -77,7 +77,7 @@ func TestPool_SerialOrderingSameAggregate(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -121,7 +121,7 @@ func TestPool_ParallelDifferentAggregates(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -177,7 +177,7 @@ func TestPool_ValidationFailureNoWrite(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -212,7 +212,7 @@ func TestPool_DrainWaitsForInflight(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -270,7 +270,7 @@ func TestPool_DrainTimeout(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -290,7 +290,7 @@ func TestPool_QueueFullBlocksSender(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -365,7 +365,7 @@ func TestPool_MultipleWorkers(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -411,7 +411,7 @@ func TestPool_ValidationErrorDecrementVersionSingleWorker(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -475,7 +475,7 @@ func TestPool_ContextCancelledDuringExecution(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -509,7 +509,7 @@ func TestPool_DrainWithNoCommands(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -526,7 +526,7 @@ func TestPool_DrainTimeoutBothPhases(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -547,7 +547,7 @@ func TestPool_DispatcherMultipleCorrections(t *testing.T) {
 	s := store.New()
 	b := bus.NewChannelBus[order]()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 
@@ -600,7 +600,7 @@ func TestPool_WaitWorkers_ContextCancelledAfterDispatch(t *testing.T) {
 	unblockCh := make(chan struct{})
 	bb := &blockingBus[order]{unblockCh: unblockCh}
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](bb)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: bb})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(es, d)
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 
@@ -243,11 +244,22 @@ func TestWrite_Get_WithUpcasting(t *testing.T) {
 // --- Concurrent writes ---
 
 func TestWrite_ConcurrentConflict_AtLeastOneFails(t *testing.T) {
+	const rounds = 50
+	for range rounds {
+		if concurrentWritesConflict(t) {
+			return
+		}
+	}
+	t.Errorf("expected a concurrent write to fail with ErrPipelineFailed in at least one of %d rounds", rounds)
+}
+
+func concurrentWritesConflict(
+	t *testing.T,
+) bool {
+	t.Helper()
 	es := New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
 	ctx := context.Background()
 
-	// Race many goroutines against version 1; all compute nextVersion before
-	// any appends, so all claim version 1. Only one can win.
 	const n = 20
 	start := make(chan struct{})
 	errs := make([]error, n)
@@ -255,7 +267,9 @@ func TestWrite_ConcurrentConflict_AtLeastOneFails(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := range n {
 		wg.Add(1)
-		go func(i int) {
+		go func(
+			i int,
+		) {
 			defer wg.Done()
 			<-start
 			_, errs[i] = es.Write(ctx, cmdEmpty())
@@ -264,15 +278,11 @@ func TestWrite_ConcurrentConflict_AtLeastOneFails(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	failures := 0
-	for _, err := range errs {
-		if errors.Is(err, asynxmd.ErrPipelineFailed) {
-			failures++
-		}
-	}
-	if failures == 0 {
-		t.Error("expected at least one concurrent write to fail with ErrPipelineFailed")
-	}
+	return slices.ContainsFunc(errs, func(
+		err error,
+	) bool {
+		return errors.Is(err, asynxmd.ErrPipelineFailed)
+	})
 }
 
 // --- Get: ErrNotFound ---
@@ -591,5 +601,28 @@ func TestWriteTx_ValidationFailureWritesNothingAndSkipsTheHook(t *testing.T) {
 	}
 	if ok, _ := es.Exists(context.Background(), "agg1"); ok {
 		t.Fatal("rejected command wrote an event")
+	}
+}
+
+func TestGuardAutoSnapshots_InstallsTheGuardOnTheReader(t *testing.T) {
+	ctx := context.Background()
+	es := New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
+	asked := 0
+	es.GuardAutoSnapshots(func(
+		string,
+		func(),
+	) bool {
+		asked++
+		return false
+	})
+	if _, err := es.Write(ctx, cmd(order{Total: 5})); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := es.Get(ctx, "agg1"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if asked > 1 {
+		t.Fatalf("guard consulted %d times for one Get", asked)
 	}
 }
