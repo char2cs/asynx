@@ -155,7 +155,7 @@ What it must not do is change the observable behavior in the ten rules, or write
 
 ## Conformance suite
 
-`dispatchertest.Run(t, factory)`, in `github.com/char2cs/asynx/tests/dispatchertest`, checks the contract against any implementation. It is a test kit under `tests/`, not part of the library's root API. It covers ordering, durable retry and ack, dead-letter, park/resume/supersede, the causes and undelivered versions `Inspect` reports, tickets, `Unrun` answers, interrupt and close, `InHandler`, and panics in handlers. The suite runs on its own aggregate type, so the factory is a `models.DispatcherFactory[dispatchertest.Aggregate]`, and it must return a fresh, independent dispatcher on every call. Run it from your implementation's tests:
+`dispatchertest.Run(t, factory)`, in `internal/tests/dispatchertest`, checks the contract against an implementation. It is an internal test kit, so only code inside this module can import it; a replacement living elsewhere cannot run it. It covers ordering, durable retry and ack, dead-letter, park/resume/supersede, the causes and undelivered versions `Inspect` reports, tickets, `Unrun` answers, interrupt and close, `InHandler`, and panics in handlers. The suite runs on its own aggregate type, so the factory is a `models.DispatcherFactory[dispatchertest.Aggregate]`, and it must return a fresh, independent dispatcher on every call. Run it from your implementation's tests:
 
 ```go
 func TestConformance(t *testing.T) {
