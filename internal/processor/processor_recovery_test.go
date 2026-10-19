@@ -20,6 +20,45 @@ import (
 	"github.com/char2cs/asynx/store"
 )
 
+type order = mocks.Order
+
+type fixture struct {
+	p    *processor.Processor[order]
+	s    store.Memory
+	snap store.SnapshotMemory
+	b    *bus.ChannelBus[order]
+}
+
+func newFixture(t *testing.T, s store.Memory, opts ...processor.ProcessorOpt[order]) fixture {
+	t.Helper()
+	snap := store.NewSnapshots()
+	b := bus.NewChannelBus[order]()
+	es := eventstore.New[order](s, snap, nil, 1, nil)
+	p := mustNew(t, es, b, opts...)
+	t.Cleanup(func() { p.Shutdown(context.Background()) })
+	return fixture{p: p, s: s, snap: snap, b: b}
+}
+
+func always(string) bool { return true }
+
+func mustNew[T any](
+	tb testing.TB,
+	es *eventstore.EventStore[T],
+	bus asynxmd.Bus[T],
+	opts ...processor.ProcessorOpt[T],
+) *processor.Processor[T] {
+	tb.Helper()
+	p, err := processor.New(es, bus, opts...)
+	if err != nil {
+		tb.Fatalf("processor.New: %v", err)
+	}
+	return p
+}
+
+func newES() *eventstore.EventStore[order] {
+	return eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
+}
+
 func seedPending(t *testing.T, s store.Memory, es *eventstore.EventStore[order], ids ...string) {
 	t.Helper()
 	ctx := context.Background()
