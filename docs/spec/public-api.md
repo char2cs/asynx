@@ -77,7 +77,7 @@ ax, err := asynx.New[Order]().
 
 See [Write-Path Guarantees](guarantees.md#durable-delivery) for retry, parking, dead-lettering and the deletion marker.
 
-`WithDispatcher(models.DispatcherFactory[T])` replaces the component that orders, retries and parks durable deliveries. The library ships only the in-memory implementation; see [dispatcher.md](./dispatcher.md) for the contract a replacement must carry. A factory error, or a factory that returns no dispatcher, fails `Build`; a nil factory is ignored.
+`WithDispatcher(models.DispatcherFactory[T])` replaces the component that orders, retries and parks durable deliveries. The library ships only the in-memory implementation; see [dispatcher.md](./dispatcher.md) for the contract a replacement must carry. A factory error (wrapped as `asynx: dispatcher factory: ...`), or a factory that returns no dispatcher, fails `Build`; a nil factory is ignored.
 
 ---
 
