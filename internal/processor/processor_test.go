@@ -1274,12 +1274,6 @@ func TestNew_AFactoryIsCalledEvenWithoutABus(t *testing.T) {
 }
 
 func TestNew_TheFactoryReceivesTheConfigWithDefaultsApplied(t *testing.T) {
-	handled := func(
-		context.Context,
-		asynxmd.Event[order],
-		error,
-	) {
-	}
 	tests := []struct {
 		name     string
 		opts     []processor.ProcessorOpt[order]
@@ -1316,19 +1310,36 @@ func TestNew_TheFactoryReceivesTheConfigWithDefaultsApplied(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := mocks.NewDispatcher[order]()
-			opts := append(tt.opts, processor.WithDispatcherFactory(fake.Factory()), processor.WithPublishErrorHandler(handled))
-			mustNew(t, newES(), bus.NewChannelBus[order](), opts...)
-
-			got := fake.Config()
-			configDiffers := got.MaxAttempts != tt.attempts || got.RetryInitial != tt.initial || got.RetryMax != tt.max
-			if configDiffers {
-				t.Errorf("config = (%d, %v, %v), want (%d, %v, %v)", got.MaxAttempts, got.RetryInitial, got.RetryMax, tt.attempts, tt.initial, tt.max)
-			}
-			if got.Bus == nil || got.OnPublishError == nil {
-				t.Errorf("config = %+v, want the bus and the publish error handler", got)
-			}
+			assertFactoryConfig(t, tt.opts, tt.attempts, tt.initial, tt.max)
 		})
+	}
+}
+
+func assertFactoryConfig(
+	t *testing.T,
+	opts []processor.ProcessorOpt[order],
+	attempts int,
+	initial time.Duration,
+	max time.Duration,
+) {
+	t.Helper()
+	handled := func(
+		context.Context,
+		asynxmd.Event[order],
+		error,
+	) {
+	}
+	fake := mocks.NewDispatcher[order]()
+	opts = append(opts, processor.WithDispatcherFactory(fake.Factory()), processor.WithPublishErrorHandler(handled))
+	mustNew(t, newES(), bus.NewChannelBus[order](), opts...)
+
+	got := fake.Config()
+	configDiffers := got.MaxAttempts != attempts || got.RetryInitial != initial || got.RetryMax != max
+	if configDiffers {
+		t.Errorf("config = (%d, %v, %v), want (%d, %v, %v)", got.MaxAttempts, got.RetryInitial, got.RetryMax, attempts, initial, max)
+	}
+	if got.Bus == nil || got.OnPublishError == nil {
+		t.Errorf("config = %+v, want the bus and the publish error handler", got)
 	}
 }
 

@@ -250,13 +250,32 @@ func TestProcessor_Recover_APanickingPublishErrorHandlerDoesNotCrash(
 	if called.Load() == 0 {
 		t.Fatal("the publish error handler was not called")
 	}
-	for _, id := range []string{"a", "z"} {
-		if _, ok := delivered.Load(id); !ok {
-			t.Errorf("aggregate %s was not recovered", id)
-		}
-	}
+	assertRecovered(t, &delivered, "a", "z")
 	if paused := p.Paused(); !slices.Equal(paused, []string{"bad"}) {
 		t.Errorf("Paused = %v, want [bad]", paused)
+	}
+}
+
+func assertRecovered(
+	t *testing.T,
+	delivered *sync.Map,
+	ids ...string,
+) {
+	t.Helper()
+	for _, id := range ids {
+		assertDeliveredTo(t, delivered, id)
+	}
+}
+
+func assertDeliveredTo(
+	t *testing.T,
+	delivered *sync.Map,
+	id string,
+) {
+	t.Helper()
+	_, ok := delivered.Load(id)
+	if !ok {
+		t.Errorf("aggregate %s was not recovered", id)
 	}
 }
 

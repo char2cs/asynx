@@ -635,12 +635,11 @@ func TestInspect_RacingParkAndLiftNeverReportsAnInconsistentStatus(t *testing.T)
 	wg.Add(1)
 	go parkAndLift(&wg, r, done, &violations)
 
-	var inconsistent int
-	for range reads {
-		if !consistent(r.Inspect("a")) {
-			inconsistent++
-		}
+	statuses := make([]asynxmd.DeliveryStatus, reads)
+	for i := range statuses {
+		statuses[i] = r.Inspect("a")
 	}
+	inconsistent := len(slices.DeleteFunc(statuses, consistent))
 	close(done)
 	wg.Wait()
 

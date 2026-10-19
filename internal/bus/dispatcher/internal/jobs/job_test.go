@@ -75,19 +75,28 @@ func TestNew_KindsDecideRouting(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			job, _ := newJob(t, tt.request)
-
-			got := [3]bool{job.Durable(), job.Forget(), job.SkipLive()}
-			if got != [3]bool{tt.durable, tt.forget, tt.skipLive} {
-				t.Fatalf("got durable=%v forget=%v skipLive=%v", job.Durable(), job.Forget(), job.SkipLive())
-			}
-			if (job.Ack() != nil) != (tt.request.Ack != nil) {
-				t.Fatalf("ack presence mismatch")
-			}
-			if job.Acked() != (tt.request.Ack != nil) {
-				t.Fatalf("acked = %v, want %v", job.Acked(), tt.request.Ack != nil)
-			}
+			assertKindRouting(t, tt.request, [3]bool{tt.durable, tt.forget, tt.skipLive})
 		})
+	}
+}
+
+func assertKindRouting(
+	t *testing.T,
+	request asynxmd.DispatchRequest[string],
+	want [3]bool,
+) {
+	t.Helper()
+	job, _ := newJob(t, request)
+
+	got := [3]bool{job.Durable(), job.Forget(), job.SkipLive()}
+	if got != want {
+		t.Fatalf("got durable=%v forget=%v skipLive=%v", job.Durable(), job.Forget(), job.SkipLive())
+	}
+	if (job.Ack() != nil) != (request.Ack != nil) {
+		t.Fatalf("ack presence mismatch")
+	}
+	if job.Acked() != (request.Ack != nil) {
+		t.Fatalf("acked = %v, want %v", job.Acked(), request.Ack != nil)
 	}
 }
 

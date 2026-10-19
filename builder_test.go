@@ -874,7 +874,6 @@ func TestBuild_UsesTheSuppliedDispatcher(t *testing.T) {
 }
 
 func TestBuild_RecoverEnqueuesRedeliveries(t *testing.T) {
-	ctx := context.Background()
 	s := store.New()
 	stuck := make(chan struct{})
 	first := build(t, eight(s).WithSubscriber("OrderUpdated", func(
@@ -885,11 +884,13 @@ func TestBuild_RecoverEnqueuesRedeliveries(t *testing.T) {
 		return nil
 	}))
 	t.Cleanup(func() { close(stuck) })
-	for _, cmd := range []models.Command[mocks.Order]{mocks.CreateOrderCmd{ID: "a", Total: 1}, upd("a", 2), upd("a", 3)} {
-		if _, err := first.Send(ctx, cmd); err != nil {
-			t.Fatal(err)
-		}
-	}
+	sendAll(
+		t,
+		first,
+		mocks.CreateOrderCmd{ID: "a", Total: 1},
+		upd("a", 2),
+		upd("a", 3),
+	)
 
 	fake := mocks.NewDispatcher[mocks.Order]()
 	build(t, eight(s).WithDispatcher(fake.Factory()).WithSubscriber("OrderUpdated", noopDurable))
@@ -899,10 +900,42 @@ func TestBuild_RecoverEnqueuesRedeliveries(t *testing.T) {
 		t.Fatalf("requests = %d, want the 2 pending deliveries", len(requests))
 	}
 	for i, request := range requests {
-		wrongRedelivery := request.Kind != models.DispatchRedelivery || request.Event.Version != int64(i+2) || request.Ack == nil
-		if wrongRedelivery {
-			t.Errorf("request %d = %+v, want the redelivery of v%d with an Ack", i, request, i+2)
-		}
+		assertRedelivery(t, i, request)
+	}
+}
+
+func sendAll(
+	t *testing.T,
+	inst asynx.Asynx[mocks.Order],
+	cmds ...models.Command[mocks.Order],
+) {
+	t.Helper()
+	for _, cmd := range cmds {
+		mustSend(t, inst, cmd)
+	}
+}
+
+func mustSend(
+	t *testing.T,
+	inst asynx.Asynx[mocks.Order],
+	cmd models.Command[mocks.Order],
+) {
+	t.Helper()
+	_, err := inst.Send(context.Background(), cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertRedelivery(
+	t *testing.T,
+	i int,
+	request models.DispatchRequest[mocks.Order],
+) {
+	t.Helper()
+	wrongRedelivery := request.Kind != models.DispatchRedelivery || request.Event.Version != int64(i+2) || request.Ack == nil
+	if wrongRedelivery {
+		t.Errorf("request %d = %+v, want the redelivery of v%d with an Ack", i, request, i+2)
 	}
 }
 
@@ -1017,24 +1050,34 @@ func TestBuild_DefaultsAreAppliedBeforeTheFactoryRuns(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := mocks.NewDispatcher[mocks.Order]()
-			b := eight(store.New()).
-				WithDispatcher(fake.Factory()).
-				WithSubscriber("OrderUpdated", noopDurable).
-				WithDeliveryRetry(tt.retry[0], tt.retry[1]).
-				WithDeliveryMaxAttempts(tt.attempts)
-			build(t, b)
-
-			got := fake.Config()
-			configDiffers := got.MaxAttempts != tt.want.MaxAttempts || got.RetryInitial != tt.want.RetryInitial || got.RetryMax != tt.want.RetryMax
-			if configDiffers {
-				t.Errorf("config = (%d, %v, %v), want (%d, %v, %v)", got.MaxAttempts, got.RetryInitial, got.RetryMax,
-					tt.want.MaxAttempts, tt.want.RetryInitial, tt.want.RetryMax)
-			}
-			if got.Bus == nil || len(got.DurableSubs) != 1 {
-				t.Errorf("config = %+v, want the bus and the one durable subscriber", got)
-			}
+			assertFactoryConfig(t, tt.retry, tt.attempts, tt.want)
 		})
+	}
+}
+
+func assertFactoryConfig(
+	t *testing.T,
+	retry [2]time.Duration,
+	attempts int,
+	want models.DispatcherConfig[mocks.Order],
+) {
+	t.Helper()
+	fake := mocks.NewDispatcher[mocks.Order]()
+	b := eight(store.New()).
+		WithDispatcher(fake.Factory()).
+		WithSubscriber("OrderUpdated", noopDurable).
+		WithDeliveryRetry(retry[0], retry[1]).
+		WithDeliveryMaxAttempts(attempts)
+	build(t, b)
+
+	got := fake.Config()
+	configDiffers := got.MaxAttempts != want.MaxAttempts || got.RetryInitial != want.RetryInitial || got.RetryMax != want.RetryMax
+	if configDiffers {
+		t.Errorf("config = (%d, %v, %v), want (%d, %v, %v)", got.MaxAttempts, got.RetryInitial, got.RetryMax,
+			want.MaxAttempts, want.RetryInitial, want.RetryMax)
+	}
+	if got.Bus == nil || len(got.DurableSubs) != 1 {
+		t.Errorf("config = %+v, want the bus and the one durable subscriber", got)
 	}
 }
 

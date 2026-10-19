@@ -11,14 +11,14 @@ import (
 // noopBus is a zero-cost Bus[T] implementation for benchmarking.
 type noopBus[T any] struct{}
 
-func (b *noopBus[T]) Publish(_ context.Context, _ asynxmd.Event[T]) error     { return nil }
+func (b *noopBus[T]) Publish(_ context.Context, _ asynxmd.Event[T]) error { return nil }
 func (b *noopBus[T]) PublishSync(_ context.Context, _ asynxmd.Event[T]) error { return nil }
 func (b *noopBus[T]) Subscribe(_ string, _ asynxmd.ProjectionHandler[T], _ ...asynxmd.SubscriptionOpt[T]) (string, error) {
 	return "", nil
 }
-func (b *noopBus[T]) Unsubscribe(_ string) error    { return nil }
-func (b *noopBus[T]) Close(_ context.Context) error { return nil }
-func (b *noopBus[T]) WaitForHandlers()              {}
+func (b *noopBus[T]) Unsubscribe(_ string) error        { return nil }
+func (b *noopBus[T]) Close(_ context.Context) error      { return nil }
+func (b *noopBus[T]) WaitForHandlers()                   {}
 
 // BenchmarkDispatch_SingleAggregate benchmarks async dispatch where all events
 // target a single aggregate "agg1".
