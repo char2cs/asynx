@@ -1025,3 +1025,18 @@ func TestBuild_DefaultsAreAppliedBeforeTheFactoryRuns(t *testing.T) {
 		})
 	}
 }
+
+func TestBuild_ATypedNilDispatcherFailsBuild(t *testing.T) {
+	factory := func(
+		models.DispatcherConfig[mocks.Order],
+	) (models.Dispatcher[mocks.Order], error) {
+		var d *mocks.Dispatcher[mocks.Order]
+		return d, nil
+	}
+
+	inst, err := eight(store.New()).WithBus(&closingBus{}).WithDispatcher(factory).Build()
+
+	if inst != nil || err == nil || !strings.Contains(err.Error(), "returned no dispatcher") {
+		t.Fatalf("Build = (%v, %v), want the no-dispatcher error and no instance", inst, err)
+	}
+}

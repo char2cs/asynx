@@ -812,14 +812,6 @@ func TestExecute_DurableDeliveryOnlyForEventsADurableSubscriberWants(t *testing.
 	}
 }
 
-
-
-
-
-
-
-
-
 func streamLen(t *testing.T, s interface {
 	ReadFrom(context.Context, string, int64) ([][]byte, error)
 }, agg string) int {
@@ -830,36 +822,6 @@ func streamLen(t *testing.T, s interface {
 	}
 	return len(blobs)
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 func TestExecute_AfterDispatcherClosedFailsPipelineButKeepsTheCommit(t *testing.T) {
 	ex, s, _, d, _ := newEnv(t)
@@ -884,70 +846,6 @@ func TestExecute_WithoutDispatcherCommitsAndReturns(t *testing.T) {
 		t.Fatalf("delivery enqueued with nobody to deliver to: %v", pending)
 	}
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 func TestExecute_WaitingForHandlersGivesUpWithTheCommittedEvent(t *testing.T) {
 	ex, _, _, _, b := newEnv(t)
@@ -976,20 +874,6 @@ func TestExecute_WaitingForHandlersGivesUpWithTheCommittedEvent(t *testing.T) {
 		t.Fatalf("got (%+v, %v), want the committed v1 with ErrContextCancelled", r.evt, r.err)
 	}
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 func TestExecute_WaitingOnAParkedAggregateReportsNoHandlerRan(t *testing.T) {
 	ex := durableEnv(t, func(context.Context, asynxmd.Event[order]) error { return nil })

@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -292,10 +293,29 @@ func newDispatcher[T any](
 	if err != nil {
 		return nil, fmt.Errorf("asynx: dispatcher factory: %w", err)
 	}
-	if d == nil {
+	if isNil(d) {
 		return nil, errNilDispatcher
 	}
 	return d, nil
+}
+
+func isNil(
+	value any,
+) bool {
+	if value == nil {
+		return true
+	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Pointer,
+		reflect.Map,
+		reflect.Func,
+		reflect.Slice,
+		reflect.Chan,
+		reflect.Interface:
+		return rv.IsNil()
+	}
+	return false
 }
 
 func configure[T any](

@@ -17,7 +17,7 @@ func newJob() jobs.Job[string] {
 	request := asynxmd.DispatchRequest[string]{
 		Event: asynxmd.Event[string]{AggregateID: "agg", Version: 1},
 	}
-	return jobs.New(request, ctx, func() {})
+	return jobs.New(ctx, request, func() {})
 }
 
 func TestReporter_PublishErrorCallsHandler(t *testing.T) {

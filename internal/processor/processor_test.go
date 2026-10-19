@@ -1338,3 +1338,16 @@ func TestShutdown_InterruptsThenClosesTheSuppliedDispatcher(t *testing.T) {
 		t.Errorf("calls = %v, want Factory, Interrupt, Close", calls)
 	}
 }
+
+func TestNew_ATypedNilDispatcherWithoutAnErrorFails(t *testing.T) {
+	factory := func(asynxmd.DispatcherConfig[order]) (asynxmd.Dispatcher[order], error) {
+		var d *mocks.Dispatcher[order]
+		return d, nil
+	}
+
+	p, err := processor.New(newES(), bus.NewChannelBus[order](), processor.WithDispatcherFactory(factory))
+
+	if p != nil || err == nil || !strings.Contains(err.Error(), "returned no dispatcher") {
+		t.Errorf("New = (%v, %v), want the no-dispatcher error and no processor", p, err)
+	}
+}

@@ -17,7 +17,7 @@ func newJob(
 	request := asynxmd.DispatchRequest[string]{
 		Event: asynxmd.Event[string]{AggregateID: aggregateID, Version: version},
 	}
-	return jobs.New(request, context.Background(), func() {})
+	return jobs.New(context.Background(), request, func() {})
 }
 
 func closed(

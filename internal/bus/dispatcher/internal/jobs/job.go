@@ -74,8 +74,8 @@ type Job[T any] interface {
 // New creates a Job for request, delivered under ctx. cancel releases ctx and
 // is called when the job completes.
 func New[T any](
-	request asynxmd.DispatchRequest[T],
 	ctx context.Context,
+	request asynxmd.DispatchRequest[T],
 	cancel context.CancelFunc,
 ) Job[T] {
 	return &dispatchJob[T]{

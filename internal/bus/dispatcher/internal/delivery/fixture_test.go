@@ -43,7 +43,7 @@ func (f *fixture) pop(
 ) (jobs.Job[int], <-chan struct{}) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	if _, err := f.registry.Enqueue(jobs.New(request, ctx, cancel)); err != nil {
+	if _, err := f.registry.Enqueue(jobs.New(ctx, request, cancel)); err != nil {
 		t.Fatal(err)
 	}
 	job, halt, ok := f.registry.Pop(request.Event.AggregateID)

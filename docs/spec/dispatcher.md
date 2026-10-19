@@ -143,7 +143,7 @@ ax, err := asynx.New[Order]().
     Build()
 ```
 
-When `WithDispatcher` is not called the in-memory default is used. If the factory returns an error (wrapped as `asynx: dispatcher factory: ...`, so `errors.Is` still sees it), or returns no dispatcher, `Build` fails and nothing is left running (the bus the builder created is closed). A nil factory passed to `WithDispatcher` is ignored. The factory is called once, after the builder has collected the subscribers, handlers and retry settings, and receives them in `DispatcherConfig`.
+When `WithDispatcher` is not called the in-memory default is used. If the factory returns an error (wrapped as `asynx: dispatcher factory: ...`, so `errors.Is` still sees it), or returns no dispatcher, `Build` fails and nothing is left running (the bus the builder created, or one passed to `WithBus`, is closed). A nil factory passed to `WithDispatcher` is ignored. The factory is called once, after the builder has collected the subscribers, handlers and retry settings, and receives them in `DispatcherConfig`.
 
 ### What an implementation is free to do
 

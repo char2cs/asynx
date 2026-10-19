@@ -7,8 +7,9 @@ import "context"
 // Event is the committed event; its AggregateID selects the per-aggregate
 // order it is delivered in.
 //
-// Ack, when nil on a DispatchEvent or on a DispatchRedelivery of an ordinary
-// event, makes the request live only: no durable subscriber runs. When non-nil
+// Ack, when nil on a DispatchEvent, makes the request live only: no durable
+// subscriber runs. A DispatchRedelivery of an ordinary event never reaches live
+// subscribers, so with a nil Ack nothing runs at all. When non-nil
 // the delivery is durable: the durable subscribers that receive the event run
 // with retry, holding back the aggregate's later events, and Ack runs exactly
 // once after every one of them has succeeded. Ack normally acknowledges the

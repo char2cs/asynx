@@ -54,7 +54,7 @@ func (f *fixture) enqueue(
 ) asynxmd.Ticket {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	job := jobs.New(request, ctx, cancel)
+	job := jobs.New(ctx, request, cancel)
 	if _, err := f.registry.Enqueue(job); err != nil {
 		t.Fatal(err)
 	}

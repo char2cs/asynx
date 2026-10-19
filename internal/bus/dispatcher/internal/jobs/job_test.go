@@ -19,7 +19,7 @@ func newJob(
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	var cancels atomic.Int32
-	job := jobs.New(request, ctx, func() {
+	job := jobs.New(ctx, request, func() {
 		cancels.Add(1)
 		cancel()
 	})

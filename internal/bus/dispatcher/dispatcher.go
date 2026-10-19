@@ -107,7 +107,7 @@ func (d *dispatcher[T]) newJob(
 		stop()
 		cancel()
 	}
-	return jobs.New(request, jobCtx, release), release
+	return jobs.New(jobCtx, request, release), release
 }
 
 func (d *dispatcher[T]) TicketFor(

@@ -16,8 +16,8 @@ import (
 	"github.com/char2cs/asynx/internal/processor/exec"
 	"github.com/char2cs/asynx/internal/processor/models"
 	"github.com/char2cs/asynx/internal/processor/pool"
-	"github.com/char2cs/asynx/store"
 	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/store"
 )
 
 func TestShard_SingleCommandSuccess(t *testing.T) {

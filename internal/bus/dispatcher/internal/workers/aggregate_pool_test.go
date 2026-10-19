@@ -141,7 +141,7 @@ func TestPool_ADispatcherPanicIsReportedAndEndsTheJob(t *testing.T) {
 func TestPool_AParkedAckedJobRunsNothing(t *testing.T) {
 	f := newFixture(t, time.Second)
 	ctx, cancel := context.WithCancel(context.Background())
-	job := jobs.New(event(1, func(context.Context) error { return nil }), ctx, cancel)
+	job := jobs.New(ctx, event(1, func(context.Context) error { return nil }), cancel)
 	halt := make(chan struct{})
 	close(halt)
 

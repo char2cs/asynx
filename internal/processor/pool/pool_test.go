@@ -13,8 +13,8 @@ import (
 	"github.com/char2cs/asynx/internal/processor/exec"
 	"github.com/char2cs/asynx/internal/processor/models"
 	"github.com/char2cs/asynx/internal/processor/pool"
-	"github.com/char2cs/asynx/store"
 	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/store"
 )
 
 // blockingBus is a test bus whose PublishSync blocks until unblockCh is closed.
@@ -32,7 +32,7 @@ func (b *blockingBus[T]) Subscribe(_ string, _ asynxmd.ProjectionHandler[T], _ .
 }
 func (b *blockingBus[T]) Unsubscribe(_ string) error    { return nil }
 func (b *blockingBus[T]) Close(_ context.Context) error { return nil }
-func (b *blockingBus[T]) WaitForHandlers()               {}
+func (b *blockingBus[T]) WaitForHandlers()              {}
 
 type order = mocks.Order
 
