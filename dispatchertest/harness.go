@@ -100,6 +100,20 @@ func (h harness) waitFor(
 	}
 }
 
+func (h harness) awaitForgotten(
+	t testing.TB,
+	d models.Dispatcher[Aggregate],
+	aggregateID string,
+	version int64,
+	what string,
+) {
+	t.Helper()
+	h.waitFor(t, what, func() bool {
+		_, found := d.TicketFor(aggregateID, version)
+		return !found
+	})
+}
+
 func (h harness) enqueueBounded(
 	t testing.TB,
 	d models.Dispatcher[Aggregate],

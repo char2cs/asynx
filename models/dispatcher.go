@@ -41,9 +41,11 @@ import "context"
 //     undelivered versions; the cause is cleared when the park lifts.
 //  7. Supersede abandons the aggregate's queued and retrying durable
 //     deliveries and leaves it unparked with no record.
-//  8. TicketFor finds a ticket exactly while a delivery is queued, running or
-//     retrying; Unrun answers for the events a park left undelivered, until
-//     the park lifts.
+//  8. TicketFor finds a ticket while a delivery is queued, running or
+//     retrying, and not for an event that was never queued; a finished
+//     delivery may still be returned for a brief moment after its Final
+//     closes, and then is not. Unrun answers for the events a park left
+//     undelivered, until the park lifts.
 //  9. InHandler(ctx, aggregateID) is true inside a handler this instance runs
 //     for that aggregate; asynx uses it to refuse a SendWait or a Forget that
 //     would wait on the handler itself.
@@ -76,10 +78,12 @@ type Dispatcher[T any] interface {
 	) (Ticket, error)
 
 	// TicketFor returns the ticket of the event at (aggregateID, version) while
-	// its delivery is under way: queued, being handled, or retrying. Once the
-	// delivery is over, or if the event was never queued, there is none and
-	// false is returned. A retried idempotent command uses it to wait for the
-	// handlers of the event its first attempt produced.
+	// its delivery is under way: queued, being handled, or retrying. If the
+	// event was never queued there is none and false is returned. Once the
+	// delivery is over there is none either, though a finished delivery may
+	// still be returned for a brief moment after its Final closes (its ticket
+	// then reports the outcome at once). A retried idempotent command uses it
+	// to wait for the handlers of the event its first attempt produced.
 	TicketFor(
 		aggregateID string,
 		version int64,

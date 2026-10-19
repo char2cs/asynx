@@ -63,9 +63,7 @@ func ticketForFindsAnEventUnderWay(
 	}
 	closeOnce(release)
 	h.wait(t, ticket.Final, "the delivery")
-	if _, found := d.TicketFor("a", 1); found {
-		t.Fatal("TicketFor kept an event whose delivery is over")
-	}
+	h.awaitForgotten(t, d, "a", 1, "TicketFor to forget an event whose delivery is over")
 }
 
 func ticketForFindsAQueuedEvent(
@@ -103,9 +101,7 @@ func ticketForFindsAnEventWhileItRetries(
 	}
 	d.Interrupt()
 	h.wait(t, enqueued.Final, "the interrupted delivery")
-	if _, found := d.TicketFor("a", 1); found {
-		t.Fatal("TicketFor kept an event whose delivery gave up")
-	}
+	h.awaitForgotten(t, d, "a", 1, "TicketFor to forget an event whose delivery gave up")
 }
 
 func ticketForForgetsParkedEvents(
@@ -116,9 +112,7 @@ func ticketForForgetsParkedEvents(
 	d.Park("a", errImposed)
 	tk := mustEnqueue(t, d, durable(event("a", 1), acknowledge))
 	h.wait(t, tk.Final, "the parked event")
-	if _, found := d.TicketFor("a", 1); found {
-		t.Fatal("TicketFor kept an event that was never queued because its aggregate is parked")
-	}
+	h.awaitForgotten(t, d, "a", 1, "TicketFor to forget an event that was never queued because its aggregate is parked")
 }
 
 func ticketForForgetsQueuedParkedEvents(
@@ -135,9 +129,7 @@ func ticketForForgetsQueuedParkedEvents(
 	queued := mustEnqueue(t, d, durable(event("a", 2), acknowledge))
 	d.Park("a", errImposed)
 	h.wait(t, queued.Final, "the queued event to leave memory")
-	if _, found := d.TicketFor("a", 2); found {
-		t.Fatal("TicketFor kept a queued event that parking took out of memory")
-	}
+	h.awaitForgotten(t, d, "a", 2, "TicketFor to forget a queued event that parking took out of memory")
 }
 
 func unrunRemembersParkedEvents(

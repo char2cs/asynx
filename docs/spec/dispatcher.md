@@ -90,7 +90,7 @@ An implementation carries these ten rules. They are what `dispatchertest.Run` ch
 5. **While parked.** A durable event is not queued. Its ticket settles with `Unrun() == ErrDeliveryParked` and ends with `ErrDeliveryParked`, and its version is recorded as undelivered. Live events still flow.
 6. **Resume.** `ResumeUndelivered(agg, generation)` lifts only the park of that generation and returns the recorded undelivered versions; a stale generation is a no-op (`lifted == false`). `Park(agg, cause, versions...)` imposes a park with a new generation; on an already parked aggregate it merges the versions and keeps the first cause.
 7. **Supersede.** `Supersede` abandons the aggregate's queued and retrying durable deliveries and leaves it unparked with no record.
-8. **Tickets.** `TicketFor` returns a ticket exactly while a delivery is queued, running or retrying. `Unrun` answers for events a park left undelivered, until the park lifts.
+8. **Tickets.** `TicketFor` returns a ticket while a delivery is queued, running or retrying, and none for an event that was never queued; a finished delivery may still be returned for a brief moment after its `Final` closes, and then is not. `Unrun` answers for events a park left undelivered, until the park lifts.
 9. **Handler detection.** `InHandler(ctx, agg)` is true inside a handler this instance runs for `agg`. The processor uses it to refuse `SendWait` and `Forget` from a handler of the same aggregate.
 10. **Shutdown.** `Close` waits for the workers to drain, honors its context, and may be retried. `Interrupt` makes retries give up and park. `Interrupted` is closed once either `Interrupt` or `Close` has been called. `WaitIdle` waits for what was in flight when it was called.
 

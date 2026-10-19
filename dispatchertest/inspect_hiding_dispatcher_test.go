@@ -25,7 +25,7 @@ func (d inspectHidingDispatcher) Inspect(
 }
 
 func TestSuite_FlagsADispatcherWhoseInspectHidesItsParks(t *testing.T) {
-	brokenCase{hideParksFromInspect, []string{
+	brokenCase{brokenBy(hideParksFromInspect), []string{
 		"TestInspect_ReportsParkGenerationCauseAndUndelivered",
 		"TestInspect_ParkedAgainKeepsTheGenerationAndTheFirstCause",
 		"TestInspect_ALaterCauseReplacesANilOne",
