@@ -623,6 +623,38 @@ func TestEnqueue_RacingLiftNeverQueuesADurableJobWhileParked(t *testing.T) {
 	}
 }
 
+func TestInspect_RacingParkAndLiftNeverReportsAnInconsistentStatus(t *testing.T) {
+	const reads = 20000
+	r, _ := newRegistry()
+	done := make(chan struct{})
+	var violations atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go parkAndLift(&wg, r, done, &violations)
+
+	var inconsistent int
+	for range reads {
+		if !consistent(r.Inspect("a")) {
+			inconsistent++
+		}
+	}
+	close(done)
+	wg.Wait()
+
+	if inconsistent != 0 {
+		t.Fatalf("%d of %d statuses were inconsistent while the park raced its lift", inconsistent, reads)
+	}
+}
+
+func consistent(
+	status asynxmd.DeliveryStatus,
+) bool {
+	if status.Parked {
+		return status.Generation != 0
+	}
+	return status.Cause == nil && len(status.Undelivered) == 0
+}
+
 func parkAndLift(
 	wg *sync.WaitGroup,
 	r aggregates.Registry[*fakeItem],

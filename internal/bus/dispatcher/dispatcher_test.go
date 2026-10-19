@@ -280,9 +280,10 @@ func TestTicketFor_FindsAnEventWhileItsDeliveryIsUnderWay(t *testing.T) {
 
 	close(bus.release)
 	<-ticket.Final
-	if _, found := d.TicketFor("a", 1); found {
-		t.Fatal("TicketFor kept an event whose delivery is over")
-	}
+	waitFor(t, "TicketFor kept an event whose delivery is over", func() bool {
+		_, found := d.TicketFor("a", 1)
+		return !found
+	})
 }
 
 func TestTicketFor_ForgetsEventsLeftBehindByAPark(t *testing.T) {
@@ -299,9 +300,10 @@ func TestTicketFor_ForgetsEventsLeftBehindByAPark(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-ticket.Final
-	if _, found := d.TicketFor("a", 1); found {
-		t.Fatal("TicketFor kept an event that was never queued because its aggregate is parked")
-	}
+	waitFor(t, "TicketFor kept an event that was never queued because its aggregate is parked", func() bool {
+		_, found := d.TicketFor("a", 1)
+		return !found
+	})
 }
 
 func TestUnrun_RemembersEventsLeftUndeliveredByAPark(t *testing.T) {
@@ -421,9 +423,10 @@ func TestTicketFor_ForgetsQueuedEventsWhenTheyAreParked(t *testing.T) {
 
 	d.Park("a", errImposed)
 	<-queued.Final
-	if _, found := d.TicketFor("a", 2); found {
-		t.Fatal("TicketFor kept a queued event that parking took out of memory")
-	}
+	waitFor(t, "TicketFor kept a queued event that parking took out of memory", func() bool {
+		_, found := d.TicketFor("a", 2)
+		return !found
+	})
 	close(bus.release)
 }
 

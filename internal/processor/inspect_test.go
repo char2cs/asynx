@@ -54,10 +54,20 @@ func TestProcessor_Inspect_FailedRecoverParksWithTheRedeliveryError(t *testing.T
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	seedUnrebuildable(t, s, "bad")
 	p := mustNew(t, es, bus.NewChannelBus[order](),
-		processor.WithPublishErrorHandler(func(context.Context, asynxmd.Event[order], error) {}),
+		processor.WithPublishErrorHandler(func(
+			context.Context,
+			asynxmd.Event[order],
+			error,
+		) {
+		}),
 		processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-			Match:   always,
-			Handler: func(context.Context, asynxmd.Event[order]) error { return nil },
+			Match: always,
+			Handler: func(
+				context.Context,
+				asynxmd.Event[order],
+			) error {
+				return nil
+			},
 		}}))
 	t.Cleanup(func() { p.Shutdown(ctx) })
 

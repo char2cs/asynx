@@ -20,12 +20,20 @@ func TestAsynx_InspectDelivery_ShowsWhyAnAggregateIsParked(t *testing.T) {
 	inst := build(t, eight(store.New()).
 		WithDeliveryRetry(time.Millisecond, 2*time.Millisecond).
 		WithDeliveryMaxAttempts(3).
-		WithDeliveryErrorHandler(func(_ context.Context, _ models.Event[mocks.Order], err error, _ int) {
+		WithDeliveryErrorHandler(func(
+			_ context.Context,
+			_ models.Event[mocks.Order],
+			err error,
+			_ int,
+		) {
 			if errors.Is(err, models.ErrDeliveryParked) {
 				parked <- err
 			}
 		}).
-		WithSubscriber("OrderUpdated", func(_ context.Context, e models.Event[mocks.Order]) error {
+		WithSubscriber("OrderUpdated", func(
+			_ context.Context,
+			e models.Event[mocks.Order],
+		) error {
 			if e.AggregateID == "bad" {
 				return readModelDown
 			}

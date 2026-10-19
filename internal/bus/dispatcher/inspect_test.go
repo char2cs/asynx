@@ -34,7 +34,11 @@ func TestInspect_GiveUpCauseNamesTheLastHandlerError(t *testing.T) {
 	var attempts atomic.Int32
 	d := newDurable(t, failingSub(&attempts), withMaxAttempts[int](3))
 
-	tk, err := enqueueTicket(context.Background(), d, makeEvent("a", 1), func(context.Context) error { return nil })
+	tk, err := enqueueTicket(context.Background(), d, makeEvent("a", 1), func(
+		context.Context,
+	) error {
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +67,11 @@ func TestInspect_AckFailureCauseIsTheAckError(t *testing.T) {
 		return nil
 	}}})
 
-	tk, err := enqueueTicket(context.Background(), d, makeEvent("a", 1), func(context.Context) error { return errAck })
+	tk, err := enqueueTicket(context.Background(), d, makeEvent("a", 1), func(
+		context.Context,
+	) error {
+		return errAck
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +87,11 @@ func TestInspect_InterruptCauseIsDispatcherClosed(t *testing.T) {
 	var attempts atomic.Int32
 	d := newDurable(t, failingSub(&attempts), withRetryBackoff[int](time.Hour, time.Hour))
 
-	tk, err := enqueueTicket(context.Background(), d, makeEvent("a", 1), func(context.Context) error { return nil })
+	tk, err := enqueueTicket(context.Background(), d, makeEvent("a", 1), func(
+		context.Context,
+	) error {
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -20,7 +20,11 @@ func fakeEnv(
 	t.Helper()
 	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
 	fake := mocks.NewDispatcher[order]()
-	return New[order](es, fake, WithDurableDelivery[order](func(string) bool { return true })), fake
+	return New[order](es, fake, WithDurableDelivery[order](func(
+		string,
+	) bool {
+		return true
+	})), fake
 }
 
 func TestExecute_EnqueueFailureParksWithTheEnqueueError(t *testing.T) {
