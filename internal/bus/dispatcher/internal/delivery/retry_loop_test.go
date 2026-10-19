@@ -126,3 +126,28 @@ func assertBackoff(
 		t.Fatalf("backoff = %v, want %v", got, want)
 	}
 }
+
+func TestRetryLoop_AParkedJobIsNotRetriedWhenItsBackoffEnds(t *testing.T) {
+	f := newFixture(asynxmd.DispatcherConfig[int]{})
+	job, _ := f.pop(t, acked("test.event"))
+	deliverer := f.deliverer.(*durableDeliverer[int])
+	parked := make(chan struct{})
+	close(parked)
+
+	for range 500 {
+		requireParkedWait(t, deliverer, job, parked)
+	}
+}
+
+func requireParkedWait(
+	t *testing.T,
+	deliverer *durableDeliverer[int],
+	job jobs.Job[int],
+	parked <-chan struct{},
+) {
+	t.Helper()
+	err := deliverer.wait("a", parked, job, 0)
+	if !errors.Is(err, asynxmd.ErrDeliveryParked) {
+		t.Fatalf("wait on a parked job = %v, want ErrDeliveryParked: its backoff ended after the park and it would run its handlers again", err)
+	}
+}
