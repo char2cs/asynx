@@ -15,31 +15,33 @@ import (
 
 func durableScenarios() map[string]scenario {
 	return map[string]scenario{
-		"TestEnqueue_AckRunsAfterHandlersFinish":                                enqueueAckRunsAfterHandlersFinish,
-		"TestEnqueue_AckErrorIsReported":                                        enqueueAckErrorIsReported,
-		"TestEnqueue_DurableDeliveryStillAcksWhenBusRejectsEvent":               durableStillAcksWhenBusRejects,
-		"TestDurable_FailedHandlerRetriesAndHoldsBackLaterEventsOfTheAggregate": durableFailedHandlerRetriesAndHoldsBack,
-		"TestDurable_DoneClosesAfterTheFirstAttemptEvenWhenItFails":             durableSettledAfterTheFirstAttempt,
-		"TestDurable_PanicIsAFailureThatRetriesAndReachesThePanicHandler":       durablePanicIsAFailure,
-		"TestDurable_APanickingPanicHandlerCannotKillTheWorker":                 durablePanickingPanicHandler,
-		"TestDurable_OnlyFailedHandlersAreRetried":                              durableOnlyFailedHandlersAreRetried,
-		"TestDurable_NonDurableJobsSkipDurableSubscribers":                      durableNonDurableJobsSkipDurableSubscribers,
-		"TestDurable_DeliveryWithNoMatchingSubscriberIsStillAcked":              durableNoMatchingSubscriberIsStillAcked,
-		"TestDurable_HandlerFinishingBeforeItsTimeoutReportsNothing":            durableHandlerWithinTimeoutReportsNothing,
-		"TestDurable_ATimedOutHandlerThatThenFailsIsRetried":                    durableTimedOutThenFailedIsRetried,
-		"TestDurable_FailuresNameTheSubscriberAndDeadLetterGetsThemAll":         durableFailuresNameTheSubscriber,
-		"TestDurable_ATimeoutNamesItsSubscriber":                                durableTimeoutNamesItsSubscriber,
-		"TestBusErrorDoesNotSkipTheDurableDelivery":                             busErrorDoesNotSkipTheDurableDelivery,
-		"TestBusPanicDoesNotSkipTheDurableDelivery":                             busPanicDoesNotSkipTheDurableDelivery,
-		"TestDispatch_WorkerSurvivesPanic":                                      dispatchWorkerSurvivesPanic,
-		"TestHandle_DispatcherPanicIsReportedNotSwallowed":                      handleBusPanicIsReported,
-		"TestDeliveryErrorHandlerPanicDoesNotReleaseTheHold":                    deliveryErrorHandlerPanicKeepsTheHold,
-		"TestPublishErrorHandlerPanicDoesNotCrashTheWorker":                     publishErrorHandlerPanicKeepsTheWorker,
-		"TestEnqueueRedelivery_GoesToTheDurableSubscribersOnly":                 redeliveryGoesToTheDurableSubscribersOnly,
-		"TestTombstone_ReachesEveryDurableSubscriber":                           tombstoneReachesEveryDurableSubscriber,
-		"TestTombstone_WithANilAckRunsTheHandlersAndCallsNoAck":                 tombstoneWithANilAck,
-		"TestRedelivery_OfAForgetMarkerWithANilAckRunsTheHandlers":              redeliveredMarkerWithANilAck,
-		"TestDeadLetter_TheDeadLetteredEventIsAckedAndItsFinalClosesNil":        deadLetteredEventIsAcked,
+		"TestEnqueue_AckRunsAfterHandlersFinish":                                 enqueueAckRunsAfterHandlersFinish,
+		"TestEnqueue_AckErrorIsReported":                                         enqueueAckErrorIsReported,
+		"TestEnqueue_DurableDeliveryStillAcksWhenBusRejectsEvent":                durableStillAcksWhenBusRejects,
+		"TestDurable_FailedHandlerRetriesAndHoldsBackLaterEventsOfTheAggregate":  durableFailedHandlerRetriesAndHoldsBack,
+		"TestDurable_DoneClosesAfterTheFirstAttemptEvenWhenItFails":              durableSettledAfterTheFirstAttempt,
+		"TestDurable_PanicIsAFailureThatRetriesAndReachesThePanicHandler":        durablePanicIsAFailure,
+		"TestDurable_APanickingPanicHandlerCannotKillTheWorker":                  durablePanickingPanicHandler,
+		"TestDurable_OnlyFailedHandlersAreRetried":                               durableOnlyFailedHandlersAreRetried,
+		"TestDurable_NonDurableJobsSkipDurableSubscribers":                       durableNonDurableJobsSkipDurableSubscribers,
+		"TestDurable_DeliveryWithNoMatchingSubscriberIsStillAcked":               durableNoMatchingSubscriberIsStillAcked,
+		"TestDurable_HandlerFinishingBeforeItsTimeoutReportsNothing":             durableHandlerWithinTimeoutReportsNothing,
+		"TestDurable_ATimedOutHandlerThatThenFailsIsRetried":                     durableTimedOutThenFailedIsRetried,
+		"TestDurable_FailuresNameTheSubscriberAndDeadLetterGetsThemAll":          durableFailuresNameTheSubscriber,
+		"TestDurable_ATimeoutNamesItsSubscriber":                                 durableTimeoutNamesItsSubscriber,
+		"TestBusErrorDoesNotSkipTheDurableDelivery":                              busErrorDoesNotSkipTheDurableDelivery,
+		"TestBusPanicDoesNotSkipTheDurableDelivery":                              busPanicDoesNotSkipTheDurableDelivery,
+		"TestDispatch_WorkerSurvivesPanic":                                       dispatchWorkerSurvivesPanic,
+		"TestHandle_DispatcherPanicIsReportedNotSwallowed":                       handleBusPanicIsReported,
+		"TestDeliveryErrorHandlerPanicDoesNotReleaseTheHold":                     deliveryErrorHandlerPanicKeepsTheHold,
+		"TestPublishErrorHandlerPanicDoesNotCrashTheWorker":                      publishErrorHandlerPanicKeepsTheWorker,
+		"TestEnqueueRedelivery_GoesToTheDurableSubscribersOnly":                  redeliveryGoesToTheDurableSubscribersOnly,
+		"TestTombstone_ReachesEveryDurableSubscriber":                            tombstoneReachesEveryDurableSubscriber,
+		"TestTombstone_WithANilAckRunsTheHandlersAndCallsNoAck":                  tombstoneWithANilAck,
+		"TestRedelivery_OfAForgetMarkerWithANilAckRunsTheHandlers":               redeliveredMarkerWithANilAck,
+		"TestDeadLetter_TheDeadLetteredEventIsAckedAndItsFinalClosesNil":         deadLetteredEventIsAcked,
+		"TestEnqueue_AnEventNamedLikeTheTombstoneReachesOnlyMatchingSubscribers": eventNamedLikeATombstone,
+		"TestRedelivery_OfAnOrdinaryEventWithANilAckRunsNoDurableHandler":        redeliveryWithANilAck,
 	}
 }
 
@@ -49,6 +51,7 @@ func enqueueAckRunsAfterHandlersFinish(
 ) {
 	var handled, acked, ackedEarly atomic.Bool
 	gate := make(chan struct{})
+	t.Cleanup(func() { closeOnce(gate) })
 	b := &bus{fn: func(
 		context.Context,
 		models.Event[Aggregate],
@@ -68,7 +71,7 @@ func enqueueAckRunsAfterHandlersFinish(
 
 	tk := mustEnqueue(t, d, durable(event("a", 1), ack))
 	ranWhileBlocked := acked.Load()
-	close(gate)
+	closeOnce(gate)
 	h.wait(t, tk.Settled, "the delivery to settle")
 	if ranWhileBlocked || ackedEarly.Load() {
 		t.Fatal("ack ran before the handlers finished")
@@ -147,10 +150,14 @@ func durableFailedHandlerRetriesAndHoldsBack(
 	var order, attempts journal
 	var failuresLeft, acks atomic.Int32
 	failuresLeft.Store(3)
+	var once sync.Once
+	gate := make(chan struct{})
+	t.Cleanup(func() { closeOnce(gate) })
 	sub := subscriber(func(
 		_ context.Context,
 		e models.Event[Aggregate],
 	) error {
+		holdIf(e.AggregateID == "a" && e.Version == 1 && firstTime(&once), gate)
 		failing := e.AggregateID == "a" && e.Version == 1 && failuresLeft.Add(-1) >= 0
 		order.note(label(e, failing))
 		return errorIf(failing, errDown)
@@ -175,6 +182,7 @@ func durableFailedHandlerRetriesAndHoldsBack(
 	mustEnqueue(t, d, durable(event("a", 1), ack))
 	mustEnqueue(t, d, durable(event("a", 2), ack))
 	b1 := mustEnqueue(t, d, durable(event("b", 1), ack))
+	closeOnce(gate)
 	h.wait(t, b1.Final, "aggregate b, which a's failure must not hold back")
 	h.waitFor(t, "all three deliveries to be acked", func() bool { return acks.Load() == 3 })
 
@@ -203,6 +211,7 @@ func durableSettledAfterTheFirstAttempt(
 	h harness,
 ) {
 	release := make(chan struct{})
+	t.Cleanup(func() { closeOnce(release) })
 	var acked atomic.Bool
 	d := h.build(t, config(&bus{}, subscriber(func(
 		context.Context,
@@ -220,10 +229,10 @@ func durableSettledAfterTheFirstAttempt(
 	tk := mustEnqueue(t, d, durable(event("a", 1), ack))
 	h.wait(t, tk.Settled, "Settled after the first, failed, attempt")
 	if acked.Load() {
-		close(release)
+		closeOnce(release)
 		t.Fatal("acked a delivery whose handler failed")
 	}
-	close(release)
+	closeOnce(release)
 	h.waitFor(t, "the ack after the retry succeeded", acked.Load)
 }
 
@@ -502,6 +511,7 @@ func durableTimeoutNamesItsSubscriber(
 	h harness,
 ) {
 	release := make(chan struct{})
+	t.Cleanup(func() { closeOnce(release) })
 	reported := make(chan error, 4)
 	sub := models.DurableSub[Aggregate]{Name: "slow#1", Match: always, Timeout: time.Millisecond, Handler: func(
 		context.Context,
@@ -523,7 +533,7 @@ func durableTimeoutNamesItsSubscriber(
 
 	tk := mustEnqueue(t, d, durable(event("a", 1), acknowledge))
 	got := receive(t, h.patience, reported, "the timeout report")
-	close(release)
+	closeOnce(release)
 	h.wait(t, tk.Final, "the delivery")
 	if names := subscriberNames(got); !slices.Equal(names, []string{"slow#1"}) || !errors.Is(got, models.ErrHandlerTimeout) {
 		t.Fatalf("timeout reported as %q, want ErrHandlerTimeout from slow#1", got)
@@ -657,11 +667,15 @@ func deliveryErrorHandlerPanicKeepsTheHold(
 	var rec journal
 	var failures atomic.Int32
 	failures.Store(2)
+	var once sync.Once
+	gate := make(chan struct{})
+	t.Cleanup(func() { closeOnce(gate) })
 	cfg := config(&bus{}, subscriber(func(
 		_ context.Context,
 		e models.Event[Aggregate],
 	) error {
 		rec.add(e)
+		holdIf(e.Version == 1 && firstTime(&once), gate)
 		return errorIf(e.Version == 1 && failures.Add(-1) >= 0, errDown)
 	}))
 	cfg.OnDeliveryError = func(
@@ -676,6 +690,7 @@ func deliveryErrorHandlerPanicKeepsTheHold(
 
 	mustEnqueue(t, d, durable(event("a", 1), acknowledge))
 	last := mustEnqueue(t, d, durable(event("a", 2), acknowledge))
+	closeOnce(gate)
 	if err := h.final(t, last, "v2"); err != nil {
 		t.Fatalf("v2 = %v", err)
 	}
@@ -849,5 +864,60 @@ func deadLetteredEventIsAcked(
 	}
 	if _, ok := acked.Load(int64(1)); !ok || dead.Load() != 1 || len(parked(d)) != 0 {
 		t.Fatalf("acked = %v, dead letters = %d, parked = %v; want acked once, unparked", ok, dead.Load(), parked(d))
+	}
+}
+
+func eventNamedLikeATombstone(
+	t testing.TB,
+	h harness,
+) {
+	var ordinary, forgets journal
+	first := subscriber(func(
+		_ context.Context,
+		e models.Event[Aggregate],
+	) error {
+		ordinary.add(e)
+		return nil
+	})
+	first.Match = onlyTestEvents
+	second := subscriber(func(
+		_ context.Context,
+		e models.Event[Aggregate],
+	) error {
+		forgets.add(e)
+		return nil
+	})
+	second.Match = onlyForgetEvents
+	d := h.build(t, config(&bus{}, first, second))
+
+	tk := mustEnqueue(t, d, durable(marker("a", 1), acknowledge))
+	if err := h.final(t, tk, "the event"); err != nil {
+		t.Fatalf("final = %v", err)
+	}
+	if len(ordinary.list()) != 0 || !slices.Equal(forgets.list(), []string{"a/1"}) {
+		t.Fatalf("non-matching saw %v, matching saw %v; want a DispatchEvent to reach only the matching subscriber", ordinary.list(), forgets.list())
+	}
+}
+
+func redeliveryWithANilAck(
+	t testing.TB,
+	h harness,
+) {
+	b := &bus{}
+	var runs atomic.Int32
+	d := h.build(t, config(b, subscriber(func(
+		context.Context,
+		models.Event[Aggregate],
+	) error {
+		runs.Add(1)
+		return nil
+	})))
+
+	tk := mustEnqueue(t, d, redelivery(event("a", 1), nil))
+	if err := h.final(t, tk, "the redelivery"); err != nil {
+		t.Fatalf("final = %v", err)
+	}
+	if runs.Load() != 0 || len(b.published()) != 0 {
+		t.Fatalf("durable runs %d, live %d; want neither for an ordinary redelivery without an ack", runs.Load(), len(b.published()))
 	}
 }

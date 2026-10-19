@@ -19,6 +19,9 @@ func parkingScenarios() map[string]scenario {
 		"TestResume_ReportsWhetherItLiftedAPark":                                resumeReportsTheLift,
 		"TestDeadLetter_AcceptingTheEventSkipsItAndLetsLaterEventsFlow":         deadLetterAcceptance,
 		"TestDeadLetter_RefusalParksTheAggregate":                               deadLetterRefusal,
+		"TestDeadLetter_AReturnedErrorParksTheAggregate":                        deadLetterReturnedError,
+		"TestDeadLetter_TheAggregateIsParkedBeforeTheRefusalIsReported":         deadLetterRefusalParksBeforeReporting,
+		"TestSupersede_LetsATombstoneWithAnAckThroughARetryingDelivery":         supersedeLetsATombstoneWithAnAckThrough,
 		"TestSupersede_LetsTheTombstoneThroughAFailingDelivery":                 supersedeLetsTheTombstoneThrough,
 		"TestSupersede_AfterThePopStillSkipsTheSupersededJob":                   supersedeAfterThePop,
 		"TestSupersede_LeavesTheAggregateUnparkedWithNoRecord":                  supersedeLeavesNoRecord,
@@ -47,12 +50,15 @@ func exhaustedAttemptsPark(
 	var attempts, parkedReports atomic.Int32
 	var rec journal
 	var acked sync.Map
+	var once sync.Once
+	gate := make(chan struct{})
 	cfg := config(&bus{}, subscriber(func(
 		_ context.Context,
 		e models.Event[Aggregate],
 	) error {
 		rec.add(e)
 		poison := e.AggregateID == "a" && e.Version == 1
+		holdIf(poison && firstTime(&once), gate)
 		countIf(poison, &attempts)
 		return errorIf(poison, errPoison)
 	}))
@@ -66,9 +72,11 @@ func exhaustedAttemptsPark(
 		countIf(errors.Is(err, models.ErrDeliveryParked), &parkedReports)
 	}
 	d := h.build(t, cfg)
+	t.Cleanup(func() { closeOnce(gate) })
 
 	t1 := mustEnqueue(t, d, durable(event("a", 1), ackInto(&acked, 1)))
 	t2 := mustEnqueue(t, d, durable(event("a", 2), ackInto(&acked, 2)))
+	closeOnce(gate)
 	if err := h.final(t, t1, "v1"); !errors.Is(err, models.ErrDeliveryParked) {
 		t.Fatalf("v1 final = %v, want ErrDeliveryParked", err)
 	}
@@ -145,11 +153,14 @@ func deadLetterAcceptance(
 	var rec journal
 	var dead atomic.Int64
 	var acked sync.Map
+	var once sync.Once
+	gate := make(chan struct{})
 	cfg := config(&bus{}, subscriber(func(
 		_ context.Context,
 		e models.Event[Aggregate],
 	) error {
 		rec.add(e)
+		holdIf(e.Version == 1 && firstTime(&once), gate)
 		return errorIf(e.Version == 1, errPoison)
 	}))
 	cfg.MaxAttempts = 3
@@ -162,9 +173,11 @@ func deadLetterAcceptance(
 		return nil
 	}
 	d := h.build(t, cfg)
+	t.Cleanup(func() { closeOnce(gate) })
 
 	t1 := mustEnqueue(t, d, durable(event("a", 1), ackInto(&acked, 1)))
 	t2 := mustEnqueue(t, d, durable(event("a", 2), ackInto(&acked, 2)))
+	closeOnce(gate)
 	if err := h.final(t, t1, "v1"); err != nil {
 		t.Fatalf("dead-lettered event final = %v, want nil", err)
 	}
@@ -198,6 +211,113 @@ func deadLetterRefusal(
 	}
 	if !slices.Equal(parked(d), []string{"a"}) {
 		t.Fatalf("parked = %v, want [a]", parked(d))
+	}
+}
+
+func deadLetterReturnedError(
+	t testing.TB,
+	h harness,
+) {
+	var rec journal
+	var acked sync.Map
+	var dead atomic.Int32
+	var once sync.Once
+	gate := make(chan struct{})
+	cfg := config(&bus{}, subscriber(func(
+		_ context.Context,
+		e models.Event[Aggregate],
+	) error {
+		rec.add(e)
+		holdIf(e.Version == 1 && firstTime(&once), gate)
+		return errorIf(e.Version == 1, errPoison)
+	}))
+	cfg.MaxAttempts = 2
+	cfg.DeadLetter = func(
+		context.Context,
+		models.Event[Aggregate],
+		error,
+	) error {
+		dead.Add(1)
+		return errDown
+	}
+	d := h.build(t, cfg)
+	t.Cleanup(func() { closeOnce(gate) })
+
+	t1 := mustEnqueue(t, d, durable(event("a", 1), ackInto(&acked, 1)))
+	t2 := mustEnqueue(t, d, durable(event("a", 2), ackInto(&acked, 2)))
+	closeOnce(gate)
+	if err := h.final(t, t1, "v1"); !errors.Is(err, models.ErrDeliveryParked) {
+		t.Fatalf("v1 final = %v, want ErrDeliveryParked", err)
+	}
+	if err := h.final(t, t2, "the queued v2"); !errors.Is(err, models.ErrDeliveryParked) {
+		t.Fatalf("v2 final = %v, want ErrDeliveryParked", err)
+	}
+	_, v1Acked := acked.Load(int64(1))
+	if v1Acked || dead.Load() != 1 || !slices.Equal(parked(d), []string{"a"}) || slices.Contains(rec.list(), "a/2") {
+		t.Fatalf("v1 acked %v, dead letters %d, parked %v, delivered %v; want unacked, 1, [a], no v2", v1Acked, dead.Load(), parked(d), rec.list())
+	}
+}
+
+func deadLetterRefusalParksBeforeReporting(
+	t testing.TB,
+	h harness,
+) {
+	var d models.Dispatcher[Aggregate]
+	parkedWhenTold := make(chan []string, 4)
+	cfg := config(&bus{}, subscriber(fail))
+	cfg.MaxAttempts = 1
+	cfg.DeadLetter = func(
+		context.Context,
+		models.Event[Aggregate],
+		error,
+	) error {
+		return errDown
+	}
+	cfg.OnDeliveryError = func(
+		_ context.Context,
+		_ models.Event[Aggregate],
+		err error,
+		_ int,
+	) {
+		sendIf(errors.Is(err, models.ErrDeliveryParked), parkedWhenTold, parked(d))
+	}
+	d = h.build(t, cfg)
+
+	mustEnqueue(t, d, durable(event("a", 1), acknowledge))
+	if got := receive(t, h.patience, parkedWhenTold, "the park to be reported"); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("parked when the handler was told = %v, want [a]", got)
+	}
+}
+
+func supersedeLetsATombstoneWithAnAckThrough(
+	t testing.TB,
+	h harness,
+) {
+	var acked sync.Map
+	attempted := make(chan struct{}, 8)
+	cfg := config(&bus{}, subscriber(func(
+		_ context.Context,
+		e models.Event[Aggregate],
+	) error {
+		poison := e.EventName == eventName
+		sendIf(poison, attempted, struct{}{})
+		return errorIf(poison, errPoison)
+	}))
+	cfg.RetryInitial, cfg.RetryMax = time.Hour, time.Hour
+	d := h.build(t, cfg)
+
+	retrying := mustEnqueue(t, d, durable(event("a", 1), ackInto(&acked, 1)))
+	h.wait(t, attempted, "the first attempt")
+	d.Supersede("a")
+	tk := mustEnqueue(t, d, tombstone(marker("a", 2), ackInto(&acked, 2)))
+	if err := h.final(t, tk, "the tombstone"); err != nil {
+		t.Fatalf("tombstone final = %v, want nil", err)
+	}
+	h.wait(t, retrying.Final, "the superseded delivery")
+	_, v1 := acked.Load(int64(1))
+	_, tombstoneAcked := acked.Load(int64(2))
+	if v1 || !tombstoneAcked || len(parked(d)) != 0 {
+		t.Fatalf("v1 acked %v, tombstone acked %v, parked %v; want only the tombstone acked, unparked", v1, tombstoneAcked, parked(d))
 	}
 }
 
@@ -241,6 +361,7 @@ func supersedeAfterThePop(
 ) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	t.Cleanup(func() { closeOnce(release) })
 	var once sync.Once
 	var oldRuns atomic.Int32
 	b := &bus{fn: func(
@@ -266,7 +387,7 @@ func supersedeAfterThePop(
 	h.wait(t, entered, "v1 popped and publishing")
 	d.Supersede("a")
 	tk := mustEnqueue(t, d, tombstone(marker("a", 2), acknowledge))
-	close(release)
+	closeOnce(release)
 	if err := h.final(t, tk, "the marker"); err != nil {
 		t.Fatalf("marker = %v", err)
 	}
@@ -304,6 +425,9 @@ func tombstoneFinalReportsAFailure(
 	tk := mustEnqueue(t, d, tombstone(marker("a", 2), nil))
 	if err := h.final(t, tk, "the tombstone"); !errors.Is(err, models.ErrDeliveryParked) {
 		t.Fatalf("final = %v, want ErrDeliveryParked", err)
+	}
+	if got := parked(d); len(got) != 0 {
+		t.Fatalf("parked = %v, want none: a tombstone without an ack leaves parking to Forget", got)
 	}
 }
 
@@ -358,11 +482,12 @@ func giveUpAfterASupersede(
 		return nil
 	}
 	d := h.build(t, cfg)
+	t.Cleanup(func() { closeOnce(release) })
 
 	tk := mustEnqueue(t, d, durable(event("a", 1), acknowledge))
 	h.wait(t, inHandler, "the last attempt to run")
 	d.Supersede("a")
-	close(release)
+	closeOnce(release)
 	if err := h.final(t, tk, "the superseded delivery"); !errors.Is(err, models.ErrDeliveryParked) {
 		t.Fatalf("final = %v, want ErrDeliveryParked", err)
 	}
@@ -474,7 +599,7 @@ func parkQueuedJobsReportUnrun(
 		holdIf(e.Version == 1, gate)
 		return nil
 	})))
-	t.Cleanup(func() { close(gate) })
+	t.Cleanup(func() { closeOnce(gate) })
 
 	mustEnqueue(t, d, durable(event("a", 1), acknowledge))
 	h.wait(t, started, "v1 running")
@@ -605,9 +730,18 @@ func ackFailureParks(
 		reported.Add(1)
 	}
 	d := h.build(t, cfg)
+	gate := make(chan struct{})
+	t.Cleanup(func() { closeOnce(gate) })
+	blockedFailingAck := func(
+		context.Context,
+	) error {
+		holdUpTo(gate, h.patience)
+		return errDown
+	}
 
-	t1 := mustEnqueue(t, d, durable(event("a", 1), failAck(errDown)))
+	t1 := mustEnqueue(t, d, durable(event("a", 1), blockedFailingAck))
 	t2 := mustEnqueue(t, d, durable(event("a", 2), acknowledge))
+	closeOnce(gate)
 	if err := h.final(t, t1, "v1"); err == nil {
 		t.Fatal("v1 ended as acknowledged")
 	}

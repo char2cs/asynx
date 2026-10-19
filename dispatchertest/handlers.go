@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/char2cs/asynx/models"
 )
@@ -30,6 +31,12 @@ func onlyTestEvents(
 	name string,
 ) bool {
 	return name == eventName
+}
+
+func onlyForgetEvents(
+	name string,
+) bool {
+	return name == models.ForgetEventName
 }
 
 func subscriber(
@@ -82,6 +89,18 @@ func holdIf(
 	<-ch
 }
 
+func holdUpTo(
+	ch <-chan struct{},
+	patience time.Duration,
+) {
+	timer := time.NewTimer(patience)
+	defer timer.Stop()
+	select {
+	case <-ch:
+	case <-timer.C:
+	}
+}
+
 func flagIf(
 	cond bool,
 	flag *atomic.Bool,
@@ -114,6 +133,14 @@ func sendIf[V any](
 	case ch <- value:
 	default:
 	}
+}
+
+func firstTime(
+	once *sync.Once,
+) bool {
+	first := false
+	once.Do(func() { first = true })
+	return first
 }
 
 func holdFirst(

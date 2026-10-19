@@ -103,38 +103,44 @@ func TestSuite_FlagsADispatcherThatRefusesEverything(t *testing.T) {
 
 func TestSuite_FlagsEveryBrokenDispatcher(t *testing.T) {
 	cases := map[string]brokenCase{
-		"reorders an aggregate's events": {reorder, []string{
+		"reorders an aggregate's events": {brokenBy(reorder), []string{
 			"TestDispatch_OrderingGuarantee",
 			"TestDispatch_MultipleAggregatesOrdered",
 			"TestClose_DrainsAllEvents",
 		}},
-		"acks before the handlers succeed": {ackEarly, []string{
+		"acks before the handlers succeed": {brokenBy(ackEarly), []string{
 			"TestEnqueue_AckRunsAfterHandlersFinish",
 			"TestDurable_DoneClosesAfterTheFirstAttemptEvenWhenItFails",
 			"TestDurable_CloseInterruptsRetriesAndLeavesTheDeliveryUnacked",
 			"TestShutdownDuringRetry_NeverDeliversALaterEventPastTheFailingOne",
 		}},
-		"ignores the generation in ResumeUndelivered": {ignoreGeneration, []string{
+		"ignores the generation in ResumeUndelivered": {brokenBy(ignoreGeneration), []string{
 			"TestResumeUndelivered_LeavesAParkImposedAgainSinceItWasListed",
 		}},
-		"queues durable events while parked": {queueWhileParked, []string{
+		"queues durable events while parked": {brokenBy(queueWhileParked), []string{
 			"TestPark_OfAnAggregateWithoutAQueueStillBlocksItsDurableEvents",
 			"TestTicket_AParkedDurableEventSettlesAndEndsWithDeliveryParked",
 			"TestTicket_UnrunSaysWhyNoHandlerRan",
 			"TestUnrun_RemembersEventsLeftUndeliveredByAPark",
 		}},
-		"never reports ErrDeliveryParked": {hideParks, []string{
+		"never reports ErrDeliveryParked": {brokenBy(hideParks), []string{
 			"TestExhaustedAttempts_ParkTheAggregateAndLeaveOthersAlone",
 			"TestUnrun_RemembersEventsLeftUndeliveredByAPark",
 			"TestTicket_UnrunSaysWhyNoHandlerRan",
 			"TestParkUndelivered_RemembersTheNamedVersionsUntilTheParkLifts",
 		}},
-		"drops Close's drain": {skipDrain, []string{
+		"drops Close's drain": {brokenBy(skipDrain), []string{
 			"TestClose_DrainsJobsQueuedBehindASlowHandler",
 			"TestClose_CalledAgainStillWaitsForTheWorkers",
 		}},
-		"dead-letters tombstones": {deadLetterTombstones, []string{
+		"dead-letters tombstones": {brokenBy(deadLetterTombstones), []string{
 			"TestEnqueueForget_IsNeverDeadLettered",
+		}},
+		"accepts the event when the dead-letter handler returns an error": {acceptingDeadLetters, []string{
+			"TestDeadLetter_AReturnedErrorParksTheAggregate",
+		}},
+		"delivers an event named like the tombstone as a tombstone": {brokenBy(treatForgetNamesAsTombstones), []string{
+			"TestEnqueue_AnEventNamedLikeTheTombstoneReachesOnlyMatchingSubscribers",
 		}},
 	}
 	for name, c := range cases {

@@ -58,7 +58,7 @@ func dispatchCrossAggregateIndependence(
 		return nil
 	}}
 	d := h.build(t, config(b))
-	t.Cleanup(func() { close(release) })
+	t.Cleanup(func() { closeOnce(release) })
 
 	mustEnqueue(t, d, live(event("agg-slow", 1)))
 	fast := mustEnqueue(t, d, live(event("agg-fast", 1)))
@@ -80,14 +80,14 @@ func dispatchSyncBlocking(
 		return nil
 	}}
 	d := h.build(t, config(b))
+	t.Cleanup(func() { closeOnce(release) })
 
 	tk := mustEnqueue(t, d, live(event("agg-1", 1)))
 	h.wait(t, entered, "the handler to start")
 	if isClosed(tk.Settled) {
-		close(release)
 		t.Fatal("Settled closed while the handler was still running")
 	}
-	close(release)
+	closeOnce(release)
 	h.wait(t, tk.Settled, "Settled after the handler returned")
 }
 
@@ -104,7 +104,7 @@ func dispatchAsyncNonBlocking(
 		return nil
 	}}
 	d := h.build(t, config(b))
-	t.Cleanup(func() { close(release) })
+	t.Cleanup(func() { closeOnce(release) })
 
 	h.enqueueBounded(t, d, live(event("agg-1", 1)))
 	h.enqueueBounded(t, d, live(event("agg-1", 2)))
@@ -157,6 +157,7 @@ func enqueueNeverBlocksBehindASlowHandler(
 ) {
 	const n = 200
 	release := make(chan struct{})
+	t.Cleanup(func() { closeOnce(release) })
 	b := &bus{fn: func(
 		context.Context,
 		models.Event[Aggregate],
@@ -170,7 +171,7 @@ func enqueueNeverBlocksBehindASlowHandler(
 	go enqueueAll(d, "a", n, &refused, enqueued)
 
 	h.wait(t, enqueued, "Enqueue to return while a handler is blocked")
-	close(release)
+	closeOnce(release)
 	h.idle(t, d)
 	if got := versionsOf(b.published()); !slices.Equal(got, sequence(n)) || len(refused.list()) != 0 {
 		t.Fatalf("published %v (refused %v), want 1..%d in order", got, refused.list(), n)

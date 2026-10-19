@@ -16,7 +16,9 @@ type harness struct {
 
 func (h harness) subtest(
 	check scenario,
-) func(*testing.T) {
+) func(
+	*testing.T,
+) {
 	return func(
 		t *testing.T,
 	) {

@@ -87,7 +87,7 @@ func closeContextTimeout(
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
 	d := h.build(t, config(gatedBus(entered, release)))
-	t.Cleanup(func() { close(release) })
+	t.Cleanup(func() { closeOnce(release) })
 
 	mustEnqueue(t, d, live(event("agg-1", 1)))
 	h.wait(t, entered, "the handler to start")
@@ -121,17 +121,17 @@ func closeDrainsQueuedJobs(
 	}
 	h.wait(t, running, "the first job to be inside its handler")
 
+	var handledAtClose atomic.Int32
 	closed := make(chan error, 1)
-	go func() { closed <- h.close(d) }()
+	go func() {
+		err := h.close(d)
+		handledAtClose.Store(handled.Load())
+		closed <- err
+	}()
 	h.waitFor(t, "Close to stop accepting requests", func() bool { return refusesProbe(d) })
-	select {
-	case err := <-closed:
-		t.Fatalf("Close returned (%v) before the queued jobs drained", err)
-	default:
-	}
 	closeOnce(release)
-	if err := receive(t, h.patience, closed, "Close to return"); err != nil || handled.Load() != 3 {
-		t.Fatalf("Close = %v, handled %d; want nil and all 3 drained", err, handled.Load())
+	if err := receive(t, h.patience, closed, "Close to return"); err != nil || handledAtClose.Load() != 3 {
+		t.Fatalf("Close = %v with %d jobs handled when it returned; want nil and all 3 drained first", err, handledAtClose.Load())
 	}
 }
 
@@ -353,24 +353,32 @@ func waitIdleRefusesNothing(
 ) {
 	entered := make(chan struct{}, 4)
 	release := make(chan struct{})
-	d := h.build(t, config(gatedBus(entered, release)))
+	b := &bus{fn: func(
+		_ context.Context,
+		e models.Event[Aggregate],
+	) error {
+		sendIf(e.AggregateID == "a", entered, struct{}{})
+		holdIf(e.AggregateID == "a", release)
+		return nil
+	}}
+	d := h.build(t, config(b))
 	t.Cleanup(func() { closeOnce(release) })
 
 	first := mustEnqueue(t, d, live(event("a", 1)))
 	h.wait(t, entered, "the handler to start")
+	started := make(chan struct{})
 	idle := make(chan struct{})
-	go waitIdle(d, idle)
-	later, err := d.Enqueue(context.Background(), live(event("b", 1)))
-	if err != nil {
-		t.Fatalf("an Enqueue during WaitIdle was refused: %v", err)
-	}
-	if isClosed(idle) {
-		t.Fatal("WaitIdle returned while an event it waits for was still being handled")
+	go waitIdleAfter(d, started, idle)
+	h.wait(t, started, "WaitIdle to be called")
+	var refused journal
+	enqueued := make(chan struct{})
+	enqueueAll(d, "b", 50, &refused, enqueued)
+	if got := refused.list(); len(got) != 0 || isClosed(idle) {
+		t.Fatalf("refused %v, WaitIdle returned %v; want nothing refused while WaitIdle waits on a running event", got, isClosed(idle))
 	}
 	closeOnce(release)
 	h.wait(t, idle, "WaitIdle to return")
 	h.wait(t, first.Final, "the first event")
-	h.wait(t, later.Final, "the later event")
 }
 
 func waitIdleWhenNothingIsQueued(

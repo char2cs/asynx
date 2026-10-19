@@ -8,9 +8,7 @@ import (
 )
 
 type brokenCase struct {
-	wrap func(
-		models.Dispatcher[Aggregate],
-	) models.Dispatcher[Aggregate]
+	factory models.DispatcherFactory[Aggregate]
 	flagged []string
 }
 
@@ -18,7 +16,7 @@ func (c brokenCase) check(
 	t *testing.T,
 ) {
 	t.Parallel()
-	failed := failures(harness{factory: brokenBy(c.wrap), patience: brokenPatience})
+	failed := failures(harness{factory: c.factory, patience: brokenPatience})
 	t.Logf("failed scenarios: %v", failedNames(failed))
 	missed := slices.DeleteFunc(slices.Clone(c.flagged), func(
 		scenario string,

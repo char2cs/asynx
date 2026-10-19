@@ -133,6 +133,15 @@ func waitIdle(
 	close(done)
 }
 
+func waitIdleAfter(
+	d models.Dispatcher[Aggregate],
+	started chan<- struct{},
+	done chan<- struct{},
+) {
+	close(started)
+	waitIdle(d, done)
+}
+
 func enqueueAll(
 	d models.Dispatcher[Aggregate],
 	aggregateID string,

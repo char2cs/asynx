@@ -12,6 +12,7 @@ import (
 func ticketScenarios() map[string]scenario {
 	return map[string]scenario{
 		"TestTicketFor_FindsAnEventWhileItsDeliveryIsUnderWay":           ticketForFindsAnEventUnderWay,
+		"TestTicketFor_FindsAnEventQueuedBehindARunningOne":              ticketForFindsAQueuedEvent,
 		"TestTicketFor_FindsAnEventWhileItRetries":                       ticketForFindsAnEventWhileItRetries,
 		"TestTicketFor_ForgetsEventsLeftBehindByAPark":                   ticketForForgetsParkedEvents,
 		"TestTicketFor_ForgetsQueuedEventsWhenTheyAreParked":             ticketForForgetsQueuedParkedEvents,
@@ -67,6 +68,26 @@ func ticketForFindsAnEventUnderWay(
 	}
 }
 
+func ticketForFindsAQueuedEvent(
+	t testing.TB,
+	h harness,
+) {
+	entered := make(chan struct{}, 4)
+	release := make(chan struct{})
+	d := h.build(t, config(gatedBus(entered, release)))
+	t.Cleanup(func() { closeOnce(release) })
+
+	mustEnqueue(t, d, live(event("a", 1)))
+	h.wait(t, entered, "v1 to start")
+	queued := mustEnqueue(t, d, durable(event("a", 2), acknowledge))
+	ticket, found := d.TicketFor("a", 2)
+	if !found || ticket.Settled != queued.Settled || ticket.Final != queued.Final {
+		t.Fatalf("TicketFor(a, 2) = found %v; want the ticket of the event queued behind a running one", found)
+	}
+	closeOnce(release)
+	h.wait(t, queued.Final, "the queued event")
+}
+
 func ticketForFindsAnEventWhileItRetries(
 	t testing.TB,
 	h harness,
@@ -107,7 +128,7 @@ func ticketForForgetsQueuedParkedEvents(
 	entered := make(chan struct{}, 4)
 	release := make(chan struct{})
 	d := h.build(t, config(gatedBus(entered, release)))
-	t.Cleanup(func() { close(release) })
+	t.Cleanup(func() { closeOnce(release) })
 
 	mustEnqueue(t, d, durable(event("a", 1), acknowledge))
 	h.wait(t, entered, "v1 to start")
