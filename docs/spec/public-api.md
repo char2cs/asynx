@@ -77,7 +77,7 @@ ax, err := asynx.New[Order]().
 
 See [Write-Path Guarantees](guarantees.md#durable-delivery) for retry, parking, dead-lettering and the deletion marker.
 
-`WithDispatcher(models.DispatcherFactory[T])` replaces the component that orders, retries and parks durable deliveries. The library ships only the in-memory implementation; see [dispatcher.md](./dispatcher.md) for the contract a replacement must carry. A factory error fails `Build`.
+`WithDispatcher(models.DispatcherFactory[T])` replaces the component that orders, retries and parks durable deliveries. The library ships only the in-memory implementation; see [dispatcher.md](./dispatcher.md) for the contract a replacement must carry. A factory error, or a factory that returns no dispatcher, fails `Build`; a nil factory is ignored.
 
 ---
 
@@ -118,7 +118,7 @@ event, err := ax.SendWait(ctx, createOrderCmd)
 #### `PausedAggregates() []string`
 
 **Defined in:** `processor` module
-**Purpose:** Lists the aggregates whose durable delivery is parked: their attempts ran out (`WithDeliveryMaxAttempts`) with no dead-letter handler accepting the event, or a `Forget` could not deliver its marker. Their events stay pending in the store and `SendWait` on them returns `ErrDeliveryParked`. Parking never lifts by itself.
+**Purpose:** Lists, sorted, the aggregates whose durable delivery is parked: their attempts ran out (`WithDeliveryMaxAttempts`) with no dead-letter handler accepting the event, or a `Forget` could not deliver its marker. Their events stay pending in the store and `SendWait` on them returns `ErrDeliveryParked`. Parking never lifts by itself.
 
 ---
 
@@ -316,11 +316,11 @@ if st.Parked {
 ```
 
 - `Parked` — the aggregate's durable deliveries are parked.
-- `Generation` — changes each time a park is imposed.
-- `Cause` — the error that parked it (an error matching `ErrDeliveryParked` with the last handler error and attempt count, a failed ack, `ErrDispatcherClosed`, or the error a `Park` call carried); nil when not parked.
+- `Generation` — changes each time a park is imposed; zero when not parked.
+- `Cause` — the error that parked it (an error matching `ErrDeliveryParked` with the last handler error and attempt count, a failed ack, `ErrDispatcherClosed`, or the error a `Park` call carried, such as the error of a failed `Forget`, enqueue or redelivery); nil when not parked. Parking an already parked aggregate keeps the first non-nil cause.
 - `Undelivered` — ascending versions that no handler took while parked.
 
-An aggregate the dispatcher knows nothing about returns the zero status. `PausedAggregates()` lists the parked aggregates and `ResumeDeliveries(ctx)` lifts the parks and redelivers the pending events in order. See [dispatcher.md](./dispatcher.md#inspect).
+An aggregate that is not parked, or that the dispatcher knows nothing about, returns the zero status. `PausedAggregates()` lists the parked aggregates and `ResumeDeliveries(ctx)` lifts the parks and redelivers the pending events in order. See [dispatcher.md](./dispatcher.md#inspect).
 
 ---
 
