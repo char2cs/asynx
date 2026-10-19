@@ -632,14 +632,18 @@ func TestGuardAutoSnapshots_InstallsTheGuardOnTheReader(t *testing.T) {
 // window where the stale-validation race lives.
 type gatedCancel struct {
 	id         string
-	onValidate func(current *order)
+	onValidate func(
+		current *order,
+	)
 }
 
 func (c gatedCancel) AggregateID() string  { return c.id }
 func (c gatedCancel) EventName() string    { return "OrderCancelled" }
 func (c gatedCancel) ShouldSnapshot() bool { return false }
 
-func (c gatedCancel) Validate(current *order) error {
+func (c gatedCancel) Validate(
+	current *order,
+) error {
 	if c.onValidate != nil {
 		c.onValidate(current)
 	}
@@ -649,7 +653,9 @@ func (c gatedCancel) Validate(current *order) error {
 	return nil
 }
 
-func (c gatedCancel) EmitEvent(current *order) order {
+func (c gatedCancel) EmitEvent(
+	current *order,
+) order {
 	o := *current
 	o.Status = "Cancelled"
 	return o
@@ -665,7 +671,9 @@ func (c gatedCancel) EmitEvent(current *order) order {
 // Before the fix B re-derived a fresh version (v3) and committed a second
 // cancel. Now B appends at its validated version (v2), which A already took, so
 // B gets ErrPipelineFailed and exactly one cancel survives.
-func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(t *testing.T) {
+func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(
+	t *testing.T,
+) {
 	s := store.New()
 	es := New[order](s, store.NewSnapshots(), nil, 1, nil)
 	ctx := context.Background()
@@ -677,7 +685,9 @@ func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(t *testing.T) {
 	aCommitted := make(chan struct{})
 	bInValidate := make(chan struct{})
 
-	bCmd := gatedCancel{id: "X", onValidate: func(cur *order) {
+	bCmd := gatedCancel{id: "X", onValidate: func(
+		cur *order,
+	) {
 		if cur == nil || cur.Status != "Pending" {
 			t.Errorf("B expected to load Pending, got %+v", cur)
 		}
@@ -704,7 +714,10 @@ func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(t *testing.T) {
 	}
 
 	cancels := 0
-	if err := es.Replay(ctx, "X", 1, 0, func(_ context.Context, e asynxmd.Event[order]) {
+	if err := es.Replay(ctx, "X", 1, 0, func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) {
 		if e.EventName == "OrderCancelled" {
 			cancels++
 		}
@@ -718,7 +731,9 @@ func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(t *testing.T) {
 
 // TestSnapshotReadDoesNotScaleWithHistory is the regression guard for the
 // original defect: Get() read every snapshot ever written to use only the last.
-func TestSnapshotReadDoesNotScaleWithHistory(t *testing.T) {
+func TestSnapshotReadDoesNotScaleWithHistory(
+	t *testing.T,
+) {
 	ctx := context.Background()
 	snaps := &mocks.CountingSnapshotStore{Inner: store.NewSnapshots()}
 	es := New[order](store.New(), snaps, nil, 1, nil)
@@ -742,11 +757,6 @@ func TestSnapshotReadDoesNotScaleWithHistory(t *testing.T) {
 	if snaps.GetCalls != 1 {
 		t.Errorf("Get calls = %d, want 1", snaps.GetCalls)
 	}
-	// 512 is a backstop, not a precise contract: a single order snapshot blob
-	// is ~88 bytes, so this leaves ~5.8x headroom for mocks.Order (a fixture
-	// shared across this package) to grow a field or two without tripping the
-	// guard. An O(n) regression re-reads all n=500 snapshots and would
-	// overshoot this ceiling by ~500x, so headroom this size never masks it.
 	if snaps.GetBytes > 512 {
 		t.Errorf("bytes read = %d after %d snapshots, want one blob — read must not scale with history", snaps.GetBytes, n)
 	}
@@ -755,7 +765,9 @@ func TestSnapshotReadDoesNotScaleWithHistory(t *testing.T) {
 // TestWritePaysConstantSnapshotCost guards the half of the defect the original
 // report missed: EventStore.Write read all snapshots twice, via Get and
 // nextVersion.
-func TestWritePaysConstantSnapshotCost(t *testing.T) {
+func TestWritePaysConstantSnapshotCost(
+	t *testing.T,
+) {
 	ctx := context.Background()
 	snaps := &mocks.CountingSnapshotStore{Inner: store.NewSnapshots()}
 	es := New[order](store.New(), snaps, nil, 1, nil)
@@ -780,22 +792,9 @@ func TestWritePaysConstantSnapshotCost(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	// EventStore.Write reads the snapshot store exactly once, via
-	// Reader.Load. (Before optimistic concurrency landed, Writer.nextVersion
-	// re-derived the version from storage and cost a second read; Load now
-	// returns the version alongside the state, so that read is gone.) Assert
-	// the count directly (size-independent) rather than relying on the byte
-	// ceiling alone, so this guard can't pass or fail for reasons unrelated
-	// to the bug it targets.
 	if snaps.GetCalls != 1 {
 		t.Errorf("Get calls = %d, want 1", snaps.GetCalls)
 	}
-	// 512 is a backstop, not a precise contract: the one order snapshot blob
-	// read here is ~88 bytes, leaving ~5.8x headroom for mocks.Order (a
-	// fixture shared across this package) to grow a field or two without
-	// tripping the guard. An O(n) regression re-reads all n=500 snapshots per
-	// Get call and would overshoot this ceiling by orders of magnitude, so
-	// headroom this size never masks it.
 	if snaps.GetBytes > 512 {
 		t.Errorf("bytes read = %d on one Write after %d snapshots, want one blob", snaps.GetBytes, n)
 	}

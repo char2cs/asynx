@@ -804,7 +804,9 @@ func TestLoad_AutoSnapshot_DoesNotUseTheGuard(t *testing.T) {
 // version is what makes optimistic-concurrency writes correct, so it gets its
 // own coverage across the new/cold/warm paths.
 
-func TestLoad_NewAggregate_ReturnsNotFoundAndZero(t *testing.T) {
+func TestLoad_NewAggregate_ReturnsNotFoundAndZero(
+	t *testing.T,
+) {
 	r := newTestReader(store.New(), store.NewSnapshots())
 
 	_, version, err := r.Load(context.Background(), "ghost")
@@ -816,12 +818,14 @@ func TestLoad_NewAggregate_ReturnsNotFoundAndZero(t *testing.T) {
 	}
 }
 
-func TestLoad_ColdPath_ReturnsLastEventVersion(t *testing.T) {
+func TestLoad_ColdPath_ReturnsLastEventVersion(
+	t *testing.T,
+) {
 	es := store.New()
 	ctx := context.Background()
 	patch := json.RawMessage(`[{"op":"replace","path":"/Status","value":"x"}]`)
-	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, patch)) //nolint:errcheck
-	es.Append(ctx, "events:agg1", 2, makeEventBlob(t, "e2", "Updated", 2, 1, patch)) //nolint:errcheck
+	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, patch))
+	es.Append(ctx, "events:agg1", 2, makeEventBlob(t, "e2", "Updated", 2, 1, patch))
 
 	r := newTestReader(es, store.NewSnapshots())
 
@@ -834,14 +838,16 @@ func TestLoad_ColdPath_ReturnsLastEventVersion(t *testing.T) {
 	}
 }
 
-func TestLoad_WarmPath_ContinuesFromSnapshot(t *testing.T) {
+func TestLoad_WarmPath_ContinuesFromSnapshot(
+	t *testing.T,
+) {
 	es := store.New()
 	ss := store.NewSnapshots()
 	ctx := context.Background()
 	patch := json.RawMessage(`[{"op":"replace","path":"/Status","value":"x"}]`)
-	ss.Put(ctx, "agg1", 5, makeSnapshotBlob(t, 5, 1, order{}))                 //nolint:errcheck
-	es.Append(ctx, "events:agg1", 6, makeEventBlob(t, "e6", "U", 6, 1, patch)) //nolint:errcheck
-	es.Append(ctx, "events:agg1", 7, makeEventBlob(t, "e7", "U", 7, 1, patch)) //nolint:errcheck
+	ss.Put(ctx, "agg1", 5, makeSnapshotBlob(t, 5, 1, order{}))
+	es.Append(ctx, "events:agg1", 6, makeEventBlob(t, "e6", "U", 6, 1, patch))
+	es.Append(ctx, "events:agg1", 7, makeEventBlob(t, "e7", "U", 7, 1, patch))
 
 	r := newTestReader(es, ss)
 
@@ -854,11 +860,13 @@ func TestLoad_WarmPath_ContinuesFromSnapshot(t *testing.T) {
 	}
 }
 
-func TestLoad_WarmPath_SnapshotWithNoDeltas_ReturnsSnapshotVersion(t *testing.T) {
+func TestLoad_WarmPath_SnapshotWithNoDeltas_ReturnsSnapshotVersion(
+	t *testing.T,
+) {
 	es := store.New()
 	ss := store.NewSnapshots()
 	ctx := context.Background()
-	ss.Put(ctx, "agg1", 5, makeSnapshotBlob(t, 5, 1, order{Status: "Snapped"})) //nolint:errcheck
+	ss.Put(ctx, "agg1", 5, makeSnapshotBlob(t, 5, 1, order{Status: "Snapped"}))
 
 	r := newTestReader(es, ss)
 
@@ -876,14 +884,16 @@ func TestLoad_WarmPath_SnapshotWithNoDeltas_ReturnsSnapshotVersion(t *testing.T)
 // here: a snapshot that cannot be deserialized must not produce a wrong
 // version. Load falls back to a full replay and reports the last event's
 // version, so the expected version handed to Write stays correct.
-func TestLoad_CorruptSnapshot_ReturnsColdPathVersion(t *testing.T) {
+func TestLoad_CorruptSnapshot_ReturnsColdPathVersion(
+	t *testing.T,
+) {
 	es := store.New()
 	ss := store.NewSnapshots()
 	ctx := context.Background()
 	patch := json.RawMessage(`[{"op":"replace","path":"/Status","value":"x"}]`)
-	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, patch)) //nolint:errcheck
-	es.Append(ctx, "events:agg1", 2, makeEventBlob(t, "e2", "Updated", 2, 1, patch)) //nolint:errcheck
-	ss.Put(ctx, "agg1", 1, []byte("{not json"))                                      //nolint:errcheck
+	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, patch))
+	es.Append(ctx, "events:agg1", 2, makeEventBlob(t, "e2", "Updated", 2, 1, patch))
+	ss.Put(ctx, "agg1", 1, []byte("{not json"))
 
 	r := newTestReader(es, ss)
 
@@ -896,7 +906,10 @@ func TestLoad_CorruptSnapshot_ReturnsColdPathVersion(t *testing.T) {
 	}
 }
 
-func benchEventBlob(version int64, patches json.RawMessage) []byte {
+func benchEventBlob(
+	version int64,
+	patches json.RawMessage,
+) []byte {
 	evt := esmodels.InternalEvent{
 		ID:            "bench",
 		EventName:     "Updated",
@@ -912,7 +925,10 @@ func benchEventBlob(version int64, patches json.RawMessage) []byte {
 	return b
 }
 
-func benchSnapshotBlob(version int64, state order) []byte {
+func benchSnapshotBlob(
+	version int64,
+	state order,
+) []byte {
 	snap := esmodels.SnapshotBlob[order]{
 		Version:       version,
 		SchemaVersion: 1,
@@ -925,7 +941,12 @@ func benchSnapshotBlob(version int64, state order) []byte {
 	return b
 }
 
-func populateEvents(b *testing.B, es store.Memory, startVersion, n int) {
+func populateEvents(
+	b *testing.B,
+	es store.Memory,
+	startVersion int,
+	n int,
+) {
 	b.Helper()
 	patch := json.RawMessage(`[{"op":"replace","path":"/Status","value":"x"}]`)
 	ctx := context.Background()
@@ -937,7 +958,9 @@ func populateEvents(b *testing.B, es store.Memory, startVersion, n int) {
 	}
 }
 
-func BenchmarkGet_WarmPath(b *testing.B) {
+func BenchmarkGet_WarmPath(
+	b *testing.B,
+) {
 	for _, tc := range []struct {
 		name   string
 		deltas int
@@ -946,7 +969,9 @@ func BenchmarkGet_WarmPath(b *testing.B) {
 		{"deltas=10", 10},
 		{"deltas=1_000_000", 1_000_000},
 	} {
-		b.Run(tc.name, func(b *testing.B) {
+		b.Run(tc.name, func(
+			b *testing.B,
+		) {
 			es := store.New()
 			ss := store.NewSnapshots()
 			ctx := context.Background()
@@ -969,7 +994,9 @@ func BenchmarkGet_WarmPath(b *testing.B) {
 	}
 }
 
-func BenchmarkGet_ColdPath(b *testing.B) {
+func BenchmarkGet_ColdPath(
+	b *testing.B,
+) {
 	for _, tc := range []struct {
 		name   string
 		events int
@@ -978,7 +1005,9 @@ func BenchmarkGet_ColdPath(b *testing.B) {
 		{"events=10", 10},
 		{"events=1_000_000", 1_000_000},
 	} {
-		b.Run(tc.name, func(b *testing.B) {
+		b.Run(tc.name, func(
+			b *testing.B,
+		) {
 			es := store.New()
 			ctx := context.Background()
 			populateEvents(b, es, 1, tc.events)

@@ -2646,7 +2646,9 @@ func TestSendWait_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWasTold(t *te
 	}
 }
 
-func newBenchInstance(b *testing.B) asynx.Asynx[mocks.Order] {
+func newBenchInstance(
+	b *testing.B,
+) asynx.Asynx[mocks.Order] {
 	s := store.New()
 	instance, err := asynx.New[mocks.Order]().
 		WithEventStore(s).
@@ -2662,7 +2664,9 @@ func newBenchInstance(b *testing.B) asynx.Asynx[mocks.Order] {
 
 // Throughput benchmarks
 
-func BenchmarkSend_SingleSerial(b *testing.B) {
+func BenchmarkSend_SingleSerial(
+	b *testing.B,
+) {
 	instance := newBenchInstance(b)
 	b.ResetTimer()
 
@@ -2673,11 +2677,15 @@ func BenchmarkSend_SingleSerial(b *testing.B) {
 	}
 }
 
-func BenchmarkSend_Parallel_DifferentAggregates(b *testing.B) {
+func BenchmarkSend_Parallel_DifferentAggregates(
+	b *testing.B,
+) {
 	instance := newBenchInstance(b)
 	b.ResetTimer()
 
-	b.RunParallel(func(pb *testing.PB) {
+	b.RunParallel(func(
+		pb *testing.PB,
+	) {
 		i := 0
 		for pb.Next() {
 			orderID := fmt.Sprintf("order-%d-%d", i, b.N)
@@ -2688,11 +2696,15 @@ func BenchmarkSend_Parallel_DifferentAggregates(b *testing.B) {
 	})
 }
 
-func BenchmarkSend_Parallel_SameAggregate(b *testing.B) {
+func BenchmarkSend_Parallel_SameAggregate(
+	b *testing.B,
+) {
 	instance := newBenchInstance(b)
 	b.ResetTimer()
 
-	b.RunParallel(func(pb *testing.PB) {
+	b.RunParallel(func(
+		pb *testing.PB,
+	) {
 		for pb.Next() {
 			cmd := mocks.UpdateOrderCmd{
 				ID:       "order-1",
@@ -2705,7 +2717,9 @@ func BenchmarkSend_Parallel_SameAggregate(b *testing.B) {
 
 // Latency benchmarks
 
-func BenchmarkGet_WarmPath(b *testing.B) {
+func BenchmarkGet_WarmPath(
+	b *testing.B,
+) {
 	instance := newBenchInstance(b)
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
 	instance.Send(context.Background(), cmd)
@@ -2716,7 +2730,9 @@ func BenchmarkGet_WarmPath(b *testing.B) {
 	}
 }
 
-func BenchmarkGet_ColdPath(b *testing.B) {
+func BenchmarkGet_ColdPath(
+	b *testing.B,
+) {
 	instance := newBenchInstance(b)
 	orderID := "order-1"
 	cmd := mocks.CreateOrderCmd{ID: orderID, Total: 100.0}
@@ -2736,7 +2752,9 @@ func BenchmarkGet_ColdPath(b *testing.B) {
 	}
 }
 
-func BenchmarkGet_WithSnapshot(b *testing.B) {
+func BenchmarkGet_WithSnapshot(
+	b *testing.B,
+) {
 	instance := newBenchInstance(b)
 	orderID := "order-1"
 	cmd := mocks.CreateOrderCmd{ID: orderID, Total: 100.0}
@@ -2750,9 +2768,14 @@ func BenchmarkGet_WithSnapshot(b *testing.B) {
 
 // Handler performance benchmarks
 
-func BenchmarkPublish_SingleHandler(b *testing.B) {
+func BenchmarkPublish_SingleHandler(
+	b *testing.B,
+) {
 	instance := newBenchInstance(b)
-	handler := func(ctx context.Context, evt models.Event[mocks.Order]) {
+	handler := func(
+		ctx context.Context,
+		evt models.Event[mocks.Order],
+	) {
 	}
 	subID, _ := instance.Subscribe("OrderCreated", handler)
 	defer instance.Unsubscribe(subID)
@@ -2765,9 +2788,14 @@ func BenchmarkPublish_SingleHandler(b *testing.B) {
 	}
 }
 
-func BenchmarkPublish_FiveHandlers(b *testing.B) {
+func BenchmarkPublish_FiveHandlers(
+	b *testing.B,
+) {
 	instance := newBenchInstance(b)
-	handler := func(ctx context.Context, evt models.Event[mocks.Order]) {
+	handler := func(
+		ctx context.Context,
+		evt models.Event[mocks.Order],
+	) {
 	}
 	ids := make([]string, 5)
 	for i := 0; i < 5; i++ {
@@ -2788,9 +2816,14 @@ func BenchmarkPublish_FiveHandlers(b *testing.B) {
 	}
 }
 
-func BenchmarkPublish_HandlerWithTimeout(b *testing.B) {
+func BenchmarkPublish_HandlerWithTimeout(
+	b *testing.B,
+) {
 	instance := newBenchInstance(b)
-	handler := func(ctx context.Context, evt models.Event[mocks.Order]) {
+	handler := func(
+		ctx context.Context,
+		evt models.Event[mocks.Order],
+	) {
 	}
 	subID, _ := instance.Subscribe("OrderCreated", handler)
 	defer instance.Unsubscribe(subID)
@@ -2805,7 +2838,9 @@ func BenchmarkPublish_HandlerWithTimeout(b *testing.B) {
 
 // Shutdown benchmarks
 
-func BenchmarkShutdown_NoInFlight(b *testing.B) {
+func BenchmarkShutdown_NoInFlight(
+	b *testing.B,
+) {
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		instance := newBenchInstance(b)
@@ -2817,7 +2852,9 @@ func BenchmarkShutdown_NoInFlight(b *testing.B) {
 	}
 }
 
-func BenchmarkShutdown_WithInFlight(b *testing.B) {
+func BenchmarkShutdown_WithInFlight(
+	b *testing.B,
+) {
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		instance := newBenchInstance(b)
@@ -2834,7 +2871,9 @@ func BenchmarkShutdown_WithInFlight(b *testing.B) {
 
 // Allocations benchmarks
 
-func BenchmarkAllocations_Send(b *testing.B) {
+func BenchmarkAllocations_Send(
+	b *testing.B,
+) {
 	instance := newBenchInstance(b)
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -2846,9 +2885,14 @@ func BenchmarkAllocations_Send(b *testing.B) {
 	}
 }
 
-func BenchmarkAllocations_Subscribe(b *testing.B) {
+func BenchmarkAllocations_Subscribe(
+	b *testing.B,
+) {
 	instance := newBenchInstance(b)
-	handler := func(ctx context.Context, evt models.Event[mocks.Order]) {
+	handler := func(
+		ctx context.Context,
+		evt models.Event[mocks.Order],
+	) {
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -2859,7 +2903,9 @@ func BenchmarkAllocations_Subscribe(b *testing.B) {
 	}
 }
 
-func BenchmarkAllocations_Get(b *testing.B) {
+func BenchmarkAllocations_Get(
+	b *testing.B,
+) {
 	instance := newBenchInstance(b)
 	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
 	instance.Send(context.Background(), cmd)
@@ -2875,7 +2921,11 @@ func BenchmarkAllocations_Get(b *testing.B) {
 // cancels at it through the public API, returning how many returned nil (i.e.
 // how many cancel events were accepted). An order may be cancelled at most once,
 // so the correct answer is always 1 — regardless of workersPerShard.
-func countConcurrentCancelSuccesses(t *testing.T, workersPerShard, attempts int) int {
+func countConcurrentCancelSuccesses(
+	t *testing.T,
+	workersPerShard int,
+	attempts int,
+) int {
 	t.Helper()
 
 	instance, err := asynx.New[mocks.Order]().
@@ -2919,7 +2969,9 @@ func countConcurrentCancelSuccesses(t *testing.T, workersPerShard, attempts int)
 // The write path enforces optimistic concurrency, so a burst of concurrent
 // cancels resolves to exactly one accepted cancel even with many workers per
 // shard — the losers get ErrPipelineFailed rather than silently double-committing.
-func TestConcurrentCancel_AcceptsExactlyOne(t *testing.T) {
+func TestConcurrentCancel_AcceptsExactlyOne(
+	t *testing.T,
+) {
 	for _, workers := range []int{1, 8} {
 		if got := countConcurrentCancelSuccesses(t, workers, 64); got != 1 {
 			t.Errorf("WorkersPerShard=%d: %d cancels accepted, want exactly 1", workers, got)
@@ -2927,7 +2979,9 @@ func TestConcurrentCancel_AcceptsExactlyOne(t *testing.T) {
 	}
 }
 
-func TestAsynx_InspectDelivery_ShowsWhyAnAggregateIsParked(t *testing.T) {
+func TestAsynx_InspectDelivery_ShowsWhyAnAggregateIsParked(
+	t *testing.T,
+) {
 	ctx := context.Background()
 	readModelDown := errors.New("read model down")
 	parked := make(chan error, 8)

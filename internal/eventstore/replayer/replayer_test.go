@@ -241,7 +241,7 @@ func TestReplay_AllEvents(t *testing.T) {
 	es := store.New()
 	ctx := context.Background()
 
-	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, json.RawMessage(`[{"op":"replace","path":"/Status","value":"Pending"}]`))) //nolint:errcheck
+	es.Append(ctx, "events:agg1", 1, makeEventBlob(t, "e1", "Created", 1, 1, json.RawMessage(`[{"op":"replace","path":"/Status","value":"Pending"}]`)))
 	es.Append(ctx, "events:agg1", 2, makeEventBlob(t, "e2", "Shipped", 2, 1, json.RawMessage(`[{"op":"replace","path":"/Status","value":"Shipped"}]`))) //nolint:errcheck
 
 	r := newTestReplayer(es, nil, 1)
@@ -574,7 +574,10 @@ func TestReplay_UnmarshalCurrentError(t *testing.T) {
 	}
 }
 
-func benchEventBlob(version int64, patches json.RawMessage) []byte {
+func benchEventBlob(
+	version int64,
+	patches json.RawMessage,
+) []byte {
 	evt := esmodels.InternalEvent{
 		ID:            "bench",
 		EventName:     "Updated",
@@ -590,7 +593,11 @@ func benchEventBlob(version int64, patches json.RawMessage) []byte {
 	return b
 }
 
-func populateEvents(b *testing.B, es store.Memory, n int) {
+func populateEvents(
+	b *testing.B,
+	es store.Memory,
+	n int,
+) {
 	b.Helper()
 	patch := json.RawMessage(`[{"op":"replace","path":"/Status","value":"x"}]`)
 	ctx := context.Background()
@@ -601,7 +608,9 @@ func populateEvents(b *testing.B, es store.Memory, n int) {
 	}
 }
 
-func BenchmarkHydrate(b *testing.B) {
+func BenchmarkHydrate(
+	b *testing.B,
+) {
 	for _, tc := range []struct {
 		name   string
 		events int
@@ -610,7 +619,9 @@ func BenchmarkHydrate(b *testing.B) {
 		{"events=10", 10},
 		{"events=10_000", 10_000},
 	} {
-		b.Run(tc.name, func(b *testing.B) {
+		b.Run(tc.name, func(
+			b *testing.B,
+		) {
 			patch := json.RawMessage(`[{"op":"replace","path":"/Status","value":"x"}]`)
 			now := time.Now().UTC()
 			events := make([]esmodels.InternalEvent, tc.events)
@@ -638,7 +649,9 @@ func BenchmarkHydrate(b *testing.B) {
 	}
 }
 
-func BenchmarkReplay(b *testing.B) {
+func BenchmarkReplay(
+	b *testing.B,
+) {
 	for _, tc := range []struct {
 		name   string
 		events int
@@ -647,7 +660,9 @@ func BenchmarkReplay(b *testing.B) {
 		{"events=10", 10},
 		{"events=10_000", 10_000},
 	} {
-		b.Run(tc.name, func(b *testing.B) {
+		b.Run(tc.name, func(
+			b *testing.B,
+		) {
 			es := store.New()
 			populateEvents(b, es, tc.events)
 			r := newTestReplayer(es, nil, 1)
@@ -655,7 +670,11 @@ func BenchmarkReplay(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				if err := r.Replay(ctx, "agg1", 1, 0, func(ctx context.Context, e asynxmd.Event[order]) {}); err != nil {
+				if err := r.Replay(ctx, "agg1", 1, 0, func(
+					ctx context.Context,
+					e asynxmd.Event[order],
+				) {
+				}); err != nil {
 					b.Fatal(err)
 				}
 			}

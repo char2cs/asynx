@@ -1088,14 +1088,22 @@ func TestChannelBus_APanicHandlerThatPanicsDoesNotCrashTheProcess(t *testing.T) 
 }
 
 // noop is a zero-cost handler used to isolate publish-path overhead.
-var noop = func(_ context.Context, _ models.Event[string]) {}
+var noop = func(
+	_ context.Context,
+	_ models.Event[string],
+) {
+}
 
 // BenchmarkPublish_ExactMatch measures Publish throughput when the event name
 // exactly matches the subscription pattern, varying the total number of
 // subscriptions. This directly benchmarks the subscription index lookup.
-func BenchmarkPublish_ExactMatch(b *testing.B) {
+func BenchmarkPublish_ExactMatch(
+	b *testing.B,
+) {
 	for _, n := range []int{1, 10, 100, 1_000, 10_000} {
-		b.Run(fmt.Sprintf("%d_subs", n), func(b *testing.B) {
+		b.Run(fmt.Sprintf("%d_subs", n), func(
+			b *testing.B,
+		) {
 			cb := bus.NewChannelBus[string]()
 			b.Cleanup(func() { cb.Close(context.Background()) })
 
@@ -1120,9 +1128,13 @@ func BenchmarkPublish_ExactMatch(b *testing.B) {
 // BenchmarkPublish_NoMatch measures the cost of publishing an event that
 // matches no subscription — worst case for a full linear scan, best case
 // for an indexed lookup.
-func BenchmarkPublish_NoMatch(b *testing.B) {
+func BenchmarkPublish_NoMatch(
+	b *testing.B,
+) {
 	for _, n := range []int{1, 100, 1_000, 10_000} {
-		b.Run(fmt.Sprintf("%d_subs", n), func(b *testing.B) {
+		b.Run(fmt.Sprintf("%d_subs", n), func(
+			b *testing.B,
+		) {
 			cb := bus.NewChannelBus[string]()
 			b.Cleanup(func() { cb.Close(context.Background()) })
 
@@ -1146,9 +1158,13 @@ func BenchmarkPublish_NoMatch(b *testing.B) {
 
 // BenchmarkPublish_Regex measures Publish when patterns are regex, requiring
 // compilation (first publish) and matching (subsequent publishes).
-func BenchmarkPublish_Regex(b *testing.B) {
+func BenchmarkPublish_Regex(
+	b *testing.B,
+) {
 	for _, n := range []int{1, 10, 100} {
-		b.Run(fmt.Sprintf("%d_patterns", n), func(b *testing.B) {
+		b.Run(fmt.Sprintf("%d_patterns", n), func(
+			b *testing.B,
+		) {
 			cb := bus.NewChannelBus[string]()
 			b.Cleanup(func() { cb.Close(context.Background()) })
 
@@ -1172,9 +1188,13 @@ func BenchmarkPublish_Regex(b *testing.B) {
 
 // BenchmarkPublish_Fanout measures the cost of dispatching to many matching
 // handlers for a single event (goroutine spawn overhead dominates here).
-func BenchmarkPublish_Fanout(b *testing.B) {
+func BenchmarkPublish_Fanout(
+	b *testing.B,
+) {
 	for _, n := range []int{1, 10, 50, 100} {
-		b.Run(fmt.Sprintf("%d_handlers", n), func(b *testing.B) {
+		b.Run(fmt.Sprintf("%d_handlers", n), func(
+			b *testing.B,
+		) {
 			cb := bus.NewChannelBus[string]()
 			b.Cleanup(func() { cb.Close(context.Background()) })
 
@@ -1198,7 +1218,9 @@ func BenchmarkPublish_Fanout(b *testing.B) {
 
 // BenchmarkPublish_Parallel measures sustained throughput with multiple
 // concurrent publishers (simulates real-world multi-goroutine producers).
-func BenchmarkPublish_Parallel(b *testing.B) {
+func BenchmarkPublish_Parallel(
+	b *testing.B,
+) {
 	cb := bus.NewChannelBus[string]()
 	b.Cleanup(func() { cb.Close(context.Background()) })
 
@@ -1210,7 +1232,9 @@ func BenchmarkPublish_Parallel(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	b.RunParallel(func(pb *testing.PB) {
+	b.RunParallel(func(
+		pb *testing.PB,
+	) {
 		for pb.Next() {
 			cb.Publish(ctx, event)
 		}
@@ -1220,10 +1244,14 @@ func BenchmarkPublish_Parallel(b *testing.B) {
 
 // BenchmarkPublish_MixedSubs benchmarks the realistic case: many exact-match
 // subscriptions plus a few regex patterns.
-func BenchmarkPublish_MixedSubs(b *testing.B) {
+func BenchmarkPublish_MixedSubs(
+	b *testing.B,
+) {
 	for _, exact := range []int{100, 1_000} {
 		for _, regex := range []int{5, 20} {
-			b.Run(fmt.Sprintf("%d_exact_%d_regex", exact, regex), func(b *testing.B) {
+			b.Run(fmt.Sprintf("%d_exact_%d_regex", exact, regex), func(
+				b *testing.B,
+			) {
 				cb := bus.NewChannelBus[string]()
 				b.Cleanup(func() { cb.Close(context.Background()) })
 
@@ -1250,7 +1278,9 @@ func BenchmarkPublish_MixedSubs(b *testing.B) {
 }
 
 // BenchmarkSubscribe measures Subscribe throughput.
-func BenchmarkSubscribe(b *testing.B) {
+func BenchmarkSubscribe(
+	b *testing.B,
+) {
 	cb := bus.NewChannelBus[string]()
 	b.Cleanup(func() { cb.Close(context.Background()) })
 
@@ -1264,7 +1294,9 @@ func BenchmarkSubscribe(b *testing.B) {
 
 // BenchmarkSubscribe_Regex measures Subscribe throughput for regex patterns,
 // which take the slice-append COW path instead of the map-copy path.
-func BenchmarkSubscribe_Regex(b *testing.B) {
+func BenchmarkSubscribe_Regex(
+	b *testing.B,
+) {
 	cb := bus.NewChannelBus[string]()
 	b.Cleanup(func() { cb.Close(context.Background()) })
 
@@ -1277,7 +1309,9 @@ func BenchmarkSubscribe_Regex(b *testing.B) {
 }
 
 // BenchmarkUnsubscribe measures Unsubscribe throughput.
-func BenchmarkUnsubscribe(b *testing.B) {
+func BenchmarkUnsubscribe(
+	b *testing.B,
+) {
 	cb := bus.NewChannelBus[string]()
 	b.Cleanup(func() { cb.Close(context.Background()) })
 
@@ -1296,7 +1330,9 @@ func BenchmarkUnsubscribe(b *testing.B) {
 
 // BenchmarkPublish_Timeout measures the overhead of handler timeout machinery
 // (time.NewTimer vs time.After).
-func BenchmarkPublish_Timeout(b *testing.B) {
+func BenchmarkPublish_Timeout(
+	b *testing.B,
+) {
 	cb := bus.NewChannelBus[string]()
 	b.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

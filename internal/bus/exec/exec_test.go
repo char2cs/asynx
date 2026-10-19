@@ -507,15 +507,21 @@ func TestExecuteHandler_PanicInTheObserverOfTheFallbackIsSwallowed(t *testing.T)
 
 func noopJob() *exec.HandlerJob[string] {
 	return &exec.HandlerJob[string]{
-		Handler: func(_ context.Context, _ models.Event[string]) {},
-		Event:   models.Event[string]{EventName: "test"},
-		Ctx:     context.Background(),
+		Handler: func(
+			_ context.Context,
+			_ models.Event[string],
+		) {
+		},
+		Event: models.Event[string]{EventName: "test"},
+		Ctx:   context.Background(),
 	}
 }
 
 // BenchmarkExecuteHandler_NoTimeout measures the cost of spawning a goroutine,
 // running a no-op handler inline (timeout=0), and calling wg.Done.
-func BenchmarkExecuteHandler_NoTimeout(b *testing.B) {
+func BenchmarkExecuteHandler_NoTimeout(
+	b *testing.B,
+) {
 	job := noopJob()
 	b.ReportAllocs()
 	for range b.N {
@@ -528,9 +534,11 @@ func BenchmarkExecuteHandler_NoTimeout(b *testing.B) {
 
 // BenchmarkExecuteHandler_WithTimeout measures the full timeout path:
 // inner goroutine spawn + timer + done channel + select.
-func BenchmarkExecuteHandler_WithTimeout(b *testing.B) {
+func BenchmarkExecuteHandler_WithTimeout(
+	b *testing.B,
+) {
 	job := noopJob()
-	job.Timeout = 5 * time.Second // long enough that it never fires
+	job.Timeout = 5 * time.Second
 	b.ReportAllocs()
 	for range b.N {
 		var wg sync.WaitGroup
@@ -546,14 +554,20 @@ var stderrMu sync.Mutex
 // BenchmarkExecuteHandler_PanicRecovery measures the cost of the deferred
 // recover path: panic + stack unwind + OnHandlerPanic. Stderr is redirected
 // once for the whole run to avoid polluting benchmark output.
-func BenchmarkExecuteHandler_PanicRecovery(b *testing.B) {
+func BenchmarkExecuteHandler_PanicRecovery(
+	b *testing.B,
+) {
 	job := &exec.HandlerJob[string]{
-		Handler: func(_ context.Context, _ models.Event[string]) { panic("bench") },
-		Event:   models.Event[string]{EventName: "test"},
-		Ctx:     context.Background(),
+		Handler: func(
+			_ context.Context,
+			_ models.Event[string],
+		) {
+			panic("bench")
+		},
+		Event: models.Event[string]{EventName: "test"},
+		Ctx:   context.Background(),
 	}
 
-	// Suppress OnHandlerPanic output for the duration of this benchmark.
 	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		b.Fatal(err)
@@ -582,8 +596,14 @@ func BenchmarkExecuteHandler_PanicRecovery(b *testing.B) {
 }
 
 // BenchmarkExecuteWithTimeout_ZeroTimeout measures inline (no goroutine) execution.
-func BenchmarkExecuteWithTimeout_ZeroTimeout(b *testing.B) {
-	handler := func(_ context.Context, _ models.Event[string]) {}
+func BenchmarkExecuteWithTimeout_ZeroTimeout(
+	b *testing.B,
+) {
+	handler := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+	}
 	event := models.Event[string]{EventName: "test"}
 	b.ReportAllocs()
 	for range b.N {
@@ -593,8 +613,14 @@ func BenchmarkExecuteWithTimeout_ZeroTimeout(b *testing.B) {
 
 // BenchmarkExecuteWithTimeout_WithTimer measures the goroutine + timer + channel
 // machinery when the handler completes well before the deadline.
-func BenchmarkExecuteWithTimeout_WithTimer(b *testing.B) {
-	handler := func(_ context.Context, _ models.Event[string]) {}
+func BenchmarkExecuteWithTimeout_WithTimer(
+	b *testing.B,
+) {
+	handler := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+	}
 	event := models.Event[string]{EventName: "test"}
 	timeout := 5 * time.Second
 	b.ReportAllocs()
