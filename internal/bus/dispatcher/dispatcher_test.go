@@ -33,9 +33,8 @@ func TestNew_WiresADispatcherThatDeliversThroughTheBus(t *testing.T) {
 	}
 }
 
-// WaitIdle returns once the job is handled; workers.Wait waits for the
-// goroutine to exit after its idle timeout.
-// Dispatching again should still work (new worker spins up).
+// WaitIdle returns once the job is handled, and the worker exits after its
+// idle timeout. Dispatching again then starts a new worker.
 func TestDispatch_IdleCleanup(t *testing.T) {
 	bus := &recordingBus{}
 	d := newTestDispatcher[int](bus, withIdleTimeout[int](10*time.Millisecond))
@@ -86,7 +85,7 @@ func TestClose_DrainsAllEvents(t *testing.T) {
 	}
 }
 
-// Second close must not panic (double close of channels).
+// A second Close returns without panicking.
 func TestClose_Idempotent(t *testing.T) {
 	bus := &recordingBus{}
 	d := newTestDispatcher[int](bus)
@@ -113,12 +112,14 @@ func TestDispatch_AfterClose(t *testing.T) {
 	}
 }
 
-// Bus blocks forever on PublishSync, signalling when it starts.
-// block forever
-// Wait until worker is actually inside PublishSync.
+// Close gives up when its context expires while the bus blocks forever in
+// PublishSync.
 func TestClose_ContextTimeout(t *testing.T) {
 	started := make(chan struct{})
-	bus := &callbackBus{fn: func(_ context.Context, _ asynxmd.Event[int]) error {
+	bus := &callbackBus{fn: func(
+		_ context.Context,
+		_ asynxmd.Event[int],
+	) error {
 		close(started)
 		select {}
 	}}
@@ -158,13 +159,16 @@ func TestDispatch_WithIdleTimeoutOption(t *testing.T) {
 	_ = d.Close(ctx)
 }
 
-// Enqueue must never block on a slow handler: callers enqueue while holding
-// their per-aggregate command lock.
+// Enqueue never blocks on a slow handler, because callers enqueue while
+// holding their per-aggregate command lock.
 func TestEnqueue_NeverBlocksBehindASlowHandler(t *testing.T) {
 	release := make(chan struct{})
 	var mu sync.Mutex
 	var seen []int64
-	bus := &callbackBus{fn: func(_ context.Context, e asynxmd.Event[int]) error {
+	bus := &callbackBus{fn: func(
+		_ context.Context,
+		e asynxmd.Event[int],
+	) error {
 		<-release
 		mu.Lock()
 		seen = append(seen, e.Version)
@@ -204,14 +208,17 @@ func TestEnqueue_NeverBlocksBehindASlowHandler(t *testing.T) {
 	}
 }
 
-// the first job is inside its handler, two more are queued behind it
-// Once Interrupted closes, Close has closed the registry and is waiting for
-// the workers.
+// Close drains the two jobs queued behind the one inside its handler. Once
+// Interrupted closes, Close has closed the registry and is waiting for the
+// workers.
 func TestClose_DrainsJobsQueuedBehindASlowHandler(t *testing.T) {
 	release := make(chan struct{})
 	running := make(chan struct{}, 3)
 	var handled atomic.Int32
-	bus := &callbackBus{fn: func(context.Context, asynxmd.Event[int]) error {
+	bus := &callbackBus{fn: func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
 		running <- struct{}{}
 		<-release
 		handled.Add(1)
@@ -375,7 +382,7 @@ func TestParkUndelivered_RemembersTheNamedVersionsUntilTheParkLifts(t *testing.T
 }
 
 // An event whose handlers ran and failed until the attempts ran out is not
-// "unrun": a handler took it.
+// unrun, because a handler took it.
 func TestUnrun_DoesNotCountAnEventWhoseHandlersRanAndFailed(t *testing.T) {
 	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: always, Handler: func(
 		context.Context,
@@ -459,7 +466,8 @@ func TestWaitIdle_ReturnsAtOnceWhenNothingIsQueued(t *testing.T) {
 	d.WaitIdle()
 }
 
-// Still open: a non-durable event is delivered normally.
+// Interrupt leaves the dispatcher open: a non-durable event is still
+// delivered normally afterwards.
 func TestInterrupt_ReleasesWaitersWithoutClosingTheDispatcher(t *testing.T) {
 	attempted := make(chan struct{}, 8)
 	d := newTestDispatcher[int](&recordingBus{},

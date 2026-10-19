@@ -33,8 +33,8 @@ func TestDispatch_OrderingGuarantee(t *testing.T) {
 	}
 }
 
-// agg-slow has a 50ms delay; agg-fast has none. agg-fast should finish
-// before agg-slow despite being dispatched second.
+// agg-fast, dispatched second, finishes before agg-slow, which has a 50ms
+// delay.
 func TestDispatch_CrossAggregateIndependence(t *testing.T) {
 	var (
 		mu       sync.Mutex
@@ -156,8 +156,8 @@ func TestDispatch_PublishErrorHandler(t *testing.T) {
 	}
 }
 
-// Interleave 3 aggregates, 5 events each.
-// Group by aggregate and verify per-aggregate ordering.
+// Three aggregates interleave five events each, and each aggregate sees its
+// own events in order.
 func TestDispatch_MultipleAggregatesOrdered(t *testing.T) {
 	bus := &recordingBus{}
 	d := newTestDispatcher[int](bus)
@@ -184,7 +184,7 @@ func TestDispatch_MultipleAggregatesOrdered(t *testing.T) {
 	}
 }
 
-// Verify no duplicates.
+// Events of one aggregate dispatched concurrently are each delivered once.
 func TestDispatch_ConcurrentSameAggregate(t *testing.T) {
 	bus := &recordingBus{}
 	d := newTestDispatcher[int](bus)
@@ -215,7 +215,8 @@ func TestDispatch_ConcurrentSameAggregate(t *testing.T) {
 	}
 }
 
-// First event will panic inside handle; second should still be delivered.
+// A panic while handling the first event does not stop the second from being
+// delivered.
 func TestDispatch_WorkerSurvivesPanic(t *testing.T) {
 	var callCount atomic.Int64
 
@@ -312,7 +313,8 @@ func TestEnqueue_NeverStrandedByIdleWorkerRetirement(t *testing.T) {
 	}
 }
 
-// The worker survives and keeps delivering.
+// A panic of the dispatcher itself is reported, and the worker survives and
+// keeps delivering.
 func TestHandle_DispatcherPanicIsReportedNotSwallowed(t *testing.T) {
 	var got atomic.Value
 	bus := &callbackBus{fn: func(

@@ -45,12 +45,15 @@ func TestResume_LiftsAParkAndDeliversAgain(t *testing.T) {
 	}
 }
 
-// The tombstone reached a subscriber whose pattern does not match it.
+// The tombstone reaches a subscriber whose pattern does not match it.
 func TestSupersede_LetsTheTombstoneThroughAFailingDelivery(t *testing.T) {
 	var seen deliveries
 	attempted := make(chan struct{}, 8)
 	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: func(name string) bool { return name == "test.event" },
-		Handler: func(_ context.Context, e asynxmd.Event[int]) error {
+		Handler: func(
+			_ context.Context,
+			e asynxmd.Event[int],
+		) error {
 			seen.add(e)
 			if e.EventName == "test.event" {
 				attempted <- struct{}{}
@@ -84,7 +87,6 @@ func TestSupersede_LetsTheTombstoneThroughAFailingDelivery(t *testing.T) {
 	}
 }
 
-// Parking an aggregate twice is idempotent.
 func TestPark_OfAnAggregateWithoutAQueueStillBlocksItsDurableEvents(t *testing.T) {
 	d := newDurable(t, nil)
 	d.Park("ghost", errImposed)

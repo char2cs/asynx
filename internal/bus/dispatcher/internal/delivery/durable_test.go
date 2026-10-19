@@ -12,8 +12,8 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-// Another aggregate is not held back by a's failure.
-// Event a2 must come after a1 finally succeeded; there were 3 failed attempts first.
+// Event a2 comes after a1 finally succeeded, which took 3 failed attempts,
+// and another aggregate is not held back by a's failure.
 func TestDurable_FailedHandlerRetriesAndHoldsBackLaterEventsOfTheAggregate(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
@@ -171,7 +171,8 @@ func TestDurable_APanickingPanicHandlerCannotKillTheWorker(t *testing.T) {
 	waitFor(t, "recovery from a panicking panic handler", acked.Load)
 }
 
-// The handler outlives its timeout.
+// The timeout is reported, and the delivery still waits for a handler that
+// outlives it.
 func TestDurable_TimeoutIsReportedButTheHandlerIsStillWaitedFor(t *testing.T) {
 	var running, overlapped atomic.Bool
 	var timeouts atomic.Int32
@@ -395,8 +396,8 @@ func TestShutdownDuringRetry_NeverDeliversALaterEventPastTheFailingOne(t *testin
 	}
 }
 
-// A later event of the parked aggregate is not queued either.
-// Another aggregate flows.
+// A later event of the parked aggregate is not queued either, while another
+// aggregate keeps flowing.
 func TestExhaustedAttempts_ParkTheAggregateAndLeaveOthersAlone(t *testing.T) {
 	var attempts atomic.Int32
 	var rec deliveries
@@ -533,7 +534,8 @@ func TestDeadLetter_RefusalParksTheAggregate(t *testing.T) {
 	}
 }
 
-// Parking after a failed tombstone is Forget's job, not the dispatcher's.
+// Parking after a failed tombstone is Forget's job, not the dispatcher's, so
+// the final ticket only reports the failure.
 func TestTombstone_FinalReportsADurableSubscriberThatKeepsFailing(t *testing.T) {
 	d := newDurable(t, []asynxmd.DurableSub[int]{{Match: func(string) bool { return false },
 		Handler: func(
@@ -577,7 +579,8 @@ func TestEnqueueForget_IsNeverDeadLettered(t *testing.T) {
 	}
 }
 
-// A Forget abandons the delivery while its last attempt runs.
+// A Forget that abandons the delivery while its last attempt runs leaves the
+// aggregate unparked.
 func TestGiveUp_AfterASupersedeDoesNotParkTheAggregateAgain(t *testing.T) {
 	inHandler := make(chan struct{})
 	release := make(chan struct{})
