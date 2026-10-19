@@ -114,7 +114,8 @@ func TestInspect_ReportsTheCauseAndUndeliveredGivenToPark(t *testing.T) {
 	}
 	d.Park("a", errImposed, 5, 3)
 	got := d.Inspect("a")
-	if !got.Parked || !errors.Is(got.Cause, errImposed) || !reflect.DeepEqual(got.Undelivered, []int64{3, 5}) {
+	wrongInspect := !got.Parked || !errors.Is(got.Cause, errImposed) || !reflect.DeepEqual(got.Undelivered, []int64{3, 5})
+	if wrongInspect {
 		t.Fatalf("Inspect = %+v, want parked with %v and [3 5]", got, errImposed)
 	}
 	resume(d, "a")

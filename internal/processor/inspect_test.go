@@ -75,7 +75,8 @@ func TestProcessor_Inspect_FailedRecoverParksWithTheRedeliveryError(t *testing.T
 		t.Fatalf("Recover: %v", err)
 	}
 	got := p.Inspect("bad")
-	if !got.Parked || got.Cause == nil || errors.Is(got.Cause, asynxmd.ErrDeliveryParked) {
+	wrongPark := !got.Parked || got.Cause == nil || errors.Is(got.Cause, asynxmd.ErrDeliveryParked)
+	if wrongPark {
 		t.Fatalf("Inspect = %+v, want parked with the redelivery error", got)
 	}
 }

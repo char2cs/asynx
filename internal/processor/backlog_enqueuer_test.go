@@ -34,7 +34,8 @@ func TestBacklogEnqueuer_EnqueuesOnlyTheWantedVersionsAsRedeliveries(t *testing.
 	e.enqueue(context.Background(), asynxmd.Event[int]{AggregateID: "a", Version: 2})
 
 	requests := d.Requests()
-	if len(requests) != 1 || requests[0].Event.Version != 2 || requests[0].Kind != asynxmd.DispatchRedelivery {
+	wrongRequests := len(requests) != 1 || requests[0].Event.Version != 2 || requests[0].Kind != asynxmd.DispatchRedelivery
+	if wrongRequests {
 		t.Errorf("requests = %+v, want one redelivery of version 2", requests)
 	}
 	if len(e.vanished) != 0 || e.err != nil {

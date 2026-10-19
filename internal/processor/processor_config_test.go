@@ -37,7 +37,8 @@ func TestConfigure_PassesTheDeliverySettingsToTheDispatcherConfig(
 	t *testing.T,
 ) {
 	cfg := configure(WithDeliveryRetry[int](time.Second, time.Minute), WithDeliveryMaxAttempts[int](7))
-	if cfg.dispatcher.RetryInitial != time.Second || cfg.dispatcher.RetryMax != time.Minute || cfg.dispatcher.MaxAttempts != 7 {
+	wrongConfig := cfg.dispatcher.RetryInitial != time.Second || cfg.dispatcher.RetryMax != time.Minute || cfg.dispatcher.MaxAttempts != 7
+	if wrongConfig {
 		t.Fatalf("config = %+v, want the values set", cfg.dispatcher)
 	}
 }

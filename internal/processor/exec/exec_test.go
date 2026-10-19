@@ -351,7 +351,11 @@ func TestPublishErrorHandler_CalledOnPublishError(t *testing.T) {
 	var gotErr error
 	called := false
 
-	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: errBus, OnPublishError: func(_ context.Context, event asynxmd.Event[order], err error) {
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: errBus, OnPublishError: func(
+		_ context.Context,
+		event asynxmd.Event[order],
+		err error,
+	) {
 		mu.Lock()
 		defer mu.Unlock()
 		gotEvent = event
@@ -390,7 +394,11 @@ func TestPublishErrorHandler_NotCalledOnSuccess(t *testing.T) {
 	successBus := &recordingBus[order]{}
 
 	called := false
-	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: successBus, OnPublishError: func(_ context.Context, _ asynxmd.Event[order], _ error) {
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: successBus, OnPublishError: func(
+		_ context.Context,
+		_ asynxmd.Event[order],
+		_ error,
+	) {
 		called = true
 	}})
 	t.Cleanup(func() { d.Close(context.Background()) })
@@ -418,7 +426,7 @@ func TestPublishErrorHandler_NilHandlerDoesNotPanic(t *testing.T) {
 		publishSyncErr: errors.New("bus error"),
 	}
 
-	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: errBus}) // no error handler — must not panic
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: errBus})
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(es, d)
@@ -461,12 +469,19 @@ func (b *recordingBus[T]) Unsubscribe(_ string) error    { return nil }
 func (b *recordingBus[T]) Close(_ context.Context) error { return nil }
 func (b *recordingBus[T]) WaitForHandlers()              {}
 
-func newEnv(t *testing.T, opts ...Opt[order]) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, asynxmd.Dispatcher[order], *bus.ChannelBus[order]) {
+func newEnv(
+	t *testing.T,
+	opts ...Opt[order],
+) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, asynxmd.Dispatcher[order], *bus.ChannelBus[order]) {
 	t.Helper()
 	return newEnvOn(t, store.New(), opts...)
 }
 
-func newEnvOn(t *testing.T, s store.Memory, opts ...Opt[order]) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, asynxmd.Dispatcher[order], *bus.ChannelBus[order]) {
+func newEnvOn(
+	t *testing.T,
+	s store.Memory,
+	opts ...Opt[order],
+) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, asynxmd.Dispatcher[order], *bus.ChannelBus[order]) {
 	t.Helper()
 	ss := store.NewSnapshots()
 	es := eventstore.New[order](s, ss, nil, 1, nil)

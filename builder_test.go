@@ -833,7 +833,12 @@ func TestShardingOpts_QueueDepthBoundsTheBacklogOfOneAggregate(t *testing.T) {
 	}
 }
 
-func noopDurable(context.Context, models.Event[mocks.Order]) error { return nil }
+func noopDurable(
+	context.Context,
+	models.Event[mocks.Order],
+) error {
+	return nil
+}
 
 func TestBuild_UsesTheSuppliedDispatcher(t *testing.T) {
 	ctx := context.Background()
@@ -850,7 +855,8 @@ func TestBuild_UsesTheSuppliedDispatcher(t *testing.T) {
 		t.Fatalf("requests = %d, want 1", len(requests))
 	}
 	request := requests[0]
-	if request.Kind != models.DispatchEvent || request.Event.AggregateID != "a" || request.Event.Version != 1 {
+	wrongRequest := request.Kind != models.DispatchEvent || request.Event.AggregateID != "a" || request.Event.Version != 1
+	if wrongRequest {
 		t.Errorf("request = %+v, want the DispatchEvent of a v1", request)
 	}
 	if request.Ack == nil {
@@ -871,7 +877,10 @@ func TestBuild_RecoverEnqueuesRedeliveries(t *testing.T) {
 	ctx := context.Background()
 	s := store.New()
 	stuck := make(chan struct{})
-	first := build(t, eight(s).WithSubscriber("OrderUpdated", func(context.Context, models.Event[mocks.Order]) error {
+	first := build(t, eight(s).WithSubscriber("OrderUpdated", func(
+		context.Context,
+		models.Event[mocks.Order],
+	) error {
 		<-stuck
 		return nil
 	}))
@@ -890,7 +899,8 @@ func TestBuild_RecoverEnqueuesRedeliveries(t *testing.T) {
 		t.Fatalf("requests = %d, want the 2 pending deliveries", len(requests))
 	}
 	for i, request := range requests {
-		if request.Kind != models.DispatchRedelivery || request.Event.Version != int64(i+2) || request.Ack == nil {
+		wrongRedelivery := request.Kind != models.DispatchRedelivery || request.Event.Version != int64(i+2) || request.Ack == nil
+		if wrongRedelivery {
 			t.Errorf("request %d = %+v, want the redelivery of v%d with an Ack", i, request, i+2)
 		}
 	}
@@ -915,7 +925,8 @@ func TestForget_SupersedesThenEnqueuesATombstone(t *testing.T) {
 	}
 	requests := fake.Requests()
 	tombstone := requests[len(requests)-1]
-	if tombstone.Kind != models.DispatchTombstone || tombstone.Event.AggregateID != "a" || tombstone.Ack == nil {
+	wrongTombstone := tombstone.Kind != models.DispatchTombstone || tombstone.Event.AggregateID != "a" || tombstone.Ack == nil
+	if wrongTombstone {
 		t.Errorf("last request = %+v, want a tombstone of a with an Ack", tombstone)
 	}
 }
@@ -1015,7 +1026,8 @@ func TestBuild_DefaultsAreAppliedBeforeTheFactoryRuns(t *testing.T) {
 			build(t, b)
 
 			got := fake.Config()
-			if got.MaxAttempts != tt.want.MaxAttempts || got.RetryInitial != tt.want.RetryInitial || got.RetryMax != tt.want.RetryMax {
+			configDiffers := got.MaxAttempts != tt.want.MaxAttempts || got.RetryInitial != tt.want.RetryInitial || got.RetryMax != tt.want.RetryMax
+			if configDiffers {
 				t.Errorf("config = (%d, %v, %v), want (%d, %v, %v)", got.MaxAttempts, got.RetryInitial, got.RetryMax,
 					tt.want.MaxAttempts, tt.want.RetryInitial, tt.want.RetryMax)
 			}
@@ -1036,7 +1048,8 @@ func TestBuild_ATypedNilDispatcherFailsBuild(t *testing.T) {
 
 	inst, err := eight(store.New()).WithBus(&closingBus{}).WithDispatcher(factory).Build()
 
-	if inst != nil || err == nil || !strings.Contains(err.Error(), "returned no dispatcher") {
+	notRejected := inst != nil || err == nil || !strings.Contains(err.Error(), "returned no dispatcher")
+	if notRejected {
 		t.Fatalf("Build = (%v, %v), want the no-dispatcher error and no instance", inst, err)
 	}
 }

@@ -66,7 +66,9 @@ func TestDispatcher_ParkResumeSupersedeFollowTheContract(t *testing.T) {
 	d.Park("a", first, 3, 4)
 	d.Park("a", errors.New("second"))
 	gen := d.Parks()["a"]
-	if got := d.Inspect("a"); !got.Parked || got.Generation != gen || got.Cause != first {
+	got := d.Inspect("a")
+	wrongInspect := !got.Parked || got.Generation != gen || got.Cause != first
+	if wrongInspect {
 		t.Errorf("Inspect = %+v, want parked at %d with the first cause", got, gen)
 	}
 	if gen == 0 {
@@ -88,7 +90,8 @@ func TestDispatcher_ParkResumeSupersedeFollowTheContract(t *testing.T) {
 		t.Errorf("Parks = %v, want none", d.Parks())
 	}
 	calls := d.ParkCalls()
-	if len(calls) != 3 || !slices.Equal(calls[0].Undelivered, []int64{3, 4}) || calls[0].Cause != first {
+	wrongCalls := len(calls) != 3 || !slices.Equal(calls[0].Undelivered, []int64{3, 4}) || calls[0].Cause != first
+	if wrongCalls {
 		t.Errorf("ParkCalls = %v", calls)
 	}
 }

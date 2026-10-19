@@ -174,12 +174,21 @@ func TestProcessor_Recover_ReportsAnUnrebuildableEventToThePublishErrorHandler(
 	}
 	reported := make(chan report, 4)
 	p := mustNew(t, es, bus.NewChannelBus[order](),
-		processor.WithPublishErrorHandler(func(_ context.Context, e asynxmd.Event[order], err error) {
+		processor.WithPublishErrorHandler(func(
+			_ context.Context,
+			e asynxmd.Event[order],
+			err error,
+		) {
 			reported <- report{e, err}
 		}),
 		processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-			Match:   always,
-			Handler: func(context.Context, asynxmd.Event[order]) error { return nil },
+			Match: always,
+			Handler: func(
+				context.Context,
+				asynxmd.Event[order],
+			) error {
+				return nil
+			},
 		}}))
 	t.Cleanup(func() { p.Shutdown(ctx) })
 
@@ -195,7 +204,8 @@ func TestProcessor_Recover_ReportsAnUnrebuildableEventToThePublishErrorHandler(
 	if got.event.AggregateID != "bad" || got.event.Version != 1 {
 		t.Errorf("reported event = %s v%d, want bad v1", got.event.AggregateID, got.event.Version)
 	}
-	if got.err == nil || !strings.HasPrefix(got.err.Error(), "recovery: ") || errors.Unwrap(got.err) == nil {
+	wrongReport := got.err == nil || !strings.HasPrefix(got.err.Error(), "recovery: ") || errors.Unwrap(got.err) == nil
+	if wrongReport {
 		t.Errorf("reported error = %v, want one wrapping the recovery error", got.err)
 	}
 }
@@ -213,13 +223,20 @@ func TestProcessor_Recover_APanickingPublishErrorHandlerDoesNotCrash(
 	var called atomic.Int32
 	var delivered sync.Map
 	p := mustNew(t, es, bus.NewChannelBus[order](),
-		processor.WithPublishErrorHandler(func(context.Context, asynxmd.Event[order], error) {
+		processor.WithPublishErrorHandler(func(
+			context.Context,
+			asynxmd.Event[order],
+			error,
+		) {
 			called.Add(1)
 			panic("publish error handler exploded")
 		}),
 		processor.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 			Match: always,
-			Handler: func(_ context.Context, e asynxmd.Event[order]) error {
+			Handler: func(
+				_ context.Context,
+				e asynxmd.Event[order],
+			) error {
 				delivered.Store(e.AggregateID, true)
 				return nil
 			},

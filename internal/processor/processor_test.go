@@ -479,7 +479,7 @@ func TestProcessor_ShutdownWithoutBus(t *testing.T) {
 	memStore := store.New()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := mustNew(t, es, nil) // No bus
+	p := mustNew(t, es, nil)
 
 	ctx := context.Background()
 
@@ -1225,7 +1225,8 @@ func TestNew_AFactoryReplacesTheDefaultDispatcher(t *testing.T) {
 	}
 
 	requests := fake.Requests()
-	if len(requests) != 1 || requests[0].Kind != asynxmd.DispatchEvent || requests[0].Event.AggregateID != "a" {
+	wrongRequests := len(requests) != 1 || requests[0].Kind != asynxmd.DispatchEvent || requests[0].Event.AggregateID != "a"
+	if wrongRequests {
 		t.Errorf("requests = %+v, want the one DispatchEvent of a", requests)
 	}
 }
@@ -1273,7 +1274,12 @@ func TestNew_AFactoryIsCalledEvenWithoutABus(t *testing.T) {
 }
 
 func TestNew_TheFactoryReceivesTheConfigWithDefaultsApplied(t *testing.T) {
-	handled := func(context.Context, asynxmd.Event[order], error) {}
+	handled := func(
+		context.Context,
+		asynxmd.Event[order],
+		error,
+	) {
+	}
 	tests := []struct {
 		name     string
 		opts     []processor.ProcessorOpt[order]
@@ -1315,7 +1321,8 @@ func TestNew_TheFactoryReceivesTheConfigWithDefaultsApplied(t *testing.T) {
 			mustNew(t, newES(), bus.NewChannelBus[order](), opts...)
 
 			got := fake.Config()
-			if got.MaxAttempts != tt.attempts || got.RetryInitial != tt.initial || got.RetryMax != tt.max {
+			configDiffers := got.MaxAttempts != tt.attempts || got.RetryInitial != tt.initial || got.RetryMax != tt.max
+			if configDiffers {
 				t.Errorf("config = (%d, %v, %v), want (%d, %v, %v)", got.MaxAttempts, got.RetryInitial, got.RetryMax, tt.attempts, tt.initial, tt.max)
 			}
 			if got.Bus == nil || got.OnPublishError == nil {
@@ -1334,7 +1341,8 @@ func TestShutdown_InterruptsThenClosesTheSuppliedDispatcher(t *testing.T) {
 	}
 
 	calls := fake.Calls()
-	if len(calls) != 3 || calls[1] != "Interrupt" || calls[2] != "Close" {
+	wrongCalls := len(calls) != 3 || calls[1] != "Interrupt" || calls[2] != "Close"
+	if wrongCalls {
 		t.Errorf("calls = %v, want Factory, Interrupt, Close", calls)
 	}
 }
@@ -1347,7 +1355,8 @@ func TestNew_ATypedNilDispatcherWithoutAnErrorFails(t *testing.T) {
 
 	p, err := processor.New(newES(), bus.NewChannelBus[order](), processor.WithDispatcherFactory(factory))
 
-	if p != nil || err == nil || !strings.Contains(err.Error(), "returned no dispatcher") {
+	notRejected := p != nil || err == nil || !strings.Contains(err.Error(), "returned no dispatcher")
+	if notRejected {
 		t.Errorf("New = (%v, %v), want the no-dispatcher error and no processor", p, err)
 	}
 }

@@ -481,7 +481,11 @@ func TestForget_FailsWhenTheDispatcherIsClosed(t *testing.T) {
 	_ = s
 }
 
-func durableEnv(t *testing.T, handler asynxmd.DurableHandler[order], edits ...func(*asynxmd.DispatcherConfig[order])) *CommandExecutor[order] {
+func durableEnv(
+	t *testing.T,
+	handler asynxmd.DurableHandler[order],
+	edits ...func(*asynxmd.DispatcherConfig[order]),
+) *CommandExecutor[order] {
 	t.Helper()
 	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
 	cfg := asynxmd.DispatcherConfig[order]{

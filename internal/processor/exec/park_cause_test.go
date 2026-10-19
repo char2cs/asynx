@@ -35,7 +35,8 @@ func TestExecute_EnqueueFailureParksWithTheEnqueueError(t *testing.T) {
 		t.Fatalf("Execute = %v, want the enqueue error", err)
 	}
 	calls := fake.ParkCalls()
-	if len(calls) != 1 || calls[0].AggregateID != "agg" || !errors.Is(calls[0].Cause, errEnqueue) {
+	wrongCalls := len(calls) != 1 || calls[0].AggregateID != "agg" || !errors.Is(calls[0].Cause, errEnqueue)
+	if wrongCalls {
 		t.Fatalf("ParkCalls = %+v, want agg parked with the enqueue error", calls)
 	}
 	if got := fake.Inspect("agg"); !got.Parked || !errors.Is(got.Cause, errEnqueue) {

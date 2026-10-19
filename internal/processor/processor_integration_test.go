@@ -116,7 +116,7 @@ func TestProcessor_IntegrationCancelDuringBurst(t *testing.T) {
 
 	// Test 1: Send some commands with a cancelled context
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
+	cancel()
 
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 	_, err := p.Send(ctx, cmd)

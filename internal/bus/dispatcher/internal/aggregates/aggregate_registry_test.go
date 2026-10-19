@@ -130,7 +130,8 @@ func TestPop_ReturnsJobsInEnqueueOrderWithTheirHalt(t *testing.T) {
 	enqueue(t, r, first)
 	enqueue(t, r, second)
 	got, halt := pop(t, r, "a")
-	if got != first || halt == nil || closed(halt) {
+	wrongPop := got != first || halt == nil || closed(halt)
+	if wrongPop {
 		t.Fatalf("Pop = %d with halt closed=%v, want 1 under an open halt", got.version, closed(halt))
 	}
 	if got, _ = pop(t, r, "a"); got != second {
@@ -302,7 +303,8 @@ func assertFreshHalt(
 		t.Fatal("a durable job was refused after the lift")
 	}
 	got, halt := pop(t, r, "a")
-	if got != next || halt == old || closed(halt) {
+	notFresh := got != next || halt == old || closed(halt)
+	if notFresh {
 		t.Fatal("after the lift the job is not delivered under a fresh open halt")
 	}
 }
@@ -384,7 +386,8 @@ func TestSupersede_DropsQueuedDurableJobsAndLeavesNoPark(t *testing.T) {
 		t.Fatal("Supersede left the running delivery's halt open")
 	}
 	unrun, completions, err := durable.state()
-	if !errors.Is(unrun, asynxmd.ErrDeliveryParked) || completions != 1 || !errors.Is(err, asynxmd.ErrDeliveryParked) {
+	wrongSupersede := !errors.Is(unrun, asynxmd.ErrDeliveryParked) || completions != 1 || !errors.Is(err, asynxmd.ErrDeliveryParked)
+	if wrongSupersede {
 		t.Fatalf("superseded job: unrun %v, completed %d with %v", unrun, completions, err)
 	}
 	if len(r.Parks()) != 0 {
@@ -798,7 +801,8 @@ func TestInspect_GenerationChangesWhenAParkIsImposedAgain(t *testing.T) {
 	r.Lift("a", first)
 	r.Park("a", errLater)
 	got := r.Inspect("a")
-	if !got.Parked || got.Generation == first || got.Generation == 0 {
+	notReimposed := !got.Parked || got.Generation == first || got.Generation == 0
+	if notReimposed {
 		t.Fatalf("Inspect = %+v, want parked with a generation other than %d", got, first)
 	}
 	if !errors.Is(got.Cause, errLater) {

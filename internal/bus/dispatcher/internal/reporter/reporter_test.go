@@ -26,7 +26,11 @@ func TestReporter_PublishErrorCallsHandler(t *testing.T) {
 	var gotCtx context.Context
 	want := errors.New("boom")
 	rep := reporter.New(
-		func(ctx context.Context, e asynxmd.Event[string], err error) {
+		func(
+			ctx context.Context,
+			e asynxmd.Event[string],
+			err error,
+		) {
 			gotCtx, gotEvent, gotErr = ctx, e, err
 		},
 		nil,
@@ -49,7 +53,12 @@ func TestReporter_DeliveryErrorCallsHandler(t *testing.T) {
 	want := errors.New("boom")
 	rep := reporter.New(
 		nil,
-		func(_ context.Context, _ asynxmd.Event[string], err error, attempt int) {
+		func(
+			_ context.Context,
+			_ asynxmd.Event[string],
+			err error,
+			attempt int,
+		) {
 			gotErr, gotAttempt = err, attempt
 		},
 		nil,
@@ -67,7 +76,13 @@ func TestReporter_PanicCallsHandler(t *testing.T) {
 	rep := reporter.New(
 		nil,
 		nil,
-		func(_ context.Context, _ asynxmd.Event[string], recovered any) { got = recovered },
+		func(
+			_ context.Context,
+			_ asynxmd.Event[string],
+			recovered any,
+		) {
+			got = recovered
+		},
 	)
 
 	rep.Panic(newJob(), "oops")
@@ -88,9 +103,28 @@ func TestReporter_NilHandlersAreNoOps(t *testing.T) {
 
 func TestReporter_SwallowsHandlerPanics(t *testing.T) {
 	rep := reporter.New(
-		func(context.Context, asynxmd.Event[string], error) { panic("publish") },
-		func(context.Context, asynxmd.Event[string], error, int) { panic("delivery") },
-		func(context.Context, asynxmd.Event[string], any) { panic("panic") },
+		func(
+			context.Context,
+			asynxmd.Event[string],
+			error,
+		) {
+			panic("publish")
+		},
+		func(
+			context.Context,
+			asynxmd.Event[string],
+			error,
+			int,
+		) {
+			panic("delivery")
+		},
+		func(
+			context.Context,
+			asynxmd.Event[string],
+			any,
+		) {
+			panic("panic")
+		},
 	)
 	job := newJob()
 
