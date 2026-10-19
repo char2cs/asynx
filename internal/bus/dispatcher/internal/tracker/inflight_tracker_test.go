@@ -2,6 +2,7 @@ package tracker_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,6 +41,23 @@ func idleReturns(
 		close(returned)
 	}()
 	return returned
+}
+
+type observedJob struct {
+	jobs.Job[string]
+	once  sync.Once
+	asked chan struct{}
+}
+
+func observe(
+	job jobs.Job[string],
+) *observedJob {
+	return &observedJob{Job: job, asked: make(chan struct{})}
+}
+
+func (j *observedJob) Ticket() asynxmd.Ticket {
+	j.once.Do(func() { close(j.asked) })
+	return j.Job.Ticket()
 }
 
 func TestTracker_ForUnknownEvent(t *testing.T) {
