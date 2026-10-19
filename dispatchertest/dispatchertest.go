@@ -1,7 +1,8 @@
 // Package dispatchertest is a conformance suite for models.Dispatcher
 // implementations, as storetest is for stores. It checks the contract written
 // on models.Dispatcher (per-aggregate order, durable retry and ack, dead
-// letters, parks and their generations, supersede, tickets and unrun answers,
+// letters, parks and their generations and causes as Inspect reports them,
+// supersede, tickets and unrun answers,
 // interrupt and close, InHandler, and surviving panics in every handler) and
 // nothing an implementation is free to choose. Run it from a test in the
 // package that provides the dispatcher:
@@ -52,5 +53,6 @@ func scenarios() map[string]scenario {
 	maps.Copy(all, parkingScenarios())
 	maps.Copy(all, ticketScenarios())
 	maps.Copy(all, lifecycleScenarios())
+	maps.Copy(all, inspectScenarios())
 	return all
 }
