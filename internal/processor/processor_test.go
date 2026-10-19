@@ -3,6 +3,7 @@ package processor_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -347,7 +348,7 @@ func TestProcessor_WithWorkersPerShard(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := mustNew(t, 
+	p := mustNew(t,
 		es,
 		channelBus,
 		processor.WithShards[order](2),
@@ -369,7 +370,7 @@ func TestProcessor_WithQueueDepth(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := mustNew(t, 
+	p := mustNew(t,
 		es,
 		channelBus,
 		processor.WithQueueDepth[order](100),
@@ -391,7 +392,7 @@ func TestProcessor_NegativeOptionsIgnored(t *testing.T) {
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
 	// Negative values should be ignored, using defaults
-	p := mustNew(t, 
+	p := mustNew(t,
 		es,
 		channelBus,
 		processor.WithShards[order](-5),
@@ -682,7 +683,7 @@ func TestWithPublishErrorHandler_IsInvokedOnPublishError(t *testing.T) {
 		got.Unlock()
 	}
 
-	proc := mustNew(t, 
+	proc := mustNew(t,
 		eventstore.New[mocks.Order](s, store.NewSnapshots(), nil, 1, nil),
 		&mocks.ErrBus[mocks.Order]{Err: errors.New("bus down")},
 		processor.WithPublishErrorHandler[mocks.Order](handler),
@@ -1238,7 +1239,10 @@ func TestNew_AFactoryErrorIsReturned(t *testing.T) {
 	p, err := processor.New(newES(), bus.NewChannelBus[order](), processor.WithDispatcherFactory(factory))
 
 	if !errors.Is(err, sentinel) || p != nil {
-		t.Errorf("New = (%v, %v), want the factory error and no processor", p, err)
+		t.Fatalf("New = (%v, %v), want the factory error and no processor", p, err)
+	}
+	if !strings.HasPrefix(err.Error(), "asynx: dispatcher factory: ") {
+		t.Errorf("error = %q, want the %q prefix", err, "asynx: dispatcher factory: ")
 	}
 }
 

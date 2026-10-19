@@ -280,7 +280,13 @@ func (b *Builder[T]) WithSnapshotErrorHandler(fn func(context.Context, models.Ev
 }
 
 // WithDispatcher plugs in the dispatcher that delivers committed events to the
-// live and durable subscribers, in place of the in-memory default. The factory
+// live and durable subscribers, in place of the in-memory default. A dispatcher
+// is the component that takes each committed event and runs the subscribers'
+// handlers in order per aggregate, retrying and parking an aggregate when the
+// attempts run out. The library ships only the in-memory implementation; the
+// contract a replacement must keep is models.Dispatcher, and the
+// dispatchertest package (dispatchertest.Run) verifies an implementation
+// against it. The factory
 // is called once per Build, with the configuration the instance was built with:
 // the bus, the durable subscribers, the handlers, and the retry and attempt
 // settings with their defaults already applied (20 attempts, a backoff of 100ms

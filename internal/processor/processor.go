@@ -15,6 +15,7 @@ package processor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -289,7 +290,7 @@ func newDispatcher[T any](
 	cfg.dispatcher.OnPublishError = cfg.publishErrorHandler
 	d, err := factory(cfg.dispatcher)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("asynx: dispatcher factory: %w", err)
 	}
 	if d == nil {
 		return nil, errNilDispatcher

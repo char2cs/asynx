@@ -282,11 +282,6 @@ func (p *Processor[T]) enqueueBacklog(
 	agg string,
 	backlog []asynxmd.Delivery,
 ) (vanished map[int64]struct{}, err error) {
-	store := p.es.Store()
-	ack := func(version int64) func(context.Context) error {
-		return func(ctx context.Context) error { return store.AckDelivery(ctx, agg, version) }
-	}
-
 	vanished = make(map[int64]struct{}, len(backlog))
 	lowest, highest := backlog[0].Version, backlog[0].Version
 	for _, d := range backlog {
@@ -294,22 +289,17 @@ func (p *Processor[T]) enqueueBacklog(
 		lowest, highest = min(lowest, d.Version), max(highest, d.Version)
 	}
 
-	var enqueueErr error
+	enqueuer := &backlogEnqueuer[T]{
+		dispatcher: p.dispatcher,
+		store:      p.es.Store(),
+		aggregate:  agg,
+		vanished:   vanished,
+	}
 	replayErr := p.es.Replay(ctx, agg, lowest, highest,
 		func(_ context.Context, evt asynxmd.Event[T]) {
-			if _, wanted := vanished[evt.Version]; !wanted || enqueueErr != nil {
-				return
-			}
-			_, enqueueErr = p.dispatcher.Enqueue(ctx, asynxmd.DispatchRequest[T]{
-				Event: evt,
-				Ack:   ack(evt.Version),
-				Kind:  asynxmd.DispatchRedelivery,
-			})
-			if enqueueErr == nil {
-				delete(vanished, evt.Version)
-			}
+			enqueuer.enqueue(ctx, evt)
 		})
-	return vanished, errors.Join(replayErr, enqueueErr)
+	return vanished, errors.Join(replayErr, enqueuer.err)
 }
 
 func (p *Processor[T]) ackVanished(

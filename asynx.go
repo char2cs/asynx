@@ -62,16 +62,18 @@ type Asynx[T any] interface {
 	// ResumeDeliveries or a restart; it never lifts by itself.
 	PausedAggregates() []string
 
-	// InspectDelivery says why an aggregate is paused: whether its durable
-	// delivery is parked, the park's generation (it changes each time a park
-	// is imposed), the error that parked it, and, in ascending order, the
-	// versions no handler took. The cause is ErrDeliveryParked wrapping the
+	// InspectDelivery says why an aggregate is paused. The DeliveryStatus it
+	// returns reports whether its durable delivery is parked, the park's
+	// generation (it changes each time a park is imposed), the error that
+	// parked it (Cause), and, in ascending order, the versions no handler took
+	// (Undelivered). The cause is ErrDeliveryParked wrapping the
 	// last handler error and the attempt count when the attempts ran out, the
 	// ack error when acknowledging the delivery failed, ErrDispatcherClosed
 	// when a shutdown interrupted the retries, or the error of the failed
 	// Forget, enqueue or redelivery that parked it. An aggregate that is not
-	// parked has the zero DeliveryStatus, as does every aggregate of an
-	// instance without a dispatcher.
+	// parked, or that the dispatcher does not know, has the zero
+	// DeliveryStatus, as does every aggregate of an instance without a
+	// dispatcher.
 	InspectDelivery(
 		aggregateID string,
 	) models.DeliveryStatus

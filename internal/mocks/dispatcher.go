@@ -98,6 +98,7 @@ func (d *Dispatcher[T]) ParkCalls() []ParkCall {
 	return slices.Clone(d.parkCalls)
 }
 
+// Enqueue records the request and returns a ticket that is already settled, or the error set by FailEnqueue.
 func (d *Dispatcher[T]) Enqueue(
 	_ context.Context,
 	request models.DispatchRequest[T],
@@ -112,6 +113,7 @@ func (d *Dispatcher[T]) Enqueue(
 	return settledTicket(), nil
 }
 
+// TicketFor records the call and reports that no ticket is held.
 func (d *Dispatcher[T]) TicketFor(
 	_ string,
 	_ int64,
@@ -120,6 +122,7 @@ func (d *Dispatcher[T]) TicketFor(
 	return models.Ticket{}, false
 }
 
+// Unrun records the call and succeeds.
 func (d *Dispatcher[T]) Unrun(
 	_ string,
 	_ int64,
@@ -128,6 +131,7 @@ func (d *Dispatcher[T]) Unrun(
 	return nil
 }
 
+// Park records the call and parks the aggregate, keeping the first non-nil cause.
 func (d *Dispatcher[T]) Park(
 	aggregateID string,
 	cause error,
@@ -163,6 +167,7 @@ func (d *Dispatcher[T]) Inspect(
 	return models.DeliveryStatus{Parked: true, Generation: generation, Cause: d.causes[aggregateID]}
 }
 
+// Supersede records the call and forgets the aggregate's park.
 func (d *Dispatcher[T]) Supersede(
 	aggregateID string,
 ) {
@@ -173,6 +178,7 @@ func (d *Dispatcher[T]) Supersede(
 	delete(d.causes, aggregateID)
 }
 
+// Parks records the call and returns the parked aggregates with their generations.
 func (d *Dispatcher[T]) Parks() map[string]uint64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -180,6 +186,7 @@ func (d *Dispatcher[T]) Parks() map[string]uint64 {
 	return maps.Clone(d.parks)
 }
 
+// ResumeUndelivered records the call and lifts the park when the generation matches.
 func (d *Dispatcher[T]) ResumeUndelivered(
 	aggregateID string,
 	generation uint64,
@@ -195,6 +202,7 @@ func (d *Dispatcher[T]) ResumeUndelivered(
 	return true, nil
 }
 
+// InHandler reports false: the fake runs no handler.
 func (d *Dispatcher[T]) InHandler(
 	_ context.Context,
 	_ string,
@@ -202,15 +210,18 @@ func (d *Dispatcher[T]) InHandler(
 	return false
 }
 
+// Interrupt records the call and closes the Interrupted channel.
 func (d *Dispatcher[T]) Interrupt() {
 	d.record("Interrupt")
 	d.interrupt.Do(func() { close(d.interrupted) })
 }
 
+// Interrupted returns the channel Interrupt and Close close.
 func (d *Dispatcher[T]) Interrupted() <-chan struct{} {
 	return d.interrupted
 }
 
+// Close records the call, closes the Interrupted channel and returns the error set by FailClose.
 func (d *Dispatcher[T]) Close(
 	_ context.Context,
 ) error {
@@ -221,6 +232,7 @@ func (d *Dispatcher[T]) Close(
 	return d.closeErr
 }
 
+// WaitIdle records the call and returns at once.
 func (d *Dispatcher[T]) WaitIdle() {
 	d.record("WaitIdle")
 }

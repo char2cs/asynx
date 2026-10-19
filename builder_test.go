@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -921,19 +922,24 @@ func TestForget_SupersedesThenEnqueuesATombstone(t *testing.T) {
 
 func TestBuild_ADispatcherFactoryErrorFailsBuild(t *testing.T) {
 	sentinel := errors.New("no dispatcher today")
-	factory := func(models.DispatcherConfig[mocks.Order]) (models.Dispatcher[mocks.Order], error) {
+	factory := func(
+		models.DispatcherConfig[mocks.Order],
+	) (models.Dispatcher[mocks.Order], error) {
 		return nil, sentinel
 	}
-	before := runtime.NumGoroutine()
-	for range 5 {
-		inst, err := eight(store.New()).WithDispatcher(factory).Build()
-		if !errors.Is(err, sentinel) || inst != nil {
-			t.Fatalf("Build = (%v, %v), want the factory error and no instance", inst, err)
-		}
+	bus := &closingBus{}
+
+	inst, err := eight(store.New()).WithBus(bus).WithDispatcher(factory).Build()
+
+	if !errors.Is(err, sentinel) || inst != nil {
+		t.Fatalf("Build = (%v, %v), want the factory error and no instance", inst, err)
 	}
-	eventually(t, "goroutines to settle after failed builds", func() bool {
-		return runtime.NumGoroutine() <= before+5
-	})
+	if !strings.HasPrefix(err.Error(), "asynx: dispatcher factory: ") {
+		t.Errorf("error = %q, want the %q prefix", err, "asynx: dispatcher factory: ")
+	}
+	if got := bus.closed.Load(); got != 1 {
+		t.Errorf("bus closed %d times, want 1", got)
+	}
 }
 
 func TestShutdown_InterruptsThenClosesTheDispatcher(t *testing.T) {
