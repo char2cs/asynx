@@ -62,9 +62,13 @@ func TestDispatcher_FactoryKeepsTheConfigAndReturnsTheFake(t *testing.T) {
 func TestDispatcher_ParkResumeSupersedeFollowTheContract(t *testing.T) {
 	d := NewDispatcher[fakeOrder]()
 
-	d.Park("a", 3, 4)
-	d.Park("a")
+	first := errors.New("first")
+	d.Park("a", first, 3, 4)
+	d.Park("a", errors.New("second"))
 	gen := d.Parks()["a"]
+	if got := d.Inspect("a"); !got.Parked || got.Generation != gen || got.Cause != first {
+		t.Errorf("Inspect = %+v, want parked at %d with the first cause", got, gen)
+	}
 	if gen == 0 {
 		t.Fatal("a is not parked")
 	}
@@ -74,13 +78,17 @@ func TestDispatcher_ParkResumeSupersedeFollowTheContract(t *testing.T) {
 	if lifted, _ := d.ResumeUndelivered("a", gen); !lifted {
 		t.Error("the current generation did not lift the park")
 	}
+	if got := d.Inspect("a"); got.Parked || got.Cause != nil {
+		t.Errorf("Inspect after the lift = %+v, want the zero status", got)
+	}
 
-	d.Park("b")
+	d.Park("b", nil)
 	d.Supersede("b")
 	if len(d.Parks()) != 0 {
 		t.Errorf("Parks = %v, want none", d.Parks())
 	}
-	if calls := d.ParkCalls(); len(calls) != 3 || !slices.Equal(calls[0].Undelivered, []int64{3, 4}) {
+	calls := d.ParkCalls()
+	if len(calls) != 3 || !slices.Equal(calls[0].Undelivered, []int64{3, 4}) || calls[0].Cause != first {
 		t.Errorf("ParkCalls = %v", calls)
 	}
 }

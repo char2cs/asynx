@@ -53,9 +53,10 @@ func (d *durableDeliverer[T]) ParkThenReport(
 	aggregateID string,
 	halt <-chan struct{},
 	job jobs.Job[T],
+	cause error,
 	report func(),
 ) {
-	d.registry.ParkIfCurrent(aggregateID, halt, job.Acked())
+	d.registry.ParkIfCurrent(aggregateID, halt, job.Acked(), cause)
 	report()
 }
 
@@ -169,7 +170,7 @@ func (d *durableDeliverer[T]) wait(
 	defer timer.Stop()
 	select {
 	case <-d.interrupted:
-		d.ParkThenReport(aggregateID, halt, job, func() {})
+		d.ParkThenReport(aggregateID, halt, job, asynxmd.ErrDispatcherClosed, func() {})
 		return asynxmd.ErrDispatcherClosed
 	case <-halt:
 		return asynxmd.ErrDeliveryParked
@@ -192,7 +193,7 @@ func (d *durableDeliverer[T]) giveUp(
 		return nil
 	}
 	parked := fmt.Errorf("%w after %d attempts: %w", asynxmd.ErrDeliveryParked, attempt, last)
-	d.ParkThenReport(aggregateID, halt, job, func() {
+	d.ParkThenReport(aggregateID, halt, job, parked, func() {
 		d.reports.DeliveryError(job, parked, attempt)
 	})
 	return parked

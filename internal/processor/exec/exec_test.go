@@ -993,7 +993,7 @@ func TestExecute_WaitingForHandlersGivesUpWithTheCommittedEvent(t *testing.T) {
 
 func TestExecute_WaitingOnAParkedAggregateReportsNoHandlerRan(t *testing.T) {
 	ex := durableEnv(t, func(context.Context, asynxmd.Event[order]) error { return nil })
-	ex.dispatcher.Park("agg")
+	ex.dispatcher.Park("agg", errors.New("parked by the test"))
 
 	evt, err := ex.Execute(context.Background(), update("agg", 1), true)
 	if !errors.Is(err, asynxmd.ErrDeliveryParked) || evt.Version != 1 {

@@ -285,7 +285,7 @@ func TestTicketFor_ForgetsEventsLeftBehindByAPark(t *testing.T) {
 	) error {
 		return nil
 	}}})
-	d.Park("a")
+	d.Park("a", errImposed)
 
 	ticket, err := enqueueTicket(context.Background(), d, makeEvent("a", 1), func(context.Context) error { return nil })
 	if err != nil {
@@ -304,7 +304,7 @@ func TestUnrun_RemembersEventsLeftUndeliveredByAPark(t *testing.T) {
 	) error {
 		return nil
 	}}})
-	d.Park("a")
+	d.Park("a", errImposed)
 
 	ticket, err := enqueueTicket(context.Background(), d, makeEvent("a", 1), func(context.Context) error { return nil })
 	if err != nil {
@@ -342,7 +342,7 @@ func TestUnrun_RemembersQueuedEventsThatParkingTookOutOfMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d.Park("a")
+	d.Park("a", errImposed)
 	<-queued.Final
 	close(bus.release)
 
@@ -357,7 +357,7 @@ func TestUnrun_RemembersQueuedEventsThatParkingTookOutOfMemory(t *testing.T) {
 func TestParkUndelivered_RemembersTheNamedVersionsUntilTheParkLifts(t *testing.T) {
 	d := newDurable(t, nil)
 
-	d.Park("a", 3, 5)
+	d.Park("a", errImposed, 3, 5)
 
 	if len(halted(d)) != 1 {
 		t.Fatalf("halted = %v, want the aggregate parked", halted(d))
@@ -412,7 +412,7 @@ func TestTicketFor_ForgetsQueuedEventsWhenTheyAreParked(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d.Park("a")
+	d.Park("a", errImposed)
 	<-queued.Final
 	if _, found := d.TicketFor("a", 2); found {
 		t.Fatal("TicketFor kept a queued event that parking took out of memory")
@@ -537,7 +537,7 @@ func TestTicket_UnrunSaysWhyNoHandlerRan(t *testing.T) {
 		t.Fatalf("Unrun = %v for a delivered event", err)
 	}
 
-	d.Park("a")
+	d.Park("a", errImposed)
 	parked, _ := enqueueTicket(ctx, d, makeEvent("a", 2), ack)
 	recv(t, parked.Settled, "settled")
 	if err := parked.Unrun(); !errors.Is(err, asynxmd.ErrDeliveryParked) {

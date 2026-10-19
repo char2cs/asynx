@@ -126,9 +126,10 @@ func (d *dispatcher[T]) Unrun(
 
 func (d *dispatcher[T]) Park(
 	aggregateID string,
+	cause error,
 	undelivered ...int64,
 ) {
-	d.registry.Park(aggregateID, undelivered...)
+	d.registry.Park(aggregateID, cause, undelivered...)
 }
 
 func (d *dispatcher[T]) Supersede(
@@ -146,6 +147,12 @@ func (d *dispatcher[T]) ResumeUndelivered(
 	generation uint64,
 ) (bool, []int64) {
 	return d.registry.Lift(aggregateID, generation)
+}
+
+func (d *dispatcher[T]) Inspect(
+	aggregateID string,
+) asynxmd.DeliveryStatus {
+	return d.registry.Inspect(aggregateID)
 }
 
 func (d *dispatcher[T]) InHandler(

@@ -38,12 +38,15 @@ type Deliverer[T any] interface {
 	// halt has been closed since the job was popped (someone else settled the
 	// aggregate's fate meanwhile), and only then calls report. The order is
 	// what callers depend on: whoever report tells may resume the aggregate at
-	// once, and must find it parked. Every give-up path goes through it:
-	// attempts exhausted, a failed ack, an interrupt.
+	// once, and must find it parked. Every give-up path goes through it, with
+	// the cause Inspect then reports: attempts exhausted (ErrDeliveryParked
+	// wrapping the last handler error and the attempt count), a failed ack
+	// (the ack error), an interrupt (ErrDispatcherClosed).
 	ParkThenReport(
 		aggregateID string,
 		halt <-chan struct{},
 		job jobs.Job[T],
+		cause error,
 		report func(),
 	)
 }

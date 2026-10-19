@@ -113,7 +113,7 @@ func ticketForForgetsParkedEvents(
 	h harness,
 ) {
 	d := h.build(t, config(&bus{}, subscriber(succeed)))
-	d.Park("a")
+	d.Park("a", errImposed)
 	tk := mustEnqueue(t, d, durable(event("a", 1), acknowledge))
 	h.wait(t, tk.Final, "the parked event")
 	if _, found := d.TicketFor("a", 1); found {
@@ -133,7 +133,7 @@ func ticketForForgetsQueuedParkedEvents(
 	mustEnqueue(t, d, durable(event("a", 1), acknowledge))
 	h.wait(t, entered, "v1 to start")
 	queued := mustEnqueue(t, d, durable(event("a", 2), acknowledge))
-	d.Park("a")
+	d.Park("a", errImposed)
 	h.wait(t, queued.Final, "the queued event to leave memory")
 	if _, found := d.TicketFor("a", 2); found {
 		t.Fatal("TicketFor kept a queued event that parking took out of memory")
@@ -145,7 +145,7 @@ func unrunRemembersParkedEvents(
 	h harness,
 ) {
 	d := h.build(t, config(&bus{}, subscriber(succeed)))
-	d.Park("a")
+	d.Park("a", errImposed)
 	tk := mustEnqueue(t, d, durable(event("a", 1), acknowledge))
 	h.wait(t, tk.Final, "the parked event")
 
@@ -173,7 +173,7 @@ func unrunRemembersQueuedParkedEvents(
 	first := mustEnqueue(t, d, durable(event("a", 1), acknowledge))
 	h.wait(t, entered, "v1 to start")
 	queued := mustEnqueue(t, d, durable(event("a", 2), acknowledge))
-	d.Park("a")
+	d.Park("a", errImposed)
 	h.wait(t, queued.Final, "the queued event to leave memory")
 	closeOnce(release)
 	h.wait(t, first.Final, "v1")
@@ -215,7 +215,7 @@ func ticketUnrunSaysWhy(
 	if err := ran.Unrun(); err != nil {
 		t.Fatalf("Unrun = %v for a delivered event", err)
 	}
-	d.Park("a")
+	d.Park("a", errImposed)
 	parkedTicket := mustEnqueue(t, d, durable(event("a", 2), acknowledge))
 	h.wait(t, parkedTicket.Settled, "the parked event to settle")
 	if err := parkedTicket.Unrun(); !errors.Is(err, models.ErrDeliveryParked) {
@@ -236,7 +236,7 @@ func ticketOfAParkedEvent(
 		runs.add(e)
 		return nil
 	})))
-	d.Park("a")
+	d.Park("a", errImposed)
 
 	tk := mustEnqueue(t, d, durable(event("a", 1), acknowledge))
 	if err := h.final(t, tk, "the parked event"); !errors.Is(err, models.ErrDeliveryParked) {

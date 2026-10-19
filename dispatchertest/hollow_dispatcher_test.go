@@ -44,8 +44,15 @@ func (hollowDispatcher) Unrun(
 
 func (hollowDispatcher) Park(
 	string,
+	error,
 	...int64,
 ) {
+}
+
+func (hollowDispatcher) Inspect(
+	string,
+) models.DeliveryStatus {
+	return models.DeliveryStatus{}
 }
 
 func (hollowDispatcher) Supersede(

@@ -177,7 +177,7 @@ func (p *aggregatePool[T]) ack(
 	if err == nil {
 		return nil
 	}
-	p.deliverer.ParkThenReport(aggregateID, halt, job, func() {
+	p.deliverer.ParkThenReport(aggregateID, halt, job, err, func() {
 		p.reports.PublishError(job, err)
 	})
 	return err

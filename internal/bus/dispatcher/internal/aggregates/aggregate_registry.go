@@ -103,15 +103,16 @@ func (r *aggregateRegistry[J]) Retire(
 	return true
 }
 
-// Park parks the aggregate and records the given versions as undelivered (see
-// Registry.Park).
+// Park parks the aggregate for cause and records the given versions as
+// undelivered (see Registry.Park).
 func (r *aggregateRegistry[J]) Park(
 	aggregateID string,
+	cause error,
 	undelivered ...int64,
 ) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	rec := r.park(aggregateID)
+	rec := r.park(aggregateID, cause)
 	for _, v := range undelivered {
 		rec.undelivered[v] = asynxmd.ErrDeliveryParked
 	}
@@ -123,6 +124,7 @@ func (r *aggregateRegistry[J]) ParkIfCurrent(
 	aggregateID string,
 	halt <-chan struct{},
 	durable bool,
+	cause error,
 ) bool {
 	if !durable {
 		return false
@@ -132,7 +134,7 @@ func (r *aggregateRegistry[J]) ParkIfCurrent(
 	if isClosed(halt) {
 		return false
 	}
-	r.park(aggregateID)
+	r.park(aggregateID, cause)
 	return true
 }
 
@@ -182,7 +184,7 @@ func (r *aggregateRegistry[J]) Supersede(
 ) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	rec := r.park(aggregateID)
+	rec := r.park(aggregateID, nil)
 	r.lift(aggregateID, rec)
 }
 
@@ -195,6 +197,25 @@ func (r *aggregateRegistry[J]) Parks() map[string]uint64 {
 		addPark(parks, agg, rec)
 	}
 	return parks
+}
+
+// Inspect reports the aggregate's park, its cause and its undelivered versions,
+// read under one hold of the mutex (see Registry.Inspect).
+func (r *aggregateRegistry[J]) Inspect(
+	aggregateID string,
+) asynxmd.DeliveryStatus {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.records[aggregateID]
+	if !ok || !rec.parked {
+		return asynxmd.DeliveryStatus{}
+	}
+	return asynxmd.DeliveryStatus{
+		Parked:      true,
+		Generation:  rec.generation,
+		Cause:       rec.cause,
+		Undelivered: undeliveredOf(rec),
+	}
 }
 
 // Unrun reports ErrDeliveryParked for a version the aggregate's park left
@@ -271,8 +292,12 @@ func (r *aggregateRegistry[J]) admit(
 
 func (r *aggregateRegistry[J]) park(
 	agg string,
+	cause error,
 ) *record[J] {
 	rec := r.recordOf(agg)
+	if rec.cause == nil {
+		rec.cause = cause
+	}
 	if rec.parked {
 		return rec
 	}
@@ -307,6 +332,7 @@ func (r *aggregateRegistry[J]) lift(
 ) {
 	rec.parked = false
 	rec.generation = 0
+	rec.cause = nil
 	rec.undelivered = make(map[int64]error)
 	rec.halt = make(chan struct{})
 	r.discardIfEmpty(agg, rec)
@@ -341,6 +367,15 @@ func addPark[J Item](
 		return
 	}
 	parks[agg] = rec.generation
+}
+
+func undeliveredOf[J Item](
+	rec *record[J],
+) []int64 {
+	if len(rec.undelivered) == 0 {
+		return nil
+	}
+	return slices.Sorted(maps.Keys(rec.undelivered))
 }
 
 func signal(

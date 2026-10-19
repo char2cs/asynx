@@ -140,7 +140,7 @@ func resumeReportsTheLift(
 	if resume(d, "a") {
 		t.Fatal("lifted a park on an aggregate that is not parked")
 	}
-	d.Park("a")
+	d.Park("a", errImposed)
 	if !resume(d, "a") || resume(d, "a") {
 		t.Fatal("ResumeUndelivered must report the lift once")
 	}
@@ -401,7 +401,7 @@ func supersedeLeavesNoRecord(
 	h harness,
 ) {
 	d := h.build(t, config(&bus{}))
-	d.Park("a", 2)
+	d.Park("a", errImposed, 2)
 	d.Supersede("a")
 	if len(parked(d)) != 0 || d.Unrun("a", 2) != nil {
 		t.Fatalf("parked = %v, Unrun = %v; want unparked and no record", parked(d), d.Unrun("a", 2))
@@ -528,8 +528,8 @@ func parkWithoutAQueue(
 ) {
 	var acked sync.Map
 	d := h.build(t, config(&bus{}))
-	d.Park("ghost")
-	d.Park("ghost")
+	d.Park("ghost", errImposed)
+	d.Park("ghost", errImposed)
 	resume(d, "never-parked")
 
 	tk := mustEnqueue(t, d, durable(event("ghost", 1), ackInto(&acked, 1)))
@@ -566,7 +566,7 @@ func parkKeepsLiveOnlyJobs(
 	h.wait(t, started, "v1 running")
 	queued := mustEnqueue(t, d, durable(event("a", 2), acknowledge))
 	liveOnly := mustEnqueue(t, d, live(event("a", 3)))
-	d.Park("a")
+	d.Park("a", errImposed)
 	if err := h.final(t, queued, "the queued durable event"); !errors.Is(err, models.ErrDeliveryParked) {
 		t.Fatalf("durable final = %v, want ErrDeliveryParked", err)
 	}
@@ -604,7 +604,7 @@ func parkQueuedJobsReportUnrun(
 	mustEnqueue(t, d, durable(event("a", 1), acknowledge))
 	h.wait(t, started, "v1 running")
 	queued := mustEnqueue(t, d, durable(event("a", 2), acknowledge))
-	d.Park("a")
+	d.Park("a", errImposed)
 	h.wait(t, queued.Settled, "the queued event to settle")
 	if err := queued.Unrun(); !errors.Is(err, models.ErrDeliveryParked) {
 		t.Fatalf("Unrun = %v, want ErrDeliveryParked", err)
@@ -616,9 +616,9 @@ func parkMergesIntoAPark(
 	h harness,
 ) {
 	d := h.build(t, config(&bus{}))
-	d.Park("a", 3)
+	d.Park("a", errImposed, 3)
 	generation := d.Parks()["a"]
-	d.Park("a", 5)
+	d.Park("a", errImposed, 5)
 	if again := d.Parks()["a"]; again != generation {
 		t.Fatalf("generation = %d after parking again, want the first park's %d", again, generation)
 	}
@@ -633,10 +633,10 @@ func parkAfterALift(
 	h harness,
 ) {
 	d := h.build(t, config(&bus{}))
-	d.Park("a")
+	d.Park("a", errImposed)
 	first := d.Parks()["a"]
 	resume(d, "a")
-	d.Park("a")
+	d.Park("a", errImposed)
 	if again, isParked := d.Parks()["a"]; !isParked || again == first {
 		t.Fatalf("generation after a lift and a new park = %d (parked %v), want parked with a generation other than %d", again, isParked, first)
 	}
@@ -647,7 +647,7 @@ func parkRemembersTheNamedVersions(
 	h harness,
 ) {
 	d := h.build(t, config(&bus{}))
-	d.Park("a", 3, 5)
+	d.Park("a", errImposed, 3, 5)
 	if !slices.Equal(parked(d), []string{"a"}) {
 		t.Fatalf("parked = %v, want [a]", parked(d))
 	}
@@ -761,7 +761,7 @@ func resumeUndeliveredReturnsTheRecord(
 	if lifted, undelivered := d.ResumeUndelivered("a", 1); lifted || undelivered != nil {
 		t.Fatalf("not parked: got %v, %v", lifted, undelivered)
 	}
-	d.Park("a", 7, 3, 5)
+	d.Park("a", errImposed, 7, 3, 5)
 	lifted, undelivered := d.ResumeUndelivered("a", d.Parks()["a"])
 	if !lifted || !slices.Equal(undelivered, []int64{3, 5, 7}) {
 		t.Fatalf("ResumeUndelivered = %v, %v; want true, [3 5 7]", lifted, undelivered)
@@ -776,10 +776,10 @@ func resumeUndeliveredLeavesANewerPark(
 	h harness,
 ) {
 	d := h.build(t, config(&bus{}))
-	d.Park("a")
+	d.Park("a", errImposed)
 	listed := d.Parks()["a"]
 	resume(d, "a")
-	d.Park("a", 4)
+	d.Park("a", errImposed, 4)
 
 	if lifted, _ := d.ResumeUndelivered("a", listed); lifted {
 		t.Fatal("lifted a park other than the one listed")

@@ -448,7 +448,7 @@ func TestExecute_Idempotent_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWas
 	if err := wait(ctx); err != nil {
 		t.Fatal(err)
 	}
-	ex.dispatcher.Park("agg")
+	ex.dispatcher.Park("agg", errors.New("parked by the test"))
 	leftBehind := idemUpdate{UpdateOrderCmd: update("agg", 2), Cmd: "cmd-2"}
 	if _, _, err := ex.ExecuteAsync(ctx, leftBehind); err != nil {
 		t.Fatal(err)

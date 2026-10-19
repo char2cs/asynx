@@ -87,8 +87,8 @@ func TestSupersede_LetsTheTombstoneThroughAFailingDelivery(t *testing.T) {
 // Parking an aggregate twice is idempotent.
 func TestPark_OfAnAggregateWithoutAQueueStillBlocksItsDurableEvents(t *testing.T) {
 	d := newDurable(t, nil)
-	d.Park("ghost")
-	d.Park("ghost")
+	d.Park("ghost", errImposed)
+	d.Park("ghost", errImposed)
 	resume(d, "never-parked")
 
 	var acked sync.Map
@@ -126,7 +126,7 @@ func TestPark_KeepsLiveOnlyJobsQueuedAndDropsDurableOnes(t *testing.T) {
 	durable, _ := enqueueTicket(ctx, d, makeEvent("a", 2), func(context.Context) error { return nil })
 	live, _ := enqueueTicket(ctx, d, makeEvent("a", 3), nil)
 
-	d.Park("a")
+	d.Park("a", errImposed)
 	if err := final(t, durable, "durable ticket"); !errors.Is(err, asynxmd.ErrDeliveryParked) {
 		t.Fatalf("durable final = %v, want ErrDeliveryParked", err)
 	}
@@ -155,7 +155,7 @@ func TestPark_QueuedDurableJobsReportThemselvesUnrun(t *testing.T) {
 	recv(t, started, "v1 running")
 	queued, _ := enqueueTicket(ctx, d, makeEvent("a", 2), ack)
 
-	d.Park("a")
+	d.Park("a", errImposed)
 	recv(t, queued.Settled, "settled")
 	if err := queued.Unrun(); !errors.Is(err, asynxmd.ErrDeliveryParked) {
 		t.Fatalf("Unrun = %v, want ErrDeliveryParked", err)
@@ -168,7 +168,7 @@ func TestResume_ReportsWhetherItLiftedAPark(t *testing.T) {
 	if resume(d, "a") {
 		t.Fatal("Resume of an aggregate that is not parked reported a lift")
 	}
-	d.Park("a")
+	d.Park("a", errImposed)
 	if !resume(d, "a") || resume(d, "a") {
 		t.Fatal("Resume must report the lift once")
 	}
@@ -179,7 +179,7 @@ func TestResumeUndelivered_ReturnsWhatTheParkLeftUndeliveredAndForgetsIt(t *test
 	if lifted, undelivered := d.ResumeUndelivered("a", 1); lifted || undelivered != nil {
 		t.Fatalf("not parked: got %v, %v", lifted, undelivered)
 	}
-	d.Park("a", 7, 3, 5)
+	d.Park("a", errImposed, 7, 3, 5)
 	lifted, undelivered := d.ResumeUndelivered("a", d.Parks()["a"])
 	if !lifted || !slices.Equal(undelivered, []int64{3, 5, 7}) {
 		t.Fatalf("ResumeUndelivered = %v, %v; want true, [3 5 7]", lifted, undelivered)
@@ -194,10 +194,10 @@ func TestResumeUndelivered_ReturnsWhatTheParkLeftUndeliveredAndForgetsIt(t *test
 // undelivered, alone.
 func TestResumeUndelivered_LeavesAParkImposedAgainSinceItWasListed(t *testing.T) {
 	d := newDurable(t, nil)
-	d.Park("a")
+	d.Park("a", errImposed)
 	listed := d.Parks()["a"]
 	resume(d, "a")
-	d.Park("a", 4)
+	d.Park("a", errImposed, 4)
 
 	if lifted, _ := d.ResumeUndelivered("a", listed); lifted {
 		t.Fatal("lifted a park other than the one listed")

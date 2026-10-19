@@ -17,12 +17,25 @@ func TestParkThenReport_ParksTheAggregateBeforeReporting(t *testing.T) {
 	job, halt := f.pop(t, acked("test.event"))
 
 	var parkedWhenTold []string
-	f.deliverer.ParkThenReport("a", halt, job, func() {
+	f.deliverer.ParkThenReport("a", halt, job, errStopped, func() {
 		parkedWhenTold = slices.Sorted(maps.Keys(f.registry.Parks()))
 	})
 
 	if !slices.Equal(parkedWhenTold, []string{"a"}) {
 		t.Fatalf("parked when told = %v, want [a]", parkedWhenTold)
+	}
+}
+
+var errStopped = errors.New("stopped")
+
+func TestParkThenReport_RecordsTheCause(t *testing.T) {
+	f := newFixture(asynxmd.DispatcherConfig[int]{})
+	job, halt := f.pop(t, acked("test.event"))
+
+	f.deliverer.ParkThenReport("a", halt, job, errStopped, func() {})
+
+	if got := f.registry.Inspect("a"); !got.Parked || !errors.Is(got.Cause, errStopped) {
+		t.Fatalf("Inspect = %+v, want parked with %v", got, errStopped)
 	}
 }
 
@@ -32,7 +45,7 @@ func TestParkThenReport_LeavesASettledAggregateAloneButStillReports(t *testing.T
 	f.registry.Supersede("a")
 
 	reported := false
-	f.deliverer.ParkThenReport("a", halt, job, func() { reported = true })
+	f.deliverer.ParkThenReport("a", halt, job, errStopped, func() { reported = true })
 
 	if len(f.registry.Parks()) != 0 {
 		t.Fatalf("parks = %v: a superseded aggregate was parked again", f.registry.Parks())
@@ -46,7 +59,7 @@ func TestParkThenReport_NeverParksForAJobWithoutAnAck(t *testing.T) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{})
 	job, halt := f.pop(t, tombstone(nil))
 
-	f.deliverer.ParkThenReport("a", halt, job, func() {})
+	f.deliverer.ParkThenReport("a", halt, job, errStopped, func() {})
 
 	if len(f.registry.Parks()) != 0 {
 		t.Fatalf("parks = %v, want none for a nil-Ack job", f.registry.Parks())
@@ -202,7 +215,7 @@ func TestDeliver_AParkDuringTheBackoffEndsTheDelivery(t *testing.T) {
 	go func() { done <- f.deliverer.Deliver("a", halt, job) }()
 
 	waitUntil(t, func() bool { return len(f.reports.all()) == 1 })
-	f.registry.Park("a")
+	f.registry.Park("a", errStopped)
 
 	if err := <-done; !errors.Is(err, asynxmd.ErrDeliveryParked) {
 		t.Fatalf("Deliver = %v, want ErrDeliveryParked", err)

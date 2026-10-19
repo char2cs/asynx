@@ -98,7 +98,7 @@ func (p *Processor[T]) resumeAggregate(
 		if err == nil {
 			return nil
 		}
-		p.dispatcher.Park(agg, stillUndelivered(undelivered, remaining)...)
+		p.dispatcher.Park(agg, nil, stillUndelivered(undelivered, remaining)...)
 		return fmt.Errorf("asynx: resume %s: %w", agg, err)
 	})
 }
@@ -169,7 +169,7 @@ func (p *Processor[T]) Recover(
 		if ctx.Err() != nil || errors.Is(err, asynxmd.ErrDispatcherClosed) {
 			return fmt.Errorf("asynx: recovery: %w", err)
 		}
-		p.dispatcher.Park(agg, undelivered...)
+		p.dispatcher.Park(agg, nil, undelivered...)
 		p.reportPublishError(ctx, asynxmd.Event[T]{AggregateID: agg, Version: backlogs[agg][0].Version},
 			fmt.Errorf("recovery: %w", err))
 	}

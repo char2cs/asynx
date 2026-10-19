@@ -27,9 +27,10 @@ func (d *fakeDeliverer) ParkThenReport(
 	aggregateID string,
 	halt <-chan struct{},
 	job jobs.Job[int],
+	cause error,
 	report func(),
 ) {
 	d.journal.add("park")
-	d.registry.ParkIfCurrent(aggregateID, halt, job.Acked())
+	d.registry.ParkIfCurrent(aggregateID, halt, job.Acked(), cause)
 	report()
 }

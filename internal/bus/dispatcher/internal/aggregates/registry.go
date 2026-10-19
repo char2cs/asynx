@@ -1,5 +1,7 @@
 package aggregates
 
+import asynxmd "github.com/char2cs/asynx/models"
+
 // Registry holds one record per aggregate under one mutex (see the package
 // doc for the lock rule and the park state table). Each method is atomic: it
 // takes the mutex once and changes the record entirely under that hold.
@@ -52,22 +54,34 @@ type Registry[J Item] interface {
 	// gives up) and drops the queued durable jobs: each is marked unrun,
 	// recorded and completed with ErrDeliveryParked under the mutex; live-only
 	// jobs stay queued. On an already parked aggregate it only merges the
-	// versions, keeping the generation. A record is created for an aggregate
-	// the registry knew nothing of.
+	// versions, keeping the generation. cause is recorded as the reason for
+	// the park, unless the record already holds a non-nil cause: the first
+	// non-nil cause is kept until the park lifts. A record is created for an
+	// aggregate the registry knew nothing of.
 	Park(
 		aggregateID string,
+		cause error,
 		undelivered ...int64,
 	)
-	// ParkIfCurrent parks the aggregate as Park does, unless durable is false
-	// or halt (the channel Pop returned with the job) has been closed since:
-	// then someone else has already settled the aggregate's fate (a Supersede
-	// abandoned the delivery, a park was imposed and possibly lifted). It
-	// reports whether halt was still open, so the park call took effect.
+	// ParkIfCurrent parks the aggregate for cause as Park does, unless durable
+	// is false or halt (the channel Pop returned with the job) has been closed
+	// since: then someone else has already settled the aggregate's fate (a
+	// Supersede abandoned the delivery, a park was imposed and possibly
+	// lifted). It reports whether halt was still open, so the park call took
+	// effect.
 	ParkIfCurrent(
 		aggregateID string,
 		halt <-chan struct{},
 		durable bool,
+		cause error,
 	) bool
+	// Inspect reports, under one hold of the mutex, whether the aggregate is
+	// parked, the park's generation, its cause and the versions it left
+	// undelivered, in ascending order. An aggregate that is not parked, or
+	// that the registry holds no record of, has the zero DeliveryStatus.
+	Inspect(
+		aggregateID string,
+	) asynxmd.DeliveryStatus
 	// SettleIfParked settles job as unrun with ErrDeliveryParked if its
 	// aggregate is parked, or was parked since halt was taken, and reports
 	// whether it did. Only a park still in force records the version as

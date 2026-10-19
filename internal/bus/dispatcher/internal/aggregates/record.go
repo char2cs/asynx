@@ -7,5 +7,6 @@ type record[J Item] struct {
 	halt        chan struct{}
 	parked      bool
 	generation  uint64
+	cause       error
 	undelivered map[int64]error
 }

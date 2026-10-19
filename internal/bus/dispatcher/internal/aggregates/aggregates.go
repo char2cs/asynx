@@ -1,8 +1,8 @@
 // Package aggregates is the dispatcher's per-aggregate registry: for every
 // aggregate it knows of, one record holding the FIFO of queued jobs, the wake
 // channel of the aggregate's worker, the halt channel that interrupts a delivery
-// in progress, and the park (its generation and the versions it left
-// undelivered).
+// in progress, and the park (its generation, its cause and the versions it
+// left undelivered).
 //
 // # Lock rule
 //
@@ -24,14 +24,15 @@
 //
 //	| State             | Event                                         | Next state    | Effect                                                                                       |
 //	|-------------------|-----------------------------------------------|---------------|----------------------------------------------------------------------------------------------|
-//	| Running           | Park(agg, v...)                               | Parked(gen+1) | close halt; queued durable jobs leave memory, recorded undelivered, completed ErrDeliveryParked |
-//	| Parked(g)         | Park(...)                                     | Parked(g)     | merge versions                                                                               |
-//	| Parked(g)         | Lift(agg, g)                                  | Running       | return and clear undelivered; replace halt channel                                           |
+//	| Running           | Park(agg, cause, v...)                        | Parked(gen+1) | record cause; close halt; queued durable jobs leave memory, recorded undelivered, completed ErrDeliveryParked |
+//	| Parked(g)         | Park(...)                                     | Parked(g)     | merge versions; keep first non-nil cause                                                     |
+//	| Parked(g)         | Lift(agg, g)                                  | Running       | return and clear undelivered; clear cause; replace halt channel                              |
 //	| Parked(g)         | Lift(agg, other)                              | Parked(g)     | no-op, lifted=false                                                                          |
 //	| Parked(g)         | Enqueue durable                               | Parked(g)     | not queued; recorded; job unrun and completed ErrDeliveryParked                              |
 //	| Running or Parked | Supersede                                     | Running       | drop queued durable jobs; clear record                                                       |
 //	| Running           | worker: ParkIfCurrent(halt), halt still open  | Parked(gen+1) | as Park                                                                                      |
 //	| any               | worker: ParkIfCurrent(halt), halt closed      | unchanged     | someone else already settled it                                                              |
+//	| any               | Inspect                                       | unchanged     | read parked, generation, cause, undelivered; zero status unless parked                       |
 //
 // Generations come from one counter shared by every aggregate, so a park that
 // is lifted and imposed again never repeats a generation a caller has listed.

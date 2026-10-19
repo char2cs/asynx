@@ -22,8 +22,10 @@ import "context"
 //  4. When the attempts of a request that carries an Ack run out, DeadLetter
 //     may accept the event, which then counts as delivered; a deletion marker
 //     (a DispatchTombstone, or a redelivered event named ForgetEventName) is
-//     never dead-lettered. Otherwise the aggregate is parked; so it is when
-//     Ack fails, on Interrupt while such a request is retrying, and on Park.
+//     never dead-lettered. Otherwise the aggregate is parked, with
+//     ErrDeliveryParked wrapping the last handler error as the cause; so it
+//     is when Ack fails (the ack error), on Interrupt while such a request is
+//     retrying (ErrDispatcherClosed), and on Park (the cause given).
 //     A request without an Ack whose attempts run out, or that is
 //     interrupted, ends with an error but does not park the aggregate.
 //  5. While an aggregate is parked, a request carrying an Ack is not queued:
@@ -34,7 +36,9 @@ import "context"
 //  6. ResumeUndelivered(aggregateID, generation) lifts only that generation's
 //     park and returns the recorded undelivered versions; a stale generation
 //     is a no-op. Park re-imposes a park with a new generation; on an already
-//     parked aggregate it merges the versions into the record.
+//     parked aggregate it merges the versions into the record and keeps the
+//     first non-nil cause. Inspect reports the park, its cause and its
+//     undelivered versions; the cause is cleared when the park lifts.
 //  7. Supersede abandons the aggregate's queued and retrying durable
 //     deliveries and leaves it unparked with no record.
 //  8. TicketFor finds a ticket exactly while a delivery is queued, running or
@@ -96,11 +100,14 @@ type Dispatcher[T any] interface {
 	// carrying an Ack are not queued until ResumeUndelivered lifts the park.
 	// Queued requests without an Ack stay queued. The undelivered
 	// versions, still pending in the delivery log, are added to the record, so
-	// a retry of the command that produced one is told so (see Unrun). Parking
-	// an aggregate that is already parked keeps its generation and merges the
-	// versions.
+	// a retry of the command that produced one is told so (see Unrun). cause
+	// says why, and Inspect reports it while the park lasts. Parking an
+	// aggregate that is already parked keeps its generation, merges the
+	// versions and keeps the first non-nil cause; a nil cause is replaced by
+	// the cause of a later park.
 	Park(
 		aggregateID string,
+		cause error,
 		undelivered ...int64,
 	)
 
@@ -130,6 +137,16 @@ type Dispatcher[T any] interface {
 		aggregateID string,
 		generation uint64,
 	) (lifted bool, undelivered []int64)
+
+	// Inspect reports the aggregate's delivery status, read in one atomic
+	// step: whether it is parked, the park's generation (as Parks lists it),
+	// the cause that parked it and, in ascending order, the versions the park
+	// left undelivered. An aggregate that is not parked, or that the
+	// dispatcher knows nothing of, has the zero DeliveryStatus. Inspect
+	// changes nothing.
+	Inspect(
+		aggregateID string,
+	) DeliveryStatus
 
 	// InHandler reports whether ctx belongs to a handler this dispatcher is
 	// running for aggregateID. Waiting on that aggregate's deliveries from

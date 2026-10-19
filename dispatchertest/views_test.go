@@ -47,8 +47,8 @@ func TestViews_SubscriberNamesSkipsErrorsWithoutASubscriber(t *testing.T) {
 func TestViews_ParksAndResume(t *testing.T) {
 	h := harness{factory: defaultFactory, patience: patience}
 	d := h.build(t, config(&bus{}))
-	d.Park("b")
-	d.Park("a")
+	d.Park("b", errImposed)
+	d.Park("a", errImposed)
 	if got := parked(d); !slices.Equal(got, []string{"a", "b"}) {
 		t.Fatalf("parked = %v, want [a b]", got)
 	}

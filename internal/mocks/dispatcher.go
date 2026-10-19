@@ -11,7 +11,9 @@ import (
 
 // Dispatcher is a recording fake of models.Dispatcher. It records every call
 // in order and every request it is handed, settles each ticket at once, and
-// lets a test script an Enqueue or Close failure. It delivers nothing.
+// lets a test script an Enqueue or Close failure. It delivers nothing. It keeps
+// the parks it is told of, with their first non-nil cause, for Parks and
+// Inspect.
 type Dispatcher[T any] struct {
 	mu          sync.Mutex
 	config      models.DispatcherConfig[T]
@@ -19,6 +21,7 @@ type Dispatcher[T any] struct {
 	requests    []models.DispatchRequest[T]
 	parkCalls   []ParkCall
 	parks       map[string]uint64
+	causes      map[string]error
 	nextPark    uint64
 	enqueueErr  error
 	closeErr    error
@@ -30,6 +33,7 @@ type Dispatcher[T any] struct {
 func NewDispatcher[T any]() *Dispatcher[T] {
 	return &Dispatcher[T]{
 		parks:       make(map[string]uint64),
+		causes:      make(map[string]error),
 		interrupted: make(chan struct{}),
 	}
 }
@@ -126,17 +130,37 @@ func (d *Dispatcher[T]) Unrun(
 
 func (d *Dispatcher[T]) Park(
 	aggregateID string,
+	cause error,
 	undelivered ...int64,
 ) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.calls = append(d.calls, "Park")
-	d.parkCalls = append(d.parkCalls, ParkCall{AggregateID: aggregateID, Undelivered: undelivered})
+	d.parkCalls = append(d.parkCalls, ParkCall{AggregateID: aggregateID, Cause: cause, Undelivered: undelivered})
+	if d.causes[aggregateID] == nil {
+		d.causes[aggregateID] = cause
+	}
 	if _, parked := d.parks[aggregateID]; parked {
 		return
 	}
 	d.nextPark++
 	d.parks[aggregateID] = d.nextPark
+}
+
+// Inspect reports whether the aggregate is parked, the park's generation and
+// the first non-nil cause it was parked with. The fake keeps no undelivered
+// versions, so Undelivered is always nil.
+func (d *Dispatcher[T]) Inspect(
+	aggregateID string,
+) models.DeliveryStatus {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.calls = append(d.calls, "Inspect")
+	generation, parked := d.parks[aggregateID]
+	if !parked {
+		return models.DeliveryStatus{}
+	}
+	return models.DeliveryStatus{Parked: true, Generation: generation, Cause: d.causes[aggregateID]}
 }
 
 func (d *Dispatcher[T]) Supersede(
@@ -146,6 +170,7 @@ func (d *Dispatcher[T]) Supersede(
 	defer d.mu.Unlock()
 	d.calls = append(d.calls, "Supersede")
 	delete(d.parks, aggregateID)
+	delete(d.causes, aggregateID)
 }
 
 func (d *Dispatcher[T]) Parks() map[string]uint64 {
@@ -166,6 +191,7 @@ func (d *Dispatcher[T]) ResumeUndelivered(
 		return false, nil
 	}
 	delete(d.parks, aggregateID)
+	delete(d.causes, aggregateID)
 	return true, nil
 }
 

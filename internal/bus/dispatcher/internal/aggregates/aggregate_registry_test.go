@@ -2,6 +2,7 @@ package aggregates_test
 
 import (
 	"errors"
+	"reflect"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -166,7 +167,7 @@ func TestPark_KeepsLiveOnlyJobsQueuedAndDropsDurableOnes(t *testing.T) {
 	enqueue(t, r, durable)
 	enqueue(t, r, live)
 
-	r.Park("a")
+	r.Park("a", errHalted)
 
 	if !closed(halt) {
 		t.Fatal("Park left the halt channel of the running delivery open")
@@ -189,7 +190,7 @@ func TestPark_QueuedDurableJobsReportThemselvesUnrun(t *testing.T) {
 	for _, job := range jobs {
 		enqueue(t, r, job)
 	}
-	r.Park("a")
+	r.Park("a", errHalted)
 	for _, job := range jobs {
 		assertDroppedAsParked(t, r, job)
 	}
@@ -197,9 +198,9 @@ func TestPark_QueuedDurableJobsReportThemselvesUnrun(t *testing.T) {
 
 func TestPark_OfAParkedAggregateMergesTheVersionsAndKeepsTheGeneration(t *testing.T) {
 	r, _ := newRegistry()
-	r.Park("a", 1)
+	r.Park("a", errHalted, 1)
 	g := generation(t, r, "a")
-	r.Park("a", 2)
+	r.Park("a", errHalted, 2)
 	if again := generation(t, r, "a"); again != g {
 		t.Fatalf("generation %d became %d on a second Park", g, again)
 	}
@@ -213,7 +214,7 @@ func TestPark_OfAParkedAggregateMergesTheVersionsAndKeepsTheGeneration(t *testin
 
 func TestPark_OfAnAggregateWithoutAQueueStillBlocksItsDurableEvents(t *testing.T) {
 	r, hooks := newRegistry()
-	r.Park("ghost")
+	r.Park("ghost", errHalted)
 	job := durableItem("ghost", 1)
 	if !enqueue(t, r, job).Parked {
 		t.Fatal("a durable job of a parked aggregate was admitted")
@@ -227,7 +228,7 @@ func TestPark_OfAnAggregateWithoutAQueueStillBlocksItsDurableEvents(t *testing.T
 func TestPark_ADurableEnqueueOnAParkedAggregateIsSettledUnrun(t *testing.T) {
 	r, hooks := newRegistry()
 	enqueue(t, r, liveItem("a", 1))
-	r.Park("a")
+	r.Park("a", errHalted)
 	g := generation(t, r, "a")
 
 	job := durableItem("a", 2)
@@ -253,14 +254,14 @@ func TestPark_ADurableEnqueueOnAParkedAggregateIsSettledUnrun(t *testing.T) {
 
 func TestPark_TakesANewGenerationEachTimeItIsImposed(t *testing.T) {
 	r, _ := newRegistry()
-	r.Park("a")
+	r.Park("a", errHalted)
 	first := generation(t, r, "a")
-	r.Park("b")
+	r.Park("b", errHalted)
 	if generation(t, r, "b") == first {
 		t.Fatal("two aggregates share a generation")
 	}
 	r.Lift("a", first)
-	r.Park("a")
+	r.Park("a", errHalted)
 	if generation(t, r, "a") == first {
 		t.Fatal("a park imposed again kept its old generation")
 	}
@@ -270,7 +271,7 @@ func TestResumeUndelivered_ReturnsWhatTheParkLeftUndeliveredAndForgetsIt(t *test
 	r, _ := newRegistry()
 	enqueue(t, r, durableItem("a", 1))
 	_, halt := pop(t, r, "a")
-	r.Park("a", 3, 1)
+	r.Park("a", errHalted, 3, 1)
 	g := generation(t, r, "a")
 
 	lifted, undelivered := r.Lift("a", g)
@@ -309,9 +310,9 @@ func assertFreshHalt(
 func TestResumeUndelivered_ReturnsTheVersionsAscending(t *testing.T) {
 	r, _ := newRegistry()
 	enqueue(t, r, durableItem("a", 4))
-	r.Park("a", 9, 2)
+	r.Park("a", errHalted, 9, 2)
 	enqueue(t, r, durableItem("a", 3))
-	r.Park("a", 5)
+	r.Park("a", errHalted, 5)
 	_, undelivered := r.Lift("a", generation(t, r, "a"))
 	if !slices.Equal(undelivered, []int64{2, 3, 4, 5, 9}) {
 		t.Fatalf("undelivered = %v, want [2 3 4 5 9]", undelivered)
@@ -320,10 +321,10 @@ func TestResumeUndelivered_ReturnsTheVersionsAscending(t *testing.T) {
 
 func TestResumeUndelivered_LeavesAParkImposedAgainSinceItWasListed(t *testing.T) {
 	r, _ := newRegistry()
-	r.Park("a", 1)
+	r.Park("a", errHalted, 1)
 	stale := generation(t, r, "a")
 	r.Lift("a", stale)
-	r.Park("a", 2)
+	r.Park("a", errHalted, 2)
 	current := generation(t, r, "a")
 
 	lifted, undelivered := r.Lift("a", stale)
@@ -343,7 +344,7 @@ func TestResumeUndelivered_WithAStaleGenerationChangesNothing(t *testing.T) {
 	r, _ := newRegistry()
 	enqueue(t, r, liveItem("a", 1))
 	_, halt := pop(t, r, "a")
-	r.Park("a", 7)
+	r.Park("a", errHalted, 7)
 	g := generation(t, r, "a")
 
 	if lifted, undelivered := r.Lift("a", g+1); lifted || undelivered != nil {
@@ -400,7 +401,7 @@ func TestSupersede_DropsQueuedDurableJobsAndLeavesNoPark(t *testing.T) {
 
 func TestSupersede_OfAParkedAggregateClearsTheRecord(t *testing.T) {
 	r, hooks := newRegistry()
-	r.Park("a", 1, 2)
+	r.Park("a", errHalted, 1, 2)
 	r.Supersede("a")
 	if len(r.Parks()) != 0 || r.Unrun("a", 1) != nil {
 		t.Fatal("Supersede left the park or its record")
@@ -420,7 +421,7 @@ func TestParkIfCurrent_WithAnOpenHaltParksTheAggregate(t *testing.T) {
 	queued := durableItem("a", 2)
 	enqueue(t, r, queued)
 
-	if !r.ParkIfCurrent("a", halt, true) {
+	if !r.ParkIfCurrent("a", halt, true, errHalted) {
 		t.Fatal("ParkIfCurrent under an open halt did not park")
 	}
 	generation(t, r, "a")
@@ -434,7 +435,7 @@ func TestParkIfCurrent_OfALiveOnlyJobDoesNothing(t *testing.T) {
 	r, _ := newRegistry()
 	enqueue(t, r, liveItem("a", 1))
 	_, halt := pop(t, r, "a")
-	if r.ParkIfCurrent("a", halt, false) {
+	if r.ParkIfCurrent("a", halt, false, errHalted) {
 		t.Fatal("ParkIfCurrent parked for a live-only job")
 	}
 	if len(r.Parks()) != 0 || closed(halt) {
@@ -450,7 +451,7 @@ func TestParkIfCurrent_WithAClosedHaltDoesNothing(t *testing.T) {
 	queued := durableItem("a", 2)
 	enqueue(t, r, queued)
 
-	if r.ParkIfCurrent("a", halt, true) {
+	if r.ParkIfCurrent("a", halt, true, errHalted) {
 		t.Fatal("ParkIfCurrent with a closed halt reported a park")
 	}
 	if len(r.Parks()) != 0 {
@@ -463,9 +464,9 @@ func TestParkIfCurrent_AfterALiftDoesNotParkAgain(t *testing.T) {
 	r, _ := newRegistry()
 	enqueue(t, r, durableItem("a", 1))
 	_, halt := pop(t, r, "a")
-	r.Park("a")
+	r.Park("a", errHalted)
 	r.Lift("a", generation(t, r, "a"))
-	if r.ParkIfCurrent("a", halt, true) || len(r.Parks()) != 0 {
+	if r.ParkIfCurrent("a", halt, true, errHalted) || len(r.Parks()) != 0 {
 		t.Fatal("ParkIfCurrent re-imposed a park that was lifted")
 	}
 }
@@ -475,7 +476,7 @@ func TestSettleIfParked_RecordsAParkStillInForce(t *testing.T) {
 	job := durableItem("a", 1)
 	enqueue(t, r, job)
 	popped, halt := pop(t, r, "a")
-	r.Park("a")
+	r.Park("a", errHalted)
 	if !r.SettleIfParked("a", halt, popped) {
 		t.Fatal("SettleIfParked of a parked aggregate refused")
 	}
@@ -493,7 +494,7 @@ func TestSettleIfParked_AfterTheLiftSettlesWithoutARecord(t *testing.T) {
 	job := durableItem("a", 1)
 	enqueue(t, r, job)
 	popped, halt := pop(t, r, "a")
-	r.Park("a")
+	r.Park("a", errHalted)
 	r.Lift("a", generation(t, r, "a"))
 
 	if !r.SettleIfParked("a", halt, popped) {
@@ -558,7 +559,7 @@ func TestRetire_KeepsTheRecordOfAParkedAggregate(t *testing.T) {
 	r, hooks := newRegistry()
 	enqueue(t, r, durableItem("a", 1))
 	pop(t, r, "a")
-	r.Park("a", 7)
+	r.Park("a", errHalted, 7)
 	g := generation(t, r, "a")
 
 	if !r.Retire("a") {
@@ -585,7 +586,7 @@ func TestRetire_ThenLiftLeavesNoRecord(t *testing.T) {
 	r, _ := newRegistry()
 	enqueue(t, r, liveItem("a", 1))
 	pop(t, r, "a")
-	r.Park("a", 1)
+	r.Park("a", errHalted, 1)
 	r.Retire("a")
 	r.Lift("a", generation(t, r, "a"))
 	if r.Wake("a") != nil || r.Unrun("a", 1) != nil {
@@ -630,7 +631,7 @@ func parkAndLift(
 ) {
 	defer wg.Done()
 	for !closed(done) {
-		r.Park("a")
+		r.Park("a", errHalted)
 		violations.Add(popWhileParked(r))
 		r.Lift("a", r.Parks()["a"])
 	}
@@ -683,5 +684,106 @@ func assertSettledOnce(
 	}
 	if errors.Is(err, asynxmd.ErrDeliveryParked) != errors.Is(unrun, asynxmd.ErrDeliveryParked) {
 		t.Fatalf("%d: completed with %v but unrun = %v", job.version, err, unrun)
+	}
+}
+
+var (
+	errHalted = errors.New("test: halted")
+	errLater  = errors.New("test: a later cause")
+)
+
+func TestInspect_UnknownAggregateIsTheZeroStatus(t *testing.T) {
+	r, _ := newRegistry()
+	enqueue(t, r, durableItem("busy", 1))
+	if got := r.Inspect("ghost"); !reflect.DeepEqual(got, asynxmd.DeliveryStatus{}) {
+		t.Fatalf("Inspect(ghost) = %+v, want the zero status", got)
+	}
+	if got := r.Inspect("busy"); !reflect.DeepEqual(got, asynxmd.DeliveryStatus{}) {
+		t.Fatalf("Inspect(busy) = %+v, want the zero status for a running aggregate", got)
+	}
+}
+
+func TestInspect_ReportsParkGenerationCauseAndUndelivered(t *testing.T) {
+	r, _ := newRegistry()
+	enqueue(t, r, durableItem("a", 4))
+	r.Park("a", errHalted, 9, 2)
+	got := r.Inspect("a")
+	if !got.Parked || got.Generation != generation(t, r, "a") {
+		t.Fatalf("Inspect = %+v, want parked with the generation Parks lists", got)
+	}
+	if !errors.Is(got.Cause, errHalted) {
+		t.Fatalf("Cause = %v, want %v", got.Cause, errHalted)
+	}
+	if !slices.Equal(got.Undelivered, []int64{2, 4, 9}) {
+		t.Fatalf("Undelivered = %v, want [2 4 9] ascending", got.Undelivered)
+	}
+}
+
+func TestPark_KeepsTheFirstNonNilCause(t *testing.T) {
+	r, _ := newRegistry()
+	r.Park("a", errHalted, 1)
+	r.Park("a", errLater, 2)
+	r.Park("a", nil, 3)
+	got := r.Inspect("a")
+	if !errors.Is(got.Cause, errHalted) || errors.Is(got.Cause, errLater) {
+		t.Fatalf("Cause = %v, want the first one, %v", got.Cause, errHalted)
+	}
+	if !slices.Equal(got.Undelivered, []int64{1, 2, 3}) {
+		t.Fatalf("Undelivered = %v, want [1 2 3]", got.Undelivered)
+	}
+}
+
+func TestPark_ALaterCauseReplacesANilOne(t *testing.T) {
+	r, _ := newRegistry()
+	r.Park("a", nil)
+	if got := r.Inspect("a"); !got.Parked || got.Cause != nil {
+		t.Fatalf("Inspect = %+v, want parked with no cause", got)
+	}
+	r.Park("a", errLater)
+	if got := r.Inspect("a"); !errors.Is(got.Cause, errLater) {
+		t.Fatalf("Cause = %v, want %v", got.Cause, errLater)
+	}
+}
+
+func TestParkIfCurrent_RecordsTheCause(t *testing.T) {
+	r, _ := newRegistry()
+	enqueue(t, r, durableItem("a", 1))
+	_, halt := pop(t, r, "a")
+	r.ParkIfCurrent("a", halt, true, errHalted)
+	if got := r.Inspect("a"); !got.Parked || !errors.Is(got.Cause, errHalted) {
+		t.Fatalf("Inspect = %+v, want parked with %v", got, errHalted)
+	}
+}
+
+func TestInspect_GenerationChangesWhenAParkIsImposedAgain(t *testing.T) {
+	r, _ := newRegistry()
+	r.Park("a", errHalted)
+	first := r.Inspect("a").Generation
+	r.Park("a", errLater)
+	if again := r.Inspect("a").Generation; again != first {
+		t.Fatalf("generation %d became %d while still parked", first, again)
+	}
+	r.Lift("a", first)
+	r.Park("a", errLater)
+	got := r.Inspect("a")
+	if !got.Parked || got.Generation == first || got.Generation == 0 {
+		t.Fatalf("Inspect = %+v, want parked with a generation other than %d", got, first)
+	}
+	if !errors.Is(got.Cause, errLater) {
+		t.Fatalf("Cause = %v, want the new park's %v", got.Cause, errLater)
+	}
+}
+
+func TestInspect_IsClearAfterTheParkLifts(t *testing.T) {
+	r, _ := newRegistry()
+	enqueue(t, r, liveItem("a", 1))
+	r.Park("a", errHalted, 3)
+	r.Lift("a", generation(t, r, "a"))
+	if got := r.Inspect("a"); !reflect.DeepEqual(got, asynxmd.DeliveryStatus{}) {
+		t.Fatalf("Inspect after the lift = %+v, want the zero status", got)
+	}
+	r.Park("a", nil)
+	if got := r.Inspect("a"); got.Cause != nil {
+		t.Fatalf("Cause = %v after a lift and a nil-cause park, want nil", got.Cause)
 	}
 }
