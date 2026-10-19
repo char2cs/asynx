@@ -1,6 +1,7 @@
 package asynx
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"maps"
@@ -13,6 +14,7 @@ import (
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/processor"
 	"github.com/char2cs/asynx/internal/processor/exec"
+	internalutils "github.com/char2cs/asynx/internal/utils"
 	"github.com/char2cs/asynx/models"
 )
 
@@ -316,16 +318,7 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 		return nil, models.ErrMissingSnapshotStore
 	}
 
-	activeBus := b.bus
-	if activeBus == nil {
-		if b.panicHandler != nil {
-			activeBus = bus.NewChannelBus[T](
-				bus.WithPanicHandler[T](b.panicHandler),
-			)
-		} else {
-			activeBus = bus.NewChannelBus[T]()
-		}
-	}
+	activeBus := b.activeBus()
 
 	es := eventstore.New[T](
 		b.eventStore,
@@ -335,6 +328,47 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 		b.corruptionHook,
 	)
 
+	procOpts, err := b.processorOpts()
+	if err != nil {
+		return nil, err
+	}
+	proc, err := processor.New(es, activeBus, procOpts...)
+	if err != nil {
+		closeAbandonedBus(activeBus)
+		return nil, err
+	}
+
+	instance := &asynxImpl[T]{
+		proc: proc,
+		es:   es,
+		bus:  activeBus,
+	}
+
+	built := false
+	defer shutdownUnlessBuilt(proc, &built)
+
+	err = b.finish(instance, proc)
+	if err != nil {
+		return nil, err
+	}
+
+	built = true
+	return instance, nil
+}
+
+func (b *Builder[T]) activeBus() models.Bus[T] {
+	if b.bus != nil {
+		return b.bus
+	}
+	if b.panicHandler != nil {
+		return bus.NewChannelBus[T](
+			bus.WithPanicHandler[T](b.panicHandler),
+		)
+	}
+	return bus.NewChannelBus[T]()
+}
+
+func (b *Builder[T]) processorOpts() ([]processor.ProcessorOpt[T], error) {
 	syncs, err := b.compileSyncProjections()
 	if err != nil {
 		return nil, err
@@ -352,25 +386,7 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 	if err != nil {
 		return nil, err
 	}
-	if durableMatch != nil {
-		procOpts = append(procOpts,
-			processor.WithDurableDelivery[T](durableMatch),
-			processor.WithDurableSubscribers(durableSubs),
-		)
-		if b.deliveryErrHandler != nil {
-			procOpts = append(procOpts, processor.WithDeliveryErrorHandler(b.deliveryErrHandler))
-		}
-		if b.panicHandler != nil {
-			procOpts = append(procOpts, processor.WithDeliveryPanicHandler(b.panicHandler))
-		}
-		procOpts = append(procOpts, processor.WithDeliveryRetry[T](b.retryInitial, b.retryMax))
-		if b.maxAttempts > 0 {
-			procOpts = append(procOpts, processor.WithDeliveryMaxAttempts[T](b.maxAttempts))
-		}
-		if b.deadLetter != nil {
-			procOpts = append(procOpts, processor.WithDeadLetterHandler(b.deadLetter))
-		}
-	}
+	procOpts = append(procOpts, b.durableOpts(durableSubs, durableMatch)...)
 	if b.snapshotErrHandler != nil {
 		procOpts = append(procOpts, processor.WithSnapshotErrorHandler(b.snapshotErrHandler))
 	}
@@ -380,41 +396,67 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 	if b.dispatcherFactory != nil {
 		procOpts = append(procOpts, processor.WithDispatcherFactory(b.dispatcherFactory))
 	}
-	proc, err := processor.New(es, activeBus, procOpts...)
+	return procOpts, nil
+}
+
+func (b *Builder[T]) durableOpts(
+	durableSubs []models.DurableSub[T],
+	durableMatch func(string) bool,
+) []processor.ProcessorOpt[T] {
+	if durableMatch == nil {
+		return nil
+	}
+	opts := []processor.ProcessorOpt[T]{
+		processor.WithDurableDelivery[T](durableMatch),
+		processor.WithDurableSubscribers(durableSubs),
+	}
+	if b.deliveryErrHandler != nil {
+		opts = append(opts, processor.WithDeliveryErrorHandler(b.deliveryErrHandler))
+	}
+	if b.panicHandler != nil {
+		opts = append(opts, processor.WithDeliveryPanicHandler(b.panicHandler))
+	}
+	opts = append(opts, processor.WithDeliveryRetry[T](b.retryInitial, b.retryMax))
+	if b.maxAttempts > 0 {
+		opts = append(opts, processor.WithDeliveryMaxAttempts[T](b.maxAttempts))
+	}
+	if b.deadLetter != nil {
+		opts = append(opts, processor.WithDeadLetterHandler(b.deadLetter))
+	}
+	return opts
+}
+
+func (b *Builder[T]) finish(
+	instance *asynxImpl[T],
+	proc *processor.Processor[T],
+) error {
+	err := internalutils.FirstError(
+		b.forgetHandlers,
+		func(fn models.ForgetHandler[T]) error {
+			_, err := instance.OnForget(fn)
+			return err
+		},
+	)
 	if err != nil {
-		closeAbandonedBus(activeBus)
-		return nil, err
+		return err
 	}
 
-	instance := &asynxImpl[T]{
-		proc: proc,
-		es:   es,
-		bus:  activeBus,
+	if len(b.subscribers) == 0 {
+		return nil
 	}
+	return proc.Recover(context.Background(), recoveryBatch)
+}
 
-	built := false
-	defer func() {
-		if !built {
-			sctx, cancel := context.WithTimeout(context.Background(), failedBuildShutdown)
-			defer cancel()
-			_ = proc.Shutdown(sctx)
-		}
-	}()
-
-	for _, fn := range b.forgetHandlers {
-		if _, err := instance.OnForget(fn); err != nil {
-			return nil, err
-		}
+func shutdownUnlessBuilt[T any](
+	proc *processor.Processor[T],
+	built *bool,
+) {
+	if *built {
+		return
 	}
-
-	if len(b.subscribers) > 0 {
-		if err := proc.Recover(context.Background(), recoveryBatch); err != nil {
-			return nil, err
-		}
-	}
-
-	built = true
-	return instance, nil
+	sctx, cancel := context.WithTimeout(context.Background(), failedBuildShutdown)
+	defer cancel()
+	_ = proc.Shutdown(sctx)
 }
 
 // closeAbandonedBus closes the bus of a Build that failed before a processor
@@ -436,21 +478,33 @@ const recoveryBatch = 100
 
 func (b *Builder[T]) compileSyncProjections() ([]exec.SyncProjection[T], error) {
 	out := make([]exec.SyncProjection[T], 0, len(b.syncProjections))
+	var failure error
 	for _, def := range b.syncProjections {
-		if def.pattern == "" {
-			return nil, models.ErrEmptyPattern
-		}
-		if def.fn == nil {
-			return nil, models.ErrNilHandler
-		}
-
-		match, err := matcher(def.pattern)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, exec.SyncProjection[T]{Match: match, Fn: def.fn})
+		sp, err := compileSyncProjection(def)
+		failure = cmp.Or(failure, err)
+		out = append(out, sp)
+	}
+	if failure != nil {
+		return nil, failure
 	}
 	return out, nil
+}
+
+func compileSyncProjection[T any](
+	def syncProjectionDef[T],
+) (exec.SyncProjection[T], error) {
+	if def.pattern == "" {
+		return exec.SyncProjection[T]{}, models.ErrEmptyPattern
+	}
+	if def.fn == nil {
+		return exec.SyncProjection[T]{}, models.ErrNilHandler
+	}
+
+	match, err := matcher(def.pattern)
+	if err != nil {
+		return exec.SyncProjection[T]{}, err
+	}
+	return exec.SyncProjection[T]{Match: match, Fn: def.fn}, nil
 }
 
 // compileDurable validates the durable subscribers and returns them with a
@@ -461,16 +515,26 @@ func (b *Builder[T]) compileDurable() ([]models.DurableSub[T], func(string) bool
 		return nil, nil, nil
 	}
 
-	subs := make([]models.DurableSub[T], 0, len(b.subscribers))
-	for i, def := range b.subscribers {
-		sub, err := compileSubscriber(i, def)
-		if err != nil {
-			return nil, nil, err
-		}
-		subs = append(subs, sub)
+	subs, err := b.compileSubscribers()
+	if err != nil {
+		return nil, nil, err
 	}
 
 	return subs, wantedBy(subs), nil
+}
+
+func (b *Builder[T]) compileSubscribers() ([]models.DurableSub[T], error) {
+	subs := make([]models.DurableSub[T], 0, len(b.subscribers))
+	var failure error
+	for i, def := range b.subscribers {
+		sub, err := compileSubscriber(i, def)
+		failure = cmp.Or(failure, err)
+		subs = append(subs, sub)
+	}
+	if failure != nil {
+		return nil, failure
+	}
+	return subs, nil
 }
 
 func compileSubscriber[T any](

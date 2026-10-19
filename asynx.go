@@ -421,7 +421,9 @@ func (i *asynxImpl[T]) ResumeDeliveries(ctx context.Context) error {
 	return i.proc.Resume(ctx, recoveryBatch)
 }
 
+// OnForget registers fn to run when an aggregate is forgotten. The dots of the
+// subscription pattern are escaped so the bus treats it as a literal, not a
+// wildcard.
 func (i *asynxImpl[T]) OnForget(fn models.ForgetHandler[T]) (string, error) {
-	// Escape dots so the bus treats this as a literal pattern, not a wildcard.
 	return i.bus.Subscribe("asynx\\.aggregate\\.forget", models.ProjectionHandler[T](fn))
 }

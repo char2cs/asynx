@@ -59,6 +59,9 @@ func (e *CommandExecutor[T]) clearForgetting(id string) {
 //
 // A handler cannot Forget the aggregate it is handling: the marker queues
 // behind that very handler. That fails with ErrForgetFromHandler.
+//
+// Once the tombstone is delivered the erase runs to completion even if the
+// caller's ctx ends.
 func (e *CommandExecutor[T]) Forget(
 	ctx context.Context,
 	aggregateID string,
@@ -83,7 +86,7 @@ func (e *CommandExecutor[T]) Forget(
 	if err := e.awaitTombstone(ctx, ticket); err != nil {
 		return err
 	}
-	return e.erase(context.WithoutCancel(ctx), aggregateID) // must finish even if the caller gives up
+	return e.erase(context.WithoutCancel(ctx), aggregateID)
 }
 
 // erase deletes the aggregate under its lock. On success it lifts the fence
@@ -129,21 +132,40 @@ func (e *CommandExecutor[T]) awaitTombstone(
 	if t.Final == nil {
 		return nil
 	}
-	select {
-	case <-t.Final:
-	case <-ctx.Done():
-		return fmt.Errorf("%w: waiting for handlers: %w", asynxmd.ErrForgetFailed, ctx.Err())
-	case <-e.dispatcher.Interrupted():
-		select {
-		case <-t.Final:
-		default:
-			return fmt.Errorf("%w: waiting for handlers: %w", asynxmd.ErrForgetFailed, asynxmd.ErrShuttingDown)
-		}
+	err := e.waitFinal(ctx, t)
+	if err != nil {
+		return err
 	}
-	if err := t.Err(); err != nil {
+	err = t.Err()
+	if err != nil {
 		return fmt.Errorf("%w: tombstone delivery: %w", asynxmd.ErrForgetFailed, err)
 	}
 	return nil
+}
+
+func (e *CommandExecutor[T]) waitFinal(
+	ctx context.Context,
+	t asynxmd.Ticket,
+) error {
+	select {
+	case <-t.Final:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("%w: waiting for handlers: %w", asynxmd.ErrForgetFailed, ctx.Err())
+	case <-e.dispatcher.Interrupted():
+		return interruptedWait(t)
+	}
+}
+
+func interruptedWait(
+	t asynxmd.Ticket,
+) error {
+	select {
+	case <-t.Final:
+		return nil
+	default:
+		return fmt.Errorf("%w: waiting for handlers: %w", asynxmd.ErrForgetFailed, asynxmd.ErrShuttingDown)
+	}
 }
 
 // writeTombstone marks the aggregate as being forgotten, commits the tombstone
@@ -171,16 +193,31 @@ func (e *CommandExecutor[T]) writeTombstone(
 	return ticket, nil
 }
 
+func tombstoneWriteError(
+	err error,
+) error {
+	if isPlainValidation(err) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
+}
+
+func isPlainValidation(
+	err error,
+) bool {
+	if !errors.Is(err, asynxmd.ErrValidation) {
+		return false
+	}
+	return !errors.Is(err, asynxmd.ErrSyncProjection)
+}
+
 func (e *CommandExecutor[T]) commitTombstone(
 	ctx context.Context,
 	aggregateID string,
 ) (asynxmd.Ticket, error) {
 	tombstone, err := e.es.WriteTx(ctx, commands.NewForgetCommand[T](aggregateID), e.tombstoneHook())
 	if err != nil {
-		if errors.Is(err, asynxmd.ErrValidation) && !errors.Is(err, asynxmd.ErrSyncProjection) {
-			return asynxmd.Ticket{}, err
-		}
-		return asynxmd.Ticket{}, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
+		return asynxmd.Ticket{}, tombstoneWriteError(err)
 	}
 
 	if e.dispatcher == nil {

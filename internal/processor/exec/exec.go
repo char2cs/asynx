@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/char2cs/asynx/internal/eventstore"
+	"github.com/char2cs/asynx/internal/utils"
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
@@ -155,35 +156,70 @@ func (e *CommandExecutor[T]) run(
 	cmd asynxmd.Command[T],
 ) (asynxmd.Event[T], Wait, error) {
 	commandID := idempotencyKey(cmd)
-	if commandID != "" {
-		if event, handled, err := e.answerFromReceipt(ctx, commandID); handled {
-			return event, e.waitForAnswered(event, err), err
-		}
+	event, handled, err := e.answerRetry(ctx, commandID)
+	if handled {
+		return event, e.waitForAnswered(event, err), err
 	}
 
-	event, err := e.es.WriteTx(ctx, cmd, e.txHook(commandID))
+	event, err = e.es.WriteTx(ctx, cmd, e.txHook(commandID))
 	if err != nil {
-		event, handled, err := e.writeFailed(ctx, commandID, err)
-		if handled {
-			return event, e.waitForAnswered(event, err), err
-		}
-		return asynxmd.Event[T]{}, nil, err
+		return e.failedWrite(ctx, commandID, err)
 	}
 
-	if cmd.ShouldSnapshot() {
-		if err := e.es.Snapshot(ctx, event); err != nil && e.onSnapshotError != nil {
-			e.onSnapshotError(ctx, event, err)
-		}
-	}
+	e.snapshotIfDue(ctx, cmd, event)
 
 	wait, err := e.enqueue(ctx, event)
 	if err != nil {
-		if e.isDurable(event.EventName) {
-			e.dispatcher.Park(event.AggregateID, err)
-		}
+		e.parkIfDurable(event, err)
 		return event, nil, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 	}
 	return event, wait, nil
+}
+
+func (e *CommandExecutor[T]) parkIfDurable(
+	event asynxmd.Event[T],
+	cause error,
+) {
+	if !e.isDurable(event.EventName) {
+		return
+	}
+	e.dispatcher.Park(event.AggregateID, cause)
+}
+
+func (e *CommandExecutor[T]) answerRetry(
+	ctx context.Context,
+	commandID string,
+) (asynxmd.Event[T], bool, error) {
+	if commandID == "" {
+		return asynxmd.Event[T]{}, false, nil
+	}
+	return e.answerFromReceipt(ctx, commandID)
+}
+
+func (e *CommandExecutor[T]) failedWrite(
+	ctx context.Context,
+	commandID string,
+	cause error,
+) (asynxmd.Event[T], Wait, error) {
+	event, handled, err := e.writeFailed(ctx, commandID, cause)
+	if handled {
+		return event, e.waitForAnswered(event, err), err
+	}
+	return asynxmd.Event[T]{}, nil, err
+}
+
+func (e *CommandExecutor[T]) snapshotIfDue(
+	ctx context.Context,
+	cmd asynxmd.Command[T],
+	event asynxmd.Event[T],
+) {
+	if !cmd.ShouldSnapshot() {
+		return
+	}
+	err := e.es.Snapshot(ctx, event)
+	if err != nil && e.onSnapshotError != nil {
+		e.onSnapshotError(ctx, event, err)
+	}
 }
 
 // enqueue hands the event to the dispatcher. With durable delivery on, the
@@ -289,14 +325,17 @@ func (e *CommandExecutor[T]) runSyncProjections(
 	tx asynxmd.Tx,
 	evt asynxmd.Event[T],
 ) error {
-	for _, p := range e.syncs {
-		matches := p.Match(evt.EventName)
-		if !matches {
-			continue
-		}
-		if err := p.Fn(ctx, tx, evt); err != nil {
-			return fmt.Errorf("%w: %w", asynxmd.ErrSyncProjection, err)
-		}
+	err := utils.FirstError(
+		e.syncs,
+		func(p SyncProjection[T]) error {
+			if !p.Match(evt.EventName) {
+				return nil
+			}
+			return p.Fn(ctx, tx, evt)
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("%w: %w", asynxmd.ErrSyncProjection, err)
 	}
 	return nil
 }
