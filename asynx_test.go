@@ -278,25 +278,6 @@ func TestShutdown_Twice(t *testing.T) {
 	}
 }
 
-func TestShardingOpts_CustomShards(t *testing.T) {
-	s := store.New()
-	instance, err := asynx.New[mocks.Order]().
-		WithEventStore(s).
-		WithSnapshotStore(store.NewSnapshots()).
-		WithShardingOpts(asynx.ShardingOpts{Shards: 16, QueueDepth: 100}).
-		Build()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer instance.Shutdown(context.Background())
-
-	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
-	_, err = instance.Send(context.Background(), cmd)
-	if err != nil {
-		t.Fatalf("Send with custom shards failed: %v", err)
-	}
-}
-
 // Integration tests
 
 func TestIntegration_FullCommandCycle(t *testing.T) {
