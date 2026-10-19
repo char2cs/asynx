@@ -11,8 +11,8 @@ import (
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor"
-	"github.com/char2cs/asynx/store"
 	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/store"
 )
 
 // TestProcessor_IntegrationHighThroughput tests sustained throughput with the jobQueue fix.
@@ -22,7 +22,7 @@ func TestProcessor_IntegrationHighThroughput(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(
+	p := mustNew(t,
 		es,
 		channelBus,
 		processor.WithShards[order](8),
@@ -59,7 +59,7 @@ func TestProcessor_IntegrationOrderPreservation(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(
+	p := mustNew(t,
 		es,
 		channelBus,
 		processor.WithShards[order](4),
@@ -106,7 +106,7 @@ func TestProcessor_IntegrationCancelDuringBurst(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(
+	p := mustNew(t,
 		es,
 		channelBus,
 		processor.WithShards[order](8),
@@ -116,7 +116,7 @@ func TestProcessor_IntegrationCancelDuringBurst(t *testing.T) {
 
 	// Test 1: Send some commands with a cancelled context
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()  // Cancel immediately
+	cancel()
 
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 	_, err := p.Send(ctx, cmd)
@@ -141,7 +141,7 @@ func TestProcessor_IntegrationShutdownGraceful(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(
+	p := mustNew(t,
 		es,
 		channelBus,
 		processor.WithShards[order](4),
@@ -198,7 +198,7 @@ func TestProcessor_IntegrationWithValidationErrors(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(
+	p := mustNew(t,
 		es,
 		channelBus,
 		processor.WithShards[order](8),
@@ -264,7 +264,7 @@ func TestProcessor_IntegrationMemoryStability(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(
+	p := mustNew(t,
 		es,
 		channelBus,
 		processor.WithShards[order](4),
@@ -283,7 +283,7 @@ func TestProcessor_IntegrationMemoryStability(t *testing.T) {
 			go func(idx int) {
 				defer wg.Done()
 				cmd := mocks.CreateOrderCmd{
-					ID:    "order" + string(rune((idx+batch*100)%26 + 'a')),
+					ID:    "order" + string(rune((idx+batch*100)%26+'a')),
 					Total: 100.0,
 				}
 				p.Send(ctx, cmd)
@@ -301,7 +301,7 @@ func TestProcessor_IntegrationEventPublishingReliability(t *testing.T) {
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	p := processor.New(
+	p := mustNew(t,
 		es,
 		channelBus,
 		processor.WithShards[order](4),
@@ -356,9 +356,9 @@ done:
 // TestProcessor_IntegrationDefaultQueueDepthScaling tests that default queue depth scales with workers.
 func TestProcessor_IntegrationDefaultQueueDepthScaling(t *testing.T) {
 	tests := []struct {
-		name            string
-		workers         int
-		expectedMinQD   int
+		name          string
+		workers       int
+		expectedMinQD int
 	}{
 		{"1 worker", 1, 1},
 		{"4 workers", 4, 4},
@@ -372,7 +372,7 @@ func TestProcessor_IntegrationDefaultQueueDepthScaling(t *testing.T) {
 			channelBus := bus.NewChannelBus[order]()
 			es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-			p := processor.New(
+			p := mustNew(t,
 				es,
 				channelBus,
 				processor.WithWorkersPerShard[order](tt.workers),

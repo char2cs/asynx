@@ -3,6 +3,7 @@ package utils
 import (
 	"maps"
 	"regexp"
+	"slices"
 
 	"github.com/char2cs/asynx/internal/bus/models"
 )
@@ -50,13 +51,7 @@ func IndexWithout[T any](
 	sub *models.Subscription[T],
 ) *models.PublishIndex[T] {
 	if !IsExactPattern(sub.Pattern) {
-		newRegex := make([]*models.Subscription[T], 0, len(old.RegexSubs)-1)
-		for _, s := range old.RegexSubs {
-			if s == sub {
-				continue
-			}
-			newRegex = append(newRegex, s)
-		}
+		newRegex := withoutSub(old.RegexSubs, sub)
 		return &models.PublishIndex[T]{
 			ExactSubs: old.ExactSubs,
 			RegexSubs: newRegex,
@@ -64,13 +59,7 @@ func IndexWithout[T any](
 	}
 
 	existing := old.ExactSubs[sub.Pattern]
-	newSlice := make([]*models.Subscription[T], 0, len(existing)-1)
-	for _, s := range existing {
-		if s == sub {
-			continue
-		}
-		newSlice = append(newSlice, s)
-	}
+	newSlice := withoutSub(existing, sub)
 
 	newExact := make(map[string][]*models.Subscription[T], len(old.ExactSubs))
 	maps.Copy(newExact, old.ExactSubs)
@@ -83,4 +72,11 @@ func IndexWithout[T any](
 		ExactSubs: newExact,
 		RegexSubs: old.RegexSubs,
 	}
+}
+
+func withoutSub[T any](
+	subs []*models.Subscription[T],
+	sub *models.Subscription[T],
+) []*models.Subscription[T] {
+	return slices.DeleteFunc(slices.Clone(subs), func(s *models.Subscription[T]) bool { return s == sub })
 }

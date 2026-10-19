@@ -5,34 +5,17 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"slices"
 	"time"
 
 	"github.com/char2cs/asynx/internal/bus"
-	"github.com/char2cs/asynx/internal/bus/dispatcher"
 	"github.com/char2cs/asynx/internal/bus/utils"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/processor"
 	"github.com/char2cs/asynx/internal/processor/exec"
+	internalutils "github.com/char2cs/asynx/internal/utils"
 	"github.com/char2cs/asynx/models"
 )
-
-// ShardingOpts configures the processor's worker pool.
-// Shards defaults to 8; QueueDepth defaults to 0 (unbounded).
-//
-// WorkersPerShard controls how many workers drain each shard's queue and
-// defaults to 8 when left zero. It tunes throughput only: whatever its value,
-// commands for one aggregate run strictly one at a time (a per-aggregate lock
-// covers load, validate, commit and enqueue), so there is no lost-update or
-// version-conflict window and handlers receive an aggregate's events in version
-// order. Commands for different aggregates run in parallel up to
-// Shards*WorkersPerShard. The lock is in-process: several processes sharing one
-// store are protected from corruption by the store's version check, but not
-// from conflicts.
-type ShardingOpts struct {
-	Shards          int
-	QueueDepth      int
-	WorkersPerShard int
-}
 
 type Builder[T any] struct {
 	eventStore          models.Store
@@ -53,17 +36,7 @@ type Builder[T any] struct {
 	retryMax            time.Duration
 	maxAttempts         int
 	deadLetter          models.DeadLetterHandler[T]
-}
-
-type syncProjectionDef[T any] struct {
-	pattern string
-	fn      func(context.Context, models.Tx, models.Event[T]) error
-}
-
-type subscriberDef[T any] struct {
-	pattern string
-	handler models.DurableHandler[T]
-	opts    []models.SubscriptionOpt[T]
+	dispatcherFactory   models.DispatcherFactory[T]
 }
 
 func New[T any]() *Builder[T] {
@@ -220,8 +193,10 @@ func (b *Builder[T]) WithDeliveryErrorHandler(fn models.DeliveryErrorHandler[T])
 }
 
 // WithDeliveryRetry sets the retry backoff of failed durable deliveries: the
-// first retry waits initial, then the delay doubles up to max. Defaults: 100ms
-// and 30s.
+// first retry waits about initial, then the delay doubles up to about max.
+// Defaults: 100ms and 30s. Each wait is randomised within its upper half
+// (jitter), so deliveries that failed together, because a downstream service
+// went down, do not retry in lockstep.
 func (b *Builder[T]) WithDeliveryRetry(
 	initial time.Duration,
 	max time.Duration,
@@ -244,7 +219,10 @@ func (b *Builder[T]) WithDeliveryMaxAttempts(n int) *Builder[T] {
 }
 
 // WithDeadLetterHandler sets the handler called when a durable delivery ran out
-// of attempts. Returning nil acknowledges the event as dealt with (typically
+// of attempts. Its error argument holds the failure of every subscriber that
+// failed on the last attempt, each a *models.SubscriberError naming the
+// subscriber by pattern and registration order (such as "OrderUpdated#2").
+// Returning nil acknowledges the event as dealt with (typically
 // after storing it somewhere for inspection) and lets the aggregate's later
 // events flow; returning an error parks the aggregate.
 func (b *Builder[T]) WithDeadLetterHandler(fn models.DeadLetterHandler[T]) *Builder[T] {
@@ -261,6 +239,32 @@ func (b *Builder[T]) WithSnapshotErrorHandler(fn func(context.Context, models.Ev
 	return b
 }
 
+// WithDispatcher plugs in the dispatcher that delivers committed events to the
+// live and durable subscribers, in place of the in-memory default. A dispatcher
+// is the component that takes each committed event and runs the subscribers'
+// handlers in order per aggregate, retrying and parking an aggregate when the
+// attempts run out. The library ships only the in-memory implementation; the
+// contract a replacement must keep is models.Dispatcher, and the
+// dispatchertest package (dispatchertest.Run) verifies an implementation
+// against it. The factory
+// is called once per Build, with the configuration the instance was built with:
+// the bus, the durable subscribers, the handlers, and the retry and attempt
+// settings with their defaults already applied (20 attempts, a backoff of 100ms
+// doubling up to 30s). It returns the dispatcher the instance owns, which
+// Shutdown interrupts and then closes. A factory error fails Build, and what
+// was built so far is shut down. A nil factory is ignored.
+//
+// The dispatcher must keep the guarantees documented on models.Dispatcher. The
+// delivery log, the aggregate lock and recovery stay with asynx: Build reads
+// the log and hands the pending deliveries to the dispatcher as
+// models.DispatchRedelivery requests.
+func (b *Builder[T]) WithDispatcher(
+	factory models.DispatcherFactory[T],
+) *Builder[T] {
+	b.dispatcherFactory = factory
+	return b
+}
+
 // Build requires WithEventStore and WithSnapshotStore; all other options have
 // defaults.
 func (b *Builder[T]) Build() (Asynx[T], error) {
@@ -272,16 +276,7 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 		return nil, models.ErrMissingSnapshotStore
 	}
 
-	activeBus := b.bus
-	if activeBus == nil {
-		if b.panicHandler != nil {
-			activeBus = bus.NewChannelBus[T](
-				bus.WithPanicHandler[T](b.panicHandler),
-			)
-		} else {
-			activeBus = bus.NewChannelBus[T]()
-		}
-	}
+	activeBus := b.activeBus()
 
 	es := eventstore.New[T](
 		b.eventStore,
@@ -291,6 +286,47 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 		b.corruptionHook,
 	)
 
+	procOpts, err := b.processorOpts()
+	if err != nil {
+		return nil, err
+	}
+	proc, err := processor.New(es, activeBus, procOpts...)
+	if err != nil {
+		closeAbandonedBus(activeBus)
+		return nil, err
+	}
+
+	instance := &asynxImpl[T]{
+		proc: proc,
+		es:   es,
+		bus:  activeBus,
+	}
+
+	built := false
+	defer shutdownUnlessBuilt(proc, &built)
+
+	err = b.finish(instance, proc)
+	if err != nil {
+		return nil, err
+	}
+
+	built = true
+	return instance, nil
+}
+
+func (b *Builder[T]) activeBus() models.Bus[T] {
+	if b.bus != nil {
+		return b.bus
+	}
+	if b.panicHandler != nil {
+		return bus.NewChannelBus[T](
+			bus.WithPanicHandler[T](b.panicHandler),
+		)
+	}
+	return bus.NewChannelBus[T]()
+}
+
+func (b *Builder[T]) processorOpts() ([]processor.ProcessorOpt[T], error) {
 	syncs, err := b.compileSyncProjections()
 	if err != nil {
 		return nil, err
@@ -308,62 +344,87 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 	if err != nil {
 		return nil, err
 	}
-	if durableMatch != nil {
-		procOpts = append(procOpts,
-			processor.WithDurableDelivery[T](durableMatch),
-			processor.WithDurableSubscribers(durableSubs),
-		)
-		if b.deliveryErrHandler != nil {
-			procOpts = append(procOpts, processor.WithDeliveryErrorHandler(b.deliveryErrHandler))
-		}
-		if b.panicHandler != nil {
-			procOpts = append(procOpts, processor.WithDeliveryPanicHandler(b.panicHandler))
-		}
-		procOpts = append(procOpts, processor.WithDeliveryRetry[T](b.retryInitial, b.retryMax))
-		if b.maxAttempts > 0 {
-			procOpts = append(procOpts, processor.WithDeliveryMaxAttempts[T](b.maxAttempts))
-		}
-		if b.deadLetter != nil {
-			procOpts = append(procOpts, processor.WithDeadLetterHandler(b.deadLetter))
-		}
-	}
+	procOpts = append(procOpts, b.durableOpts(durableSubs, durableMatch)...)
 	if b.snapshotErrHandler != nil {
 		procOpts = append(procOpts, processor.WithSnapshotErrorHandler(b.snapshotErrHandler))
 	}
 	if b.publishErrorHandler != nil {
 		procOpts = append(procOpts, processor.WithPublishErrorHandler[T](b.publishErrorHandler))
 	}
-	proc := processor.New(es, activeBus, procOpts...)
+	if b.dispatcherFactory != nil {
+		procOpts = append(procOpts, processor.WithDispatcherFactory(b.dispatcherFactory))
+	}
+	return procOpts, nil
+}
 
-	instance := &asynxImpl[T]{
-		proc: proc,
-		es:   es,
-		bus:  activeBus,
+func (b *Builder[T]) durableOpts(
+	durableSubs []models.DurableSub[T],
+	durableMatch func(string) bool,
+) []processor.ProcessorOpt[T] {
+	if durableMatch == nil {
+		return nil
+	}
+	opts := []processor.ProcessorOpt[T]{
+		processor.WithDurableDelivery[T](durableMatch),
+		processor.WithDurableSubscribers(durableSubs),
+	}
+	if b.deliveryErrHandler != nil {
+		opts = append(opts, processor.WithDeliveryErrorHandler(b.deliveryErrHandler))
+	}
+	if b.panicHandler != nil {
+		opts = append(opts, processor.WithDeliveryPanicHandler(b.panicHandler))
+	}
+	opts = append(opts, processor.WithDeliveryRetry[T](b.retryInitial, b.retryMax))
+	if b.maxAttempts > 0 {
+		opts = append(opts, processor.WithDeliveryMaxAttempts[T](b.maxAttempts))
+	}
+	if b.deadLetter != nil {
+		opts = append(opts, processor.WithDeadLetterHandler(b.deadLetter))
+	}
+	return opts
+}
+
+func (b *Builder[T]) finish(
+	instance *asynxImpl[T],
+	proc *processor.Processor[T],
+) error {
+	err := internalutils.FirstError(
+		b.forgetHandlers,
+		func(fn models.ForgetHandler[T]) error {
+			_, err := instance.OnForget(fn)
+			return err
+		},
+	)
+	if err != nil {
+		return err
 	}
 
-	built := false
-	defer func() {
-		if !built {
-			sctx, cancel := context.WithTimeout(context.Background(), failedBuildShutdown)
-			defer cancel()
-			_ = proc.Shutdown(sctx)
-		}
-	}()
-
-	for _, fn := range b.forgetHandlers {
-		if _, err := instance.OnForget(fn); err != nil {
-			return nil, err
-		}
+	if len(b.subscribers) == 0 {
+		return nil
 	}
+	return proc.Recover(context.Background(), recoveryBatch)
+}
 
-	if len(b.subscribers) > 0 {
-		if err := proc.Recover(context.Background(), recoveryBatch); err != nil {
-			return nil, err
-		}
+func shutdownUnlessBuilt[T any](
+	proc *processor.Processor[T],
+	built *bool,
+) {
+	if *built {
+		return
 	}
+	sctx, cancel := context.WithTimeout(context.Background(), failedBuildShutdown)
+	defer cancel()
+	_ = proc.Shutdown(sctx)
+}
 
-	built = true
-	return instance, nil
+// closeAbandonedBus closes the bus of a Build that failed before a processor
+// existed to shut it down, within the same bound.
+func closeAbandonedBus[T any](
+	activeBus models.Bus[T],
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), failedBuildShutdown)
+	defer cancel()
+	_ = activeBus.Close(ctx)
 }
 
 // failedBuildShutdown bounds how long a failed Build waits for the instance it
@@ -376,62 +437,93 @@ const recoveryBatch = 100
 func (b *Builder[T]) compileSyncProjections() ([]exec.SyncProjection[T], error) {
 	out := make([]exec.SyncProjection[T], 0, len(b.syncProjections))
 	for _, def := range b.syncProjections {
-		if def.pattern == "" {
-			return nil, models.ErrEmptyPattern
-		}
-		if def.fn == nil {
-			return nil, models.ErrNilHandler
-		}
-
-		match, err := matcher(def.pattern)
+		sp, err := compileSyncProjection(def)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, exec.SyncProjection[T]{Match: match, Fn: def.fn})
+		out = append(out, sp)
 	}
 	return out, nil
+}
+
+func compileSyncProjection[T any](
+	def syncProjectionDef[T],
+) (exec.SyncProjection[T], error) {
+	if def.pattern == "" {
+		return exec.SyncProjection[T]{}, models.ErrEmptyPattern
+	}
+	if def.fn == nil {
+		return exec.SyncProjection[T]{}, models.ErrNilHandler
+	}
+
+	match, err := matcher(def.pattern)
+	if err != nil {
+		return exec.SyncProjection[T]{}, err
+	}
+	return exec.SyncProjection[T]{Match: match, Fn: def.fn}, nil
 }
 
 // compileDurable validates the durable subscribers and returns them with a
 // predicate accepting the events at least one of them wants (nil when there are
 // none). Events nobody durable listens to get no delivery entry.
-func (b *Builder[T]) compileDurable() ([]dispatcher.DurableSub[T], func(string) bool, error) {
+func (b *Builder[T]) compileDurable() ([]models.DurableSub[T], func(string) bool, error) {
 	if len(b.subscribers) == 0 {
 		return nil, nil, nil
 	}
 
-	subs := make([]dispatcher.DurableSub[T], 0, len(b.subscribers))
-	for _, def := range b.subscribers {
-		if def.pattern == "" {
-			return nil, nil, models.ErrEmptyPattern
-		}
-		if def.handler == nil {
-			return nil, nil, models.ErrNilHandler
-		}
-
-		cfg := &models.SubscriptionConfig[T]{}
-		for _, opt := range def.opts {
-			opt(cfg)
-		}
-		if cfg.Fallback != nil {
-			return nil, nil, models.ErrFallbackUnsupported
-		}
-
-		m, err := matcher(def.pattern)
-		if err != nil {
-			return nil, nil, err
-		}
-		subs = append(subs, dispatcher.DurableSub[T]{Match: m, Handler: def.handler, Timeout: cfg.Timeout})
+	subs, err := b.compileSubscribers()
+	if err != nil {
+		return nil, nil, err
 	}
 
-	return subs, func(name string) bool {
-		for _, sub := range subs {
-			if sub.Match(name) {
-				return true
-			}
+	return subs, wantedBy(subs), nil
+}
+
+func (b *Builder[T]) compileSubscribers() ([]models.DurableSub[T], error) {
+	subs := make([]models.DurableSub[T], 0, len(b.subscribers))
+	for i, def := range b.subscribers {
+		sub, err := compileSubscriber(i, def)
+		if err != nil {
+			return nil, err
 		}
-		return false
-	}, nil
+		subs = append(subs, sub)
+	}
+	return subs, nil
+}
+
+func compileSubscriber[T any](
+	index int,
+	def subscriberDef[T],
+) (models.DurableSub[T], error) {
+	if def.pattern == "" {
+		return models.DurableSub[T]{}, models.ErrEmptyPattern
+	}
+	if def.handler == nil {
+		return models.DurableSub[T]{}, models.ErrNilHandler
+	}
+
+	cfg := &models.SubscriptionConfig[T]{}
+	for _, opt := range def.opts {
+		opt(cfg)
+	}
+	if cfg.Fallback != nil {
+		return models.DurableSub[T]{}, models.ErrFallbackUnsupported
+	}
+
+	m, err := matcher(def.pattern)
+	if err != nil {
+		return models.DurableSub[T]{}, err
+	}
+	name := fmt.Sprintf("%s#%d", def.pattern, index+1)
+	return models.DurableSub[T]{Name: name, Match: m, Handler: def.handler, Timeout: cfg.Timeout}, nil
+}
+
+func wantedBy[T any](subs []models.DurableSub[T]) func(string) bool {
+	return func(name string) bool {
+		return slices.ContainsFunc(subs, func(sub models.DurableSub[T]) bool {
+			return sub.Match(name)
+		})
+	}
 }
 
 // matcher mirrors the bus's pattern rule: an exact event name, or an

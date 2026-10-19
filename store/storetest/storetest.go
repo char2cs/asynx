@@ -7,10 +7,13 @@
 package storetest
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/char2cs/asynx/models"
 )
@@ -20,6 +23,9 @@ type Factory func(t *testing.T) models.Store
 
 var errBoom = errors.New("storetest: boom")
 
+// SnapshotFactory returns a fresh, empty snapshot store for one subtest.
+type SnapshotFactory func(t *testing.T) models.SnapshotStore
+
 // Run executes the full conformance suite against stores built by newStore.
 func Run(
 	t *testing.T,
@@ -27,25 +33,7 @@ func Run(
 ) {
 	t.Helper()
 
-	tests := map[string]func(*testing.T, models.Store){
-		"AppendCommitsAndReadFromReturnsInOrder":    appendCommitsAndReads,
-		"ReadRangeLimitsCount":                      readRangeLimits,
-		"DuplicateVersionConflictsAndRollsBack":     duplicateVersionRollsBack,
-		"ErrorRollsBackEverything":                  errorRollsBackEverything,
-		"ReceiptsAreStoredAndDuplicatesRejected":    receiptsDuplicates,
-		"DeliveriesKeepEnqueueOrderAndAckRemoves":   deliveriesOrderAndAck,
-		"DropDeliveriesOnlyAffectsThatAggregate":    dropDeliveries,
-		"DeleteStreamIsIdempotentAndScoped":         deleteStream,
-		"AckOfUnknownDeliveryIsNotAnError":          ackUnknown,
-		"DropThenEnqueueInOneTxKeepsTheNewEntry":    dropThenEnqueue,
-		"RollbackRestoresDroppedDeliveries":         rollbackRestoresDrop,
-		"DeliveryKeyCanBeEnqueuedAgain":             reEnqueueAfterAckOrDrop,
-		"AckAfterDropIsNotAnError":                  ackAfterDrop,
-		"NativeIsCallable":                          nativeCallable,
-		"ReadsOfUnknownStreamAreEmpty":              readsOfUnknown,
-		"PendingDeliveriesHonoursLimit":             pendingLimit,
-		"CommitInsideAtomicallyIsVisibleAfterwards": committedVisible,
-	}
+	tests := storeScenarios()
 
 	for name, fn := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -55,7 +43,7 @@ func Run(
 }
 
 func mustAtomically(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 	fn func(models.Tx) error,
 ) {
@@ -65,18 +53,74 @@ func mustAtomically(
 	}
 }
 
+func appendEach(
+	ctx context.Context,
+	tx models.Tx,
+	streamID string,
+	blobs ...[]byte,
+) error {
+	for i, blob := range blobs {
+		if err := tx.Append(ctx, streamID, int64(i+1), blob); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func enqueueEach(
+	ctx context.Context,
+	tx models.Tx,
+	deliveries ...models.Delivery,
+) error {
+	for _, d := range deliveries {
+		if err := tx.EnqueueDelivery(ctx, d.AggregateID, d.Version); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func raceAll(
+	n int,
+	run func(i int) error,
+) []error {
+	results := make([]error, n)
+	var start, finished sync.WaitGroup
+	start.Add(1)
+	for i := range n {
+		finished.Add(1)
+		go func() {
+			defer finished.Done()
+			start.Wait()
+			results[i] = run(i)
+		}()
+	}
+	start.Done()
+	finished.Wait()
+	return results
+}
+
+func appendAndHold(
+	ctx context.Context,
+	tx models.Tx,
+	appended chan<- struct{},
+	release <-chan struct{},
+) error {
+	if err := tx.Append(ctx, "s1", 1, []byte("a")); err != nil {
+		return err
+	}
+	close(appended)
+	<-release
+	return nil
+}
+
 func appendCommitsAndReads(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	ctx := context.Background()
 	mustAtomically(t, s, func(tx models.Tx) error {
-		for v, d := range []string{"a", "b", "c"} {
-			if err := tx.Append(ctx, "s1", int64(v+1), []byte(d)); err != nil {
-				return err
-			}
-		}
-		return nil
+		return appendEach(ctx, tx, "s1", []byte("a"), []byte("b"), []byte("c"))
 	})
 
 	blobs, err := s.ReadFrom(ctx, "s1", 2)
@@ -89,17 +133,12 @@ func appendCommitsAndReads(
 }
 
 func readRangeLimits(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	ctx := context.Background()
 	mustAtomically(t, s, func(tx models.Tx) error {
-		for v := int64(1); v <= 4; v++ {
-			if err := tx.Append(ctx, "s1", v, []byte{byte('0' + v)}); err != nil {
-				return err
-			}
-		}
-		return nil
+		return appendEach(ctx, tx, "s1", []byte("1"), []byte("2"), []byte("3"), []byte("4"))
 	})
 
 	blobs, err := s.ReadRange(ctx, "s1", 2, 2)
@@ -112,7 +151,7 @@ func readRangeLimits(
 }
 
 func duplicateVersionRollsBack(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	ctx := context.Background()
@@ -139,7 +178,7 @@ func duplicateVersionRollsBack(
 }
 
 func errorRollsBackEverything(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	ctx := context.Background()
@@ -165,7 +204,7 @@ func errorRollsBackEverything(
 }
 
 func receiptsDuplicates(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	ctx := context.Background()
@@ -190,24 +229,17 @@ func receiptsDuplicates(
 }
 
 func deliveriesOrderAndAck(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	ctx := context.Background()
-	mustAtomically(t, s, func(tx models.Tx) error {
-		for _, d := range []models.Delivery{{AggregateID: "a", Version: 1}, {AggregateID: "b", Version: 1}, {AggregateID: "a", Version: 2}} {
-			if err := tx.EnqueueDelivery(ctx, d.AggregateID, d.Version); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	want := []models.Delivery{{AggregateID: "a", Version: 1}, {AggregateID: "b", Version: 1}, {AggregateID: "a", Version: 2}}
+	mustAtomically(t, s, func(tx models.Tx) error { return enqueueEach(ctx, tx, want...) })
 
 	pending, err := s.PendingDeliveries(ctx, 10)
 	if err != nil {
 		t.Fatalf("PendingDeliveries: %v", err)
 	}
-	want := []models.Delivery{{AggregateID: "a", Version: 1}, {AggregateID: "b", Version: 1}, {AggregateID: "a", Version: 2}}
 	if len(pending) != len(want) {
 		t.Fatalf("pending = %v, want %v", pending, want)
 	}
@@ -227,7 +259,7 @@ func deliveriesOrderAndAck(
 }
 
 func dropDeliveries(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	ctx := context.Background()
@@ -245,7 +277,7 @@ func dropDeliveries(
 }
 
 func deleteStream(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	ctx := context.Background()
@@ -270,7 +302,7 @@ func deleteStream(
 }
 
 func ackUnknown(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	if err := s.AckDelivery(context.Background(), "ghost", 7); err != nil {
@@ -280,7 +312,7 @@ func ackUnknown(
 
 // wantPending fails the test unless the pending deliveries are exactly want.
 func wantPending(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 	want ...models.Delivery,
 ) {
@@ -293,7 +325,7 @@ func wantPending(
 
 // enqueueIn runs fn on a transaction, failing the test if it does not commit.
 func enqueueIn(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 	fn func(ctx context.Context, tx models.Tx) error,
 ) {
@@ -305,7 +337,7 @@ func enqueueIn(
 // Forget drops an aggregate's entries and records its tombstone in one
 // transaction; the new entry must survive the drop and sort after the others.
 func dropThenEnqueue(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	enqueueIn(t, s, func(ctx context.Context, tx models.Tx) error {
@@ -318,7 +350,7 @@ func dropThenEnqueue(
 }
 
 func rollbackRestoresDrop(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	enqueueIn(t, s, func(ctx context.Context, tx models.Tx) error { return tx.EnqueueDelivery(ctx, "a", 1) })
@@ -333,7 +365,7 @@ func rollbackRestoresDrop(
 
 // A forgotten aggregate starts again at version 1: its keys are reused.
 func reEnqueueAfterAckOrDrop(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	a1 := models.Delivery{AggregateID: "a", Version: 1}
@@ -353,7 +385,7 @@ func reEnqueueAfterAckOrDrop(
 
 // A delivery can be acknowledged after the erase dropped its entry.
 func ackAfterDrop(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	enqueueIn(t, s, func(ctx context.Context, tx models.Tx) error {
@@ -365,7 +397,7 @@ func ackAfterDrop(
 }
 
 func nativeCallable(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	mustAtomically(t, s, func(tx models.Tx) error {
@@ -375,7 +407,7 @@ func nativeCallable(
 }
 
 func readsOfUnknown(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	ctx := context.Background()
@@ -388,17 +420,18 @@ func readsOfUnknown(
 }
 
 func pendingLimit(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	ctx := context.Background()
 	mustAtomically(t, s, func(tx models.Tx) error {
-		for v := int64(1); v <= 5; v++ {
-			if err := tx.EnqueueDelivery(ctx, "a", v); err != nil {
-				return err
-			}
-		}
-		return nil
+		return enqueueEach(ctx, tx,
+			models.Delivery{AggregateID: "a", Version: 1},
+			models.Delivery{AggregateID: "a", Version: 2},
+			models.Delivery{AggregateID: "a", Version: 3},
+			models.Delivery{AggregateID: "a", Version: 4},
+			models.Delivery{AggregateID: "a", Version: 5},
+		)
 	})
 	pending, _ := s.PendingDeliveries(ctx, 2)
 	if len(pending) != 2 || pending[0].Version != 1 || pending[1].Version != 2 {
@@ -407,7 +440,7 @@ func pendingLimit(
 }
 
 func committedVisible(
-	t *testing.T,
+	t testing.TB,
 	s models.Store,
 ) {
 	ctx := context.Background()
@@ -420,5 +453,395 @@ func committedVisible(
 	blobs, _ := s.ReadFrom(ctx, "s1", 1)
 	if len(blobs) != 2 {
 		t.Fatalf("len = %d, want 2", len(blobs))
+	}
+}
+
+// Appends may arrive in any order; reads return the stream by version.
+func outOfOrderAppends(
+	t testing.TB,
+	s models.Store,
+) {
+	ctx := context.Background()
+	for _, v := range []int64{3, 1, 2} {
+		mustAtomically(t, s, func(tx models.Tx) error { return tx.Append(ctx, "s1", v, []byte{byte('0' + v)}) })
+	}
+
+	all, err := s.ReadFrom(ctx, "s1", 1)
+	if err != nil || !slices.Equal(asStrings(all), []string{"1", "2", "3"}) {
+		t.Fatalf("ReadFrom(1) = %q, %v; want [1 2 3] in version order", all, err)
+	}
+	tail, err := s.ReadFrom(ctx, "s1", 2)
+	if err != nil || !slices.Equal(asStrings(tail), []string{"2", "3"}) {
+		t.Fatalf("ReadFrom(2) = %q, %v; want [2 3]", tail, err)
+	}
+	window, err := s.ReadRange(ctx, "s1", 2, 1)
+	if err != nil || !slices.Equal(asStrings(window), []string{"2"}) {
+		t.Fatalf("ReadRange(2, 1) = %q, %v; want [2]", window, err)
+	}
+}
+
+// Uniqueness of (stream, version) holds under contention: of many writers
+// racing for one version, exactly one commits and the rest conflict.
+func concurrentSameVersion(
+	t testing.TB,
+	s models.Store,
+) {
+	const writers = 16
+	ctx := context.Background()
+	results := raceAll(writers, func(i int) error {
+		return s.Atomically(ctx, func(tx models.Tx) error { return tx.Append(ctx, "s1", 1, []byte{byte(i)}) })
+	})
+
+	committed := 0
+	for _, err := range results {
+		switch {
+		case err == nil:
+			committed++
+		case !errors.Is(err, models.ErrPipelineFailed):
+			t.Errorf("losing writer got %v, want ErrPipelineFailed", err)
+		}
+	}
+	if committed != 1 {
+		t.Fatalf("%d writers committed version 1, want exactly one", committed)
+	}
+	if blobs, _ := s.ReadFrom(ctx, "s1", 1); len(blobs) != 1 {
+		t.Fatalf("stream holds %d records, want 1", len(blobs))
+	}
+}
+
+// Concurrent transactions that do not conflict all commit, and nothing is lost.
+func concurrentDistinctVersions(
+	t testing.TB,
+	s models.Store,
+) {
+	const writers = 20
+	ctx := context.Background()
+	results := raceAll(writers, func(i int) error {
+		v := int64(i + 1)
+		return s.Atomically(ctx, func(tx models.Tx) error {
+			return errors.Join(tx.Append(ctx, "s1", v, []byte{byte(v)}), tx.EnqueueDelivery(ctx, "s1", v))
+		})
+	})
+	for _, err := range results {
+		if err != nil {
+			t.Fatalf("a non-conflicting transaction failed: %v", err)
+		}
+	}
+
+	blobs, err := s.ReadFrom(ctx, "s1", 1)
+	if err != nil || len(blobs) != writers {
+		t.Fatalf("stream holds %d records (%v), want %d", len(blobs), err, writers)
+	}
+	for i, blob := range blobs {
+		if blob[0] != byte(i+1) {
+			t.Fatalf("record %d holds %d, want the stream in version order", i, blob[0])
+		}
+	}
+	if pending, _ := s.PendingDeliveries(ctx, 100); len(pending) != writers {
+		t.Fatalf("%d deliveries pending, want %d", len(pending), writers)
+	}
+}
+
+// A context that is already done fails the operation and changes nothing.
+func cancelledContext(
+	t testing.TB,
+	s models.Store,
+) {
+	live := context.Background()
+	mustAtomically(t, s, func(tx models.Tx) error {
+		return errors.Join(tx.Append(live, "s1", 1, []byte("a")), tx.EnqueueDelivery(live, "s1", 1))
+	})
+
+	done, cancel := context.WithCancel(live)
+	cancel()
+
+	if err := s.Atomically(done, func(tx models.Tx) error { return tx.Append(live, "s1", 2, []byte("b")) }); err == nil {
+		t.Error("Atomically succeeded on a cancelled context")
+	}
+	if _, err := s.ReadFrom(done, "s1", 1); err == nil {
+		t.Error("ReadFrom succeeded on a cancelled context")
+	}
+	if _, err := s.ReadRange(done, "s1", 1, 1); err == nil {
+		t.Error("ReadRange succeeded on a cancelled context")
+	}
+	if _, _, err := s.GetReceipt(done, "cmd"); err == nil {
+		t.Error("GetReceipt succeeded on a cancelled context")
+	}
+	if _, err := s.PendingDeliveries(done, 10); err == nil {
+		t.Error("PendingDeliveries succeeded on a cancelled context")
+	}
+	if err := s.AckDelivery(done, "s1", 1); err == nil {
+		t.Error("AckDelivery succeeded on a cancelled context")
+	}
+
+	if blobs, _ := s.ReadFrom(live, "s1", 1); len(blobs) != 1 {
+		t.Errorf("stream holds %d records, want only the committed one", len(blobs))
+	}
+	wantPending(t, s, models.Delivery{AggregateID: "s1", Version: 1})
+}
+
+// Reads that run while a transaction is open must neither fail nor deadlock the
+// transaction (isolation level is the store's choice: they may see the writes
+// or block until the commit), and see them for good once it commits.
+func readsDuringOpenTransaction(
+	t testing.TB,
+	s models.Store,
+) {
+	ctx := context.Background()
+	appended := make(chan struct{})
+	release := make(chan struct{})
+	committed := make(chan error, 1)
+	go func() {
+		committed <- s.Atomically(ctx, func(tx models.Tx) error {
+			return appendAndHold(ctx, tx, appended, release)
+		})
+	}()
+	select {
+	case <-appended:
+	case err := <-committed:
+		t.Fatalf("the transaction ended (%v) without running its function", err)
+	}
+
+	read := make(chan error, 1)
+	go func() {
+		_, err := s.ReadFrom(ctx, "s1", 1)
+		read <- err
+	}()
+	var readErr error
+	select {
+	case readErr = <-read:
+		read = nil
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-committed; err != nil {
+		t.Fatalf("the open transaction failed to commit: %v", err)
+	}
+	if read != nil {
+		readErr = <-read
+	}
+	if readErr != nil {
+		t.Errorf("a read during an open transaction failed: %v", readErr)
+	}
+	if blobs, err := s.ReadFrom(ctx, "s1", 1); err != nil || len(blobs) != 1 {
+		t.Fatalf("after the commit ReadFrom = %q, %v; want the record", blobs, err)
+	}
+}
+
+// RunSnapshots executes the conformance suite for models.SnapshotStore
+// implementations built by newStore.
+func RunSnapshots(
+	t *testing.T,
+	newStore SnapshotFactory,
+) {
+	t.Helper()
+
+	tests := snapshotScenarios()
+
+	for name, fn := range tests {
+		t.Run(name, func(t *testing.T) {
+			fn(t, newStore(t))
+		})
+	}
+}
+
+func asStrings(blobs [][]byte) []string {
+	out := make([]string, len(blobs))
+	for i, b := range blobs {
+		out[i] = string(b)
+	}
+	return out
+}
+
+func snapshotUnknown(
+	t testing.TB,
+	s models.SnapshotStore,
+) {
+	data, found, err := s.Get(context.Background(), "ghost")
+	isAbsent := !found && len(data) == 0
+	if err != nil || !isAbsent {
+		t.Fatalf("Get(unknown) = %q, %v, %v; want not found and no error", data, found, err)
+	}
+}
+
+func snapshotRoundTrip(
+	t testing.TB,
+	s models.SnapshotStore,
+) {
+	ctx := context.Background()
+	want := []byte{0, 1, 2, 255, '{', '}'}
+	if err := s.Put(ctx, "a", 7, want); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, found, err := s.Get(ctx, "a")
+	isStored := found && bytes.Equal(got, want)
+	if err != nil || !isStored {
+		t.Fatalf("Get = %v, %v, %v; want %v", got, found, err, want)
+	}
+}
+
+func snapshotReplaced(
+	t testing.TB,
+	s models.SnapshotStore,
+) {
+	ctx := context.Background()
+	for v, data := range []string{"one", "two", "three"} {
+		if err := s.Put(ctx, "a", int64(v+1), []byte(data)); err != nil {
+			t.Fatalf("Put v%d: %v", v+1, err)
+		}
+	}
+	got, found, err := s.Get(ctx, "a")
+	isNewest := found && string(got) == "three"
+	if err != nil || !isNewest {
+		t.Fatalf("Get = %q, %v, %v; want the newest snapshot only", got, found, err)
+	}
+}
+
+func snapshotsIndependent(
+	t testing.TB,
+	s models.SnapshotStore,
+) {
+	ctx := context.Background()
+	s.Put(ctx, "a", 1, []byte("A"))
+	s.Put(ctx, "b", 1, []byte("B"))
+	if err := s.Delete(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if got, found, _ := s.Get(ctx, "b"); !found || string(got) != "B" {
+		t.Fatalf("deleting a's snapshot changed b's: %q, %v", got, found)
+	}
+}
+
+func snapshotDeleted(
+	t testing.TB,
+	s models.SnapshotStore,
+) {
+	ctx := context.Background()
+	s.Put(ctx, "a", 1, []byte("A"))
+	if err := s.Delete(ctx, "a"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, found, _ := s.Get(ctx, "a"); found {
+		t.Fatal("snapshot survived Delete")
+	}
+	if err := s.Delete(ctx, "a"); err != nil {
+		t.Fatalf("second Delete = %v, want nil", err)
+	}
+	if err := s.Delete(ctx, "never-existed"); err != nil {
+		t.Fatalf("Delete(unknown) = %v, want nil", err)
+	}
+}
+
+func snapshotPutAfterDelete(
+	t testing.TB,
+	s models.SnapshotStore,
+) {
+	ctx := context.Background()
+	s.Put(ctx, "a", 5, []byte("old"))
+	s.Delete(ctx, "a")
+	if err := s.Put(ctx, "a", 1, []byte("fresh")); err != nil {
+		t.Fatalf("Put after Delete: %v", err)
+	}
+	if got, found, _ := s.Get(ctx, "a"); !found || string(got) != "fresh" {
+		t.Fatalf("Get = %q, %v; want the snapshot written after the delete", got, found)
+	}
+}
+
+func snapshotConcurrentPuts(
+	t testing.TB,
+	s models.SnapshotStore,
+) {
+	const writers = 16
+	ctx := context.Background()
+	payload := func(i int) []byte { return []byte{'v', byte('a' + i)} }
+	candidates := map[string]struct{}{}
+	for i := range writers {
+		candidates[string(payload(i))] = struct{}{}
+	}
+	results := raceAll(writers, func(i int) error { return s.Put(ctx, "a", int64(i+1), payload(i)) })
+	for i, err := range results {
+		if err != nil {
+			t.Errorf("Put v%d: %v", i+1, err)
+		}
+	}
+
+	got, found, err := s.Get(ctx, "a")
+	if err != nil || !found {
+		t.Fatalf("Get = %q, %v, %v", got, found, err)
+	}
+	if _, ok := candidates[string(got)]; !ok {
+		t.Fatalf("Get = %q, which no writer wrote (torn write)", got)
+	}
+}
+
+func snapshotCancelled(
+	t testing.TB,
+	s models.SnapshotStore,
+) {
+	live := context.Background()
+	s.Put(live, "a", 1, []byte("A"))
+	done, cancel := context.WithCancel(live)
+	cancel()
+
+	if err := s.Put(done, "a", 2, []byte("B")); err == nil {
+		t.Error("Put succeeded on a cancelled context")
+	}
+	if _, _, err := s.Get(done, "a"); err == nil {
+		t.Error("Get succeeded on a cancelled context")
+	}
+	if err := s.Delete(done, "a"); err == nil {
+		t.Error("Delete succeeded on a cancelled context")
+	}
+	if got, found, _ := s.Get(live, "a"); !found || string(got) != "A" {
+		t.Errorf("the snapshot changed after failed operations: %q, %v", got, found)
+	}
+}
+
+// scenario is one check of the suite, run against a store of type S.
+type scenario[S any] func(
+	t testing.TB,
+	s S,
+)
+
+// storeScenarios lists the scenarios of the suite, by name.
+func storeScenarios() map[string]scenario[models.Store] {
+	return map[string]scenario[models.Store]{
+		"AppendCommitsAndReadFromReturnsInOrder":       appendCommitsAndReads,
+		"ReadRangeLimitsCount":                         readRangeLimits,
+		"DuplicateVersionConflictsAndRollsBack":        duplicateVersionRollsBack,
+		"ErrorRollsBackEverything":                     errorRollsBackEverything,
+		"ReceiptsAreStoredAndDuplicatesRejected":       receiptsDuplicates,
+		"DeliveriesKeepEnqueueOrderAndAckRemoves":      deliveriesOrderAndAck,
+		"DropDeliveriesOnlyAffectsThatAggregate":       dropDeliveries,
+		"DeleteStreamIsIdempotentAndScoped":            deleteStream,
+		"AckOfUnknownDeliveryIsNotAnError":             ackUnknown,
+		"DropThenEnqueueInOneTxKeepsTheNewEntry":       dropThenEnqueue,
+		"RollbackRestoresDroppedDeliveries":            rollbackRestoresDrop,
+		"DeliveryKeyCanBeEnqueuedAgain":                reEnqueueAfterAckOrDrop,
+		"AckAfterDropIsNotAnError":                     ackAfterDrop,
+		"NativeIsCallable":                             nativeCallable,
+		"ReadsOfUnknownStreamAreEmpty":                 readsOfUnknown,
+		"PendingDeliveriesHonoursLimit":                pendingLimit,
+		"CommitInsideAtomicallyIsVisibleAfterwards":    committedVisible,
+		"AppendsOutOfVersionOrderReadInOrder":          outOfOrderAppends,
+		"ConcurrentAppendsOfOneVersionAdmitOne":        concurrentSameVersion,
+		"ConcurrentAppendsOfDistinctVersionsAllCommit": concurrentDistinctVersions,
+		"CancelledContextFailsEveryOperation":          cancelledContext,
+		"ReadsDuringAnOpenTransactionDoNotFail":        readsDuringOpenTransaction,
+	}
+}
+
+// snapshotScenarios lists the scenarios of the suite, by name.
+func snapshotScenarios() map[string]scenario[models.SnapshotStore] {
+	return map[string]scenario[models.SnapshotStore]{
+		"GetOfUnknownAggregateIsNotFoundNotAnError": snapshotUnknown,
+		"PutThenGetReturnsTheBytes":                 snapshotRoundTrip,
+		"PutReplacesTheSnapshot":                    snapshotReplaced,
+		"AggregatesAreIndependent":                  snapshotsIndependent,
+		"DeleteRemovesAndIsIdempotent":              snapshotDeleted,
+		"PutAfterDeleteStores":                      snapshotPutAfterDelete,
+		"ConcurrentPutsLeaveOneOfThem":              snapshotConcurrentPuts,
+		"CancelledContextFailsEveryOperation":       snapshotCancelled,
 	}
 }

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/char2cs/asynx/models"
 	"github.com/char2cs/asynx/internal/bus/exec"
+	"github.com/char2cs/asynx/models"
 )
 
 // captureStderr redirects os.Stderr to a pipe, runs f, then returns what was written.
@@ -422,4 +422,85 @@ func TestExecuteWithTimeout_PanicCallbackPanics(t *testing.T) {
 	)
 	close(done)
 	// If we reach here without hanging or crashing, the test passes.
+}
+
+// A panic in the panic or timeout observer is swallowed instead of crashing the
+// process from a goroutine nobody recovers.
+func TestExecuteHandler_PanicInTheObserversIsSwallowed(t *testing.T) {
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	panicking := &exec.HandlerJob[string]{
+		Handler: func(
+			_ context.Context,
+			_ models.Event[string],
+		) {
+			panic("handler")
+		},
+		Event: ev("test"),
+		Ctx:   context.Background(),
+		OnPanic: func(
+			context.Context,
+			models.Event[string],
+			any,
+		) {
+			panic("observer")
+		},
+	}
+	go exec.ExecuteHandler(&wg, panicking)
+
+	wg.Add(1)
+	release := make(chan struct{})
+	slow := &exec.HandlerJob[string]{
+		Handler: func(
+			_ context.Context,
+			_ models.Event[string],
+		) {
+			<-release
+		},
+		Timeout: time.Millisecond,
+		Event:   ev("test"),
+		Ctx:     context.Background(),
+		OnTimeout: func(
+			context.Context,
+			models.Event[string],
+			time.Duration,
+		) {
+			close(release)
+			panic("observer")
+		},
+	}
+	go exec.ExecuteHandler(&wg, slow)
+
+	wg.Wait()
+}
+
+func TestExecuteHandler_PanicInTheObserverOfTheFallbackIsSwallowed(t *testing.T) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	job := &exec.HandlerJob[string]{
+		Handler: func(
+			_ context.Context,
+			_ models.Event[string],
+		) {
+			panic("handler")
+		},
+		FallbackHandler: func(
+			_ context.Context,
+			_ models.Event[string],
+		) {
+			panic("fallback")
+		},
+		Event: ev("test"),
+		Ctx:   context.Background(),
+		OnPanic: func(
+			context.Context,
+			models.Event[string],
+			any,
+		) {
+			panic("observer")
+		},
+	}
+	go exec.ExecuteHandler(&wg, job)
+	wg.Wait()
 }

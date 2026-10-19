@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -168,7 +171,7 @@ func TestExecute_DispatchCalledAsync(t *testing.T) {
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 
 	trackBus := &recordingBus[order]{}
-	d := dispatcher.New[order](trackBus)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: trackBus})
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(es, d)
@@ -273,7 +276,7 @@ func TestExecute_WaitHandlersTrue_HandlersDoneBeforeReturn(t *testing.T) {
 			handlerDone.Store(true)
 		},
 	}
-	d := dispatcher.New[order](callbackBus)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: callbackBus})
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(es, d)
@@ -295,7 +298,7 @@ func TestExecute_WaitHandlersFalse_DispatchCalled(t *testing.T) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	trackBus := &recordingBus[order]{}
-	d := dispatcher.New[order](trackBus)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: trackBus})
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(es, d)
@@ -348,13 +351,17 @@ func TestPublishErrorHandler_CalledOnPublishError(t *testing.T) {
 	var gotErr error
 	called := false
 
-	d := dispatcher.New[order](errBus, dispatcher.WithPublishErrorHandler[order](func(_ context.Context, event asynxmd.Event[order], err error) {
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: errBus, OnPublishError: func(
+		_ context.Context,
+		event asynxmd.Event[order],
+		err error,
+	) {
 		mu.Lock()
 		defer mu.Unlock()
 		gotEvent = event
 		gotErr = err
 		called = true
-	}))
+	}})
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(es, d)
@@ -387,9 +394,13 @@ func TestPublishErrorHandler_NotCalledOnSuccess(t *testing.T) {
 	successBus := &recordingBus[order]{}
 
 	called := false
-	d := dispatcher.New[order](successBus, dispatcher.WithPublishErrorHandler[order](func(_ context.Context, _ asynxmd.Event[order], _ error) {
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: successBus, OnPublishError: func(
+		_ context.Context,
+		_ asynxmd.Event[order],
+		_ error,
+	) {
 		called = true
-	}))
+	}})
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(es, d)
@@ -415,7 +426,7 @@ func TestPublishErrorHandler_NilHandlerDoesNotPanic(t *testing.T) {
 		publishSyncErr: errors.New("bus error"),
 	}
 
-	d := dispatcher.New[order](errBus) // no error handler — must not panic
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: errBus})
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(es, d)
@@ -458,19 +469,30 @@ func (b *recordingBus[T]) Unsubscribe(_ string) error    { return nil }
 func (b *recordingBus[T]) Close(_ context.Context) error { return nil }
 func (b *recordingBus[T]) WaitForHandlers()              {}
 
-func newEnv(t *testing.T, opts ...Opt[order]) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, *dispatcher.Dispatcher[order], *bus.ChannelBus[order]) {
+func newEnv(
+	t *testing.T,
+	opts ...Opt[order],
+) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, asynxmd.Dispatcher[order], *bus.ChannelBus[order]) {
 	t.Helper()
 	return newEnvOn(t, store.New(), opts...)
 }
 
-func newEnvOn(t *testing.T, s store.Memory, opts ...Opt[order]) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, *dispatcher.Dispatcher[order], *bus.ChannelBus[order]) {
+func newEnvOn(
+	t *testing.T,
+	s store.Memory,
+	opts ...Opt[order],
+) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, asynxmd.Dispatcher[order], *bus.ChannelBus[order]) {
 	t.Helper()
 	ss := store.NewSnapshots()
 	es := eventstore.New[order](s, ss, nil, 1, nil)
 	b := bus.NewChannelBus[order]()
-	d := dispatcher.New[order](b)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	return New(es, d, opts...), s, ss, d, b
+}
+
+func parked(d asynxmd.Dispatcher[order]) []string {
+	return slices.Sorted(maps.Keys(d.Parks()))
 }
 
 func update(id string, total float64) mocks.UpdateOrderCmd {
@@ -805,14 +827,6 @@ func TestExecute_DurableDeliveryOnlyForEventsADurableSubscriberWants(t *testing.
 	}
 }
 
-
-
-
-
-
-
-
-
 func streamLen(t *testing.T, s interface {
 	ReadFrom(context.Context, string, int64) ([][]byte, error)
 }, agg string) int {
@@ -823,36 +837,6 @@ func streamLen(t *testing.T, s interface {
 	}
 	return len(blobs)
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 func TestExecute_AfterDispatcherClosedFailsPipelineButKeepsTheCommit(t *testing.T) {
 	ex, s, _, d, _ := newEnv(t)
@@ -877,70 +861,6 @@ func TestExecute_WithoutDispatcherCommitsAndReturns(t *testing.T) {
 		t.Fatalf("delivery enqueued with nobody to deliver to: %v", pending)
 	}
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 func TestExecute_WaitingForHandlersGivesUpWithTheCommittedEvent(t *testing.T) {
 	ex, _, _, _, b := newEnv(t)
@@ -970,23 +890,9 @@ func TestExecute_WaitingForHandlersGivesUpWithTheCommittedEvent(t *testing.T) {
 	}
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 func TestExecute_WaitingOnAParkedAggregateReportsNoHandlerRan(t *testing.T) {
 	ex := durableEnv(t, func(context.Context, asynxmd.Event[order]) error { return nil })
-	ex.dispatcher.Park("agg")
+	ex.dispatcher.Park("agg", errors.New("parked by the test"))
 
 	evt, err := ex.Execute(context.Background(), update("agg", 1), true)
 	if !errors.Is(err, asynxmd.ErrDeliveryParked) || evt.Version != 1 {
@@ -1008,7 +914,63 @@ func TestExecute_EnqueueFailureAfterCommitParksTheAggregate(t *testing.T) {
 	if !errors.Is(err, asynxmd.ErrPipelineFailed) || evt.Version != 1 {
 		t.Fatalf("Execute = v%d, %v; want the committed v1 with ErrPipelineFailed", evt.Version, err)
 	}
-	if got := d.Halted(); len(got) != 1 || got[0] != "agg" {
+	if got := parked(d); len(got) != 1 || got[0] != "agg" {
 		t.Fatalf("halted = %v, want [agg]", got)
+	}
+}
+
+func TestWithLockIfFree_RunsWhenFreeAndSkipsWhenHeld(t *testing.T) {
+	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
+	executor := New(es, nil)
+
+	ran := false
+	if !executor.WithLockIfFree("agg", func() { ran = true }) || !ran {
+		t.Fatal("fn did not run on a free aggregate")
+	}
+
+	var ranWhileHeld, reportedRunning bool
+	err := executor.WithLock(context.Background(), "agg", func() error {
+		reportedRunning = executor.WithLockIfFree("agg", func() { ranWhileHeld = true })
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ranWhileHeld || reportedRunning {
+		t.Errorf("WithLockIfFree ran = %v, reported running = %v while the lock was held", ranWhileHeld, reportedRunning)
+	}
+
+	if !executor.WithLockIfFree("agg", func() {}) {
+		t.Fatal("the lock was not released")
+	}
+}
+
+func within[V any](
+	t *testing.T,
+	ch <-chan V,
+	what string,
+) V {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		panic("unreachable")
+	}
+}
+
+func eventually(
+	t *testing.T,
+	what string,
+	cond func() bool,
+) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		runtime.Gosched()
 	}
 }

@@ -56,6 +56,14 @@ func New[T any](
 	}
 }
 
+// GuardAutoSnapshots installs the guard under which a lock-free Get or Preload
+// writes the auto-snapshot of an upcast state: it must run its function while
+// no command or Forget runs for the aggregate, and return false without running
+// it when that cannot be arranged. See reader.SnapshotGuard.
+func (es *EventStore[T]) GuardAutoSnapshots(guard reader.SnapshotGuard) {
+	es.reader.SetSnapshotGuard(guard)
+}
+
 // Get returns the current aggregate state using the optimal path (warm or
 // cold). Returns ErrNotFound if the aggregate has never been written.
 func (es *EventStore[T]) Get(

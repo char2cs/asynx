@@ -20,7 +20,6 @@ import (
 	"github.com/char2cs/asynx/store"
 )
 
-
 func TestForget_ErasesStreamSnapshotAndPendingDeliveries(t *testing.T) {
 	ex, s, ss, d, _ := newEnv(t, WithDurableDelivery[order](func(string) bool { return true }))
 	ctx := context.Background()
@@ -111,7 +110,7 @@ func TestForget_ErasePhaseFailureParksTheAggregate(t *testing.T) {
 	if err := ex.Forget(ctx, "agg"); !errors.Is(err, asynxmd.ErrForgetFailed) {
 		t.Fatalf("err = %v", err)
 	}
-	if got := d.Halted(); !slices.Equal(got, []string{"agg"}) {
+	if got := parked(d); !slices.Equal(got, []string{"agg"}) {
 		t.Fatalf("halted = %v, want [agg]", got)
 	}
 	if ex.isForgetting("agg") {
@@ -247,7 +246,7 @@ func TestForget_AfterDispatcherClosedFailsPipeline(t *testing.T) {
 	}
 	// The marker is committed and pending, and nothing may be delivered ahead
 	// of it.
-	if got := d.Halted(); !slices.Equal(got, []string{"agg"}) {
+	if got := parked(d); !slices.Equal(got, []string{"agg"}) {
 		t.Fatalf("halted = %v, want [agg]", got)
 	}
 	if pending, _ := ex.es.Store().PendingDeliveries(ctx, 10); len(pending) != 1 {
@@ -482,14 +481,24 @@ func TestForget_FailsWhenTheDispatcherIsClosed(t *testing.T) {
 	_ = s
 }
 
-func durableEnv(t *testing.T, handler asynxmd.DurableHandler[order], opts ...dispatcher.Opt[order]) *CommandExecutor[order] {
+func durableEnv(
+	t *testing.T,
+	handler asynxmd.DurableHandler[order],
+	edits ...func(*asynxmd.DispatcherConfig[order]),
+) *CommandExecutor[order] {
 	t.Helper()
 	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
-	d := dispatcher.New[order](bus.NewChannelBus[order](), append([]dispatcher.Opt[order]{
-		dispatcher.WithDurableSubs([]dispatcher.DurableSub[order]{{Match: func(string) bool { return true }, Handler: handler}}),
-		dispatcher.WithRetryBackoff[order](time.Millisecond, 2*time.Millisecond),
-		dispatcher.WithMaxAttempts[order](2),
-	}, opts...)...)
+	cfg := asynxmd.DispatcherConfig[order]{
+		Bus:          bus.NewChannelBus[order](),
+		DurableSubs:  []asynxmd.DurableSub[order]{{Match: func(string) bool { return true }, Handler: handler}},
+		RetryInitial: time.Millisecond,
+		RetryMax:     2 * time.Millisecond,
+		MaxAttempts:  2,
+	}
+	for _, edit := range edits {
+		edit(&cfg)
+	}
+	d := dispatcher.New(cfg)
 	t.Cleanup(func() { d.Close(context.Background()) })
 	return New(es, d, WithDurableDelivery[order](func(string) bool { return true }))
 }
@@ -512,7 +521,7 @@ func TestForget_DoesNotEraseWhenADurableSubscriberCannotTakeTheTombstone(t *test
 	if n := streamLen(t, ex.es.Store().(store.Memory), "agg"); n == 0 {
 		t.Fatal("aggregate erased although a durable subscriber never took the tombstone")
 	}
-	if got := ex.dispatcher.Halted(); !slices.Equal(got, []string{"agg"}) {
+	if got := parked(ex.dispatcher); !slices.Equal(got, []string{"agg"}) {
 		t.Fatalf("halted = %v, want [agg]: later events must wait behind the marker", got)
 	}
 	// The tombstone's transaction dropped the superseded delivery and left the
@@ -572,7 +581,9 @@ func TestForget_LetsAFailingDeliveryGoWhenTheTombstoneIsAccepted(t *testing.T) {
 		}
 		attempted <- struct{}{}
 		return errors.New("poison")
-	}, dispatcher.WithRetryBackoff[order](time.Hour, time.Hour), dispatcher.WithMaxAttempts[order](100))
+	}, func(cfg *asynxmd.DispatcherConfig[order]) {
+		cfg.RetryInitial, cfg.RetryMax, cfg.MaxAttempts = time.Hour, time.Hour, 100
+	})
 	ctx := context.Background()
 	if _, err := ex.Execute(ctx, update("agg", 1), false); err != nil {
 		t.Fatal(err)
@@ -646,5 +657,67 @@ func TestForget_DeliveryLogFailureInTheTombstoneTransactionAbortsIt(t *testing.T
 				t.Fatal("fence left up after the aborted tombstone")
 			}
 		})
+	}
+}
+
+// A Forget stuck behind a handler that is waiting for it, which is only
+// recognised when the handler passes its own context on, must not hold a
+// shutdown open: shutting down releases it.
+func TestForget_GivesUpWhenShutdownBegins(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	ex := durableEnv(t, func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) error {
+		if e.EventName != asynxmd.ForgetEventName {
+			entered <- struct{}{}
+			<-release
+		}
+		return nil
+	})
+	ctx := context.Background()
+	if _, _, err := ex.ExecuteAsync(ctx, update("agg", 1)); err != nil {
+		t.Fatal(err)
+	}
+	within(t, entered, "the handler")
+
+	got := make(chan error, 1)
+	go func() { got <- ex.Forget(ctx, "agg") }()
+	eventually(t, "the Forget to raise its fence", func() bool { return ex.isForgetting("agg") })
+	select {
+	case err := <-got:
+		t.Fatalf("Forget returned %v while the handler ahead of the tombstone was still running", err)
+	default:
+	}
+
+	t.Cleanup(func() { close(release) })
+	ex.dispatcher.Interrupt()
+	err := within(t, got, "the Forget to give up")
+	if !errors.Is(err, asynxmd.ErrForgetFailed) || !errors.Is(err, asynxmd.ErrShuttingDown) {
+		t.Fatalf("err = %v, want ErrForgetFailed wrapping ErrShuttingDown", err)
+	}
+
+	if ex.isForgetting("agg") {
+		t.Fatal("aggregate left fenced by the abandoned Forget")
+	}
+	if got := parked(ex.dispatcher); !slices.Equal(got, []string{"agg"}) {
+		t.Fatalf("halted = %v, want [agg]: the marker is still to be delivered", got)
+	}
+}
+
+// A tombstone that was delivered counts even if shutdown begins at the same
+// moment.
+func TestAwaitTombstone_PrefersADeliveryThatFinished(t *testing.T) {
+	ex, _, _, d, _ := newEnv(t)
+	d.Interrupt()
+	finished := make(chan struct{})
+	close(finished)
+
+	for range 50 {
+		err := ex.awaitTombstone(context.Background(), asynxmd.Ticket{Final: finished, Err: func() error { return nil }})
+		if err != nil {
+			t.Fatalf("awaitTombstone = %v for a tombstone that was delivered", err)
+		}
 	}
 }

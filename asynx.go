@@ -24,6 +24,10 @@ type Asynx[T any] interface {
 	// projection handlers have completed. When SendWait returns without error,
 	// the event is persisted and every projection subscribed to it has finished.
 	// Use Send when projection consistency is not required at the call site.
+	// The retry of an idempotent command (see IdempotentCommand) waits too, for
+	// the handlers of the event its first attempt produced, if they are still
+	// running, or reports ErrDeliveryParked if the event is still pending behind
+	// a parked aggregate.
 	SendWait(
 		ctx context.Context,
 		cmd models.Command[T],
@@ -41,7 +45,11 @@ type Asynx[T any] interface {
 	// Forget again, which delivers the handlers' notifications again. The
 	// tombstone also stays in the delivery log until acknowledged, so
 	// ResumeDeliveries or a restart delivers it ahead of anything newer. A handler
-	// cannot Forget the aggregate it is handling (ErrForgetFromHandler).
+	// cannot Forget the aggregate it is handling (ErrForgetFromHandler); that is
+	// recognised through the handler's ctx, so pass it on: a Forget made with an
+	// unrelated context (context.Background()) waits behind the very handler that
+	// called it, and only ctx, or the shutdown (which then fails it with
+	// ErrShuttingDown), ends the wait.
 	Forget(
 		ctx context.Context,
 		aggregateID string,
@@ -53,6 +61,22 @@ type Asynx[T any] interface {
 	// SendWait on them returns ErrDeliveryParked. Parking lasts until
 	// ResumeDeliveries or a restart; it never lifts by itself.
 	PausedAggregates() []string
+
+	// InspectDelivery says why an aggregate is paused. The DeliveryStatus it
+	// returns reports whether its durable delivery is parked, the park's
+	// generation (it changes each time a park is imposed), the error that
+	// parked it (Cause), and, in ascending order, the versions no handler took
+	// (Undelivered). The cause is ErrDeliveryParked wrapping the
+	// last handler error and the attempt count when the attempts ran out, the
+	// ack error when acknowledging the delivery failed, ErrDispatcherClosed
+	// when a shutdown interrupted the retries, or the error of the failed
+	// Forget, enqueue or redelivery that parked it. An aggregate that is not
+	// parked, or that the dispatcher does not know, has the zero
+	// DeliveryStatus, as does every aggregate of an instance without a
+	// dispatcher.
+	InspectDelivery(
+		aggregateID string,
+	) models.DeliveryStatus
 
 	// ResumeDeliveries redelivers the paused aggregates' pending events, in
 	// order, ahead of any live event, to the durable subscribers only (live
@@ -135,10 +159,10 @@ type Asynx[T any] interface {
 		fn models.ProjectionHandler[T],
 	) error
 
-	// WaitPublish blocks until every queued event has been handled. It is for
-	// tests: while it waits, commands are refused by the dispatcher, so one that
-	// commits meanwhile fails with ErrPipelineFailed and parks its aggregate until
-	// ResumeDeliveries. Do not call it under live traffic.
+	// WaitPublish blocks until every event queued when it was called has been
+	// handled. It is for tests: under live traffic it still returns, but what it
+	// waited for is only a moment's worth of events. Commands sent while it waits
+	// are neither refused nor waited for.
 	WaitPublish()
 }
 
@@ -209,104 +233,137 @@ func (i *asynxImpl[T]) Listen(
 		return nil, nil, models.ErrEmptyPattern
 	}
 
+	l := newListener(i.bus, count)
+	id, err := i.bus.Subscribe(Topic(pattern), l.handle)
+	if err != nil {
+		return nil, nil, err
+	}
+	l.publishSubscription(id)
+
+	return l.ch, l.unsubscribe, nil
+}
+
+// listener feeds a Listen channel. In bounded mode (count > 0) the channel has
+// capacity count, so a send never blocks once sendMu is held, and ch is closed
+// under sendMu so no handler can send on a closed channel.
+type listener[T any] struct {
+	bus   models.Bus[T]
+	ch    chan models.Event[T]
+	count int
+
+	done       chan struct{}
+	subIDReady chan struct{}
+	received   atomic.Int64
+	closed     atomic.Bool
+
+	sendMu    sync.Mutex
+	delivered int64
+	chClosed  bool
+	subID     string
+}
+
+func newListener[T any](
+	bus models.Bus[T],
+	count int,
+) *listener[T] {
 	capacity := count
 	if capacity <= 0 {
 		capacity = 16
 	}
-	ch := make(chan models.Event[T], capacity)
-
-	var (
-		received  atomic.Int64
-		delivered int64 // protected by sendMu; counts actual sends so close fires after exactly count deliveries
-		closed    atomic.Bool
-		// sendMu serialises send+close in bounded mode so close(ch) never races with ch<-evt.
-		sendMu   sync.Mutex
-		chClosed bool // protected by sendMu; closed means "unsubbed or finished", chClosed means ch itself is closed
-		subID    string
-	)
-	// closeCh closes ch exactly once. Caller must hold sendMu.
-	closeCh := func() {
-		if !chClosed {
-			chClosed = true
-			close(ch)
-		}
+	return &listener[T]{
+		bus:        bus,
+		ch:         make(chan models.Event[T], capacity),
+		count:      count,
+		done:       make(chan struct{}),
+		subIDReady: make(chan struct{}),
 	}
-	done := make(chan struct{})       // signals unbounded-mode handlers to abort on unsub
-	subIDReady := make(chan struct{}) // closed once subID is written; gates auto-unsub goroutine
+}
 
-	handler := func(_ context.Context, evt models.Event[T]) {
-		// Fast-path short-circuit if already closed/unsubbed.
-		if closed.Load() {
-			return
-		}
-
-		if count <= 0 {
-			// Unbounded mode: send may block if consumer doesn't drain.
-			// Use the done channel to abort cleanly when unsub() is called.
-			select {
-			case <-done:
-				return
-			case ch <- evt:
-			}
-			return
-		}
-
-		// Bounded mode: channel capacity == count, so send never blocks once we
-		// hold the guard. Use received to gate exactly count deliveries.
-		n := received.Add(1)
-		if n > int64(count) {
-			return
-		}
-
-		sendMu.Lock()
-		if closed.Load() {
-			sendMu.Unlock()
-			return
-		}
-		ch <- evt // capacity == count, never blocks
-		delivered++
-		isLast := delivered == int64(count)
-		if isLast {
-			closed.Store(true)
-			closeCh()
-		}
-		sendMu.Unlock()
-
-		if isLast {
-			// Auto-unsubscribe asynchronously — wait for subID to be published, then unsub.
-			go func() {
-				<-subIDReady
-				_ = i.bus.Unsubscribe(subID)
-			}()
-		}
+func (l *listener[T]) handle(
+	_ context.Context,
+	evt models.Event[T],
+) {
+	if l.closed.Load() {
+		return
 	}
-
-	id, err := i.bus.Subscribe(Topic(pattern), handler)
-	if err != nil {
-		return nil, nil, err
+	if l.count <= 0 {
+		l.sendUnbounded(evt)
+		return
 	}
+	l.sendBounded(evt)
+}
 
-	sendMu.Lock()
-	subID = id
-	sendMu.Unlock()
-	close(subIDReady)
-
-	unsub := func() {
-		if !closed.CompareAndSwap(false, true) {
-			return
-		}
-		close(done)
-		_ = i.bus.Unsubscribe(subID)
-		// In bounded mode, close ch under sendMu so any handler that slipped
-		// past the fast-path closed.Load() check cannot send to a closed channel.
-		if count > 0 {
-			sendMu.Lock()
-			closeCh()
-			sendMu.Unlock()
-		}
+func (l *listener[T]) sendUnbounded(evt models.Event[T]) {
+	select {
+	case <-l.done:
+	case l.ch <- evt:
 	}
+}
 
-	return ch, unsub, nil
+func (l *listener[T]) sendBounded(evt models.Event[T]) {
+	withinCount := l.received.Add(1) <= int64(l.count)
+	if !withinCount {
+		return
+	}
+	if !l.deliver(evt) {
+		return
+	}
+	go l.unsubscribeWhenPublished()
+}
+
+// deliver sends evt and reports whether it was the last one the listener takes.
+func (l *listener[T]) deliver(evt models.Event[T]) (isLast bool) {
+	l.sendMu.Lock()
+	defer l.sendMu.Unlock()
+
+	if l.closed.Load() {
+		return false
+	}
+	l.ch <- evt
+	l.delivered++
+	isLast = l.delivered == int64(l.count)
+	if isLast {
+		l.closed.Store(true)
+		l.closeChLocked()
+	}
+	return isLast
+}
+
+func (l *listener[T]) unsubscribeWhenPublished() {
+	<-l.subIDReady
+	_ = l.bus.Unsubscribe(l.subID)
+}
+
+// closeChLocked closes ch exactly once. The caller holds sendMu.
+func (l *listener[T]) closeChLocked() {
+	if l.chClosed {
+		return
+	}
+	l.chClosed = true
+	close(l.ch)
+}
+
+func (l *listener[T]) publishSubscription(id string) {
+	l.sendMu.Lock()
+	l.subID = id
+	l.sendMu.Unlock()
+	close(l.subIDReady)
+}
+
+func (l *listener[T]) unsubscribe() {
+	if !l.closed.CompareAndSwap(false, true) {
+		return
+	}
+	close(l.done)
+	_ = l.bus.Unsubscribe(l.subID)
+
+	isBounded := l.count > 0
+	if !isBounded {
+		return
+	}
+	l.sendMu.Lock()
+	l.closeChLocked()
+	l.sendMu.Unlock()
 }
 
 func (i *asynxImpl[T]) SubscribeWait(
@@ -354,11 +411,19 @@ func (i *asynxImpl[T]) PausedAggregates() []string {
 	return i.proc.Paused()
 }
 
+func (i *asynxImpl[T]) InspectDelivery(
+	aggregateID string,
+) models.DeliveryStatus {
+	return i.proc.Inspect(aggregateID)
+}
+
 func (i *asynxImpl[T]) ResumeDeliveries(ctx context.Context) error {
 	return i.proc.Resume(ctx, recoveryBatch)
 }
 
+// OnForget registers fn to run when an aggregate is forgotten. The dots of the
+// subscription pattern are escaped so the bus treats it as a literal, not a
+// wildcard.
 func (i *asynxImpl[T]) OnForget(fn models.ForgetHandler[T]) (string, error) {
-	// Escape dots so the bus treats this as a literal pattern, not a wildcard.
 	return i.bus.Subscribe("asynx\\.aggregate\\.forget", models.ProjectionHandler[T](fn))
 }

@@ -1,5 +1,7 @@
 # Processor Implementation Specification
 
+> **Since v1.0:** this page describes the original design (one goroutine per shard, no locks). The current behaviour differs: commands for one aggregate run under a per-aggregate lock; a worker that picks a command for a busy aggregate leaves it in that aggregate's mailbox instead of waiting; `QueueDepth` bounds that mailbox per aggregate (default `WorkersPerShard`). See [Write-Path Guarantees](guarantees.md#workers-and-the-queue).
+
 ## Overview
 
 This specification details the **internal architecture and mechanics** of the processor module. It explains how components interact, how concurrency is managed, and how the command execution pipeline actually works at the implementation level.
@@ -1574,7 +1576,7 @@ func (w *Worker[T]) run(commandChan chan *CommandEnvelope[T]) {
 ```go
 type ShardingOpts struct {
     Shards          int  // Number of shards (default 8)
-    QueueDepth      int  // Per-shard buffer (default 0 = unbounded)
+    QueueDepth      int  // Commands waiting per aggregate (default 0 = WorkersPerShard)
     WorkersPerShard int  // Workers per shard (default 1)
 }
 ```
