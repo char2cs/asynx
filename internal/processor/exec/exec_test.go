@@ -974,3 +974,82 @@ func eventually(
 		runtime.Gosched()
 	}
 }
+
+func BenchmarkExecute_CreateNew(b *testing.B) {
+	s := store.New()
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	executor := New(es, nil)
+
+	ctx := context.Background()
+
+	for _, numEvents := range []int{1, 100, 1000} {
+		b.Run("events="+string(rune('0'+numEvents/100))+"_000", func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				cmd := mocks.CreateOrderCmd{ID: "order" + string(rune(b.N)), Total: 100.0}
+				_, _ = executor.Execute(ctx, cmd, false)
+			}
+		})
+	}
+}
+
+func BenchmarkExecute_UpdateExisting(b *testing.B) {
+	s := store.New()
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	executor := New(es, nil)
+
+	ctx := context.Background()
+
+	// Pre-populate with an aggregate
+	createCmd := mocks.CreateOrderCmd{ID: "order_base", Total: 100.0}
+	executor.Execute(ctx, createCmd, false)
+
+	for _, numEvents := range []int{1, 100, 1000} {
+		b.Run("events="+string(rune('0'+numEvents/100))+"_000", func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				cmd := mocks.UpdateOrderCmd{
+					ID:       "order_base",
+					NewState: order{ID: "order_base", Total: 150.0, Status: "Confirmed"},
+				}
+				_, _ = executor.Execute(ctx, cmd, false)
+			}
+		})
+	}
+}
+
+var errEnqueue = errors.New("enqueue refused")
+
+func fakeEnv(
+	t *testing.T,
+) (*CommandExecutor[order], *mocks.Dispatcher[order]) {
+	t.Helper()
+	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
+	fake := mocks.NewDispatcher[order]()
+	return New[order](es, fake, WithDurableDelivery[order](func(
+		string,
+	) bool {
+		return true
+	})), fake
+}
+
+func TestExecute_EnqueueFailureParksWithTheEnqueueError(t *testing.T) {
+	ex, fake := fakeEnv(t)
+	fake.FailEnqueue(errEnqueue)
+
+	if _, err := ex.Execute(context.Background(), update("agg", 1), false); !errors.Is(err, errEnqueue) {
+		t.Fatalf("Execute = %v, want the enqueue error", err)
+	}
+	calls := fake.ParkCalls()
+	wrongCalls := len(calls) != 1 || calls[0].AggregateID != "agg" || !errors.Is(calls[0].Cause, errEnqueue)
+	if wrongCalls {
+		t.Fatalf("ParkCalls = %+v, want agg parked with the enqueue error", calls)
+	}
+	if got := fake.Inspect("agg"); !got.Parked || !errors.Is(got.Cause, errEnqueue) {
+		t.Fatalf("Inspect = %+v, want parked with the enqueue error", got)
+	}
+}
