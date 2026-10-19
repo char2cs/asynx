@@ -75,7 +75,7 @@ func (e *CommandExecutor[T]) Forget(
 			return
 		}
 		if e.dispatcher != nil {
-			e.dispatcher.Park(aggregateID, nil)
+			e.dispatcher.Park(aggregateID, err)
 		}
 		e.clearForgetting(aggregateID)
 	}()
@@ -196,7 +196,7 @@ func (e *CommandExecutor[T]) commitTombstone(
 		Kind: asynxmd.DispatchTombstone,
 	})
 	if err != nil {
-		e.dispatcher.Park(aggregateID, nil)
+		e.dispatcher.Park(aggregateID, err)
 		return asynxmd.Ticket{}, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 	}
 	return ticket, nil

@@ -20,6 +20,19 @@ func (p *Processor[T]) Paused() []string {
 	return slices.Sorted(maps.Keys(p.dispatcher.Parks()))
 }
 
+// Inspect reports the aggregate's delivery status as the dispatcher sees it:
+// whether it is parked, the park's generation, the error that parked it and
+// the versions the park left undelivered. Without a dispatcher it is the zero
+// DeliveryStatus.
+func (p *Processor[T]) Inspect(
+	aggregateID string,
+) asynxmd.DeliveryStatus {
+	if p.dispatcher == nil {
+		return asynxmd.DeliveryStatus{}
+	}
+	return p.dispatcher.Inspect(aggregateID)
+}
+
 // Resume redelivers the parked aggregates, to the durable subscribers. For each
 // it lifts the park and re-enqueues the aggregate's pending deliveries, in
 // order, under the aggregate's command lock so no live event overtakes them.
@@ -81,7 +94,8 @@ func (p *Processor[T]) Resume(
 // has been lifted, or lifted and imposed again, since Resume listed it is left
 // to the next Resume: the log read does not describe it. It holds agg's command
 // lock, and only that one. When the redelivery fails the aggregate is
-// parked again, remembering which of its events no handler has taken, because a
+// parked again, with the redelivery error as the cause Inspect reports,
+// remembering which of its events no handler has taken, because a
 // lifted park would hide the failure from the next Resume.
 func (p *Processor[T]) resumeAggregate(
 	ctx context.Context,
@@ -98,7 +112,7 @@ func (p *Processor[T]) resumeAggregate(
 		if err == nil {
 			return nil
 		}
-		p.dispatcher.Park(agg, nil, stillUndelivered(undelivered, remaining)...)
+		p.dispatcher.Park(agg, err, stillUndelivered(undelivered, remaining)...)
 		return fmt.Errorf("asynx: resume %s: %w", agg, err)
 	})
 }
@@ -169,7 +183,7 @@ func (p *Processor[T]) Recover(
 		if ctx.Err() != nil || errors.Is(err, asynxmd.ErrDispatcherClosed) {
 			return fmt.Errorf("asynx: recovery: %w", err)
 		}
-		p.dispatcher.Park(agg, nil, undelivered...)
+		p.dispatcher.Park(agg, err, undelivered...)
 		p.reportPublishError(ctx, asynxmd.Event[T]{AggregateID: agg, Version: backlogs[agg][0].Version},
 			fmt.Errorf("recovery: %w", err))
 	}

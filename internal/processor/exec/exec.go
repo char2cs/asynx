@@ -179,7 +179,7 @@ func (e *CommandExecutor[T]) run(
 	wait, err := e.enqueue(ctx, event)
 	if err != nil {
 		if e.isDurable(event.EventName) {
-			e.dispatcher.Park(event.AggregateID, nil)
+			e.dispatcher.Park(event.AggregateID, err)
 		}
 		return event, nil, fmt.Errorf("%w: %w", asynxmd.ErrPipelineFailed, err)
 	}
