@@ -175,8 +175,18 @@ func (d *durableDeliverer[T]) wait(
 	case <-halt:
 		return asynxmd.ErrDeliveryParked
 	case <-timer.C:
-		return nil
+		return backoffEnded(job, halt)
 	}
+}
+
+func backoffEnded[T any](
+	job jobs.Job[T],
+	halt <-chan struct{},
+) error {
+	if job.Acked() && isClosed(halt) {
+		return asynxmd.ErrDeliveryParked
+	}
+	return nil
 }
 
 func (d *durableDeliverer[T]) giveUp(
