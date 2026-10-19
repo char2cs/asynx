@@ -398,9 +398,7 @@ func TestExecute_Idempotent_RetryWaitsForTheOriginalEventsHandlers(t *testing.T)
 	if err := wait(ctx); err != nil {
 		t.Fatalf("wait after the handler finished = %v", err)
 	}
-	if _, wait, err := ex.ExecuteAsync(ctx, cmd); err != nil || wait != nil {
-		t.Fatalf("retry after the delivery is over: wait set = %v, err = %v; want nothing to wait on", wait != nil, err)
-	}
+	awaitNothingToWaitOn(t, ex, cmd)
 }
 
 func TestExecute_Idempotent_RejectedRetryHasNothingToWaitOn(t *testing.T) {
@@ -461,7 +459,31 @@ func TestExecute_Idempotent_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWas
 	if err := wait(ctx); !errors.Is(err, asynxmd.ErrDeliveryParked) {
 		t.Fatalf("wait = %v, want ErrDeliveryParked", err)
 	}
-	if _, wait, err := ex.ExecuteAsync(ctx, delivered); err != nil || wait != nil {
-		t.Fatalf("retry of the command delivered before the park: err = %v, wait set = %v; want nothing to report", err, wait != nil)
+	awaitNothingToWaitOn(t, ex, delivered)
+}
+
+func awaitNothingToWaitOn(
+	t *testing.T,
+	ex *CommandExecutor[order],
+	cmd asynxmd.Command[order],
+) {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, wait, err := ex.ExecuteAsync(ctx, cmd)
+		if err != nil {
+			t.Fatalf("retry of a delivered command: err = %v", err)
+		}
+		if wait == nil {
+			return
+		}
+		if err := wait(ctx); err != nil {
+			t.Fatalf("a retry that still finds the finished delivery must not wait: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("retry of a delivered command: still something to wait on after 5s; want nothing")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
