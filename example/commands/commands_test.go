@@ -354,3 +354,41 @@ func TestShipOrderCmd_EmitEvent(t *testing.T) {
 		t.Errorf("EmitEvent().ShipTo = %q, want %q", event.ShipTo, "123 Main St")
 	}
 }
+
+func TestOrderStatusConstants(t *testing.T) {
+	if domain.OrderPending != "Pending" {
+		t.Errorf("OrderPending = %q, want %q", domain.OrderPending, "Pending")
+	}
+	if domain.OrderConfirmed != "Confirmed" {
+		t.Errorf("OrderConfirmed = %q, want %q", domain.OrderConfirmed, "Confirmed")
+	}
+	if domain.OrderShipped != "Shipped" {
+		t.Errorf("OrderShipped = %q, want %q", domain.OrderShipped, "Shipped")
+	}
+}
+
+func TestOrderStruct(t *testing.T) {
+	order := domain.Order{
+		ID:     "ORD-001",
+		Status: domain.OrderPending,
+		Total:  99.99,
+		Items:  2,
+		ShipTo: "123 Main St",
+	}
+
+	if order.ID != "ORD-001" {
+		t.Errorf("ID = %q, want %q", order.ID, "ORD-001")
+	}
+	if order.Status != domain.OrderPending {
+		t.Errorf("Status = %q, want %q", order.Status, domain.OrderPending)
+	}
+	if order.Total != 99.99 {
+		t.Errorf("Total = %v, want %v", order.Total, 99.99)
+	}
+	if order.Items != 2 {
+		t.Errorf("Items = %d, want %d", order.Items, 2)
+	}
+	if order.ShipTo != "123 Main St" {
+		t.Errorf("ShipTo = %q, want %q", order.ShipTo, "123 Main St")
+	}
+}
