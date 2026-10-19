@@ -146,7 +146,8 @@ func dispatchConcurrentSameAggregate(
 		t.Fatalf("Close: %v", err)
 	}
 	versions := versionsOf(b.published())
-	if len(versions) != n || distinct(versions) != n || len(refused.list()) != 0 {
+	wrongCount := len(versions) != n || distinct(versions) != n
+	if wrongCount || len(refused.list()) != 0 {
 		t.Fatalf("published %d events (%d distinct), refused %v; want %d once each", len(versions), distinct(versions), refused.list(), n)
 	}
 }

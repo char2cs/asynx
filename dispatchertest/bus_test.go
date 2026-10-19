@@ -33,7 +33,8 @@ func TestBus_TheRestOfTheBusIsANoOp(t *testing.T) {
 		b.Close(context.Background()),
 	)
 	b.WaitForHandlers()
-	if errs != nil || id != "" || len(b.published()) != 0 {
+	rejected := errs != nil || id != ""
+	if rejected || len(b.published()) != 0 {
 		t.Fatalf("errors %v, id %q, published %d; want a silent no-op", errs, id, len(b.published()))
 	}
 }

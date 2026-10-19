@@ -259,7 +259,8 @@ func shutdownDuringRetry(
 	}
 	_, v1 := acked.Load(int64(1))
 	_, v2 := acked.Load(int64(2))
-	if v1 || v2 || slices.Contains(rec.list(), "a/2") {
+	anyAcked := v1 || v2
+	if anyAcked || slices.Contains(rec.list(), "a/2") {
 		t.Fatalf("acked v1 %v, v2 %v, delivered %v; want nothing past the failing v1", v1, v2, rec.list())
 	}
 }
@@ -411,7 +412,8 @@ func handlerContextMarksItsAggregate(
 	tk := mustEnqueue(t, d, durable(event("a", 1), acknowledge))
 	h.wait(t, tk.Final, "the delivery")
 	handlerCtx := receive(t, h.patience, contexts, "the handler context")
-	if !inOwn.Load() || inOtherAggregate.Load() || inOther.Load() {
+	wrongOwner := !inOwn.Load() || inOtherAggregate.Load()
+	if wrongOwner || inOther.Load() {
 		t.Fatalf("InHandler own=%v otherAggregate=%v otherInstance=%v; want true, false, false", inOwn.Load(), inOtherAggregate.Load(), inOther.Load())
 	}
 	if handlerCtx.Err() == nil || d.InHandler(context.Background(), "a") {

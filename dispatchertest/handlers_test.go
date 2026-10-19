@@ -11,7 +11,8 @@ import (
 func TestHandlers_MatchersAndFixedOutcomes(t *testing.T) {
 	ctx := context.Background()
 	matches := always("x") && !never("x") && onlyTestEvents(eventName) && !onlyTestEvents("other")
-	if !matches || succeed(ctx, event("a", 1)) != nil || !errors.Is(fail(ctx, event("a", 1)), errDown) {
+	outcomesFixed := succeed(ctx, event("a", 1)) == nil && errors.Is(fail(ctx, event("a", 1)), errDown)
+	if !matches || !outcomesFixed {
 		t.Fatal("a matcher or a fixed handler does not do what its name says")
 	}
 	if sub := subscriber(succeed); sub.Name == "" || !sub.Match("anything") {
@@ -28,14 +29,17 @@ func TestHandlers_ConditionalHelpersActOnlyWhenTheConditionHolds(t *testing.T) {
 	sendIf(false, ch, 1)
 	holdIf(false, nil)
 	panicIf(false, "never")
-	if errorIf(false, errDown) != nil || flag.Load() || counter.Load() != 0 || len(ch) != 0 {
+	actedOnFalse := errorIf(false, errDown) != nil || flag.Load()
+	leftover := counter.Load() != 0 || len(ch) != 0
+	if actedOnFalse || leftover {
 		t.Fatal("a helper acted on a false condition")
 	}
 	flagIf(true, &flag)
 	countIf(true, &counter)
 	sendIf(true, ch, 1)
 	sendIf(true, ch, 2)
-	if !errors.Is(errorIf(true, errDown), errDown) || !flag.Load() || counter.Load() != 1 || <-ch != 1 {
+	actedOnTrue := errors.Is(errorIf(true, errDown), errDown) && flag.Load() && counter.Load() == 1
+	if !actedOnTrue || <-ch != 1 {
 		t.Fatal("a helper did not act on a true condition, or a full channel blocked")
 	}
 }

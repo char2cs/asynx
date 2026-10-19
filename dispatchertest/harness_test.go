@@ -57,7 +57,8 @@ func TestHarness_BoundedWaitsFailInsteadOfHanging(t *testing.T) {
 	) {
 		h.final(t, models.Ticket{Final: never}, "nothing")
 	})
-	if !waitFails || !waitForFails || !finalFails {
+	waitsFail := waitFails && waitForFails
+	if !waitsFail || !finalFails {
 		t.Fatalf("wait %v, waitFor %v, final %v: each must fail on what never happens", waitFails, waitForFails, finalFails)
 	}
 }

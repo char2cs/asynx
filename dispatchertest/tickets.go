@@ -53,7 +53,8 @@ func ticketForFindsAnEventUnderWay(
 	enqueued := mustEnqueue(t, d, live(event("a", 1)))
 	h.wait(t, entered, "the handler to start")
 	ticket, found := d.TicketFor("a", 1)
-	if !found || ticket.Settled != enqueued.Settled || ticket.Final != enqueued.Final {
+	sameTicket := ticket.Settled == enqueued.Settled && ticket.Final == enqueued.Final
+	if !found || !sameTicket {
 		t.Fatalf("TicketFor = found %v; want the ticket Enqueue returned while its handler runs", found)
 	}
 	_, otherVersion := d.TicketFor("a", 2)
@@ -79,7 +80,8 @@ func ticketForFindsAQueuedEvent(
 	h.wait(t, entered, "v1 to start")
 	queued := mustEnqueue(t, d, durable(event("a", 2), acknowledge))
 	ticket, found := d.TicketFor("a", 2)
-	if !found || ticket.Settled != queued.Settled || ticket.Final != queued.Final {
+	sameTicket := ticket.Settled == queued.Settled && ticket.Final == queued.Final
+	if !found || !sameTicket {
 		t.Fatalf("TicketFor(a, 2) = found %v; want the ticket of the event queued behind a running one", found)
 	}
 	closeOnce(release)

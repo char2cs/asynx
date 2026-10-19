@@ -52,7 +52,8 @@ func TestViews_ParksAndResume(t *testing.T) {
 	if got := parked(d); !slices.Equal(got, []string{"a", "b"}) {
 		t.Fatalf("parked = %v, want [a b]", got)
 	}
-	if !resume(d, "a") || resume(d, "a") || isClosed(make(chan struct{})) {
+	liftedOnce := resume(d, "a") && !resume(d, "a")
+	if !liftedOnce || isClosed(make(chan struct{})) {
 		t.Fatal("resume must lift a park once, and an open channel is not closed")
 	}
 }

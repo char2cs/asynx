@@ -21,7 +21,8 @@ func (d parkIgnoringDispatcher) Enqueue(
 	r models.DispatchRequest[Aggregate],
 ) (models.Ticket, error) {
 	_, isParked := d.Parks()[r.Event.AggregateID]
-	if !isParked || r.Kind != models.DispatchEvent || r.Ack == nil {
+	isLiveWithAck := r.Kind == models.DispatchEvent && r.Ack != nil
+	if !isParked || !isLiveWithAck {
 		return d.Dispatcher.Enqueue(ctx, r)
 	}
 	r.Ack = nil

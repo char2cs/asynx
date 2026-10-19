@@ -53,7 +53,8 @@ func inspectReportsThePark(
 	d := h.build(t, config(&bus{}))
 	d.Park("a", errImposed, 5, 3)
 	got := d.Inspect("a")
-	if !got.Parked || got.Generation == 0 || got.Generation != d.Parks()["a"] {
+	unparked := !got.Parked || got.Generation == 0
+	if unparked || got.Generation != d.Parks()["a"] {
 		t.Fatalf("Inspect = %+v, want parked with the generation Parks lists (%d)", got, d.Parks()["a"])
 	}
 	if !errors.Is(got.Cause, errImposed) {

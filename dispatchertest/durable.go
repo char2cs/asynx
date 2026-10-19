@@ -350,7 +350,8 @@ func durableOnlyFailedHandlersAreRetried(
 
 	mustEnqueue(t, d, durable(event("a", 1), ack))
 	h.waitFor(t, "the ack", acked.Load)
-	if goodRuns.Load() != 1 || flakyRuns.Load() != 3 || strayRuns.Load() != 0 {
+	wrongRetries := goodRuns.Load() != 1 || flakyRuns.Load() != 3
+	if wrongRetries || strayRuns.Load() != 0 {
 		t.Fatalf("good ran %d, flaky %d, non-matching %d; want 1, 3, 0", goodRuns.Load(), flakyRuns.Load(), strayRuns.Load())
 	}
 }
@@ -862,7 +863,9 @@ func deadLetteredEventIsAcked(
 	if err := h.final(t, tk, "the dead-lettered delivery"); err != nil {
 		t.Fatalf("final = %v, want nil", err)
 	}
-	if _, ok := acked.Load(int64(1)); !ok || dead.Load() != 1 || len(parked(d)) != 0 {
+	_, ok := acked.Load(int64(1))
+	notSettled := !ok || dead.Load() != 1
+	if notSettled || len(parked(d)) != 0 {
 		t.Fatalf("acked = %v, dead letters = %d, parked = %v; want acked once, unparked", ok, dead.Load(), parked(d))
 	}
 }

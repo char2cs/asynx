@@ -185,7 +185,8 @@ func deadLetterAcceptance(
 		t.Fatalf("v2 final = %v", err)
 	}
 	_, ok := acked.Load(int64(1))
-	if dead.Load() != 1 || !ok || len(parked(d)) != 0 {
+	notSettled := dead.Load() != 1 || !ok
+	if notSettled || len(parked(d)) != 0 {
 		t.Fatalf("dead letter saw v%d, v1 acked = %v, parked = %v; want v1, acked, nothing parked", dead.Load(), ok, parked(d))
 	}
 }
@@ -253,7 +254,9 @@ func deadLetterReturnedError(
 		t.Fatalf("v2 final = %v, want ErrDeliveryParked", err)
 	}
 	_, v1Acked := acked.Load(int64(1))
-	if v1Acked || dead.Load() != 1 || !slices.Equal(parked(d), []string{"a"}) || slices.Contains(rec.list(), "a/2") {
+	notHeld := v1Acked || dead.Load() != 1
+	notParked := !slices.Equal(parked(d), []string{"a"}) || slices.Contains(rec.list(), "a/2")
+	if notHeld || notParked {
 		t.Fatalf("v1 acked %v, dead letters %d, parked %v, delivered %v; want unacked, 1, [a], no v2", v1Acked, dead.Load(), parked(d), rec.list())
 	}
 }
@@ -316,7 +319,8 @@ func supersedeLetsATombstoneWithAnAckThrough(
 	h.wait(t, retrying.Final, "the superseded delivery")
 	_, v1 := acked.Load(int64(1))
 	_, tombstoneAcked := acked.Load(int64(2))
-	if v1 || !tombstoneAcked || len(parked(d)) != 0 {
+	wrongAcks := v1 || !tombstoneAcked
+	if wrongAcks || len(parked(d)) != 0 {
 		t.Fatalf("v1 acked %v, tombstone acked %v, parked %v; want only the tombstone acked, unparked", v1, tombstoneAcked, parked(d))
 	}
 }
@@ -748,7 +752,8 @@ func ackFailureParks(
 	if err := h.final(t, t2, "v2"); !errors.Is(err, models.ErrDeliveryParked) {
 		t.Fatalf("v2 = %v, want ErrDeliveryParked", err)
 	}
-	if !slices.Equal(rec.list(), []string{"a/1"}) || !slices.Equal(parked(d), []string{"a"}) || reported.Load() != 1 {
+	wrongState := !slices.Equal(rec.list(), []string{"a/1"}) || !slices.Equal(parked(d), []string{"a"})
+	if wrongState || reported.Load() != 1 {
 		t.Fatalf("delivered %v, parked %v, reported %d; want only v1, [a], 1", rec.list(), parked(d), reported.Load())
 	}
 }

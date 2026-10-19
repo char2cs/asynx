@@ -22,8 +22,11 @@ func TestEvents_RequestsCarryTheirKindAndAck(t *testing.T) {
 		kinds = append(kinds, r.Kind)
 	}
 	want := []models.DispatchKind{models.DispatchEvent, models.DispatchEvent, models.DispatchRedelivery, models.DispatchTombstone}
-	if !slices.Equal(kinds, want) || requests[0].Ack != nil || requests[3].Event.EventName != models.ForgetEventName {
-		t.Fatalf("kinds = %v, want %v, a live request without ack and a tombstone named %q", kinds, want, models.ForgetEventName)
+	if !slices.Equal(kinds, want) {
+		t.Fatalf("kinds = %v, want %v", kinds, want)
+	}
+	if requests[0].Ack != nil || requests[3].Event.EventName != models.ForgetEventName {
+		t.Fatalf("want a live request without ack and a tombstone named %q", models.ForgetEventName)
 	}
 }
 
@@ -42,7 +45,9 @@ func TestEvents_AcksRecordOrFail(t *testing.T) {
 	var acked sync.Map
 	errs := errors.Join(acknowledge(context.Background()), ackInto(&acked, 7)(context.Background()))
 	_, stored := acked.Load(int64(7))
-	if errs != nil || !stored || !errors.Is(failAck(errDown)(context.Background()), errDown) {
+	failsAsTold := errors.Is(failAck(errDown)(context.Background()), errDown)
+	acksBroken := errs != nil || !stored
+	if acksBroken || !failsAsTold {
 		t.Fatalf("errors %v, stored %v; want acks that succeed, record, or fail as told", errs, stored)
 	}
 }
