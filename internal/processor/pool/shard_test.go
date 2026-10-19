@@ -567,3 +567,65 @@ func waitForBacklog[T any](
 		runtime.Gosched()
 	}
 }
+
+func BenchmarkShard_SingleWorker(b *testing.B) {
+	s := store.New()
+	bu := bus.NewChannelBus[order]()
+	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+	d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: bu})
+	defer d.Close(context.Background())
+	executor := exec.New(es, d)
+
+	p := pool.New(executor, 1, 0, 1)
+	defer p.Drain(context.Background())
+
+	ctx := context.Background()
+	shard := p.Shards()[0]
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		envelope := &models.CommandEnvelope[order]{
+			Cmd:        mocks.CreateOrderCmd{ID: "order", Total: 100.0},
+			Ctx:        ctx,
+			ResultChan: make(chan models.CommandResult[order], 1),
+		}
+
+		shard.CommandChan() <- envelope
+		<-envelope.ResultChan
+	}
+}
+
+func BenchmarkShard_MultipleWorkers(b *testing.B) {
+	for _, workers := range []int{1, 4, 8} {
+		b.Run("workers="+string(rune('0'+workers)), func(b *testing.B) {
+			s := store.New()
+			bu := bus.NewChannelBus[order]()
+			es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
+			d := dispatcher.New(asynxmd.DispatcherConfig[order]{Bus: bu})
+			defer d.Close(context.Background())
+			executor := exec.New(es, d)
+
+			p := pool.New(executor, 1, 0, workers)
+			defer p.Drain(context.Background())
+
+			ctx := context.Background()
+			shard := p.Shards()[0]
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				envelope := &models.CommandEnvelope[order]{
+					Cmd:        mocks.CreateOrderCmd{ID: "order", Total: 100.0},
+					Ctx:        ctx,
+					ResultChan: make(chan models.CommandResult[order], 1),
+				}
+
+				shard.CommandChan() <- envelope
+				<-envelope.ResultChan
+			}
+		})
+	}
+}
