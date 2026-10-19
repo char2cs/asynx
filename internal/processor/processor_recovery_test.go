@@ -19,33 +19,54 @@ import (
 	"github.com/char2cs/asynx/store"
 )
 
-func seedPending(t *testing.T, s store.Memory, es *eventstore.EventStore[order], ids ...string) {
+func seedPending(
+	t *testing.T,
+	s store.Memory,
+	es *eventstore.EventStore[order],
+	ids ...string,
+) {
 	t.Helper()
 	ctx := context.Background()
 	for _, id := range ids {
 		if _, err := es.Write(ctx, mocks.CreateOrderCmd{ID: id, Total: 1}); err != nil {
 			t.Fatal(err)
 		}
-		s.Atomically(ctx, func(tx asynxmd.Tx) error { return tx.EnqueueDelivery(ctx, id, 1) })
+		s.Atomically(ctx, func(
+			tx asynxmd.Tx,
+		) error {
+			return tx.EnqueueDelivery(ctx, id, 1)
+		})
 	}
 }
 
-func TestProcessor_Recover_RedeliversEveryPendingEventAndAcksIt(t *testing.T) {
+func TestProcessor_Recover_RedeliversEveryPendingEventAndAcksIt(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	seedPending(t, s, es, "a", "b", "c")
 
 	b := bus.NewChannelBus[order]()
 	var live atomic.Int32
-	b.Subscribe("OrderCreated", func(context.Context, asynxmd.Event[order]) { live.Add(1) })
+	b.Subscribe("OrderCreated", func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		live.Add(1)
+	})
 	var got atomic.Int32
 	p := mustNew(t, es, b, WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-		Match:   always,
-		Handler: func(context.Context, asynxmd.Event[order]) error { got.Add(1); return nil },
+		Match: always,
+		Handler: func(
+			context.Context,
+			asynxmd.Event[order],
+		) error {
+			got.Add(1)
+			return nil
+		},
 	}}))
 	t.Cleanup(func() { p.Shutdown(context.Background()) })
 
-	// batch <= 0 falls back to the default; batch 2 forces multiple rounds.
 	if err := p.Recover(context.Background(), 2); err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
@@ -64,7 +85,9 @@ func TestProcessor_Recover_RedeliversEveryPendingEventAndAcksIt(t *testing.T) {
 	}
 }
 
-func TestProcessor_Recover_WithoutBusIsNoOp(t *testing.T) {
+func TestProcessor_Recover_WithoutBusIsNoOp(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	p := mustNew[order](t, es, nil)
@@ -74,10 +97,11 @@ func TestProcessor_Recover_WithoutBusIsNoOp(t *testing.T) {
 	}
 }
 
-func TestProcessor_Recover_ReportsReadAndReplayFailures(t *testing.T) {
+func TestProcessor_Recover_ReportsReadAndReplayFailures(
+	t *testing.T,
+) {
 	ctx := context.Background()
 
-	// Unreadable delivery log.
 	es := eventstore.New[order](&mocks.ErrStore{Err: errors.New("log down")}, store.NewSnapshots(), nil, 1, nil)
 	p := mustNew(t, es, bus.NewChannelBus[order]())
 	t.Cleanup(func() { p.Shutdown(ctx) })
@@ -89,30 +113,44 @@ func TestProcessor_Recover_ReportsReadAndReplayFailures(t *testing.T) {
 
 // One corrupt event must not stop the process from starting or the other
 // aggregates from being recovered: its aggregate is parked and reported.
-func TestProcessor_Recover_ParksAnAggregateWhoseEventCannotBeRebuilt(t *testing.T) {
+func TestProcessor_Recover_ParksAnAggregateWhoseEventCannotBeRebuilt(
+	t *testing.T,
+) {
 	ctx := context.Background()
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	seedPending(t, s, es, "good")
 	s.Append(ctx, "events:bad", 1, []byte("!!!"))
-	s.Atomically(ctx, func(tx asynxmd.Tx) error {
+	s.Atomically(ctx, func(
+		tx asynxmd.Tx,
+	) error {
 		if err := tx.EnqueueDelivery(ctx, "bad", 1); err != nil {
 			return err
 		}
-		return tx.EnqueueDelivery(ctx, "bad", 2) // behind the failed one: stays pending
+		return tx.EnqueueDelivery(ctx, "bad", 2)
 	})
 
 	var got atomic.Int32
 	reported := make(chan error, 4)
 	p := mustNew(t, es, bus.NewChannelBus[order](),
-		WithPublishErrorHandler(func(_ context.Context, e asynxmd.Event[order], err error) {
+		WithPublishErrorHandler(func(
+			_ context.Context,
+			e asynxmd.Event[order],
+			err error,
+		) {
 			if e.AggregateID == "bad" {
 				reported <- err
 			}
 		}),
 		WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-			Match:   always,
-			Handler: func(context.Context, asynxmd.Event[order]) error { got.Add(1); return nil },
+			Match: always,
+			Handler: func(
+				context.Context,
+				asynxmd.Event[order],
+			) error {
+				got.Add(1)
+				return nil
+			},
 		}}))
 	t.Cleanup(func() { p.Shutdown(ctx) })
 
@@ -135,7 +173,6 @@ func TestProcessor_Recover_ParksAnAggregateWhoseEventCannotBeRebuilt(t *testing.
 		t.Fatalf("pending = %v, want both of the bad aggregate's entries kept", pending)
 	}
 
-	// Resume retries it, fails again, and says so.
 	if err := p.Resume(ctx, 10); err == nil {
 		t.Fatal("Resume hid the unreadable event")
 	}
@@ -154,7 +191,11 @@ func seedUnrebuildable(
 	if err := s.Append(ctx, "events:"+aggregateID, 1, []byte("!!!")); err != nil {
 		t.Fatal(err)
 	}
-	enqueue := func(tx asynxmd.Tx) error { return tx.EnqueueDelivery(ctx, aggregateID, 1) }
+	enqueue := func(
+		tx asynxmd.Tx,
+	) error {
+		return tx.EnqueueDelivery(ctx, aggregateID, 1)
+	}
 	if err := s.Atomically(ctx, enqueue); err != nil {
 		t.Fatal(err)
 	}
@@ -279,14 +320,21 @@ func assertDeliveredTo(
 	}
 }
 
-func TestProcessor_Recover_ReturnsWithoutWaitingForHandlers(t *testing.T) {
+func TestProcessor_Recover_ReturnsWithoutWaitingForHandlers(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	seedPending(t, s, es, "a")
 
 	b := bus.NewChannelBus[order]()
 	release := make(chan struct{})
-	b.Subscribe("OrderCreated", func(context.Context, asynxmd.Event[order]) { <-release })
+	b.Subscribe("OrderCreated", func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		<-release
+	})
 	p := mustNew(t, es, b)
 	t.Cleanup(func() { close(release); p.Shutdown(context.Background()) })
 
@@ -304,16 +352,34 @@ func TestProcessor_Recover_ReturnsWithoutWaitingForHandlers(t *testing.T) {
 
 type ackErrStore struct{ store.Memory }
 
-func (ackErrStore) AckDelivery(context.Context, string, int64) error { return errors.New("ack failed") }
+func (ackErrStore) AckDelivery(
+	context.Context,
+	string,
+	int64,
+) error {
+	return errors.New("ack failed")
+}
 
-func TestProcessor_Recover_ReportsAnAckFailureForAVanishedEvent(t *testing.T) {
+func TestProcessor_Recover_ReportsAnAckFailureForAVanishedEvent(
+	t *testing.T,
+) {
 	s := ackErrStore{store.New()}
 	ctx := context.Background()
-	s.Atomically(ctx, func(tx asynxmd.Tx) error { return tx.EnqueueDelivery(ctx, "ghost", 1) })
+	s.Atomically(ctx, func(
+		tx asynxmd.Tx,
+	) error {
+		return tx.EnqueueDelivery(ctx, "ghost", 1)
+	})
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	reported := make(chan error, 1)
 	p := mustNew(t, es, bus.NewChannelBus[order](),
-		WithPublishErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error) { reported <- err }))
+		WithPublishErrorHandler(func(
+			_ context.Context,
+			_ asynxmd.Event[order],
+			err error,
+		) {
+			reported <- err
+		}))
 	t.Cleanup(func() { p.Shutdown(ctx) })
 
 	if err := p.Recover(ctx, 10); err != nil {
@@ -326,11 +392,18 @@ func TestProcessor_Recover_ReportsAnAckFailureForAVanishedEvent(t *testing.T) {
 	}
 }
 
-func TestProcessor_Resume_RedeliversParkedAggregatesInOrder(t *testing.T) {
+func TestProcessor_Resume_RedeliversParkedAggregatesInOrder(
+	t *testing.T,
+) {
 	var healthy atomic.Bool
 	parked := make(chan struct{}, 4)
 	f := newFixture(t, store.New(), parkingOpts(&healthy,
-		WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+		WithDeliveryErrorHandler(func(
+			_ context.Context,
+			_ asynxmd.Event[order],
+			err error,
+			_ int,
+		) {
 			if errors.Is(err, asynxmd.ErrDeliveryParked) {
 				parked <- struct{}{}
 			}
@@ -355,13 +428,14 @@ func TestProcessor_Resume_RedeliversParkedAggregatesInOrder(t *testing.T) {
 	if pending, _ := f.s.PendingDeliveries(ctx, 10); len(pending) != 0 {
 		t.Fatalf("pending after Resume = %v", pending)
 	}
-	// Nothing parked any more: a second Resume is a no-op.
 	if err := f.p.Resume(ctx, 0); err != nil {
 		t.Fatalf("second Resume: %v", err)
 	}
 }
 
-func TestProcessor_Resume_WithoutDispatcherIsNoOp(t *testing.T) {
+func TestProcessor_Resume_WithoutDispatcherIsNoOp(
+	t *testing.T,
+) {
 	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
 	p := mustNew[order](t, es, nil)
 	t.Cleanup(func() { p.Shutdown(context.Background()) })
@@ -375,19 +449,29 @@ type flakyPendingStore struct {
 	fail atomic.Bool
 }
 
-func (s *flakyPendingStore) PendingDeliveries(ctx context.Context, limit int) ([]asynxmd.Delivery, error) {
+func (s *flakyPendingStore) PendingDeliveries(
+	ctx context.Context,
+	limit int,
+) ([]asynxmd.Delivery, error) {
 	if s.fail.Load() {
 		return nil, errors.New("log unreadable")
 	}
 	return s.Memory.PendingDeliveries(ctx, limit)
 }
 
-func TestProcessor_Resume_ReportsAFailureReadingTheLogAndStaysParked(t *testing.T) {
+func TestProcessor_Resume_ReportsAFailureReadingTheLogAndStaysParked(
+	t *testing.T,
+) {
 	var healthy atomic.Bool
 	parked := make(chan struct{}, 4)
 	s := &flakyPendingStore{Memory: store.New()}
 	f := newFixture(t, s, parkingOpts(&healthy,
-		WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+		WithDeliveryErrorHandler(func(
+			_ context.Context,
+			_ asynxmd.Event[order],
+			err error,
+			_ int,
+		) {
 			if errors.Is(err, asynxmd.ErrDeliveryParked) {
 				parked <- struct{}{}
 			}
@@ -411,11 +495,18 @@ func TestProcessor_Resume_ReportsAFailureReadingTheLogAndStaysParked(t *testing.
 	}
 }
 
-func TestProcessor_Paused_ListsParkedAggregatesAndSendWaitSaysSo(t *testing.T) {
+func TestProcessor_Paused_ListsParkedAggregatesAndSendWaitSaysSo(
+	t *testing.T,
+) {
 	var healthy atomic.Bool
 	parked := make(chan struct{}, 4)
 	f := newFixture(t, store.New(), parkingOpts(&healthy,
-		WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+		WithDeliveryErrorHandler(func(
+			_ context.Context,
+			_ asynxmd.Event[order],
+			err error,
+			_ int,
+		) {
 			if errors.Is(err, asynxmd.ErrDeliveryParked) {
 				parked <- struct{}{}
 			}
@@ -438,7 +529,9 @@ func TestProcessor_Paused_ListsParkedAggregatesAndSendWaitSaysSo(t *testing.T) {
 	}
 }
 
-func TestProcessor_Paused_WithoutDispatcherIsEmpty(t *testing.T) {
+func TestProcessor_Paused_WithoutDispatcherIsEmpty(
+	t *testing.T,
+) {
 	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
 	p := mustNew[order](t, es, nil)
 	t.Cleanup(func() { p.Shutdown(context.Background()) })
@@ -447,7 +540,9 @@ func TestProcessor_Paused_WithoutDispatcherIsEmpty(t *testing.T) {
 	}
 }
 
-func TestProcessor_Recover_AfterShutdownFails(t *testing.T) {
+func TestProcessor_Recover_AfterShutdownFails(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	seedPending(t, s, es, "a")
@@ -460,11 +555,18 @@ func TestProcessor_Recover_AfterShutdownFails(t *testing.T) {
 	}
 }
 
-func TestProcessor_Resume_StopsWhenItsContextEnds(t *testing.T) {
+func TestProcessor_Resume_StopsWhenItsContextEnds(
+	t *testing.T,
+) {
 	var healthy atomic.Bool
 	parked := make(chan struct{}, 4)
 	f := newFixture(t, store.New(), parkingOpts(&healthy,
-		WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+		WithDeliveryErrorHandler(func(
+			_ context.Context,
+			_ asynxmd.Event[order],
+			err error,
+			_ int,
+		) {
 			if errors.Is(err, asynxmd.ErrDeliveryParked) {
 				parked <- struct{}{}
 			}
@@ -491,17 +593,26 @@ func TestProcessor_Resume_StopsWhenItsContextEnds(t *testing.T) {
 
 // Two Resumes must not both redeliver: the second would queue the same entries
 // behind the first's and invert their order.
-func TestProcessor_Resume_ConcurrentCallsRedeliverOnce(t *testing.T) {
+func TestProcessor_Resume_ConcurrentCallsRedeliverOnce(
+	t *testing.T,
+) {
 	var healthy atomic.Bool
 	var mu sync.Mutex
 	var delivered []int64
 	parked := make(chan struct{}, 4)
 	release := make(chan struct{})
 	f := newFixture(t, store.New(),
-		WithDurableDelivery[order](func(name string) bool { return name == "OrderUpdated" }),
+		WithDurableDelivery[order](func(
+			name string,
+		) bool {
+			return name == "OrderUpdated"
+		}),
 		WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 			Match: always,
-			Handler: func(_ context.Context, e asynxmd.Event[order]) error {
+			Handler: func(
+				_ context.Context,
+				e asynxmd.Event[order],
+			) error {
 				if !healthy.Load() {
 					return errors.New("down")
 				}
@@ -514,7 +625,12 @@ func TestProcessor_Resume_ConcurrentCallsRedeliverOnce(t *testing.T) {
 		}}),
 		WithDeliveryRetry[order](time.Millisecond, 2*time.Millisecond),
 		WithDeliveryMaxAttempts[order](2),
-		WithDeliveryErrorHandler(func(_ context.Context, _ asynxmd.Event[order], err error, _ int) {
+		WithDeliveryErrorHandler(func(
+			_ context.Context,
+			_ asynxmd.Event[order],
+			err error,
+			_ int,
+		) {
 			if errors.Is(err, asynxmd.ErrDeliveryParked) {
 				parked <- struct{}{}
 			}
@@ -561,7 +677,9 @@ func (s *rowCountingStore) ReadFrom(
 
 // A long backlog of one aggregate costs one pass over its stream, not one pass
 // per entry: the work must grow linearly with the backlog.
-func TestProcessor_Recover_ReplaysAnAggregatesStreamOnce(t *testing.T) {
+func TestProcessor_Recover_ReplaysAnAggregatesStreamOnce(
+	t *testing.T,
+) {
 	const events = 300
 	ctx := context.Background()
 	s := &rowCountingStore{Memory: store.New()}
@@ -574,7 +692,11 @@ func TestProcessor_Recover_ReplaysAnAggregatesStreamOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	s.Atomically(ctx, func(tx asynxmd.Tx) error { return enqueueUpTo(ctx, tx, "a", events) })
+	s.Atomically(ctx, func(
+		tx asynxmd.Tx,
+	) error {
+		return enqueueUpTo(ctx, tx, "a", events)
+	})
 
 	var mu sync.Mutex
 	var delivered []int64
@@ -608,7 +730,9 @@ func TestProcessor_Recover_ReplaysAnAggregatesStreamOnce(t *testing.T) {
 	}
 }
 
-func TestProcessor_Resume_ReplaysAnAggregatesStreamOnce(t *testing.T) {
+func TestProcessor_Resume_ReplaysAnAggregatesStreamOnce(
+	t *testing.T,
+) {
 	const events = 60
 	var healthy atomic.Bool
 	parked := make(chan struct{}, 4)
@@ -667,7 +791,9 @@ func (s *logCountingStore) PendingDeliveries(
 // Resuming many parked aggregates reads the delivery log once for all of them,
 // not once per aggregate and not once per group of them: an outage that parks
 // many chats must not make the recovery quadratic in them.
-func TestProcessor_Resume_ReadsTheDeliveryLogOnceForAllAggregates(t *testing.T) {
+func TestProcessor_Resume_ReadsTheDeliveryLogOnceForAllAggregates(
+	t *testing.T,
+) {
 	const aggregates = 600
 	var healthy atomic.Bool
 	parked := make(chan struct{}, aggregates)
@@ -722,12 +848,16 @@ func TestProcessor_Resume_ReadsTheDeliveryLogOnceForAllAggregates(t *testing.T) 
 // A command on one aggregate may send to another from inside its validation. A
 // resume must not hold one aggregate's lock while waiting for another's, or the
 // two wait for each other forever.
-func TestProcessor_Resume_DoesNotDeadlockWithACommandSendingToAnotherAggregate(t *testing.T) {
+func TestProcessor_Resume_DoesNotDeadlockWithACommandSendingToAnotherAggregate(
+	t *testing.T,
+) {
 	var healthy atomic.Bool
 	parked := make(chan struct{}, 2)
 	var readA sync.Once
 	redelivering := make(chan struct{})
-	s := &readHookStore{Memory: store.New(), onRead: func(streamID string) {
+	s := &readHookStore{Memory: store.New(), onRead: func(
+		streamID string,
+	) {
 		if streamID == "events:a" {
 			readA.Do(func() { close(redelivering) })
 		}
@@ -795,12 +925,18 @@ type validatingUpdate struct {
 	validate func() error
 }
 
-func (c validatingUpdate) Validate(*order) error { return c.validate() }
+func (c validatingUpdate) Validate(
+	*order,
+) error {
+	return c.validate()
+}
 
 // readHookStore reports every stream read.
 type readHookStore struct {
 	store.Memory
-	onRead func(streamID string)
+	onRead func(
+		streamID string,
+	)
 }
 
 func (s *readHookStore) ReadFrom(
@@ -834,7 +970,9 @@ func (s *staleLogStore) PendingDeliveries(
 
 // An event committed while the delivery log is being read is on no scanned
 // entry; the resume must still deliver it, ahead of anything later.
-func TestProcessor_Resume_DeliversAnEventCommittedAfterItReadTheLog(t *testing.T) {
+func TestProcessor_Resume_DeliversAnEventCommittedAfterItReadTheLog(
+	t *testing.T,
+) {
 	var healthy atomic.Bool
 	parked := make(chan struct{}, 1)
 	var mu sync.Mutex
@@ -898,7 +1036,9 @@ func TestProcessor_Resume_DeliversAnEventCommittedAfterItReadTheLog(t *testing.T
 // A resume that finds an aggregate already resumed by another leaves it alone:
 // redelivering what its own, stale, read of the log lists would deliver the same
 // events twice.
-func TestProcessor_Resume_SkipsAnAggregateAnotherResumeLiftedMeanwhile(t *testing.T) {
+func TestProcessor_Resume_SkipsAnAggregateAnotherResumeLiftedMeanwhile(
+	t *testing.T,
+) {
 	var healthy atomic.Bool
 	parked := make(chan struct{}, 1)
 	var mu sync.Mutex
@@ -948,7 +1088,9 @@ func TestProcessor_Resume_SkipsAnAggregateAnotherResumeLiftedMeanwhile(t *testin
 // one. Redelivering from it would deliver an acknowledged event twice and miss
 // the one that parked the aggregate again, so the aggregate is left for the next
 // Resume.
-func TestProcessor_Resume_LeavesAParkImposedAgainSinceItReadTheLog(t *testing.T) {
+func TestProcessor_Resume_LeavesAParkImposedAgainSinceItReadTheLog(
+	t *testing.T,
+) {
 	var healthy atomic.Bool
 	parked := make(chan struct{}, 2)
 	var mu sync.Mutex
@@ -1011,12 +1153,18 @@ func TestProcessor_Resume_LeavesAParkImposedAgainSinceItReadTheLog(t *testing.T)
 
 // A Resume whose context ends part-way stops there instead of going on to the
 // aggregates it did not get to.
-func TestProcessor_Resume_StopsAtTheAggregateWhereItsContextEnds(t *testing.T) {
+func TestProcessor_Resume_StopsAtTheAggregateWhereItsContextEnds(
+	t *testing.T,
+) {
 	var healthy atomic.Bool
 	parked := make(chan struct{}, 3)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s := &readHookStore{Memory: store.New(), onRead: func(string) { cancel() }}
+	s := &readHookStore{Memory: store.New(), onRead: func(
+		string,
+	) {
+		cancel()
+	}}
 	f := newFixture(t, s, parkingOpts(&healthy, parkedSignal(parked))...)
 	for _, id := range []string{"o1", "o2", "o3"} {
 		if _, err := f.p.Send(context.Background(), updateCmd(id, 1)); err != nil {
@@ -1079,7 +1227,9 @@ func parkWithTwoCommands(
 	}
 }
 
-func parkedSignal(parked chan<- struct{}) ProcessorOpt[order] {
+func parkedSignal(
+	parked chan<- struct{},
+) ProcessorOpt[order] {
 	return WithDeliveryErrorHandler(func(
 		_ context.Context,
 		_ asynxmd.Event[order],
@@ -1108,7 +1258,9 @@ func retryOutcomes(
 
 // A resume that cannot read the delivery log changes nothing: the retry of an
 // event no handler took is still told so.
-func TestProcessor_Resume_AfterALogReadFailureRetriesStillReportTheParkedEvent(t *testing.T) {
+func TestProcessor_Resume_AfterALogReadFailureRetriesStillReportTheParkedEvent(
+	t *testing.T,
+) {
 	var healthy atomic.Bool
 	parked := make(chan struct{}, 1)
 	s := &flakyPendingStore{Memory: store.New()}
@@ -1127,7 +1279,9 @@ func TestProcessor_Resume_AfterALogReadFailureRetriesStillReportTheParkedEvent(t
 
 // A resume that fails to replay the stream leaves the aggregate parked with the
 // same account of what ran: the event whose handler failed stays "ran".
-func TestProcessor_Resume_AfterAReplayFailureRetriesKeepTheirAnswers(t *testing.T) {
+func TestProcessor_Resume_AfterAReplayFailureRetriesKeepTheirAnswers(
+	t *testing.T,
+) {
 	var healthy atomic.Bool
 	parked := make(chan struct{}, 1)
 	s := &failingReadsStore{Memory: store.New()}
@@ -1169,7 +1323,9 @@ func (s *ackSignalStore) AckDelivery(
 
 // One aggregate that cannot be redelivered does not hold the others back: they
 // are resumed, it stays parked, and the error names it.
-func TestProcessor_Resume_AnAggregateThatFailsDoesNotStopTheOthers(t *testing.T) {
+func TestProcessor_Resume_AnAggregateThatFailsDoesNotStopTheOthers(
+	t *testing.T,
+) {
 	var healthy atomic.Bool
 	parked := make(chan struct{}, 2)
 	s := &failingReadsStore{Memory: store.New(), stream: "events:o1"}
@@ -1202,7 +1358,9 @@ func TestProcessor_Resume_AnAggregateThatFailsDoesNotStopTheOthers(t *testing.T)
 // claim that the events it delivered went undelivered. The third event's
 // upcaster fails once the first two have been handled and acknowledged, which
 // makes the recovery fail halfway, deterministically.
-func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(t *testing.T) {
+func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(
+	t *testing.T,
+) {
 	ctx := context.Background()
 	s := &ackSignalStore{Memory: store.New(), acked: make(chan struct{}, 8)}
 	var healthy atomic.Bool
@@ -1240,7 +1398,11 @@ func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(t
 	es := eventstore.New[order](s, store.NewSnapshots(), map[int]asynxmd.Upcaster{1: upcaster}, 2, nil)
 	reported := make(chan struct{}, 1)
 	p := mustNew(t, es, bus.NewChannelBus[order](),
-		WithDurableDelivery[order](func(name string) bool { return name == "OrderUpdated" }),
+		WithDurableDelivery[order](func(
+			name string,
+		) bool {
+			return name == "OrderUpdated"
+		}),
 		WithPublishErrorHandler(func(
 			context.Context,
 			asynxmd.Event[order],
@@ -1279,7 +1441,9 @@ func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(t
 
 // Entries behind an event that cannot be rebuilt stay pending while the entries
 // before it are still delivered.
-func TestProcessor_Recover_DeliversWhatPrecedesAnUnreadableEvent(t *testing.T) {
+func TestProcessor_Recover_DeliversWhatPrecedesAnUnreadableEvent(
+	t *testing.T,
+) {
 	ctx := context.Background()
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
@@ -1289,7 +1453,9 @@ func TestProcessor_Recover_DeliversWhatPrecedesAnUnreadableEvent(t *testing.T) {
 		}
 	}
 	s.Append(ctx, "events:a", 3, []byte("!!!"))
-	s.Atomically(ctx, func(tx asynxmd.Tx) error {
+	s.Atomically(ctx, func(
+		tx asynxmd.Tx,
+	) error {
 		return errors.Join(tx.EnqueueDelivery(ctx, "a", 1), tx.EnqueueDelivery(ctx, "a", 3))
 	})
 
@@ -1352,7 +1518,9 @@ func enqueueUpTo(
 	return nil
 }
 
-func TestProcessor_Inspect_FailedResumeKeepsTheCauseAndUndelivered(t *testing.T) {
+func TestProcessor_Inspect_FailedResumeKeepsTheCauseAndUndelivered(
+	t *testing.T,
+) {
 	var healthy atomic.Bool
 	parked := make(chan struct{}, 1)
 	s := &failingReadsStore{Memory: store.New()}
@@ -1384,7 +1552,9 @@ func TestProcessor_Inspect_FailedResumeKeepsTheCauseAndUndelivered(t *testing.T)
 	}
 }
 
-func TestProcessor_Inspect_FailedRecoverParksWithTheRedeliveryError(t *testing.T) {
+func TestProcessor_Inspect_FailedRecoverParksWithTheRedeliveryError(
+	t *testing.T,
+) {
 	ctx := context.Background()
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
@@ -1417,7 +1587,9 @@ func TestProcessor_Inspect_FailedRecoverParksWithTheRedeliveryError(t *testing.T
 	}
 }
 
-func TestProcessor_Inspect_WithoutDispatcherIsTheZeroStatus(t *testing.T) {
+func TestProcessor_Inspect_WithoutDispatcherIsTheZeroStatus(
+	t *testing.T,
+) {
 	p := mustNew[order](t, newES(), nil)
 	t.Cleanup(func() { p.Shutdown(context.Background()) })
 

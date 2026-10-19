@@ -23,7 +23,9 @@ import (
 
 type order = mocks.Order
 
-func TestExecute_SuccessNewAggregate(t *testing.T) {
+func TestExecute_SuccessNewAggregate(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
@@ -45,7 +47,9 @@ func TestExecute_SuccessNewAggregate(t *testing.T) {
 	}
 }
 
-func TestExecute_SuccessExistingAggregate(t *testing.T) {
+func TestExecute_SuccessExistingAggregate(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
@@ -76,7 +80,9 @@ func TestExecute_SuccessExistingAggregate(t *testing.T) {
 	}
 }
 
-func TestExecute_ValidationFailure(t *testing.T) {
+func TestExecute_ValidationFailure(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
@@ -95,7 +101,9 @@ func TestExecute_ValidationFailure(t *testing.T) {
 	}
 }
 
-func TestExecute_ValidationFailureNoWrite(t *testing.T) {
+func TestExecute_ValidationFailureNoWrite(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
@@ -118,7 +126,9 @@ func TestExecute_ValidationFailureNoWrite(t *testing.T) {
 	}
 }
 
-func TestExecute_GetStorageError(t *testing.T) {
+func TestExecute_GetStorageError(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
@@ -135,7 +145,9 @@ func TestExecute_GetStorageError(t *testing.T) {
 	}
 }
 
-func TestExecute_WriteStorageError(t *testing.T) {
+func TestExecute_WriteStorageError(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
@@ -152,7 +164,9 @@ func TestExecute_WriteStorageError(t *testing.T) {
 	}
 }
 
-func TestExecute_NilDispatcherNoPanic(t *testing.T) {
+func TestExecute_NilDispatcherNoPanic(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
@@ -166,7 +180,9 @@ func TestExecute_NilDispatcherNoPanic(t *testing.T) {
 	}
 }
 
-func TestExecute_DispatchCalledAsync(t *testing.T) {
+func TestExecute_DispatchCalledAsync(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 
@@ -193,7 +209,9 @@ func TestExecute_DispatchCalledAsync(t *testing.T) {
 	}
 }
 
-func TestExecute_ContextAlreadyCancelled(t *testing.T) {
+func TestExecute_ContextAlreadyCancelled(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
@@ -209,7 +227,9 @@ func TestExecute_ContextAlreadyCancelled(t *testing.T) {
 	}
 }
 
-func TestExecute_AggregateStatePreserved(t *testing.T) {
+func TestExecute_AggregateStatePreserved(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
@@ -246,7 +266,9 @@ func TestExecute_AggregateStatePreserved(t *testing.T) {
 	}
 }
 
-func TestExecute_ReturnsEvent(t *testing.T) {
+func TestExecute_ReturnsEvent(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
@@ -266,7 +288,9 @@ func TestExecute_ReturnsEvent(t *testing.T) {
 	}
 }
 
-func TestExecute_WaitHandlersTrue_HandlersDoneBeforeReturn(t *testing.T) {
+func TestExecute_WaitHandlersTrue_HandlersDoneBeforeReturn(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 
@@ -294,7 +318,9 @@ func TestExecute_WaitHandlersTrue_HandlersDoneBeforeReturn(t *testing.T) {
 	}
 }
 
-func TestExecute_WaitHandlersFalse_DispatchCalled(t *testing.T) {
+func TestExecute_WaitHandlersFalse_DispatchCalled(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	trackBus := &recordingBus[order]{}
@@ -320,7 +346,9 @@ func TestExecute_WaitHandlersFalse_DispatchCalled(t *testing.T) {
 	}
 }
 
-func TestExecute_WaitHandlers_NilDispatcherNoPanic(t *testing.T) {
+func TestExecute_WaitHandlers_NilDispatcherNoPanic(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
@@ -337,7 +365,9 @@ func TestExecute_WaitHandlers_NilDispatcherNoPanic(t *testing.T) {
 	}
 }
 
-func TestPublishErrorHandler_CalledOnPublishError(t *testing.T) {
+func TestPublishErrorHandler_CalledOnPublishError(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 
@@ -387,7 +417,9 @@ func TestPublishErrorHandler_CalledOnPublishError(t *testing.T) {
 	}
 }
 
-func TestPublishErrorHandler_NotCalledOnSuccess(t *testing.T) {
+func TestPublishErrorHandler_NotCalledOnSuccess(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 
@@ -418,7 +450,9 @@ func TestPublishErrorHandler_NotCalledOnSuccess(t *testing.T) {
 	}
 }
 
-func TestPublishErrorHandler_NilHandlerDoesNotPanic(t *testing.T) {
+func TestPublishErrorHandler_NilHandlerDoesNotPanic(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 
@@ -450,8 +484,16 @@ type recordingBus[T any] struct {
 	onPublishSync  func()
 }
 
-func (b *recordingBus[T]) Publish(_ context.Context, _ asynxmd.Event[T]) error { return nil }
-func (b *recordingBus[T]) PublishSync(ctx context.Context, _ asynxmd.Event[T]) error {
+func (b *recordingBus[T]) Publish(
+	_ context.Context,
+	_ asynxmd.Event[T],
+) error {
+	return nil
+}
+func (b *recordingBus[T]) PublishSync(
+	ctx context.Context,
+	_ asynxmd.Event[T],
+) error {
 	b.mu.Lock()
 	b.count++
 	b.lastCtx = ctx
@@ -462,12 +504,24 @@ func (b *recordingBus[T]) PublishSync(ctx context.Context, _ asynxmd.Event[T]) e
 	b.mu.Unlock()
 	return err
 }
-func (b *recordingBus[T]) Subscribe(_ string, _ asynxmd.ProjectionHandler[T], _ ...asynxmd.SubscriptionOpt[T]) (string, error) {
+func (b *recordingBus[T]) Subscribe(
+	_ string,
+	_ asynxmd.ProjectionHandler[T],
+	_ ...asynxmd.SubscriptionOpt[T],
+) (string, error) {
 	return "", nil
 }
-func (b *recordingBus[T]) Unsubscribe(_ string) error    { return nil }
-func (b *recordingBus[T]) Close(_ context.Context) error { return nil }
-func (b *recordingBus[T]) WaitForHandlers()              {}
+func (b *recordingBus[T]) Unsubscribe(
+	_ string,
+) error {
+	return nil
+}
+func (b *recordingBus[T]) Close(
+	_ context.Context,
+) error {
+	return nil
+}
+func (b *recordingBus[T]) WaitForHandlers() {}
 
 func newEnv(
 	t *testing.T,
@@ -491,21 +545,31 @@ func newEnvOn(
 	return New(es, d, opts...), s, ss, d, b
 }
 
-func parked(d asynxmd.Dispatcher[order]) []string {
+func parked(
+	d asynxmd.Dispatcher[order],
+) []string {
 	return slices.Sorted(maps.Keys(d.Parks()))
 }
 
-func update(id string, total float64) mocks.UpdateOrderCmd {
+func update(
+	id string,
+	total float64,
+) mocks.UpdateOrderCmd {
 	return mocks.UpdateOrderCmd{ID: id, NewState: order{ID: id, Total: total}}
 }
 
-func TestExecute_SameAggregateFlood_NoSpuriousFailuresAndOrderedDelivery(t *testing.T) {
+func TestExecute_SameAggregateFlood_NoSpuriousFailuresAndOrderedDelivery(
+	t *testing.T,
+) {
 	ex, _, _, d, b := newEnv(t)
 
 	var mu sync.Mutex
 	var seen []int64
-	if _, err := b.Subscribe("OrderUpdated", func(_ context.Context, e asynxmd.Event[order]) {
-		time.Sleep(200 * time.Microsecond) // slow handler: reordering would show
+	if _, err := b.Subscribe("OrderUpdated", func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) {
+		time.Sleep(200 * time.Microsecond)
 		mu.Lock()
 		seen = append(seen, e.Version)
 		mu.Unlock()
@@ -544,12 +608,17 @@ func TestExecute_SameAggregateFlood_NoSpuriousFailuresAndOrderedDelivery(t *test
 	}
 }
 
-func TestExecute_DifferentAggregatesRunInParallel(t *testing.T) {
+func TestExecute_DifferentAggregatesRunInParallel(
+	t *testing.T,
+) {
 	ex, _, _, _, b := newEnv(t)
 
 	release := make(chan struct{})
 	started := make(chan struct{}, 2)
-	if _, err := b.Subscribe("OrderUpdated", func(context.Context, asynxmd.Event[order]) {
+	if _, err := b.Subscribe("OrderUpdated", func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
 		started <- struct{}{}
 		<-release
 	}); err != nil {
@@ -571,12 +640,17 @@ func TestExecute_DifferentAggregatesRunInParallel(t *testing.T) {
 	close(release)
 }
 
-func TestExecute_SendWaitDoesNotHoldAggregateLockWhileHandlersRun(t *testing.T) {
+func TestExecute_SendWaitDoesNotHoldAggregateLockWhileHandlersRun(
+	t *testing.T,
+) {
 	ex, _, _, _, b := newEnv(t)
 
 	release := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	if _, err := b.Subscribe("OrderUpdated", func(_ context.Context, e asynxmd.Event[order]) {
+	if _, err := b.Subscribe("OrderUpdated", func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) {
 		if e.Version == 1 {
 			entered <- struct{}{}
 			<-release
@@ -592,8 +666,6 @@ func TestExecute_SendWaitDoesNotHoldAggregateLockWhileHandlersRun(t *testing.T) 
 	}()
 	<-entered
 
-	// The first command is still waiting for its handler; the lock must be
-	// free, so the next command commits (its handler queues behind v1).
 	committed := make(chan error, 1)
 	go func() {
 		_, err := ex.Execute(context.Background(), update("agg", 2), false)
@@ -611,10 +683,16 @@ func TestExecute_SendWaitDoesNotHoldAggregateLockWhileHandlersRun(t *testing.T) 
 	<-waited
 }
 
-func TestExecute_LockWaitHonoursContext(t *testing.T) {
+func TestExecute_LockWaitHonoursContext(
+	t *testing.T,
+) {
 	release := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	ex, _, _, _, _ := newEnv(t, syncAll(func(context.Context, asynxmd.Tx, asynxmd.Event[order]) error {
+	ex, _, _, _, _ := newEnv(t, syncAll(func(
+		context.Context,
+		asynxmd.Tx,
+		asynxmd.Event[order],
+	) error {
 		entered <- struct{}{}
 		<-release
 		return nil
@@ -632,13 +710,24 @@ func TestExecute_LockWaitHonoursContext(t *testing.T) {
 	close(release)
 }
 
-func TestExecute_SnapshotFailureIsNonFatalAndStillDispatches(t *testing.T) {
+func TestExecute_SnapshotFailureIsNonFatalAndStillDispatches(
+	t *testing.T,
+) {
 	var reported atomic.Int32
-	ex, _, ss, d, b := newEnv(t, WithSnapshotErrorHandler[order](func(context.Context, asynxmd.Event[order], error) {
+	ex, _, ss, d, b := newEnv(t, WithSnapshotErrorHandler[order](func(
+		context.Context,
+		asynxmd.Event[order],
+		error,
+	) {
 		reported.Add(1)
 	}))
 	var delivered atomic.Int32
-	b.Subscribe("OrderUpdated", func(context.Context, asynxmd.Event[order]) { delivered.Add(1) })
+	b.Subscribe("OrderUpdated", func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		delivered.Add(1)
+	})
 
 	ss.SetError("agg", errors.New("snapshot disk full"))
 	cmd := mocks.UpdateOrderCmd{ID: "agg", NewState: order{ID: "agg", Total: 1}, Snapshot: true}
@@ -660,15 +749,38 @@ func TestExecute_SnapshotFailureIsNonFatalAndStillDispatches(t *testing.T) {
 	}
 }
 
-func syncAll(fn func(context.Context, asynxmd.Tx, asynxmd.Event[order]) error) Opt[order] {
-	return WithSyncProjections[order]([]SyncProjection[order]{{Match: func(string) bool { return true }, Fn: fn}})
+func syncAll(
+	fn func(
+		context.Context,
+		asynxmd.Tx,
+		asynxmd.Event[order],
+	) error,
+) Opt[order] {
+	return WithSyncProjections[order]([]SyncProjection[order]{{Match: func(
+		string,
+	) bool {
+		return true
+	}, Fn: fn}})
 }
 
-func TestExecute_SyncProjectionErrorRollsBackAndDispatchesNothing(t *testing.T) {
+func TestExecute_SyncProjectionErrorRollsBackAndDispatchesNothing(
+	t *testing.T,
+) {
 	boom := errors.New("read model write failed")
-	ex, s, _, d, b := newEnv(t, syncAll(func(context.Context, asynxmd.Tx, asynxmd.Event[order]) error { return boom }))
+	ex, s, _, d, b := newEnv(t, syncAll(func(
+		context.Context,
+		asynxmd.Tx,
+		asynxmd.Event[order],
+	) error {
+		return boom
+	}))
 	var delivered atomic.Int32
-	b.Subscribe("OrderUpdated", func(context.Context, asynxmd.Event[order]) { delivered.Add(1) })
+	b.Subscribe("OrderUpdated", func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		delivered.Add(1)
+	})
 
 	_, err := ex.Execute(context.Background(), update("agg", 1), false)
 	d.WaitIdle()
@@ -684,11 +796,21 @@ func TestExecute_SyncProjectionErrorRollsBackAndDispatchesNothing(t *testing.T) 
 	}
 }
 
-func TestExecute_SyncProjectionSeesTxAndEvent_OnlyForMatchingEvents(t *testing.T) {
+func TestExecute_SyncProjectionSeesTxAndEvent_OnlyForMatchingEvents(
+	t *testing.T,
+) {
 	var got []string
 	ex, _, _, _, _ := newEnv(t, WithSyncProjections[order]([]SyncProjection[order]{{
-		Match: func(name string) bool { return name == "OrderUpdated" },
-		Fn: func(_ context.Context, tx asynxmd.Tx, e asynxmd.Event[order]) error {
+		Match: func(
+			name string,
+		) bool {
+			return name == "OrderUpdated"
+		},
+		Fn: func(
+			_ context.Context,
+			tx asynxmd.Tx,
+			e asynxmd.Event[order],
+		) error {
 			if tx == nil {
 				return errors.New("nil tx")
 			}
@@ -709,11 +831,20 @@ func TestExecute_SyncProjectionSeesTxAndEvent_OnlyForMatchingEvents(t *testing.T
 	}
 }
 
-func TestExecute_DurableDeliveryIsPendingUntilHandlersFinish(t *testing.T) {
-	ex, s, _, d, b := newEnv(t, WithDurableDelivery[order](func(string) bool { return true }))
+func TestExecute_DurableDeliveryIsPendingUntilHandlersFinish(
+	t *testing.T,
+) {
+	ex, s, _, d, b := newEnv(t, WithDurableDelivery[order](func(
+		string,
+	) bool {
+		return true
+	}))
 	release := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	b.Subscribe("OrderUpdated", func(context.Context, asynxmd.Event[order]) {
+	b.Subscribe("OrderUpdated", func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
 		entered <- struct{}{}
 		<-release
 	})
@@ -737,7 +868,9 @@ func TestExecute_DurableDeliveryIsPendingUntilHandlersFinish(t *testing.T) {
 	}
 }
 
-func TestExecute_NoDeliveryEntriesWhenDurableOff(t *testing.T) {
+func TestExecute_NoDeliveryEntriesWhenDurableOff(
+	t *testing.T,
+) {
 	ex, s, _, _, _ := newEnv(t)
 	if _, err := ex.Execute(context.Background(), update("agg", 1), false); err != nil {
 		t.Fatal(err)
@@ -747,7 +880,9 @@ func TestExecute_NoDeliveryEntriesWhenDurableOff(t *testing.T) {
 	}
 }
 
-func TestExecute_ValidationErrorPassesThroughUnwrapped(t *testing.T) {
+func TestExecute_ValidationErrorPassesThroughUnwrapped(
+	t *testing.T,
+) {
 	ex, _, _, _, _ := newEnv(t)
 	_, err := ex.Execute(context.Background(), mocks.CreateOrderCmd{ID: "x", Total: -1}, false)
 	if err != asynxmd.ErrValidation {
@@ -760,15 +895,19 @@ func TestExecute_ValidationErrorPassesThroughUnwrapped(t *testing.T) {
 
 // A reaction handler that sends commands back to its own aggregate must not
 // deadlock against commands queued behind a slow handler.
-func TestExecute_ReactionToOwnAggregateDoesNotDeadlockUnderBacklog(t *testing.T) {
+func TestExecute_ReactionToOwnAggregateDoesNotDeadlockUnderBacklog(
+	t *testing.T,
+) {
 	ex, _, _, d, b := newEnv(t)
 
 	release := make(chan struct{})
 	reacted := make(chan struct{})
-	b.Subscribe("OrderUpdated", func(ctx context.Context, e asynxmd.Event[order]) {
+	b.Subscribe("OrderUpdated", func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
 		if e.Version == 1 {
 			<-release
-			// React: send a follow-up command to the same aggregate.
 			if _, err := ex.Execute(ctx, update("agg", 999), false); err != nil {
 				t.Errorf("reaction Execute: %v", err)
 			}
@@ -782,7 +921,7 @@ func TestExecute_ReactionToOwnAggregateDoesNotDeadlockUnderBacklog(t *testing.T)
 
 	flooded := make(chan struct{})
 	go func() {
-		for i := range 60 { // far more than any queue bound
+		for i := range 60 {
 			if _, err := ex.Execute(context.Background(), update("agg", float64(i+2)), false); err != nil {
 				t.Errorf("Execute: %v", err)
 			}
@@ -805,10 +944,21 @@ func TestExecute_ReactionToOwnAggregateDoesNotDeadlockUnderBacklog(t *testing.T)
 	d.WaitIdle()
 }
 
-func TestExecute_DurableDeliveryOnlyForEventsADurableSubscriberWants(t *testing.T) {
-	ex, s, _, _, b := newEnv(t, WithDurableDelivery[order](func(name string) bool { return name == "OrderUpdated" }))
+func TestExecute_DurableDeliveryOnlyForEventsADurableSubscriberWants(
+	t *testing.T,
+) {
+	ex, s, _, _, b := newEnv(t, WithDurableDelivery[order](func(
+		name string,
+	) bool {
+		return name == "OrderUpdated"
+	}))
 	release := make(chan struct{})
-	b.Subscribe("OrderUpdated", func(context.Context, asynxmd.Event[order]) { <-release })
+	b.Subscribe("OrderUpdated", func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		<-release
+	})
 	t.Cleanup(func() { close(release) })
 	ctx := context.Background()
 
@@ -827,9 +977,17 @@ func TestExecute_DurableDeliveryOnlyForEventsADurableSubscriberWants(t *testing.
 	}
 }
 
-func streamLen(t *testing.T, s interface {
-	ReadFrom(context.Context, string, int64) ([][]byte, error)
-}, agg string) int {
+func streamLen(
+	t *testing.T,
+	s interface {
+		ReadFrom(
+			context.Context,
+			string,
+			int64,
+		) ([][]byte, error)
+	},
+	agg string,
+) int {
 	t.Helper()
 	blobs, err := s.ReadFrom(context.Background(), "events:"+agg, 1)
 	if err != nil {
@@ -838,7 +996,9 @@ func streamLen(t *testing.T, s interface {
 	return len(blobs)
 }
 
-func TestExecute_AfterDispatcherClosedFailsPipelineButKeepsTheCommit(t *testing.T) {
+func TestExecute_AfterDispatcherClosedFailsPipelineButKeepsTheCommit(
+	t *testing.T,
+) {
 	ex, s, _, d, _ := newEnv(t)
 	d.Close(context.Background())
 	evt, err := ex.Execute(context.Background(), update("agg", 1), false)
@@ -850,10 +1010,16 @@ func TestExecute_AfterDispatcherClosedFailsPipelineButKeepsTheCommit(t *testing.
 	}
 }
 
-func TestExecute_WithoutDispatcherCommitsAndReturns(t *testing.T) {
+func TestExecute_WithoutDispatcherCommitsAndReturns(
+	t *testing.T,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
-	ex := New[order](es, nil, WithDurableDelivery[order](func(string) bool { return true }))
+	ex := New[order](es, nil, WithDurableDelivery[order](func(
+		string,
+	) bool {
+		return true
+	}))
 	if _, err := ex.Execute(context.Background(), update("agg", 1), true); err != nil {
 		t.Fatal(err)
 	}
@@ -862,12 +1028,17 @@ func TestExecute_WithoutDispatcherCommitsAndReturns(t *testing.T) {
 	}
 }
 
-func TestExecute_WaitingForHandlersGivesUpWithTheCommittedEvent(t *testing.T) {
+func TestExecute_WaitingForHandlersGivesUpWithTheCommittedEvent(
+	t *testing.T,
+) {
 	ex, _, _, _, b := newEnv(t)
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	b.Subscribe("OrderUpdated", func(context.Context, asynxmd.Event[order]) {
+	b.Subscribe("OrderUpdated", func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
 		close(entered)
 		<-release
 	})
@@ -890,15 +1061,21 @@ func TestExecute_WaitingForHandlersGivesUpWithTheCommittedEvent(t *testing.T) {
 	}
 }
 
-func TestExecute_WaitingOnAParkedAggregateReportsNoHandlerRan(t *testing.T) {
-	ex := durableEnv(t, func(context.Context, asynxmd.Event[order]) error { return nil })
+func TestExecute_WaitingOnAParkedAggregateReportsNoHandlerRan(
+	t *testing.T,
+) {
+	ex := durableEnv(t, func(
+		context.Context,
+		asynxmd.Event[order],
+	) error {
+		return nil
+	})
 	ex.dispatcher.Park("agg", errors.New("parked by the test"))
 
 	evt, err := ex.Execute(context.Background(), update("agg", 1), true)
 	if !errors.Is(err, asynxmd.ErrDeliveryParked) || evt.Version != 1 {
 		t.Fatalf("Execute = v%d, %v; want the committed v1 with ErrDeliveryParked", evt.Version, err)
 	}
-	// Without waiting the command simply commits.
 	if _, err := ex.Execute(context.Background(), update("agg", 2), false); err != nil {
 		t.Fatalf("Execute without waiting: %v", err)
 	}
@@ -906,8 +1083,14 @@ func TestExecute_WaitingOnAParkedAggregateReportsNoHandlerRan(t *testing.T) {
 
 // A command committed but not queued must not let the next one be delivered
 // ahead of it.
-func TestExecute_EnqueueFailureAfterCommitParksTheAggregate(t *testing.T) {
-	ex, _, _, d, _ := newEnv(t, WithDurableDelivery[order](func(string) bool { return true }))
+func TestExecute_EnqueueFailureAfterCommitParksTheAggregate(
+	t *testing.T,
+) {
+	ex, _, _, d, _ := newEnv(t, WithDurableDelivery[order](func(
+		string,
+	) bool {
+		return true
+	}))
 	d.Close(context.Background())
 
 	evt, err := ex.Execute(context.Background(), update("agg", 1), false)
@@ -919,7 +1102,9 @@ func TestExecute_EnqueueFailureAfterCommitParksTheAggregate(t *testing.T) {
 	}
 }
 
-func TestWithLockIfFree_RunsWhenFreeAndSkipsWhenHeld(t *testing.T) {
+func TestWithLockIfFree_RunsWhenFreeAndSkipsWhenHeld(
+	t *testing.T,
+) {
 	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
@@ -975,7 +1160,9 @@ func eventually(
 	}
 }
 
-func BenchmarkExecute_CreateNew(b *testing.B) {
+func BenchmarkExecute_CreateNew(
+	b *testing.B,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
@@ -983,7 +1170,9 @@ func BenchmarkExecute_CreateNew(b *testing.B) {
 	ctx := context.Background()
 
 	for _, numEvents := range []int{1, 100, 1000} {
-		b.Run("events="+string(rune('0'+numEvents/100))+"_000", func(b *testing.B) {
+		b.Run("events="+string(rune('0'+numEvents/100))+"_000", func(
+			b *testing.B,
+		) {
 			b.ReportAllocs()
 			b.ResetTimer()
 
@@ -995,19 +1184,22 @@ func BenchmarkExecute_CreateNew(b *testing.B) {
 	}
 }
 
-func BenchmarkExecute_UpdateExisting(b *testing.B) {
+func BenchmarkExecute_UpdateExisting(
+	b *testing.B,
+) {
 	s := store.New()
 	es := eventstore.New[order](s, store.NewSnapshots(), nil, 1, nil)
 	executor := New(es, nil)
 
 	ctx := context.Background()
 
-	// Pre-populate with an aggregate
 	createCmd := mocks.CreateOrderCmd{ID: "order_base", Total: 100.0}
 	executor.Execute(ctx, createCmd, false)
 
 	for _, numEvents := range []int{1, 100, 1000} {
-		b.Run("events="+string(rune('0'+numEvents/100))+"_000", func(b *testing.B) {
+		b.Run("events="+string(rune('0'+numEvents/100))+"_000", func(
+			b *testing.B,
+		) {
 			b.ReportAllocs()
 			b.ResetTimer()
 
@@ -1037,7 +1229,9 @@ func fakeEnv(
 	})), fake
 }
 
-func TestExecute_EnqueueFailureParksWithTheEnqueueError(t *testing.T) {
+func TestExecute_EnqueueFailureParksWithTheEnqueueError(
+	t *testing.T,
+) {
 	ex, fake := fakeEnv(t)
 	fake.FailEnqueue(errEnqueue)
 

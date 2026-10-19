@@ -20,7 +20,10 @@ import (
 
 type order = mocks.Order
 
-func newProcessor(t *testing.T, opts ...ProcessorOpt[order]) *Processor[order] {
+func newProcessor(
+	t *testing.T,
+	opts ...ProcessorOpt[order],
+) *Processor[order] {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -34,7 +37,9 @@ func newProcessor(t *testing.T, opts ...ProcessorOpt[order]) *Processor[order] {
 	return p
 }
 
-func TestProcessor_SendSuccess(t *testing.T) {
+func TestProcessor_SendSuccess(
+	t *testing.T,
+) {
 	p := newProcessor(t)
 
 	ctx := context.Background()
@@ -46,11 +51,13 @@ func TestProcessor_SendSuccess(t *testing.T) {
 	}
 }
 
-func TestProcessor_ValidationError(t *testing.T) {
+func TestProcessor_ValidationError(
+	t *testing.T,
+) {
 	p := newProcessor(t)
 
 	ctx := context.Background()
-	cmd := mocks.CreateOrderCmd{ID: "order1", Total: -100.0} // Invalid
+	cmd := mocks.CreateOrderCmd{ID: "order1", Total: -100.0}
 
 	_, err := p.Send(ctx, cmd)
 	if err != asynxmd.ErrValidation {
@@ -58,17 +65,17 @@ func TestProcessor_ValidationError(t *testing.T) {
 	}
 }
 
-func TestProcessor_ValidationNoWrite(t *testing.T) {
+func TestProcessor_ValidationNoWrite(
+	t *testing.T,
+) {
 	p := newProcessor(t)
 
 	ctx := context.Background()
 
-	// Create an order first
 	cmd1 := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 	p.Send(ctx, cmd1)
 
-	// Try to cancel a non-existent order (validation failure)
-	cmd2 := mocks.CancelOrderCmd{ID: "order2"} // order2 doesn't exist
+	cmd2 := mocks.CancelOrderCmd{ID: "order2"}
 
 	_, err := p.Send(ctx, cmd2)
 	if err != asynxmd.ErrValidation {
@@ -76,12 +83,13 @@ func TestProcessor_ValidationNoWrite(t *testing.T) {
 	}
 }
 
-func TestProcessor_SerialOrdering10Increments(t *testing.T) {
+func TestProcessor_SerialOrdering10Increments(
+	t *testing.T,
+) {
 	p := newProcessor(t, WithShards[order](1))
 
 	ctx := context.Background()
 
-	// Send 10 commands for the same aggregate
 	for i := 1; i <= 10; i++ {
 		cmd := mocks.UpdateOrderCmd{
 			ID:       "order1",
@@ -94,7 +102,9 @@ func TestProcessor_SerialOrdering10Increments(t *testing.T) {
 	}
 }
 
-func TestProcessor_ParallelAggregates8Goroutines(t *testing.T) {
+func TestProcessor_ParallelAggregates8Goroutines(
+	t *testing.T,
+) {
 	p := newProcessor(t, WithShards[order](8))
 
 	ctx := context.Background()
@@ -104,7 +114,9 @@ func TestProcessor_ParallelAggregates8Goroutines(t *testing.T) {
 
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
-		go func(idx int) {
+		go func(
+			idx int,
+		) {
 			defer wg.Done()
 			cmd := mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0}
 			_, _err := p.Send(ctx, cmd)
@@ -122,7 +134,9 @@ func TestProcessor_ParallelAggregates8Goroutines(t *testing.T) {
 	}
 }
 
-func TestProcessor_ShuttingDown(t *testing.T) {
+func TestProcessor_ShuttingDown(
+	t *testing.T,
+) {
 	p := newProcessor(t)
 
 	ctx := context.Background()
@@ -131,7 +145,6 @@ func TestProcessor_ShuttingDown(t *testing.T) {
 		t.Fatalf("shutdown failed: %v", err)
 	}
 
-	// Try to send after shutdown
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 	_, err = p.Send(ctx, cmd)
 	if err != asynxmd.ErrShuttingDown {
@@ -139,11 +152,13 @@ func TestProcessor_ShuttingDown(t *testing.T) {
 	}
 }
 
-func TestProcessor_ContextCancelledBeforeQueue(t *testing.T) {
+func TestProcessor_ContextCancelledBeforeQueue(
+	t *testing.T,
+) {
 	p := newProcessor(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
+	cancel()
 
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 	_, err := p.Send(ctx, cmd)
@@ -152,7 +167,9 @@ func TestProcessor_ContextCancelledBeforeQueue(t *testing.T) {
 	}
 }
 
-func TestProcessor_ContextCancelledWhileWaiting(t *testing.T) {
+func TestProcessor_ContextCancelledWhileWaiting(
+	t *testing.T,
+) {
 	p := newProcessor(t, WithShards[order](1))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -167,42 +184,35 @@ func TestProcessor_ContextCancelledWhileWaiting(t *testing.T) {
 		}
 	})
 
-	// Start send in background
 	done := make(chan error, 1)
 	go func() {
 		_, _err := p.Send(ctx, cmd)
 		done <- _err
 	}()
 
-	// Wait until Send is waiting for result
 	<-pending
 
-	// Cancel context
 	cancel()
 
-	// Wait for send to return
 	err := <-done
-	// Could be ErrContextCancelled or nil (if it completed before cancellation)
 	if err != nil && err != asynxmd.ErrContextCancelled {
 		t.Logf("Send returned: %v (acceptable if completed quickly)", err)
 	}
 }
 
-func TestProcessor_QueueFull(t *testing.T) {
+func TestProcessor_QueueFull(
+	t *testing.T,
+) {
 	p := newProcessor(t, WithShards[order](1), WithQueueDepth[order](1))
 
 	ctx := context.Background()
 
-	// Create a command that takes time to process (conceptually)
-	// Since we can't easily control execution time, we'll test that
-	// the queueing behavior is correct
 	cmd1 := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 	_, err := p.Send(ctx, cmd1)
 	if err != nil {
 		t.Fatalf("first send failed: %v", err)
 	}
 
-	// Second send should succeed (depth=1 means 1 in queue)
 	cmd2 := mocks.CreateOrderCmd{ID: "order2", Total: 100.0}
 	_, err = p.Send(ctx, cmd2)
 	if err != nil {
@@ -210,7 +220,9 @@ func TestProcessor_QueueFull(t *testing.T) {
 	}
 }
 
-func TestProcessor_ShutdownDrains(t *testing.T) {
+func TestProcessor_ShutdownDrains(
+	t *testing.T,
+) {
 	p := newProcessor(t, WithShards[order](4), WithQueueDepth[order](5))
 
 	ctx := context.Background()
@@ -220,7 +232,9 @@ func TestProcessor_ShutdownDrains(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
-		go func(idx int) {
+		go func(
+			idx int,
+		) {
 			defer wg.Done()
 			cmd := mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0}
 			_, _err := p.Send(ctx, cmd)
@@ -237,7 +251,6 @@ func TestProcessor_ShutdownDrains(t *testing.T) {
 
 	close(errs)
 
-	// Verify all commands were processed
 	for err := range errs {
 		if err != nil {
 			t.Errorf("Send failed: %v", err)
@@ -245,10 +258,11 @@ func TestProcessor_ShutdownDrains(t *testing.T) {
 	}
 }
 
-func TestProcessor_ShutdownTimeout(t *testing.T) {
+func TestProcessor_ShutdownTimeout(
+	t *testing.T,
+) {
 	p := newProcessor(t)
 
-	// Use an already-expired deadline so there is no race with the clock.
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 
@@ -258,25 +272,27 @@ func TestProcessor_ShutdownTimeout(t *testing.T) {
 	}
 }
 
-func TestProcessor_AlreadyShuttingDown(t *testing.T) {
+func TestProcessor_AlreadyShuttingDown(
+	t *testing.T,
+) {
 	p := newProcessor(t)
 
 	ctx := context.Background()
 
-	// First shutdown
 	err1 := p.Shutdown(ctx)
 	if err1 != nil {
 		t.Fatalf("first shutdown failed: %v", err1)
 	}
 
-	// Second shutdown should return error
 	err2 := p.Shutdown(ctx)
 	if err2 != asynxmd.ErrAlreadyShuttingDown {
 		t.Fatalf("expected ErrAlreadyShuttingDown, got %v", err2)
 	}
 }
 
-func TestProcessor_EventPublishedToRealBus(t *testing.T) {
+func TestProcessor_EventPublishedToRealBus(
+	t *testing.T,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -286,9 +302,11 @@ func TestProcessor_EventPublishedToRealBus(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Subscribe to events
 	eventReceived := make(chan asynxmd.Event[order], 1)
-	channelBus.Subscribe("OrderCreated", func(ctx context.Context, e asynxmd.Event[order]) {
+	channelBus.Subscribe("OrderCreated", func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
 		eventReceived <- e
 	})
 
@@ -298,7 +316,6 @@ func TestProcessor_EventPublishedToRealBus(t *testing.T) {
 		t.Fatalf("Send failed: %v", err)
 	}
 
-	// Wait for event to be published
 	select {
 	case event := <-eventReceived:
 		if event.EventName != "OrderCreated" {
@@ -309,7 +326,9 @@ func TestProcessor_EventPublishedToRealBus(t *testing.T) {
 	}
 }
 
-func TestProcessor_PublishUsesDetachedContext(t *testing.T) {
+func TestProcessor_PublishUsesDetachedContext(
+	t *testing.T,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -319,9 +338,11 @@ func TestProcessor_PublishUsesDetachedContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Subscribe to events
 	contextReceived := make(chan context.Context, 1)
-	channelBus.Subscribe("OrderCreated", func(ctx context.Context, e asynxmd.Event[order]) {
+	channelBus.Subscribe("OrderCreated", func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
 		contextReceived <- ctx
 	})
 
@@ -331,19 +352,18 @@ func TestProcessor_PublishUsesDetachedContext(t *testing.T) {
 		t.Fatalf("Send failed: %v", err)
 	}
 
-	// Cancel the original context
 	cancel()
 
-	// Wait for event to be published
 	select {
 	case <-contextReceived:
-		// Event was published despite context cancellation
 	case <-time.After(1 * time.Second):
 		t.Fatalf("event not published within timeout")
 	}
 }
 
-func TestProcessor_WithWorkersPerShard(t *testing.T) {
+func TestProcessor_WithWorkersPerShard(
+	t *testing.T,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -365,7 +385,9 @@ func TestProcessor_WithWorkersPerShard(t *testing.T) {
 	}
 }
 
-func TestProcessor_WithQueueDepth(t *testing.T) {
+func TestProcessor_WithQueueDepth(
+	t *testing.T,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -386,12 +408,13 @@ func TestProcessor_WithQueueDepth(t *testing.T) {
 	}
 }
 
-func TestProcessor_NegativeOptionsIgnored(t *testing.T) {
+func TestProcessor_NegativeOptionsIgnored(
+	t *testing.T,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	// Negative values should be ignored, using defaults
 	p := mustNew(t,
 		es,
 		channelBus,
@@ -410,7 +433,9 @@ func TestProcessor_NegativeOptionsIgnored(t *testing.T) {
 	}
 }
 
-func TestProcessor_SendContextCancelledDuringWait(t *testing.T) {
+func TestProcessor_SendContextCancelledDuringWait(
+	t *testing.T,
+) {
 	p := newProcessor(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -431,13 +456,14 @@ func TestProcessor_SendContextCancelledDuringWait(t *testing.T) {
 	}()
 
 	_, err := p.Send(ctx, cmd)
-	// Should get either context cancelled or success (timing dependent)
 	if err != nil && err != asynxmd.ErrContextCancelled {
 		t.Logf("Send returned: %v", err)
 	}
 }
 
-func TestProcessor_ShutdownWithBus(t *testing.T) {
+func TestProcessor_ShutdownWithBus(
+	t *testing.T,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -446,26 +472,25 @@ func TestProcessor_ShutdownWithBus(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Send a command
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 	_, err := p.Send(ctx, cmd)
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
 
-	// Shutdown with bus
 	err = p.Shutdown(ctx)
 	if err != nil {
 		t.Fatalf("shutdown failed: %v", err)
 	}
 }
 
-func TestProcessor_SendToMultipleShards(t *testing.T) {
+func TestProcessor_SendToMultipleShards(
+	t *testing.T,
+) {
 	p := newProcessor(t, WithShards[order](4))
 
 	ctx := context.Background()
 
-	// Send to different shards
 	for i := 0; i < 12; i++ {
 		cmd := mocks.CreateOrderCmd{ID: "order" + string(rune('0'+i)), Total: 100.0}
 		_, err := p.Send(ctx, cmd)
@@ -475,7 +500,9 @@ func TestProcessor_SendToMultipleShards(t *testing.T) {
 	}
 }
 
-func TestProcessor_ShutdownWithoutBus(t *testing.T) {
+func TestProcessor_ShutdownWithoutBus(
+	t *testing.T,
+) {
 	memStore := store.New()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
@@ -483,25 +510,25 @@ func TestProcessor_ShutdownWithoutBus(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Send a command
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 	_, err := p.Send(ctx, cmd)
 	if err != nil {
 		t.Fatalf("Send failed: %v", err)
 	}
 
-	// Shutdown without bus
 	err = p.Shutdown(ctx)
 	if err != nil {
 		t.Fatalf("shutdown failed: %v", err)
 	}
 }
 
-func TestProcessor_ContextCancelledEarlyCheck(t *testing.T) {
+func TestProcessor_ContextCancelledEarlyCheck(
+	t *testing.T,
+) {
 	p := newProcessor(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel before calling Send
+	cancel()
 
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 
@@ -511,7 +538,9 @@ func TestProcessor_ContextCancelledEarlyCheck(t *testing.T) {
 	}
 }
 
-func TestProcessor_AllSendBranches(t *testing.T) {
+func TestProcessor_AllSendBranches(
+	t *testing.T,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -521,14 +550,12 @@ func TestProcessor_AllSendBranches(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Test normal path
 	cmd1 := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 	_, err := p.Send(ctx, cmd1)
 	if err != nil {
 		t.Fatalf("normal send failed: %v", err)
 	}
 
-	// Test with cancelled context in early check
 	ctx2, cancel := context.WithCancel(context.Background())
 	cancel()
 	cmd2 := mocks.CreateOrderCmd{ID: "order2", Total: 100.0}
@@ -537,14 +564,12 @@ func TestProcessor_AllSendBranches(t *testing.T) {
 		t.Fatalf("cancelled early should return ErrContextCancelled, got %v", err)
 	}
 
-	// Test validation error
 	cmd3 := mocks.CreateOrderCmd{ID: "order3", Total: -100.0}
 	_, err = p.Send(ctx, cmd3)
 	if err != asynxmd.ErrValidation {
 		t.Fatalf("validation error should propagate, got %v", err)
 	}
 
-	// Test successful multiple operations
 	for i := 0; i < 5; i++ {
 		cmd := mocks.CreateOrderCmd{ID: "order" + string(rune('A'+i)), Total: 100.0}
 		_, err := p.Send(ctx, cmd)
@@ -554,7 +579,9 @@ func TestProcessor_AllSendBranches(t *testing.T) {
 	}
 }
 
-func TestProcessor_ShutdownClosesPool(t *testing.T) {
+func TestProcessor_ShutdownClosesPool(
+	t *testing.T,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -563,20 +590,17 @@ func TestProcessor_ShutdownClosesPool(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Verify we can send before shutdown
 	cmd1 := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 	_, err := p.Send(ctx, cmd1)
 	if err != nil {
 		t.Fatalf("send before shutdown failed: %v", err)
 	}
 
-	// Shutdown
 	err = p.Shutdown(ctx)
 	if err != nil {
 		t.Fatalf("shutdown failed: %v", err)
 	}
 
-	// Verify sends are blocked after shutdown
 	cmd2 := mocks.CreateOrderCmd{ID: "order2", Total: 100.0}
 	_, err = p.Send(ctx, cmd2)
 	if err != asynxmd.ErrShuttingDown {
@@ -584,7 +608,9 @@ func TestProcessor_ShutdownClosesPool(t *testing.T) {
 	}
 }
 
-func TestProcessor_SendWait_Success(t *testing.T) {
+func TestProcessor_SendWait_Success(
+	t *testing.T,
+) {
 	p := newProcessor(t)
 
 	ctx := context.Background()
@@ -602,7 +628,9 @@ func TestProcessor_SendWait_Success(t *testing.T) {
 	}
 }
 
-func TestProcessor_SendWait_HandlersCompleteBeforeReturn(t *testing.T) {
+func TestProcessor_SendWait_HandlersCompleteBeforeReturn(
+	t *testing.T,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -611,7 +639,10 @@ func TestProcessor_SendWait_HandlersCompleteBeforeReturn(t *testing.T) {
 	defer p.Shutdown(context.Background())
 
 	var handlerDone atomic.Bool
-	channelBus.Subscribe("OrderCreated", func(_ context.Context, _ asynxmd.Event[order]) {
+	channelBus.Subscribe("OrderCreated", func(
+		_ context.Context,
+		_ asynxmd.Event[order],
+	) {
 		handlerDone.Store(true)
 	})
 
@@ -623,13 +654,14 @@ func TestProcessor_SendWait_HandlersCompleteBeforeReturn(t *testing.T) {
 		t.Fatalf("expected nil, got %v", err)
 	}
 
-	// No WaitPublish needed — handlers must be done when SendWait returns.
 	if !handlerDone.Load() {
 		t.Error("handler not done when SendWait returned")
 	}
 }
 
-func TestProcessor_SendWait_ValidationError(t *testing.T) {
+func TestProcessor_SendWait_ValidationError(
+	t *testing.T,
+) {
 	p := newProcessor(t)
 
 	ctx := context.Background()
@@ -641,7 +673,9 @@ func TestProcessor_SendWait_ValidationError(t *testing.T) {
 	}
 }
 
-func TestProcessor_SendWait_ContextCancelled(t *testing.T) {
+func TestProcessor_SendWait_ContextCancelled(
+	t *testing.T,
+) {
 	p := newProcessor(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -655,7 +689,9 @@ func TestProcessor_SendWait_ContextCancelled(t *testing.T) {
 	}
 }
 
-func TestProcessor_SendWait_AfterShutdown(t *testing.T) {
+func TestProcessor_SendWait_AfterShutdown(
+	t *testing.T,
+) {
 	p := newProcessor(t)
 
 	ctx := context.Background()
@@ -669,15 +705,20 @@ func TestProcessor_SendWait_AfterShutdown(t *testing.T) {
 	}
 }
 
-func TestWithPublishErrorHandler_IsInvokedOnPublishError(t *testing.T) {
-	// Use a bus that always errors on Publish to trigger the handler.
+func TestWithPublishErrorHandler_IsInvokedOnPublishError(
+	t *testing.T,
+) {
 	var got struct {
 		sync.Mutex
 		called bool
 	}
 
 	s := store.New()
-	handler := func(_ context.Context, _ asynxmd.Event[mocks.Order], _ error) {
+	handler := func(
+		_ context.Context,
+		_ asynxmd.Event[mocks.Order],
+		_ error,
+	) {
 		got.Lock()
 		got.called = true
 		got.Unlock()
@@ -694,7 +735,6 @@ func TestWithPublishErrorHandler_IsInvokedOnPublishError(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 
-	// Wait for the async publish goroutine to fire.
 	proc.WaitPublish()
 
 	got.Lock()
@@ -712,23 +752,45 @@ type blockingTestBus[T any] struct {
 	unblockCh chan struct{}
 }
 
-func (b *blockingTestBus[T]) Publish(_ context.Context, _ asynxmd.Event[T]) error { return nil }
-func (b *blockingTestBus[T]) PublishSync(_ context.Context, _ asynxmd.Event[T]) error {
+func (b *blockingTestBus[T]) Publish(
+	_ context.Context,
+	_ asynxmd.Event[T],
+) error {
+	return nil
+}
+func (b *blockingTestBus[T]) PublishSync(
+	_ context.Context,
+	_ asynxmd.Event[T],
+) error {
 	<-b.unblockCh
 	return nil
 }
-func (b *blockingTestBus[T]) Subscribe(_ string, _ asynxmd.ProjectionHandler[T], _ ...asynxmd.SubscriptionOpt[T]) (string, error) {
+func (b *blockingTestBus[T]) Subscribe(
+	_ string,
+	_ asynxmd.ProjectionHandler[T],
+	_ ...asynxmd.SubscriptionOpt[T],
+) (string, error) {
 	return "", nil
 }
-func (b *blockingTestBus[T]) Unsubscribe(_ string) error    { return nil }
-func (b *blockingTestBus[T]) Close(_ context.Context) error { return nil }
-func (b *blockingTestBus[T]) WaitForHandlers()              {}
+func (b *blockingTestBus[T]) Unsubscribe(
+	_ string,
+) error {
+	return nil
+}
+func (b *blockingTestBus[T]) Close(
+	_ context.Context,
+) error {
+	return nil
+}
+func (b *blockingTestBus[T]) WaitForHandlers() {}
 
 // TestProcessor_SendWait_ContextCancelledWhileWaiting verifies the second-select
 // ctx.Done branch in sendAndWait: context is cancelled after the command is enqueued
 // but before the result arrives. A blocking bus ensures the worker is still running
 // when ctx is cancelled, making the second-select ctx.Done branch deterministic.
-func TestProcessor_SendWait_ContextCancelledWhileWaiting(t *testing.T) {
+func TestProcessor_SendWait_ContextCancelledWhileWaiting(
+	t *testing.T,
+) {
 	memStore := store.New()
 	unblockCh := make(chan struct{})
 	bb := &blockingTestBus[order]{unblockCh: unblockCh}
@@ -736,7 +798,7 @@ func TestProcessor_SendWait_ContextCancelledWhileWaiting(t *testing.T) {
 
 	p := mustNew(t, es, bb, WithShards[order](1))
 	t.Cleanup(func() {
-		close(unblockCh) // unblock any pending PublishSync before shutdown
+		close(unblockCh)
 		p.Shutdown(context.Background())
 	})
 
@@ -754,19 +816,14 @@ func TestProcessor_SendWait_ContextCancelledWhileWaiting(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		// SendWait enqueues, then blocks waiting for result (which requires PublishSync to finish).
-		// Since bb.PublishSync blocks on unblockCh, the worker won't finish until we unblock.
 		_, err := p.SendWait(ctx, cmd)
 		done <- err
 	}()
 
-	// Wait until command is enqueued and worker is processing it.
 	<-pending
 
-	// Cancel ctx while worker is still blocked in PublishSync.
 	cancel()
 
-	// SendWait should return ErrContextCancelled via the second select ctx.Done branch.
 	select {
 	case err := <-done:
 		if err != asynxmd.ErrContextCancelled {
@@ -784,7 +841,11 @@ type fixture struct {
 	b    *bus.ChannelBus[order]
 }
 
-func newFixture(t *testing.T, s store.Memory, opts ...ProcessorOpt[order]) fixture {
+func newFixture(
+	t *testing.T,
+	s store.Memory,
+	opts ...ProcessorOpt[order],
+) fixture {
 	t.Helper()
 	snap := store.NewSnapshots()
 	b := bus.NewChannelBus[order]()
@@ -794,17 +855,30 @@ func newFixture(t *testing.T, s store.Memory, opts ...ProcessorOpt[order]) fixtu
 	return fixture{p: p, s: s, snap: snap, b: b}
 }
 
-func updateCmd(id string, total float64) mocks.UpdateOrderCmd {
+func updateCmd(
+	id string,
+	total float64,
+) mocks.UpdateOrderCmd {
 	return mocks.UpdateOrderCmd{ID: id, NewState: order{ID: id, Total: total}}
 }
 
 // parkingOpts makes a delivery give up after two attempts unless healthy is set.
-func parkingOpts(healthy *atomic.Bool, extra ...ProcessorOpt[order]) []ProcessorOpt[order] {
+func parkingOpts(
+	healthy *atomic.Bool,
+	extra ...ProcessorOpt[order],
+) []ProcessorOpt[order] {
 	return append([]ProcessorOpt[order]{
-		WithDurableDelivery[order](func(name string) bool { return name == "OrderUpdated" }),
+		WithDurableDelivery[order](func(
+			name string,
+		) bool {
+			return name == "OrderUpdated"
+		}),
 		WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 			Match: always,
-			Handler: func(context.Context, asynxmd.Event[order]) error {
+			Handler: func(
+				context.Context,
+				asynxmd.Event[order],
+			) error {
 				if healthy.Load() {
 					return nil
 				}
@@ -816,12 +890,19 @@ func parkingOpts(healthy *atomic.Bool, extra ...ProcessorOpt[order]) []Processor
 	}, extra...)
 }
 
-func TestProcessor_Forget_ErasesAndNotifiesHandlers(t *testing.T) {
+func TestProcessor_Forget_ErasesAndNotifiesHandlers(
+	t *testing.T,
+) {
 	f := newFixture(t, store.New())
 	ctx := context.Background()
 
 	var tombstones atomic.Int32
-	f.b.Subscribe("asynx\\.aggregate\\.forget", func(context.Context, asynxmd.Event[order]) { tombstones.Add(1) })
+	f.b.Subscribe("asynx\\.aggregate\\.forget", func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		tombstones.Add(1)
+	})
 
 	if _, err := f.p.Send(ctx, mocks.CreateOrderCmd{ID: "o1", Total: 5}); err != nil {
 		t.Fatal(err)
@@ -840,7 +921,9 @@ func TestProcessor_Forget_ErasesAndNotifiesHandlers(t *testing.T) {
 	}
 }
 
-func TestProcessor_Forget_RejectedWhenShuttingDownOrCancelled(t *testing.T) {
+func TestProcessor_Forget_RejectedWhenShuttingDownOrCancelled(
+	t *testing.T,
+) {
 	f := newFixture(t, store.New())
 
 	cancelled, cancel := context.WithCancel(context.Background())
@@ -855,19 +938,39 @@ func TestProcessor_Forget_RejectedWhenShuttingDownOrCancelled(t *testing.T) {
 	}
 }
 
-func TestProcessor_Options_SyncProjectionsDurableDeliverySnapshotErrors(t *testing.T) {
+func TestProcessor_Options_SyncProjectionsDurableDeliverySnapshotErrors(
+	t *testing.T,
+) {
 	var projected, snapErrs atomic.Int32
 	s := store.New()
 	f := newFixture(t, s,
 		WithSyncProjections([]exec.SyncProjection[order]{{
-			Match: func(string) bool { return true },
-			Fn: func(context.Context, asynxmd.Tx, asynxmd.Event[order]) error {
+			Match: func(
+				string,
+			) bool {
+				return true
+			},
+			Fn: func(
+				context.Context,
+				asynxmd.Tx,
+				asynxmd.Event[order],
+			) error {
 				projected.Add(1)
 				return nil
 			},
 		}}),
-		WithDurableDelivery[order](func(string) bool { return true }),
-		WithSnapshotErrorHandler(func(context.Context, asynxmd.Event[order], error) { snapErrs.Add(1) }),
+		WithDurableDelivery[order](func(
+			string,
+		) bool {
+			return true
+		}),
+		WithSnapshotErrorHandler(func(
+			context.Context,
+			asynxmd.Event[order],
+			error,
+		) {
+			snapErrs.Add(1)
+		}),
 	)
 	f.snap.SetError("o1", errors.New("snapshot down"))
 
@@ -886,14 +989,27 @@ func TestProcessor_Options_SyncProjectionsDurableDeliverySnapshotErrors(t *testi
 	}
 }
 
-func TestProcessor_DurableDeliveryOptions_RetryReportAndPanicHandling(t *testing.T) {
+func TestProcessor_DurableDeliveryOptions_RetryReportAndPanicHandling(
+	t *testing.T,
+) {
 	var attempts, reports, panics atomic.Int32
 	s := store.New()
 	f := newFixture(t, s,
-		WithDurableDelivery[order](func(name string) bool { return name == "OrderUpdated" }),
+		WithDurableDelivery[order](func(
+			name string,
+		) bool {
+			return name == "OrderUpdated"
+		}),
 		WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-			Match: func(string) bool { return true },
-			Handler: func(context.Context, asynxmd.Event[order]) error {
+			Match: func(
+				string,
+			) bool {
+				return true
+			},
+			Handler: func(
+				context.Context,
+				asynxmd.Event[order],
+			) error {
 				switch attempts.Add(1) {
 				case 1:
 					return errors.New("transient")
@@ -903,8 +1019,21 @@ func TestProcessor_DurableDeliveryOptions_RetryReportAndPanicHandling(t *testing
 				return nil
 			},
 		}}),
-		WithDeliveryErrorHandler(func(context.Context, asynxmd.Event[order], error, int) { reports.Add(1) }),
-		WithDeliveryPanicHandler(func(context.Context, asynxmd.Event[order], any) { panics.Add(1) }),
+		WithDeliveryErrorHandler(func(
+			context.Context,
+			asynxmd.Event[order],
+			error,
+			int,
+		) {
+			reports.Add(1)
+		}),
+		WithDeliveryPanicHandler(func(
+			context.Context,
+			asynxmd.Event[order],
+			any,
+		) {
+			panics.Add(1)
+		}),
 		WithDeliveryRetry[order](time.Millisecond, 2*time.Millisecond),
 	)
 
@@ -922,13 +1051,23 @@ func TestProcessor_DurableDeliveryOptions_RetryReportAndPanicHandling(t *testing
 	}
 }
 
-func always(string) bool { return true }
+func always(
+	string,
+) bool {
+	return true
+}
 
-func TestProcessor_Options_DeadLetter(t *testing.T) {
+func TestProcessor_Options_DeadLetter(
+	t *testing.T,
+) {
 	var healthy atomic.Bool
 	dead := make(chan int64, 4)
 	f := newFixture(t, store.New(), parkingOpts(&healthy,
-		WithDeadLetterHandler(func(_ context.Context, e asynxmd.Event[order], _ error) error {
+		WithDeadLetterHandler(func(
+			_ context.Context,
+			e asynxmd.Event[order],
+			_ error,
+		) error {
 			dead <- e.Version
 			return nil
 		}))...)
@@ -945,12 +1084,17 @@ func TestProcessor_Options_DeadLetter(t *testing.T) {
 	}
 }
 
-func TestProcessor_SendWait_GivesUpWaitingButReturnsTheCommittedEvent(t *testing.T) {
+func TestProcessor_SendWait_GivesUpWaitingButReturnsTheCommittedEvent(
+	t *testing.T,
+) {
 	f := newFixture(t, store.New())
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	f.b.Subscribe("OrderUpdated", func(context.Context, asynxmd.Event[order]) {
+	f.b.Subscribe("OrderUpdated", func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
 		close(entered)
 		<-release
 	})
@@ -976,7 +1120,9 @@ func TestProcessor_SendWait_GivesUpWaitingButReturnsTheCommittedEvent(t *testing
 	}
 }
 
-func TestProcessor_Shutdown_WaitsForForgetInFlightUntilItsContextEnds(t *testing.T) {
+func TestProcessor_Shutdown_WaitsForForgetInFlightUntilItsContextEnds(
+	t *testing.T,
+) {
 	f := newFixture(t, store.New())
 	ctx := context.Background()
 	if _, err := f.p.Send(ctx, mocks.CreateOrderCmd{ID: "o1", Total: 1}); err != nil {
@@ -985,7 +1131,10 @@ func TestProcessor_Shutdown_WaitsForForgetInFlightUntilItsContextEnds(t *testing
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	f.b.Subscribe("asynx\\.aggregate\\.forget", func(context.Context, asynxmd.Event[order]) {
+	f.b.Subscribe("asynx\\.aggregate\\.forget", func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
 		close(entered)
 		<-release
 	})
@@ -1015,7 +1164,9 @@ type gatedCmd struct {
 	gate    <-chan struct{}
 }
 
-func (c gatedCmd) Validate(o *order) error {
+func (c gatedCmd) Validate(
+	o *order,
+) error {
 	select {
 	case c.entered <- struct{}{}:
 	default:
@@ -1026,7 +1177,9 @@ func (c gatedCmd) Validate(o *order) error {
 
 // Shutdown must not return while a sender is still waiting on a queue the pool
 // has stopped reading: every Send either runs or is refused.
-func TestProcessor_Shutdown_NeverStrandsAQueuedSend(t *testing.T) {
+func TestProcessor_Shutdown_NeverStrandsAQueuedSend(
+	t *testing.T,
+) {
 	for range 25 {
 		gate := make(chan struct{})
 		entered := make(chan struct{}, 1)
@@ -1049,25 +1202,39 @@ func TestProcessor_Shutdown_NeverStrandsAQueuedSend(t *testing.T) {
 		go func() { down <- p.Shutdown(context.Background()) }()
 		close(gate)
 
-		for range 6 {
-			select {
-			case <-results:
-			case <-time.After(5 * time.Second):
-				t.Fatal("a Send was stranded by Shutdown")
-			}
-		}
+		awaitSendResults(t, results, 6)
 		if err := <-down; err != nil {
 			t.Fatalf("Shutdown: %v", err)
 		}
 	}
 }
 
-func TestProcessor_Shutdown_CanBeRetriedAfterItsContextEnds(t *testing.T) {
+func awaitSendResults(
+	t *testing.T,
+	results chan error,
+	n int,
+) {
+	t.Helper()
+	for range n {
+		select {
+		case <-results:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a Send was stranded by Shutdown")
+		}
+	}
+}
+
+func TestProcessor_Shutdown_CanBeRetriedAfterItsContextEnds(
+	t *testing.T,
+) {
 	es := eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
 	b := bus.NewChannelBus[order]()
 	release := make(chan struct{})
 	entered := make(chan struct{})
-	b.Subscribe("OrderUpdated", func(context.Context, asynxmd.Event[order]) {
+	b.Subscribe("OrderUpdated", func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
 		close(entered)
 		<-release
 	})
@@ -1091,10 +1258,15 @@ func TestProcessor_Shutdown_CanBeRetriedAfterItsContextEnds(t *testing.T) {
 	}
 }
 
-func TestProcessor_SendWait_FromAHandlerOfTheSameAggregateFailsFast(t *testing.T) {
+func TestProcessor_SendWait_FromAHandlerOfTheSameAggregateFailsFast(
+	t *testing.T,
+) {
 	f := newFixture(t, store.New())
 	got := make(chan error, 1)
-	f.b.Subscribe("OrderUpdated", func(ctx context.Context, e asynxmd.Event[order]) {
+	f.b.Subscribe("OrderUpdated", func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
 		_, err := f.p.SendWait(ctx, updateCmd(e.AggregateID, 2))
 		got <- err
 	})
@@ -1111,13 +1283,14 @@ func TestProcessor_SendWait_FromAHandlerOfTheSameAggregateFailsFast(t *testing.T
 	}
 }
 
-func TestProcessor_Shutdown_ReportsAWorkerThatWillNotFinish(t *testing.T) {
+func TestProcessor_Shutdown_ReportsAWorkerThatWillNotFinish(
+	t *testing.T,
+) {
 	gate := make(chan struct{})
 	entered := make(chan struct{}, 1)
 	p := newProcessor(t, WithShards[order](1), WithWorkersPerShard[order](1))
 	t.Cleanup(func() { close(gate) })
 
-	// The sender gives up, but its command is still running on the worker.
 	sendCtx, cancelSend := context.WithCancel(context.Background())
 	sent := make(chan error, 1)
 	go func() {
@@ -1135,7 +1308,9 @@ func TestProcessor_Shutdown_ReportsAWorkerThatWillNotFinish(t *testing.T) {
 	}
 }
 
-func TestProcessor_Shutdown_WaitsForASendInFlightUntilItsContextEnds(t *testing.T) {
+func TestProcessor_Shutdown_WaitsForASendInFlightUntilItsContextEnds(
+	t *testing.T,
+) {
 	gate := make(chan struct{})
 	entered := make(chan struct{}, 1)
 	p := newProcessor(t, WithShards[order](1), WithWorkersPerShard[order](1))
@@ -1152,7 +1327,9 @@ func TestProcessor_Shutdown_WaitsForASendInFlightUntilItsContextEnds(t *testing.
 
 // Applications use one aggregate ID across several instances (an arrow and its
 // runtime): a handler of one instance may Forget or SendWait on the other.
-func TestProcessor_HandlerMayWaitOnAnotherInstanceUnderTheSameID(t *testing.T) {
+func TestProcessor_HandlerMayWaitOnAnotherInstanceUnderTheSameID(
+	t *testing.T,
+) {
 	a := newFixture(t, store.New())
 	b := newFixture(t, store.New())
 	ctx := context.Background()
@@ -1161,7 +1338,10 @@ func TestProcessor_HandlerMayWaitOnAnotherInstanceUnderTheSameID(t *testing.T) {
 	}
 
 	got := make(chan error, 2)
-	a.b.Subscribe("OrderUpdated", func(hctx context.Context, e asynxmd.Event[order]) {
+	a.b.Subscribe("OrderUpdated", func(
+		hctx context.Context,
+		e asynxmd.Event[order],
+	) {
 		_, err := b.p.SendWait(hctx, updateCmd(e.AggregateID, 2))
 		got <- err
 		got <- b.p.Forget(hctx, e.AggregateID)
@@ -1183,7 +1363,9 @@ func TestProcessor_HandlerMayWaitOnAnotherInstanceUnderTheSameID(t *testing.T) {
 
 // WaitPublish waits for what is queued and refuses nothing: a command sent while
 // it waits commits, is not reported as failed, and parks nobody.
-func TestProcessor_WaitPublish_DoesNotFailCommandsSentWhileItWaits(t *testing.T) {
+func TestProcessor_WaitPublish_DoesNotFailCommandsSentWhileItWaits(
+	t *testing.T,
+) {
 	f := newFixture(t, store.New())
 	ctx := context.Background()
 	entered := make(chan struct{}, 1)
@@ -1237,7 +1419,9 @@ func newES() *eventstore.EventStore[order] {
 	return eventstore.New[order](store.New(), store.NewSnapshots(), nil, 1, nil)
 }
 
-func TestNew_AFactoryReplacesTheDefaultDispatcher(t *testing.T) {
+func TestNew_AFactoryReplacesTheDefaultDispatcher(
+	t *testing.T,
+) {
 	fake := mocks.NewDispatcher[order]()
 	p := mustNew(t, newES(), bus.NewChannelBus[order](), WithDispatcherFactory(fake.Factory()))
 	t.Cleanup(func() { p.Shutdown(context.Background()) })
@@ -1253,9 +1437,13 @@ func TestNew_AFactoryReplacesTheDefaultDispatcher(t *testing.T) {
 	}
 }
 
-func TestNew_AFactoryErrorIsReturned(t *testing.T) {
+func TestNew_AFactoryErrorIsReturned(
+	t *testing.T,
+) {
 	sentinel := errors.New("factory failed")
-	factory := func(asynxmd.DispatcherConfig[order]) (asynxmd.Dispatcher[order], error) {
+	factory := func(
+		asynxmd.DispatcherConfig[order],
+	) (asynxmd.Dispatcher[order], error) {
 		return nil, sentinel
 	}
 
@@ -1269,8 +1457,12 @@ func TestNew_AFactoryErrorIsReturned(t *testing.T) {
 	}
 }
 
-func TestNew_ANilDispatcherWithoutAnErrorFails(t *testing.T) {
-	factory := func(asynxmd.DispatcherConfig[order]) (asynxmd.Dispatcher[order], error) {
+func TestNew_ANilDispatcherWithoutAnErrorFails(
+	t *testing.T,
+) {
+	factory := func(
+		asynxmd.DispatcherConfig[order],
+	) (asynxmd.Dispatcher[order], error) {
 		return nil, nil
 	}
 
@@ -1281,7 +1473,9 @@ func TestNew_ANilDispatcherWithoutAnErrorFails(t *testing.T) {
 	}
 }
 
-func TestNew_AFactoryIsCalledEvenWithoutABus(t *testing.T) {
+func TestNew_AFactoryIsCalledEvenWithoutABus(
+	t *testing.T,
+) {
 	fake := mocks.NewDispatcher[order]()
 	p := mustNew[order](t, newES(), nil, WithDispatcherFactory(fake.Factory()))
 	t.Cleanup(func() { p.Shutdown(context.Background()) })
@@ -1295,7 +1489,9 @@ func TestNew_AFactoryIsCalledEvenWithoutABus(t *testing.T) {
 	}
 }
 
-func TestNew_TheFactoryReceivesTheConfigWithDefaultsApplied(t *testing.T) {
+func TestNew_TheFactoryReceivesTheConfigWithDefaultsApplied(
+	t *testing.T,
+) {
 	tests := []struct {
 		name     string
 		opts     []ProcessorOpt[order]
@@ -1331,7 +1527,9 @@ func TestNew_TheFactoryReceivesTheConfigWithDefaultsApplied(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		t.Run(tt.name, func(
+			t *testing.T,
+		) {
 			assertFactoryConfig(t, tt.opts, tt.attempts, tt.initial, tt.max)
 		})
 	}
@@ -1365,7 +1563,9 @@ func assertFactoryConfig(
 	}
 }
 
-func TestShutdown_InterruptsThenClosesTheSuppliedDispatcher(t *testing.T) {
+func TestShutdown_InterruptsThenClosesTheSuppliedDispatcher(
+	t *testing.T,
+) {
 	fake := mocks.NewDispatcher[order]()
 	p := mustNew(t, newES(), bus.NewChannelBus[order](), WithDispatcherFactory(fake.Factory()))
 
@@ -1380,8 +1580,12 @@ func TestShutdown_InterruptsThenClosesTheSuppliedDispatcher(t *testing.T) {
 	}
 }
 
-func TestNew_ATypedNilDispatcherWithoutAnErrorFails(t *testing.T) {
-	factory := func(asynxmd.DispatcherConfig[order]) (asynxmd.Dispatcher[order], error) {
+func TestNew_ATypedNilDispatcherWithoutAnErrorFails(
+	t *testing.T,
+) {
+	factory := func(
+		asynxmd.DispatcherConfig[order],
+	) (asynxmd.Dispatcher[order], error) {
 		var d *mocks.Dispatcher[order]
 		return d, nil
 	}
@@ -1394,9 +1598,13 @@ func TestNew_ATypedNilDispatcherWithoutAnErrorFails(t *testing.T) {
 	}
 }
 
-func BenchmarkSend_MultiShard(b *testing.B) {
+func BenchmarkSend_MultiShard(
+	b *testing.B,
+) {
 	for _, shards := range []int{1, 4, 8, 16} {
-		b.Run(fmt.Sprintf("shards=%d", shards), func(b *testing.B) {
+		b.Run(fmt.Sprintf("shards=%d", shards), func(
+			b *testing.B,
+		) {
 			memStore := store.New()
 			channelBus := bus.NewChannelBus[order]()
 			es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -1417,7 +1625,9 @@ func BenchmarkSend_MultiShard(b *testing.B) {
 	}
 }
 
-func BenchmarkSend_Parallel(b *testing.B) {
+func BenchmarkSend_Parallel(
+	b *testing.B,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -1430,7 +1640,9 @@ func BenchmarkSend_Parallel(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 
-	b.RunParallel(func(pb *testing.PB) {
+	b.RunParallel(func(
+		pb *testing.PB,
+	) {
 		for pb.Next() {
 			cmd := mocks.CreateOrderCmd{ID: "order", Total: 100.0}
 			p.Send(ctx, cmd)
@@ -1438,15 +1650,18 @@ func BenchmarkSend_Parallel(b *testing.B) {
 	})
 }
 
-func BenchmarkSend_WithBusFanout(b *testing.B) {
+func BenchmarkSend_WithBusFanout(
+	b *testing.B,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
 
-	// Subscribe 10 handlers to the bus
 	for i := 0; i < 10; i++ {
-		channelBus.Subscribe("OrderCreated", func(ctx context.Context, e asynxmd.Event[order]) {
-			// Handler does nothing
+		channelBus.Subscribe("OrderCreated", func(
+			ctx context.Context,
+			e asynxmd.Event[order],
+		) {
 		})
 	}
 
@@ -1466,7 +1681,9 @@ func BenchmarkSend_WithBusFanout(b *testing.B) {
 
 // TestProcessor_IntegrationHighThroughput tests sustained throughput with the jobQueue fix.
 // Sends 200 commands serially across different aggregates to verify no deadlock.
-func TestProcessor_IntegrationHighThroughput(t *testing.T) {
+func TestProcessor_IntegrationHighThroughput(
+	t *testing.T,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -1483,7 +1700,6 @@ func TestProcessor_IntegrationHighThroughput(t *testing.T) {
 	ctx := context.Background()
 	successCount := 0
 
-	// Send 200 commands serially to verify processor throughput
 	for i := 0; i < 200; i++ {
 		cmd := mocks.CreateOrderCmd{
 			ID:    "order" + string(rune(i%26+'a')),
@@ -1494,7 +1710,6 @@ func TestProcessor_IntegrationHighThroughput(t *testing.T) {
 		}
 	}
 
-	// With jobQueue fix, we should be able to send all 200 without deadlock
 	if successCount < 190 {
 		t.Fatalf("throughput: expected at least 190 successes, got %d", successCount)
 	}
@@ -1503,7 +1718,9 @@ func TestProcessor_IntegrationHighThroughput(t *testing.T) {
 }
 
 // TestProcessor_IntegrationOrderPreservation tests that commands for the same aggregate are processed in order.
-func TestProcessor_IntegrationOrderPreservation(t *testing.T) {
+func TestProcessor_IntegrationOrderPreservation(
+	t *testing.T,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -1518,13 +1735,14 @@ func TestProcessor_IntegrationOrderPreservation(t *testing.T) {
 	ctx := context.Background()
 	aggregateID := "order1"
 
-	// Subscribe to events BEFORE sending
 	var eventCount int32
-	channelBus.Subscribe("OrderUpdated", func(ctx context.Context, e asynxmd.Event[order]) {
+	channelBus.Subscribe("OrderUpdated", func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
 		atomic.AddInt32(&eventCount, 1)
 	})
 
-	// Send 50 updates to the same aggregate
 	for i := 1; i <= 50; i++ {
 		cmd := mocks.UpdateOrderCmd{
 			ID: aggregateID,
@@ -1539,7 +1757,6 @@ func TestProcessor_IntegrationOrderPreservation(t *testing.T) {
 		}
 	}
 
-	// Wait for all async publishes to complete
 	p.WaitPublish()
 
 	count := atomic.LoadInt32(&eventCount)
@@ -1550,7 +1767,9 @@ func TestProcessor_IntegrationOrderPreservation(t *testing.T) {
 
 // TestProcessor_IntegrationCancelDuringBurst tests graceful cancellation handling.
 // Verifies that cancellations are properly propagated during concurrent load.
-func TestProcessor_IntegrationCancelDuringBurst(t *testing.T) {
+func TestProcessor_IntegrationCancelDuringBurst(
+	t *testing.T,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -1563,7 +1782,6 @@ func TestProcessor_IntegrationCancelDuringBurst(t *testing.T) {
 	)
 	defer p.Shutdown(context.Background())
 
-	// Test 1: Send some commands with a cancelled context
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -1573,7 +1791,6 @@ func TestProcessor_IntegrationCancelDuringBurst(t *testing.T) {
 		t.Fatalf("expected ErrContextCancelled, got %v", err)
 	}
 
-	// Test 2: Send with active context (should work)
 	ctx2 := context.Background()
 	cmd2 := mocks.CreateOrderCmd{ID: "order2", Total: 100.0}
 	_, err2 := p.Send(ctx2, cmd2)
@@ -1585,7 +1802,9 @@ func TestProcessor_IntegrationCancelDuringBurst(t *testing.T) {
 }
 
 // TestProcessor_IntegrationShutdownGraceful tests graceful shutdown with in-flight commands.
-func TestProcessor_IntegrationShutdownGraceful(t *testing.T) {
+func TestProcessor_IntegrationShutdownGraceful(
+	t *testing.T,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -1598,8 +1817,6 @@ func TestProcessor_IntegrationShutdownGraceful(t *testing.T) {
 		WithQueueDepth[order](10),
 	)
 
-	// Use a cancellable context so goroutines blocked in sendAndWait's result-wait
-	// select can unblock when we cancel after Shutdown drains the workers.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1609,7 +1826,9 @@ func TestProcessor_IntegrationShutdownGraceful(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < commandCount; i++ {
 		wg.Add(1)
-		go func(idx int) {
+		go func(
+			idx int,
+		) {
 			defer wg.Done()
 			cmd := mocks.CreateOrderCmd{
 				ID:    "order" + string(rune(idx%4)),
@@ -1629,7 +1848,6 @@ func TestProcessor_IntegrationShutdownGraceful(t *testing.T) {
 		t.Logf("Shutdown returned: %v", err)
 	}
 
-	// Cancel goroutines still waiting for results from the drained workers.
 	cancel()
 	wg.Wait()
 
@@ -1642,7 +1860,9 @@ func TestProcessor_IntegrationShutdownGraceful(t *testing.T) {
 }
 
 // TestProcessor_IntegrationWithValidationErrors tests error handling across all shards.
-func TestProcessor_IntegrationWithValidationErrors(t *testing.T) {
+func TestProcessor_IntegrationWithValidationErrors(
+	t *testing.T,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -1661,18 +1881,18 @@ func TestProcessor_IntegrationWithValidationErrors(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
-		go func(idx int) {
+		go func(
+			idx int,
+		) {
 			defer wg.Done()
 			var cmd asynxmd.Command[order]
 
 			if idx%2 == 0 {
-				// Valid command
 				cmd = mocks.CreateOrderCmd{
 					ID:    "order" + string(rune(idx)),
 					Total: 100.0,
 				}
 			} else {
-				// Invalid command (negative total)
 				cmd = mocks.CreateOrderCmd{
 					ID:    "order" + string(rune(idx)),
 					Total: -100.0,
@@ -1693,9 +1913,6 @@ func TestProcessor_IntegrationWithValidationErrors(t *testing.T) {
 	validVal := atomic.LoadInt32(&validCount)
 	invalidVal := atomic.LoadInt32(&invalidCount)
 
-	// Should have roughly ~50 valid, ~50 invalid. Some commands may get
-	// ErrQueueFull when goroutines race on overlapping aggregate IDs, so we
-	// use a generous lower bound.
 	if validVal < 30 || invalidVal < 30 {
 		t.Fatalf("unexpected distribution: valid=%d, invalid=%d", validVal, invalidVal)
 	}
@@ -1704,7 +1921,9 @@ func TestProcessor_IntegrationWithValidationErrors(t *testing.T) {
 }
 
 // TestProcessor_IntegrationMemoryStability tests that processor doesn't leak memory under sustained load.
-func TestProcessor_IntegrationMemoryStability(t *testing.T) {
+func TestProcessor_IntegrationMemoryStability(
+	t *testing.T,
+) {
 	if testing.Short() {
 		t.Skip("Skipping memory stability test in short mode")
 	}
@@ -1724,12 +1943,13 @@ func TestProcessor_IntegrationMemoryStability(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Send many commands
 	for batch := 0; batch < 10; batch++ {
 		var wg sync.WaitGroup
 		for i := 0; i < 100; i++ {
 			wg.Add(1)
-			go func(idx int) {
+			go func(
+				idx int,
+			) {
 				defer wg.Done()
 				cmd := mocks.CreateOrderCmd{
 					ID:    "order" + string(rune((idx+batch*100)%26+'a')),
@@ -1745,7 +1965,9 @@ func TestProcessor_IntegrationMemoryStability(t *testing.T) {
 }
 
 // TestProcessor_IntegrationEventPublishingReliability tests that events are published reliably.
-func TestProcessor_IntegrationEventPublishingReliability(t *testing.T) {
+func TestProcessor_IntegrationEventPublishingReliability(
+	t *testing.T,
+) {
 	memStore := store.New()
 	channelBus := bus.NewChannelBus[order]()
 	es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -1760,7 +1982,10 @@ func TestProcessor_IntegrationEventPublishingReliability(t *testing.T) {
 	ctx := context.Background()
 	eventsChan := make(chan asynxmd.Event[order], 100)
 
-	channelBus.Subscribe("OrderCreated", func(ctx context.Context, e asynxmd.Event[order]) {
+	channelBus.Subscribe("OrderCreated", func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
 		select {
 		case eventsChan <- e:
 		default:
@@ -1768,7 +1993,6 @@ func TestProcessor_IntegrationEventPublishingReliability(t *testing.T) {
 		}
 	})
 
-	// Send commands and verify events are published
 	commandCount := 20
 	for i := 0; i < commandCount; i++ {
 		cmd := mocks.CreateOrderCmd{
@@ -1780,7 +2004,6 @@ func TestProcessor_IntegrationEventPublishingReliability(t *testing.T) {
 		}
 	}
 
-	// Wait for all async publishes to complete
 	p.WaitPublish()
 
 	receivedCount := 0
@@ -1803,7 +2026,9 @@ done:
 }
 
 // TestProcessor_IntegrationDefaultQueueDepthScaling tests that default queue depth scales with workers.
-func TestProcessor_IntegrationDefaultQueueDepthScaling(t *testing.T) {
+func TestProcessor_IntegrationDefaultQueueDepthScaling(
+	t *testing.T,
+) {
 	tests := []struct {
 		name          string
 		workers       int
@@ -1816,7 +2041,9 @@ func TestProcessor_IntegrationDefaultQueueDepthScaling(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		t.Run(tt.name, func(
+			t *testing.T,
+		) {
 			memStore := store.New()
 			channelBus := bus.NewChannelBus[order]()
 			es := eventstore.New[order](memStore, store.NewSnapshots(), nil, 1, nil)
@@ -1828,7 +2055,6 @@ func TestProcessor_IntegrationDefaultQueueDepthScaling(t *testing.T) {
 			)
 			defer p.Shutdown(context.Background())
 
-			// Send commands rapidly to verify queue depth
 			ctx := context.Background()
 			successCount := 0
 			for i := 0; i < tt.expectedMinQD*2; i++ {
