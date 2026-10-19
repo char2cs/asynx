@@ -12,6 +12,100 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
+type fakeItem struct {
+	mu          sync.Mutex
+	aggregateID string
+	version     int64
+	durable     bool
+	unrun       error
+	unrunCalls  int
+	err         error
+	completions int
+}
+
+func durableItem(
+	aggregateID string,
+	version int64,
+) *fakeItem {
+	return &fakeItem{aggregateID: aggregateID, version: version, durable: true}
+}
+
+func liveItem(
+	aggregateID string,
+	version int64,
+) *fakeItem {
+	return &fakeItem{aggregateID: aggregateID, version: version}
+}
+
+func (f *fakeItem) AggregateID() string { return f.aggregateID }
+
+func (f *fakeItem) Version() int64 { return f.version }
+
+func (f *fakeItem) Acked() bool { return f.durable }
+
+func (f *fakeItem) MarkUnrun(
+	err error,
+) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unrunCalls++
+	f.unrun = err
+}
+
+func (f *fakeItem) Complete(
+	err error,
+) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.completions++
+	f.err = err
+}
+
+func (f *fakeItem) state() (unrun error, completions int, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.unrun, f.completions, f.err
+}
+
+type hookRecorder struct {
+	mu       sync.Mutex
+	spawned  []string
+	admitted []*fakeItem
+}
+
+func newRegistry() (aggregates.Registry[*fakeItem], *hookRecorder) {
+	rec := &hookRecorder{}
+	return aggregates.New(aggregates.Hooks[*fakeItem]{Spawn: rec.spawn, Admit: rec.admit}), rec
+}
+
+func (h *hookRecorder) spawn(
+	aggregateID string,
+) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.spawned = append(h.spawned, aggregateID)
+}
+
+func (h *hookRecorder) admit(
+	job *fakeItem,
+) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.admitted = append(h.admitted, job)
+}
+
+func (h *hookRecorder) spawns() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.spawned)
+}
+
+func (h *hookRecorder) admits() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.admitted)
+}
+
 func enqueue(
 	t *testing.T,
 	r aggregates.Registry[*fakeItem],

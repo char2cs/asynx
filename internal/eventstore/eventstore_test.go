@@ -626,3 +626,176 @@ func TestGuardAutoSnapshots_InstallsTheGuardOnTheReader(t *testing.T) {
 		t.Fatalf("guard consulted %d times for one Get", asked)
 	}
 }
+
+// gatedCancel is a cancel command whose Validate runs a hook, letting the test
+// pause a writer at the exact seam between loading state and appending — the
+// window where the stale-validation race lives.
+type gatedCancel struct {
+	id         string
+	onValidate func(
+		current *order,
+	)
+}
+
+func (c gatedCancel) AggregateID() string  { return c.id }
+func (c gatedCancel) EventName() string    { return "OrderCancelled" }
+func (c gatedCancel) ShouldSnapshot() bool { return false }
+
+func (c gatedCancel) Validate(
+	current *order,
+) error {
+	if c.onValidate != nil {
+		c.onValidate(current)
+	}
+	if current == nil || current.Status == "Cancelled" {
+		return asynxmd.ErrValidation
+	}
+	return nil
+}
+
+func (c gatedCancel) EmitEvent(
+	current *order,
+) order {
+	o := *current
+	o.Status = "Cancelled"
+	return o
+}
+
+// TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit pins the exact race
+// that let a stale-validated write slip past the version check:
+//
+//  1. B loads Pending state and parks inside Validate.
+//  2. A cancels and commits while B is parked.
+//  3. B leaves Validate still judging the stale Pending state.
+//
+// Before the fix B re-derived a fresh version (v3) and committed a second
+// cancel. Now B appends at its validated version (v2), which A already took, so
+// B gets ErrPipelineFailed and exactly one cancel survives.
+func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(
+	t *testing.T,
+) {
+	s := store.New()
+	es := New[order](s, store.NewSnapshots(), nil, 1, nil)
+	ctx := context.Background()
+
+	if _, err := es.Write(ctx, mocks.CreateOrderCmd{ID: "X", Total: 100}); err != nil {
+		t.Fatalf("seed create: %v", err)
+	}
+
+	aCommitted := make(chan struct{})
+	bInValidate := make(chan struct{})
+
+	bCmd := gatedCancel{id: "X", onValidate: func(
+		cur *order,
+	) {
+		if cur == nil || cur.Status != "Pending" {
+			t.Errorf("B expected to load Pending, got %+v", cur)
+		}
+		close(bInValidate)
+		<-aCommitted
+	}}
+
+	var bErr error
+	bDone := make(chan struct{})
+	go func() {
+		_, bErr = es.Write(ctx, bCmd)
+		close(bDone)
+	}()
+
+	<-bInValidate
+	if _, err := es.Write(ctx, gatedCancel{id: "X"}); err != nil {
+		t.Fatalf("A cancel: %v", err)
+	}
+	close(aCommitted)
+	<-bDone
+
+	if !errors.Is(bErr, asynxmd.ErrPipelineFailed) {
+		t.Errorf("B err = %v, want ErrPipelineFailed (stale write must be rejected)", bErr)
+	}
+
+	cancels := 0
+	if err := es.Replay(ctx, "X", 1, 0, func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) {
+		if e.EventName == "OrderCancelled" {
+			cancels++
+		}
+	}); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if cancels != 1 {
+		t.Fatalf("order X cancelled %d times, want exactly 1", cancels)
+	}
+}
+
+// TestSnapshotReadDoesNotScaleWithHistory is the regression guard for the
+// original defect: Get() read every snapshot ever written to use only the last.
+func TestSnapshotReadDoesNotScaleWithHistory(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	snaps := &mocks.CountingSnapshotStore{Inner: store.NewSnapshots()}
+	es := New[order](store.New(), snaps, nil, 1, nil)
+
+	const n = 500
+	for i := range n {
+		if _, err := es.Write(ctx, mocks.UpdateOrderCmd{
+			ID:       "agg-1",
+			NewState: order{ID: "agg-1", Total: float64(i), Status: "Pending"},
+			Snapshot: true,
+		}); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+
+	snaps.Reset()
+	if _, err := es.Get(ctx, "agg-1"); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	if snaps.GetCalls != 1 {
+		t.Errorf("Get calls = %d, want 1", snaps.GetCalls)
+	}
+	if snaps.GetBytes > 512 {
+		t.Errorf("bytes read = %d after %d snapshots, want one blob — read must not scale with history", snaps.GetBytes, n)
+	}
+}
+
+// TestWritePaysConstantSnapshotCost guards the half of the defect the original
+// report missed: EventStore.Write read all snapshots twice, via Get and
+// nextVersion.
+func TestWritePaysConstantSnapshotCost(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	snaps := &mocks.CountingSnapshotStore{Inner: store.NewSnapshots()}
+	es := New[order](store.New(), snaps, nil, 1, nil)
+
+	const n = 500
+	for i := range n {
+		if _, err := es.Write(ctx, mocks.UpdateOrderCmd{
+			ID:       "agg-2",
+			NewState: order{ID: "agg-2", Total: float64(i), Status: "Pending"},
+			Snapshot: true,
+		}); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+
+	snaps.Reset()
+	if _, err := es.Write(ctx, mocks.UpdateOrderCmd{
+		ID:       "agg-2",
+		NewState: order{ID: "agg-2", Total: 999, Status: "Pending"},
+		Snapshot: true,
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if snaps.GetCalls != 1 {
+		t.Errorf("Get calls = %d, want 1", snaps.GetCalls)
+	}
+	if snaps.GetBytes > 512 {
+		t.Errorf("bytes read = %d on one Write after %d snapshots, want one blob", snaps.GetBytes, n)
+	}
+}

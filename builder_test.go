@@ -115,6 +115,25 @@ func TestShardingOptsZeroValue(t *testing.T) {
 	}
 }
 
+func TestShardingOpts_CustomShards(t *testing.T) {
+	s := store.New()
+	instance, err := asynx.New[mocks.Order]().
+		WithEventStore(s).
+		WithSnapshotStore(store.NewSnapshots()).
+		WithShardingOpts(asynx.ShardingOpts{Shards: 16, QueueDepth: 100}).
+		Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.Shutdown(context.Background())
+
+	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: 100.0}
+	_, err = instance.Send(context.Background(), cmd)
+	if err != nil {
+		t.Fatalf("Send with custom shards failed: %v", err)
+	}
+}
+
 func TestBuildWithWorkersPerShard(t *testing.T) {
 	instance, err := asynx.New[mocks.Order]().
 		WithEventStore(store.New()).
@@ -971,7 +990,7 @@ func TestBuild_ADispatcherFactoryErrorFailsBuild(t *testing.T) {
 	) (models.Dispatcher[mocks.Order], error) {
 		return nil, sentinel
 	}
-	bus := &closingBus{}
+	bus := &mocks.ClosingBus{}
 
 	inst, err := eight(store.New()).WithBus(bus).WithDispatcher(factory).Build()
 
@@ -981,7 +1000,7 @@ func TestBuild_ADispatcherFactoryErrorFailsBuild(t *testing.T) {
 	if !strings.HasPrefix(err.Error(), "asynx: dispatcher factory: ") {
 		t.Errorf("error = %q, want the %q prefix", err, "asynx: dispatcher factory: ")
 	}
-	if got := bus.closed.Load(); got != 1 {
+	if got := bus.Closes.Load(); got != 1 {
 		t.Errorf("bus closed %d times, want 1", got)
 	}
 }
@@ -1089,7 +1108,7 @@ func TestBuild_ATypedNilDispatcherFailsBuild(t *testing.T) {
 		return d, nil
 	}
 
-	inst, err := eight(store.New()).WithBus(&closingBus{}).WithDispatcher(factory).Build()
+	inst, err := eight(store.New()).WithBus(&mocks.ClosingBus{}).WithDispatcher(factory).Build()
 
 	notRejected := inst != nil || err == nil || !strings.Contains(err.Error(), "returned no dispatcher")
 	if notRejected {
