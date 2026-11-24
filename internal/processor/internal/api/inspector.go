@@ -1,7 +1,7 @@
 package api
 
 import (
-	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/v2/models/dispatch"
 )
 
 // Inspector is the read-only view of durable delivery. Both methods are safe to

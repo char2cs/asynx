@@ -3,7 +3,7 @@ package subscription
 import (
 	"time"
 
-	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/v2/models/handler"
 )
 
 // WithFallback registers a secondary handler invoked, with the same context and

@@ -3,9 +3,9 @@ package jobs
 import (
 	"context"
 
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/contracts"
-	"github.com/char2cs/asynx/models/dispatch"
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/contracts"
+	"github.com/char2cs/asynx/v2/models/dispatch"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 // Job is one event on its way through the dispatcher; see contracts.Job.

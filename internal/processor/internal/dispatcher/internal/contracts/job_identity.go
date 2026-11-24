@@ -1,7 +1,7 @@
 package contracts
 
 import (
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 // JobIdentity names a job and carries the event it delivers.

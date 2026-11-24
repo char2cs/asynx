@@ -3,9 +3,9 @@ package reporter
 import (
 	"context"
 
-	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/v2/models/handler"
 
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/jobs"
 )
 
 // Reporter calls the configured error and panic handlers on behalf of the

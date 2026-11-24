@@ -2,7 +2,7 @@ package write
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/v2/models/storage"
 )
 
 // Transaction returns the function to pass to Store.Atomically that runs ops

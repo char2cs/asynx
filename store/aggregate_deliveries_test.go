@@ -3,7 +3,7 @@ package store
 import (
 	"testing"
 
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 func TestAggregateDeliveries_BelongMatchesOnlyItsAggregate(

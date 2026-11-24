@@ -2,7 +2,7 @@ package write
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/v2/models/storage"
 )
 
 // SnapshotPuts returns the lane function for a concurrent run in which writer i

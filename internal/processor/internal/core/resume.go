@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/char2cs/asynx/models/dispatch"
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/dispatch"
+	"github.com/char2cs/asynx/v2/models/event"
 	"maps"
 	"slices"
 )

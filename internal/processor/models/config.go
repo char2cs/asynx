@@ -3,9 +3,9 @@ package models
 import (
 	"context"
 
-	"github.com/char2cs/asynx/models/dispatcher"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/v2/models/dispatcher"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/handler"
 )
 
 // Config holds the settings a processor is built with. The zero value selects

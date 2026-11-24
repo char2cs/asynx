@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/char2cs/asynx"
+	"github.com/char2cs/asynx/v2"
 )
 
 func TestTopic_Literal_ExactMatch(

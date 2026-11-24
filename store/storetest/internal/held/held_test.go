@@ -3,9 +3,9 @@ package held_test
 import (
 	"context"
 	"errors"
-	"github.com/char2cs/asynx/models/storage"
-	"github.com/char2cs/asynx/store"
-	"github.com/char2cs/asynx/store/storetest/internal/held"
+	"github.com/char2cs/asynx/v2/models/storage"
+	"github.com/char2cs/asynx/v2/store"
+	"github.com/char2cs/asynx/v2/store/storetest/internal/held"
 	"runtime"
 	"sync/atomic"
 	"testing"

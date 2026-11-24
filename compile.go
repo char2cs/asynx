@@ -2,10 +2,10 @@ package asynx
 
 import (
 	"fmt"
-	"github.com/char2cs/asynx/internal/bus"
-	procmodels "github.com/char2cs/asynx/internal/processor/models"
-	"github.com/char2cs/asynx/models/failure"
-	"github.com/char2cs/asynx/models/subscription"
+	"github.com/char2cs/asynx/v2/internal/bus"
+	procmodels "github.com/char2cs/asynx/v2/internal/processor/models"
+	"github.com/char2cs/asynx/v2/models/failure"
+	"github.com/char2cs/asynx/v2/models/subscription"
 	"regexp"
 )
 

@@ -3,7 +3,7 @@ package dispatch
 import (
 	"context"
 
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 // Request is one event handed to a dispatcher.Dispatcher for ordered delivery.

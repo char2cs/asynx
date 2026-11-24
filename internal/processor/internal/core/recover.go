@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/char2cs/asynx/internal/firsterror"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/v2/internal/firsterror"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/failure"
 	"maps"
 	"slices"
 )

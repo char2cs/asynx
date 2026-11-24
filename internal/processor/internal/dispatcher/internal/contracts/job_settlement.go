@@ -1,7 +1,7 @@
 package contracts
 
 import (
-	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/v2/models/dispatch"
 )
 
 // JobSettlement is how a job reports that its handlers have run, or never

@@ -3,8 +3,8 @@ package models
 import (
 	"context"
 
-	"github.com/char2cs/asynx/models/command"
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/command"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 // Executor is the write pipeline an envelope runs its command through. The

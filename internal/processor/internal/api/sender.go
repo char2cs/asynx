@@ -3,8 +3,8 @@ package api
 import (
 	"context"
 
-	"github.com/char2cs/asynx/models/command"
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/command"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 // Sender is the write side of the processor: commands in, committed events out.

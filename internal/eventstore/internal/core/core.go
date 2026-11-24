@@ -3,15 +3,15 @@ package core
 import (
 	"context"
 
-	"github.com/char2cs/asynx/internal/eventstore/internal/reader"
-	"github.com/char2cs/asynx/internal/eventstore/internal/replayer"
-	"github.com/char2cs/asynx/internal/eventstore/internal/writer"
-	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	"github.com/char2cs/asynx/models/command"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/failure"
-	"github.com/char2cs/asynx/models/handler"
-	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/v2/internal/eventstore/internal/reader"
+	"github.com/char2cs/asynx/v2/internal/eventstore/internal/replayer"
+	"github.com/char2cs/asynx/v2/internal/eventstore/internal/writer"
+	esmodels "github.com/char2cs/asynx/v2/internal/eventstore/models"
+	"github.com/char2cs/asynx/v2/models/command"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/failure"
+	"github.com/char2cs/asynx/v2/models/handler"
+	"github.com/char2cs/asynx/v2/models/storage"
 )
 
 // EventStore is the implementation behind the eventstore.EventStore interface:

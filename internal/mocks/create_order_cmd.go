@@ -1,7 +1,7 @@
 package mocks
 
 import (
-	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/v2/models/failure"
 )
 
 // CreateOrderCmd is the test command that creates an Order with the given ID

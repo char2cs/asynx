@@ -2,12 +2,12 @@ package asynx
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models/dispatcher"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/handler"
-	"github.com/char2cs/asynx/models/pubsub"
-	"github.com/char2cs/asynx/models/storage"
-	"github.com/char2cs/asynx/models/subscription"
+	"github.com/char2cs/asynx/v2/models/dispatcher"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/handler"
+	"github.com/char2cs/asynx/v2/models/pubsub"
+	"github.com/char2cs/asynx/v2/models/storage"
+	"github.com/char2cs/asynx/v2/models/subscription"
 	"time"
 )
 

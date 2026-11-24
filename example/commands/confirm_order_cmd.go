@@ -1,8 +1,8 @@
 package commands
 
 import (
-	"github.com/char2cs/asynx/example/domain"
-	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/v2/example/domain"
+	"github.com/char2cs/asynx/v2/models/failure"
 )
 
 // ConfirmOrderCmd confirms a pending order. It is valid only for an existing

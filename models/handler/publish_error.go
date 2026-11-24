@@ -3,7 +3,7 @@ package handler
 import (
 	"context"
 
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 // PublishError is called when a publish of a committed event fails

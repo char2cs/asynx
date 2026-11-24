@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/char2cs/asynx/models/dispatch"
-	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/v2/models/dispatch"
+	"github.com/char2cs/asynx/v2/models/failure"
 )
 
 type tombstoneWrite[T any] struct {

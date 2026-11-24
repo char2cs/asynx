@@ -3,10 +3,10 @@ package core
 import (
 	"context"
 	"errors"
-	"github.com/char2cs/asynx/internal/processor/models"
-	"github.com/char2cs/asynx/models/command"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/v2/internal/processor/models"
+	"github.com/char2cs/asynx/v2/models/command"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/failure"
 )
 
 // Send runs cmd on the shard that owns its aggregate and returns its event once

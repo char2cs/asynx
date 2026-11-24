@@ -1,9 +1,9 @@
 package exec
 
 import (
-	"github.com/char2cs/asynx/internal/bus/models"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/v2/internal/bus/models"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/handler"
 )
 
 // MakeJob builds the HandlerJob that delivers event to the handler registered

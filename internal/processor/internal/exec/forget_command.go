@@ -3,8 +3,8 @@ package exec
 import (
 	"fmt"
 
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/failure"
 )
 
 // ForgetCommand implements command.Command[T] for the Forget operation.

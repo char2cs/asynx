@@ -1,7 +1,7 @@
 package inspection
 
 import (
-	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/v2/models/dispatch"
 )
 
 // ParkReader reads the parks of aggregates.

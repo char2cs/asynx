@@ -3,8 +3,8 @@ package options
 import (
 	"context"
 
-	"github.com/char2cs/asynx/internal/eventstore/internal/core"
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/internal/eventstore/internal/core"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 // Option configures an EventStore at construction; pass options to eventstore.New.

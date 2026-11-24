@@ -3,7 +3,7 @@ package asynx
 import (
 	"slices"
 
-	"github.com/char2cs/asynx/models/subscription"
+	"github.com/char2cs/asynx/v2/models/subscription"
 )
 
 type durableEvents[T any] []subscription.Durable[T]

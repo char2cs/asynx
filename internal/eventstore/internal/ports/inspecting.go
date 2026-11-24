@@ -3,9 +3,9 @@ package ports
 import (
 	"context"
 
-	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	"github.com/char2cs/asynx/models/handler"
-	"github.com/char2cs/asynx/models/storage"
+	esmodels "github.com/char2cs/asynx/v2/internal/eventstore/models"
+	"github.com/char2cs/asynx/v2/models/handler"
+	"github.com/char2cs/asynx/v2/models/storage"
 )
 
 // Inspecting gives the command processor access to the machinery under the

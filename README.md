@@ -9,7 +9,7 @@
 ## Install
 
 ```bash
-go get github.com/char2cs/asynx
+go get github.com/char2cs/asynx/v2
 ```
 
 ## Quick Start
@@ -54,9 +54,9 @@ func (c CreateOrderCmd) EmitEvent(current *Order) Order {
 **Initialize and send commands:**
 ```go
 import (
-	"github.com/char2cs/asynx"
-	"github.com/char2cs/asynx/models/failure"
-	"github.com/char2cs/asynx/store" // in-memory store for tests/examples
+	"github.com/char2cs/asynx/v2"
+	"github.com/char2cs/asynx/v2/models/failure"
+	"github.com/char2cs/asynx/v2/store" // in-memory store for tests/examples
 )
 
 ax, _ := asynx.New[Order]().
@@ -507,7 +507,7 @@ ax, _ := asynx.New[Order]().
 
 **For testing, use the bundled in-memory stores:**
 ```go
-import "github.com/char2cs/asynx/store"
+import "github.com/char2cs/asynx/v2/store"
 
 ax, _ := asynx.New[Order]().
 	WithEventStore(store.New()).            // Fast, no persistence
@@ -540,7 +540,7 @@ Details, semantics and limits: [docs/spec/guarantees.md](./docs/spec/guarantees.
 
 ## Breaking change: the `models` package is split
 
-The old `github.com/char2cs/asynx/models` import path is gone. Its types now live in `models/event`, `models/handler`, `models/subscription`, `models/command`, `models/storage`, `models/pubsub`, `models/dispatch`, `models/dispatcher` and `models/failure`. The module path is unchanged. See [docs/migration-models-split.md](./docs/migration-models-split.md) for the old-to-new table.
+This is the v2 release. The module path is now `github.com/char2cs/asynx/v2` (there is no `v2/` directory; the major version lives only in `go.mod` and the import paths), and the old `github.com/char2cs/asynx/models` package is gone. Its types now live in `models/event`, `models/handler`, `models/subscription`, `models/command`, `models/storage`, `models/pubsub`, `models/dispatch`, `models/dispatcher` and `models/failure`. See [docs/migration-models-split.md](./docs/migration-models-split.md) for the old-to-new table.
 
 ## Breaking changes in v0.9.0
 

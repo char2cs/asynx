@@ -1,8 +1,8 @@
 package asynx
 
 import (
-	"github.com/char2cs/asynx/models/handler"
-	"github.com/char2cs/asynx/models/subscription"
+	"github.com/char2cs/asynx/v2/models/handler"
+	"github.com/char2cs/asynx/v2/models/subscription"
 )
 
 type subscriberDef[T any] struct {

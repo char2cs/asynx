@@ -2,8 +2,8 @@ package asynx
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/handler"
 )
 
 // EventListener consumes events without registering a handler function:

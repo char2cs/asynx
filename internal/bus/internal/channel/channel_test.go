@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/char2cs/asynx/internal/bus"
-	"github.com/char2cs/asynx/internal/bus/internal/channel"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/failure"
-	"github.com/char2cs/asynx/models/handler"
-	"github.com/char2cs/asynx/models/pubsub"
-	"github.com/char2cs/asynx/models/subscription"
+	"github.com/char2cs/asynx/v2/internal/bus"
+	"github.com/char2cs/asynx/v2/internal/bus/internal/channel"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/failure"
+	"github.com/char2cs/asynx/v2/models/handler"
+	"github.com/char2cs/asynx/v2/models/pubsub"
+	"github.com/char2cs/asynx/v2/models/subscription"
 )
 
 func newBus[T any]() pubsub.Bus[T] {

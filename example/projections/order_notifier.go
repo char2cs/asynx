@@ -3,8 +3,8 @@ package projections
 import (
 	"context"
 	"fmt"
-	"github.com/char2cs/asynx/example/domain"
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/example/domain"
+	"github.com/char2cs/asynx/v2/models/event"
 	"slices"
 	"sync"
 )

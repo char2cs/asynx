@@ -3,8 +3,8 @@ package models
 import (
 	"context"
 
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/storage"
 )
 
 // TxHook runs inside the append's transaction, after the event is appended.

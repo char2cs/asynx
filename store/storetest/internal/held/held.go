@@ -2,7 +2,7 @@ package held
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/v2/models/storage"
 	"sync"
 	"testing"
 )

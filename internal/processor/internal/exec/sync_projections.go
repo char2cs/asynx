@@ -3,12 +3,12 @@ package exec
 import (
 	"context"
 	"fmt"
-	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	"github.com/char2cs/asynx/internal/firsterror"
-	"github.com/char2cs/asynx/internal/processor/models"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/failure"
-	"github.com/char2cs/asynx/models/storage"
+	esmodels "github.com/char2cs/asynx/v2/internal/eventstore/models"
+	"github.com/char2cs/asynx/v2/internal/firsterror"
+	"github.com/char2cs/asynx/v2/internal/processor/models"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/failure"
+	"github.com/char2cs/asynx/v2/models/storage"
 )
 
 func (e *CommandExecutor[T]) runSyncProjections(

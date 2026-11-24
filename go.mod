@@ -1,4 +1,4 @@
-module github.com/char2cs/asynx
+module github.com/char2cs/asynx/v2
 
 go 1.26
 

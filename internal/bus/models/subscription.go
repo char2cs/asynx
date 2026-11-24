@@ -3,7 +3,7 @@ package models
 import (
 	"time"
 
-	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/v2/models/handler"
 )
 
 // Subscription is one registered handler together with its routing pattern, the

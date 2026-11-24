@@ -3,7 +3,7 @@ package pubsub
 import (
 	"context"
 
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 // Publisher hands events to the handlers whose subscription matches the

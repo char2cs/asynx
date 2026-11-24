@@ -2,7 +2,7 @@ package models
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 // CommandResult is the single outcome of an envelope: the committed event and

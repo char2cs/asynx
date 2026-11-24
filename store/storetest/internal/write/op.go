@@ -2,7 +2,7 @@ package write
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/v2/models/storage"
 )
 
 // Op is one write inside a transaction: it receives the transaction's Tx and

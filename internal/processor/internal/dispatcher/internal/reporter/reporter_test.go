@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/reporter"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/reporter"
 )
 
 func TestNew_CallsTheHandlersItIsGiven(

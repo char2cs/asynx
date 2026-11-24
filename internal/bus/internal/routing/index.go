@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"slices"
 
-	"github.com/char2cs/asynx/internal/bus/models"
+	"github.com/char2cs/asynx/v2/internal/bus/models"
 )
 
 // IsExactPattern reports whether pattern contains no regexp metacharacters,

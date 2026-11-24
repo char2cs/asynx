@@ -3,7 +3,7 @@ package delivery
 import (
 	"context"
 
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/contracts"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/contracts"
 )
 
 // Deliverer runs a job's durable delivery on behalf of the delivery goroutine

@@ -4,11 +4,11 @@ import (
 	"context"
 	"testing"
 
-	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher"
-	"github.com/char2cs/asynx/models/dispatch"
-	dispatchermodel "github.com/char2cs/asynx/models/dispatcher"
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/internal/mocks"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher"
+	"github.com/char2cs/asynx/v2/models/dispatch"
+	dispatchermodel "github.com/char2cs/asynx/v2/models/dispatcher"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 func TestDispatcher_EnqueueTracksTheTicketAndCloses(

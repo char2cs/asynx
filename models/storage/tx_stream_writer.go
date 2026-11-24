@@ -3,7 +3,7 @@ package storage
 import (
 	"context"
 
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 // TxStreamWriter writes event streams and command receipts inside a

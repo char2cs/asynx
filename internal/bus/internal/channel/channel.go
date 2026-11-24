@@ -6,14 +6,14 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/char2cs/asynx/internal/bus/internal/exec"
-	"github.com/char2cs/asynx/internal/bus/internal/routing"
-	"github.com/char2cs/asynx/internal/bus/models"
-	"github.com/char2cs/asynx/internal/ids"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/failure"
-	"github.com/char2cs/asynx/models/handler"
-	"github.com/char2cs/asynx/models/subscription"
+	"github.com/char2cs/asynx/v2/internal/bus/internal/exec"
+	"github.com/char2cs/asynx/v2/internal/bus/internal/routing"
+	"github.com/char2cs/asynx/v2/internal/bus/models"
+	"github.com/char2cs/asynx/v2/internal/ids"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/failure"
+	"github.com/char2cs/asynx/v2/models/handler"
+	"github.com/char2cs/asynx/v2/models/subscription"
 )
 
 // Bus is the in-process event bus: it routes each published event to every

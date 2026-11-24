@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"time"
 
-	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	"github.com/char2cs/asynx/internal/ids"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/storage"
+	esmodels "github.com/char2cs/asynx/v2/internal/eventstore/models"
+	"github.com/char2cs/asynx/v2/internal/ids"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/storage"
 	"github.com/wI2L/jsondiff"
 )
 

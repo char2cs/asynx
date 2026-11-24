@@ -3,10 +3,10 @@ package core
 import (
 	"context"
 
-	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	"github.com/char2cs/asynx/models/command"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/storage"
+	esmodels "github.com/char2cs/asynx/v2/internal/eventstore/models"
+	"github.com/char2cs/asynx/v2/models/command"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/storage"
 )
 
 type pendingAppend[T any] struct {

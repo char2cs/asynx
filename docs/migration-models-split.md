@@ -1,6 +1,6 @@
 # Migration: the `models` package is split
 
-The single `github.com/char2cs/asynx/models` package (49 files) is gone. Its contents now live in nine focused packages under `models/`. This is a deliberate breaking change to the import path: the module path (`github.com/char2cs/asynx`) is unchanged, and so are the root `asynx`, `store` and `store/storetest` packages; only the types they mention moved.
+The single `github.com/char2cs/asynx/models` package (49 files) is gone. Its contents now live in nine focused packages under `models/`. This is a deliberate breaking change, shipped as v2: the module path becomes `github.com/char2cs/asynx/v2` (declared in `go.mod`; there is no `v2/` directory). Update every import, including the root `asynx`, `store` and `store/storetest` packages, to the `/v2` path (`go get github.com/char2cs/asynx/v2`). Those packages keep their names and exported identifiers; only the types they mention moved.
 
 There is no compatibility shim. Replace the old import with the packages you use and requalify each name using the table below.
 
@@ -80,7 +80,7 @@ There is no compatibility shim. Replace the old import with the packages you use
 
 ```go
 // before
-import "github.com/char2cs/asynx/models"
+import "github.com/char2cs/asynx/v2/models"
 
 func onOrder(ctx context.Context, event models.Event[Order]) {}
 
@@ -91,9 +91,9 @@ if errors.Is(err, models.ErrValidation) {}
 ```go
 // after
 import (
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/failure"
-	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/failure"
+	"github.com/char2cs/asynx/v2/models/handler"
 )
 
 func onOrder(ctx context.Context, evt event.Event[Order]) {}

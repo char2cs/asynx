@@ -3,8 +3,8 @@ package models
 import (
 	"context"
 
-	"github.com/char2cs/asynx/models/command"
-	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/v2/models/command"
+	"github.com/char2cs/asynx/v2/models/failure"
 )
 
 // CommandEnvelope carries one command through a shard queue and coordinates the

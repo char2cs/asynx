@@ -2,8 +2,8 @@ package write_test
 
 import (
 	"context"
-	"github.com/char2cs/asynx/store"
-	"github.com/char2cs/asynx/store/storetest/internal/write"
+	"github.com/char2cs/asynx/v2/store"
+	"github.com/char2cs/asynx/v2/store/storetest/internal/write"
 	"testing"
 )
 

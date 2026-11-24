@@ -2,7 +2,7 @@ package write
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/v2/models/storage"
 )
 
 // Blob returns an Op that appends data to streamID at version.

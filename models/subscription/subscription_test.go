@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/subscription"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/subscription"
 )
 
 func TestSubscriptionOptions_SetTheirConfig(

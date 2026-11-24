@@ -3,8 +3,8 @@ package pool
 import (
 	"testing"
 
-	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/internal/processor/models"
+	"github.com/char2cs/asynx/v2/internal/mocks"
+	"github.com/char2cs/asynx/v2/internal/processor/models"
 )
 
 func queuedJob(

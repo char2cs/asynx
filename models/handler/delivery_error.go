@@ -3,7 +3,7 @@ package handler
 import (
 	"context"
 
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 // DeliveryError observes a failed durable delivery attempt. It is told

@@ -1,11 +1,11 @@
 package bus
 
 import (
-	"github.com/char2cs/asynx/internal/bus/internal/channel"
-	"github.com/char2cs/asynx/internal/bus/internal/routing"
-	"github.com/char2cs/asynx/internal/bus/models"
-	"github.com/char2cs/asynx/models/handler"
-	"github.com/char2cs/asynx/models/pubsub"
+	"github.com/char2cs/asynx/v2/internal/bus/internal/channel"
+	"github.com/char2cs/asynx/v2/internal/bus/internal/routing"
+	"github.com/char2cs/asynx/v2/internal/bus/models"
+	"github.com/char2cs/asynx/v2/models/handler"
+	"github.com/char2cs/asynx/v2/models/pubsub"
 )
 
 // Bus is the in-process event bus the asynx runtime publishes projection events

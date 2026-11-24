@@ -2,7 +2,7 @@ package core
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/v2/models/failure"
 	"sync"
 )
 

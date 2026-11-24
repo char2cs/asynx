@@ -3,7 +3,7 @@ package handler
 import (
 	"context"
 
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 // Durable is the callback of a durable subscriber (see

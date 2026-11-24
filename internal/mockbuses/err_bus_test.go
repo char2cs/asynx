@@ -3,7 +3,7 @@ package mockbuses
 import (
 	"context"
 	"errors"
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/event"
 	"testing"
 )
 

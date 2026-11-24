@@ -3,8 +3,8 @@ package asynx
 import (
 	"context"
 	"fmt"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/pubsub"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/pubsub"
 	"sync"
 	"sync/atomic"
 )

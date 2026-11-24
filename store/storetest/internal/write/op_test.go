@@ -3,10 +3,10 @@ package write_test
 import (
 	"context"
 	"errors"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/storage"
-	"github.com/char2cs/asynx/store"
-	"github.com/char2cs/asynx/store/storetest/internal/write"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/storage"
+	"github.com/char2cs/asynx/v2/store"
+	"github.com/char2cs/asynx/v2/store/storetest/internal/write"
 	"testing"
 )
 

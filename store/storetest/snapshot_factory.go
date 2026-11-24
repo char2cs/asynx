@@ -1,7 +1,7 @@
 package storetest
 
 import (
-	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/v2/models/storage"
 	"testing"
 )
 

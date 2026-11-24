@@ -3,7 +3,7 @@ package subscription
 import (
 	"time"
 
-	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/v2/models/handler"
 )
 
 // Config holds the options of one subscription. It is what a

@@ -3,11 +3,11 @@ package storetest
 import (
 	"context"
 	"errors"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/failure"
-	"github.com/char2cs/asynx/models/storage"
-	"github.com/char2cs/asynx/store/storetest/internal/held"
-	"github.com/char2cs/asynx/store/storetest/internal/write"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/failure"
+	"github.com/char2cs/asynx/v2/models/storage"
+	"github.com/char2cs/asynx/v2/store/storetest/internal/held"
+	"github.com/char2cs/asynx/v2/store/storetest/internal/write"
 	"testing"
 	"time"
 )

@@ -5,11 +5,11 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/char2cs/asynx/internal/eventstore"
-	"github.com/char2cs/asynx/internal/eventstore/options"
-	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/store"
+	"github.com/char2cs/asynx/v2/internal/eventstore"
+	"github.com/char2cs/asynx/v2/internal/eventstore/options"
+	"github.com/char2cs/asynx/v2/internal/mocks"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/store"
 )
 
 var errSnapshotPut = errors.New("snapshot put failed")

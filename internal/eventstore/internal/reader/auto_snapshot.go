@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	"github.com/char2cs/asynx/models/event"
+	esmodels "github.com/char2cs/asynx/v2/internal/eventstore/models"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 func (r *Reader[T]) sealUpcastLockHeld(

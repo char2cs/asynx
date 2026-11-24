@@ -2,7 +2,7 @@ package mockstores
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/v2/models/storage"
 )
 
 // CountingSnapshotStore wraps a storage.SnapshotStore and records how often Get

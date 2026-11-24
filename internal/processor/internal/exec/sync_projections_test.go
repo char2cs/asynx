@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/internal/processor/models"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/failure"
-	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/v2/internal/mocks"
+	"github.com/char2cs/asynx/v2/internal/processor/models"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/failure"
+	"github.com/char2cs/asynx/v2/models/storage"
 	"testing"
 )
 

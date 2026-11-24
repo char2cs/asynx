@@ -2,9 +2,9 @@ package mockbuses
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/handler"
-	"github.com/char2cs/asynx/models/subscription"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/handler"
+	"github.com/char2cs/asynx/v2/models/subscription"
 )
 
 // ErrBus is a Bus implementation that returns Err for Publish and PublishSync.

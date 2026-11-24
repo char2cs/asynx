@@ -2,8 +2,8 @@ package write
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/storage"
 )
 
 // Receipt returns an Op that stores r as the receipt of commandID.

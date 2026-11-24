@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/char2cs/asynx"
-	"github.com/char2cs/asynx/example/commands"
-	"github.com/char2cs/asynx/example/domain"
-	"github.com/char2cs/asynx/example/projections"
-	"github.com/char2cs/asynx/models/command"
-	"github.com/char2cs/asynx/store"
+	"github.com/char2cs/asynx/v2"
+	"github.com/char2cs/asynx/v2/example/commands"
+	"github.com/char2cs/asynx/v2/example/domain"
+	"github.com/char2cs/asynx/v2/example/projections"
+	"github.com/char2cs/asynx/v2/models/command"
+	"github.com/char2cs/asynx/v2/store"
 )
 
 const (

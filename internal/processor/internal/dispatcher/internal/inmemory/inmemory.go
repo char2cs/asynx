@@ -4,16 +4,16 @@ import (
 	"context"
 	"sync"
 
-	"github.com/char2cs/asynx/models/dispatch"
-	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/v2/models/dispatch"
+	"github.com/char2cs/asynx/v2/models/dispatcher"
 
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates"
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates/contracts"
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/delivery"
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/reporter"
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/tracker"
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/workers"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/aggregates"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/aggregates/contracts"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/delivery"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/jobs"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/reporter"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/tracker"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/workers"
 )
 
 var _ dispatcher.Dispatcher[int] = (*inMemoryDispatcher[int])(nil)

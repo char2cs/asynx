@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/char2cs/asynx/internal/eventstore/internal/replayer"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/storage"
-	"github.com/char2cs/asynx/store"
+	"github.com/char2cs/asynx/v2/internal/eventstore/internal/replayer"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/storage"
+	"github.com/char2cs/asynx/v2/store"
 )
 
 type failingSnapshots struct{ err error }

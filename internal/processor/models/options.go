@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
-	"github.com/char2cs/asynx/models/dispatcher"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/handler"
-	"github.com/char2cs/asynx/models/subscription"
+	"github.com/char2cs/asynx/v2/models/dispatcher"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/handler"
+	"github.com/char2cs/asynx/v2/models/subscription"
 )
 
 // WithDurableSubscribers registers the durable subscribers the dispatcher runs,

@@ -1,8 +1,8 @@
 package commands
 
 import (
-	"github.com/char2cs/asynx/example/domain"
-	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/v2/example/domain"
+	"github.com/char2cs/asynx/v2/models/failure"
 )
 
 // ShipOrderCmd marks a confirmed order as shipped. It is valid only for an

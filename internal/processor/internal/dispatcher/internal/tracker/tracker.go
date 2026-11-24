@@ -1,9 +1,9 @@
 package tracker
 
 import (
-	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/v2/models/dispatch"
 
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/jobs"
 )
 
 // Tracker keeps the jobs queued, running or retrying, until each completes.

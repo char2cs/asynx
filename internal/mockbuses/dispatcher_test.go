@@ -6,9 +6,9 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/char2cs/asynx/models/dispatch"
-	"github.com/char2cs/asynx/models/dispatcher"
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/dispatch"
+	"github.com/char2cs/asynx/v2/models/dispatcher"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 type fakeOrder struct{}

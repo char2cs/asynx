@@ -5,10 +5,10 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/char2cs/asynx/internal/mockbuses"
-	"github.com/char2cs/asynx/models/dispatch"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/store"
+	"github.com/char2cs/asynx/v2/internal/mockbuses"
+	"github.com/char2cs/asynx/v2/models/dispatch"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/store"
 )
 
 func newEnqueuer(

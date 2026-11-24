@@ -2,8 +2,8 @@ package projections
 
 import (
 	"context"
-	"github.com/char2cs/asynx/example/domain"
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/example/domain"
+	"github.com/char2cs/asynx/v2/models/event"
 	"sync"
 	"testing"
 )

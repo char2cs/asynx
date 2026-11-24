@@ -1,8 +1,8 @@
 package dispatcher
 
 import (
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/inmemory"
-	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/inmemory"
+	"github.com/char2cs/asynx/v2/models/dispatcher"
 )
 
 // Dispatcher creates the in-memory Dispatcher from cfg, whose values it takes

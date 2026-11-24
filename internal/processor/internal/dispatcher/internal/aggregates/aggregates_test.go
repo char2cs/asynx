@@ -3,8 +3,8 @@ package aggregates_test
 import (
 	"testing"
 
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates"
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates/contracts"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/aggregates"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/aggregates/contracts"
 )
 
 func TestNew_KnowsNoAggregate(

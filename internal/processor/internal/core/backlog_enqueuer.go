@@ -3,10 +3,10 @@ package core
 import (
 	"context"
 
-	"github.com/char2cs/asynx/models/dispatch"
-	"github.com/char2cs/asynx/models/dispatcher"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/v2/models/dispatch"
+	"github.com/char2cs/asynx/v2/models/dispatcher"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/storage"
 )
 
 type backlogEnqueuer[T any] struct {

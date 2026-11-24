@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 // Timeout is called when a Projection exceeds its timeout (see

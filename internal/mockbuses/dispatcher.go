@@ -6,8 +6,8 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/char2cs/asynx/models/dispatch"
-	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/v2/models/dispatch"
+	"github.com/char2cs/asynx/v2/models/dispatcher"
 )
 
 // Dispatcher is a recording fake of dispatcher.Dispatcher. It records every

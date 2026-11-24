@@ -3,7 +3,7 @@ package workers
 import (
 	"context"
 
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/contracts"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/contracts"
 )
 
 // Pool runs the deliveries of jobs, one goroutine per job, which the dispatcher

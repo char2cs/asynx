@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/char2cs/asynx/internal/bus"
-	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/handler"
-	"github.com/char2cs/asynx/models/subscription"
+	"github.com/char2cs/asynx/v2/internal/bus"
+	"github.com/char2cs/asynx/v2/internal/mocks"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/handler"
+	"github.com/char2cs/asynx/v2/models/subscription"
 )
 
 func TestIsExactPattern_DistinguishesLiteralsFromRegexps(

@@ -2,8 +2,8 @@ package asynx
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models/command"
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/command"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 // CommandSender is how state changes: it runs commands against aggregates and

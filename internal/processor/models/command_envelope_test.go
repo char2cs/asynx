@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/internal/processor/models"
-	"github.com/char2cs/asynx/models/command"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/v2/internal/mocks"
+	"github.com/char2cs/asynx/v2/internal/processor/models"
+	"github.com/char2cs/asynx/v2/models/command"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/failure"
 )
 
 type countingExecutor struct {

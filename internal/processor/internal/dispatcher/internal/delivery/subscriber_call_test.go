@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/char2cs/asynx/models/dispatcher"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/failure"
-	"github.com/char2cs/asynx/models/subscription"
+	"github.com/char2cs/asynx/v2/models/dispatcher"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/failure"
+	"github.com/char2cs/asynx/v2/models/subscription"
 )
 
 func TestSubscriberCall_ATimedOutHandlerIsReportedOnceAndStillWaitedFor(

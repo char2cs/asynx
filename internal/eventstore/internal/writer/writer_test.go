@@ -7,12 +7,12 @@ import (
 	"errors"
 	"testing"
 
-	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/internal/mockstores"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/storage"
-	"github.com/char2cs/asynx/store"
+	esmodels "github.com/char2cs/asynx/v2/internal/eventstore/models"
+	"github.com/char2cs/asynx/v2/internal/mocks"
+	"github.com/char2cs/asynx/v2/internal/mockstores"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/storage"
+	"github.com/char2cs/asynx/v2/store"
 )
 
 type order = mocks.Order

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/v2/models/failure"
 )
 
 func TestSubscriberError_NamesTheSubscriberAndKeepsTheCause(

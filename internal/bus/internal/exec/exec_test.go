@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/char2cs/asynx/internal/bus/internal/exec"
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/internal/bus/internal/exec"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 func captureStderr(

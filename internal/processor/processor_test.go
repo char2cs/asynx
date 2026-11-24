@@ -5,12 +5,12 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/char2cs/asynx/internal/eventstore"
-	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/internal/processor"
-	"github.com/char2cs/asynx/internal/processor/models"
-	"github.com/char2cs/asynx/models/dispatcher"
-	"github.com/char2cs/asynx/store"
+	"github.com/char2cs/asynx/v2/internal/eventstore"
+	"github.com/char2cs/asynx/v2/internal/mocks"
+	"github.com/char2cs/asynx/v2/internal/processor"
+	"github.com/char2cs/asynx/v2/internal/processor/models"
+	"github.com/char2cs/asynx/v2/models/dispatcher"
+	"github.com/char2cs/asynx/v2/store"
 )
 
 func newStore() eventstore.EventStore[mocks.Order] {

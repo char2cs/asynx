@@ -3,8 +3,8 @@ package asynx
 import (
 	"context"
 
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/storage"
 )
 
 type syncProjectionDef[T any] struct {

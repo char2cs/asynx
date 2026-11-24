@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/char2cs/asynx/models/command"
-	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/v2/models/command"
+	"github.com/char2cs/asynx/v2/models/failure"
 )
 
 type forgottenOrder struct {

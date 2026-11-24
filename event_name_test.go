@@ -3,7 +3,7 @@ package asynx
 import (
 	"testing"
 
-	"github.com/char2cs/asynx/models/subscription"
+	"github.com/char2cs/asynx/v2/models/subscription"
 )
 
 func TestEventName_MatchedByAsksTheSubscribersMatcher(

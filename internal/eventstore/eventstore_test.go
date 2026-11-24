@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/char2cs/asynx/internal/eventstore"
-	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/store"
+	"github.com/char2cs/asynx/v2/internal/eventstore"
+	"github.com/char2cs/asynx/v2/internal/mocks"
+	"github.com/char2cs/asynx/v2/store"
 )
 
 func TestNew_WritesAndReadsBack(

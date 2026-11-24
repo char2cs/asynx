@@ -1,7 +1,7 @@
 package store
 
 import (
-	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/v2/models/storage"
 )
 
 // SnapshotMemory is a thread-safe in-memory snapshot store for tests and

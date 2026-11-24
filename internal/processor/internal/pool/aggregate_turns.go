@@ -1,7 +1,7 @@
 package pool
 
 import (
-	"github.com/char2cs/asynx/internal/processor/models"
+	"github.com/char2cs/asynx/v2/internal/processor/models"
 )
 
 type aggregateTurns[T any] struct {

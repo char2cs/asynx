@@ -2,7 +2,7 @@ package asynx
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/v2/models/dispatch"
 )
 
 // DeliveryControl is the operator's handle on durable delivery (see

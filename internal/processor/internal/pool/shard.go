@@ -3,8 +3,8 @@ package pool
 import (
 	"sync"
 
-	"github.com/char2cs/asynx/internal/processor/models"
-	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/v2/internal/processor/models"
+	"github.com/char2cs/asynx/v2/models/failure"
 )
 
 // Shard is one command queue of the pool. A single dispatcher goroutine reads

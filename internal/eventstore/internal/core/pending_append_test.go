@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/char2cs/asynx/store"
+	"github.com/char2cs/asynx/v2/store"
 )
 
 func TestPendingAppend_InTransactionKeepsTheAppendedEvent(

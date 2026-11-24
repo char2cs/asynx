@@ -3,7 +3,7 @@ package handler
 import (
 	"context"
 
-	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 // Panic is called when a Projection panics. It receives the

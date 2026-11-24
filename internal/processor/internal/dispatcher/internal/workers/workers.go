@@ -3,12 +3,12 @@ package workers
 import (
 	"context"
 	"fmt"
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates"
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/delivery"
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/reporter"
-	"github.com/char2cs/asynx/models/failure"
-	"github.com/char2cs/asynx/models/pubsub"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/aggregates"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/delivery"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/jobs"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/reporter"
+	"github.com/char2cs/asynx/v2/models/failure"
+	"github.com/char2cs/asynx/v2/models/pubsub"
 )
 
 // New creates a Pool whose runs begin their jobs in registry, publish them

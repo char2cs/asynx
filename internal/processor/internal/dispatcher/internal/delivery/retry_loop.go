@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/char2cs/asynx/models/subscription"
+	"github.com/char2cs/asynx/v2/models/subscription"
 
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/contracts"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/contracts"
 )
 
 const backoffFactor = 2

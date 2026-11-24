@@ -3,14 +3,14 @@ package exec
 import (
 	"context"
 	"fmt"
-	"github.com/char2cs/asynx/internal/eventstore"
-	"github.com/char2cs/asynx/internal/processor/internal/keyedlock"
-	"github.com/char2cs/asynx/internal/processor/models"
-	"github.com/char2cs/asynx/models/command"
-	"github.com/char2cs/asynx/models/dispatch"
-	"github.com/char2cs/asynx/models/dispatcher"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/v2/internal/eventstore"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/keyedlock"
+	"github.com/char2cs/asynx/v2/internal/processor/models"
+	"github.com/char2cs/asynx/v2/models/command"
+	"github.com/char2cs/asynx/v2/models/dispatch"
+	"github.com/char2cs/asynx/v2/models/dispatcher"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/failure"
 	"sync"
 )
 

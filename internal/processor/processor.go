@@ -1,11 +1,11 @@
 package processor
 
 import (
-	"github.com/char2cs/asynx/internal/eventstore"
-	"github.com/char2cs/asynx/internal/processor/internal/api"
-	"github.com/char2cs/asynx/internal/processor/internal/core"
-	"github.com/char2cs/asynx/internal/processor/models"
-	"github.com/char2cs/asynx/models/pubsub"
+	"github.com/char2cs/asynx/v2/internal/eventstore"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/api"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/core"
+	"github.com/char2cs/asynx/v2/internal/processor/models"
+	"github.com/char2cs/asynx/v2/models/pubsub"
 )
 
 // Processor is the command side of asynx: it routes each command to a

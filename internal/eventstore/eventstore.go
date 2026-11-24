@@ -1,11 +1,11 @@
 package eventstore
 
 import (
-	"github.com/char2cs/asynx/internal/eventstore/internal/core"
-	"github.com/char2cs/asynx/internal/eventstore/internal/ports"
-	"github.com/char2cs/asynx/internal/eventstore/options"
-	"github.com/char2cs/asynx/models/event"
-	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/v2/internal/eventstore/internal/core"
+	"github.com/char2cs/asynx/v2/internal/eventstore/internal/ports"
+	"github.com/char2cs/asynx/v2/internal/eventstore/options"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/storage"
 )
 
 // EventStore is the durable store of aggregate state: every command appends one

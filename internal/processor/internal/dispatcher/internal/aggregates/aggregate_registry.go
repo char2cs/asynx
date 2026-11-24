@@ -5,9 +5,9 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates/contracts"
-	"github.com/char2cs/asynx/models/dispatch"
-	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/v2/internal/processor/internal/dispatcher/internal/aggregates/contracts"
+	"github.com/char2cs/asynx/v2/models/dispatch"
+	"github.com/char2cs/asynx/v2/models/failure"
 )
 
 type aggregateRegistry[J Item] struct {

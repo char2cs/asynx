@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/char2cs/asynx/models/storage"
-	"github.com/char2cs/asynx/store/storetest/internal/race"
-	"github.com/char2cs/asynx/store/storetest/internal/write"
+	"github.com/char2cs/asynx/v2/models/storage"
+	"github.com/char2cs/asynx/v2/store/storetest/internal/race"
+	"github.com/char2cs/asynx/v2/store/storetest/internal/write"
 	"slices"
 	"testing"
 )

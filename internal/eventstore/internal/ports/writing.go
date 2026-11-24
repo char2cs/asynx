@@ -3,9 +3,9 @@ package ports
 import (
 	"context"
 
-	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	"github.com/char2cs/asynx/models/command"
-	"github.com/char2cs/asynx/models/event"
+	esmodels "github.com/char2cs/asynx/v2/internal/eventstore/models"
+	"github.com/char2cs/asynx/v2/models/command"
+	"github.com/char2cs/asynx/v2/models/event"
 )
 
 // Writing is the write side of an event store: it appends one event per command

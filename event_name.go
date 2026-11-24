@@ -1,7 +1,7 @@
 package asynx
 
 import (
-	"github.com/char2cs/asynx/models/subscription"
+	"github.com/char2cs/asynx/v2/models/subscription"
 )
 
 type eventName[T any] string
