@@ -14,6 +14,43 @@ import (
 
 var errSnapshotPut = errors.New("snapshot put failed")
 
+type snapshotFailureLog struct {
+	events []asynxmd.Event[mocks.Order]
+	errs   []error
+}
+
+func (l *snapshotFailureLog) record(
+	_ context.Context,
+	event asynxmd.Event[mocks.Order],
+	err error,
+) {
+	l.events = append(
+		l.events,
+		event,
+	)
+	l.errs = append(
+		l.errs,
+		err,
+	)
+}
+
+func panicOnSnapshotFailure(
+	context.Context,
+	asynxmd.Event[mocks.Order],
+	error,
+) {
+	panic("handler blew up")
+}
+
+func keepPayloadUpcaster(
+	_ context.Context,
+	_ string,
+	payload []byte,
+) ([]byte, error) {
+	return payload,
+		nil
+}
+
 func upcastedStore(
 	t *testing.T,
 	handler func(context.Context, asynxmd.Event[mocks.Order], error),
@@ -47,18 +84,10 @@ func upcastedStore(
 		"agg1",
 		errSnapshotPut,
 	)
-	identity := func(
-		_ context.Context,
-		_ string,
-		payload []byte,
-	) ([]byte, error) {
-		return payload,
-			nil
-	}
 	return eventstore.New[mocks.Order](
 		events,
 		snapshots,
-		map[int]asynxmd.Upcaster{1: identity},
+		map[int]asynxmd.Upcaster{1: keepPayloadUpcaster},
 		2,
 		nil,
 		options.WithSnapshotErrorHandler(handler),
@@ -68,25 +97,10 @@ func upcastedStore(
 func TestWithSnapshotErrorHandler_ReportsAFailedAutoSnapshotOnRead(
 	t *testing.T,
 ) {
-	var calls []asynxmd.Event[mocks.Order]
-	var errs []error
-	handler := func(
-		_ context.Context,
-		event asynxmd.Event[mocks.Order],
-		err error,
-	) {
-		calls = append(
-			calls,
-			event,
-		)
-		errs = append(
-			errs,
-			err,
-		)
-	}
+	var failures snapshotFailureLog
 	es := upcastedStore(
 		t,
-		handler,
+		failures.record,
 	)
 
 	got, err := es.Get(
@@ -102,24 +116,24 @@ func TestWithSnapshotErrorHandler_ReportsAFailedAutoSnapshotOnRead(
 		)
 	}
 
-	if len(calls) != 1 ||
+	if len(failures.events) != 1 ||
 		!errors.Is(
-			errs[0],
+			failures.errs[0],
 			errSnapshotPut,
 		) {
 		t.Fatalf(
 			"handler calls = %d, errs = %v; want 1 call with the put error",
-			len(calls),
-			errs,
+			len(failures.events),
+			failures.errs,
 		)
 	}
 
-	if calls[0].AggregateID != "agg1" ||
-		calls[0].Version != 1 ||
-		calls[0].Aggregate.Status != "Pending" {
+	if failures.events[0].AggregateID != "agg1" ||
+		failures.events[0].Version != 1 ||
+		failures.events[0].Aggregate.Status != "Pending" {
 		t.Errorf(
 			"event = %+v, want agg1 v1 Pending",
-			calls[0],
+			failures.events[0],
 		)
 	}
 }
@@ -149,16 +163,9 @@ func TestWithSnapshotErrorHandler_NilHandlerKeepsDroppingTheFailure(
 func TestWithSnapshotErrorHandler_PanickingHandlerDoesNotBreakPreload(
 	t *testing.T,
 ) {
-	handler := func(
-		context.Context,
-		asynxmd.Event[mocks.Order],
-		error,
-	) {
-		panic("handler blew up")
-	}
 	es := upcastedStore(
 		t,
-		handler,
+		panicOnSnapshotFailure,
 	)
 
 	err := es.Preload(

@@ -55,43 +55,70 @@ func TestSharding_PositiveValuesApplyAndOthersAreIgnored(
 	}
 }
 
+type callLog struct {
+	calls []string
+}
+
+func (l *callLog) onError(
+	context.Context,
+	asynxmd.Event[int],
+	error,
+	int,
+) {
+	l.calls = append(
+		l.calls,
+		"error",
+	)
+}
+
+func (l *callLog) onPanic(
+	context.Context,
+	asynxmd.Event[int],
+	any,
+) {
+	l.calls = append(
+		l.calls,
+		"panic",
+	)
+}
+
+func keepsDeadLetters(
+	context.Context,
+	asynxmd.Event[int],
+	error,
+) error {
+	return nil
+}
+
+func matchesEveryEvent(
+	string,
+) bool {
+	return true
+}
+
+func ignoresEventError(
+	context.Context,
+	asynxmd.Event[int],
+	error,
+) {
+}
+
+func buildsNoDispatcher(
+	asynxmd.DispatcherConfig[int],
+) (asynxmd.Dispatcher[int], error) {
+	return nil,
+		nil
+}
+
 func TestDelivery_HandlersAndLimitsReachTheDispatcherConfig(
 	t *testing.T,
 ) {
-	var calls []string
-	onError := func(
-		context.Context,
-		asynxmd.Event[int],
-		error,
-		int,
-	) {
-		calls = append(
-			calls,
-			"error",
-		)
-	}
-	onPanic := func(
-		context.Context,
-		asynxmd.Event[int],
-		any,
-	) {
-		calls = append(
-			calls,
-			"panic",
-		)
-	}
-	deadLetter := func(
-		context.Context,
-		asynxmd.Event[int],
-		error,
-	) error {
-		return nil
-	}
+	calls := &callLog{}
 	cfg := apply(
 		models.WithDurableSubscribers([]asynxmd.DurableSub[int]{{}}),
-		models.WithDeliveryErrorHandler(onError),
-		models.WithDeliveryPanicHandler(onPanic),
-		models.WithDeadLetterHandler(deadLetter),
+		models.WithDeliveryErrorHandler(calls.onError),
+		models.WithDeliveryPanicHandler(calls.onPanic),
+		models.WithDeadLetterHandler(keepsDeadLetters),
 		models.WithDeliveryMaxAttempts[int](7),
 		models.WithDeliveryRetry[int](
 			time.Second,
@@ -146,22 +173,11 @@ func TestDelivery_NonPositiveLimitsKeepTheEarlierValues(
 func TestExecutor_SettingsAreRecorded(
 	t *testing.T,
 ) {
-	match := func(
-		string,
-	) bool {
-		return true
-	}
-	onEvent := func(
-		context.Context,
-		asynxmd.Event[int],
-		error,
-	) {
-	}
 	cfg := apply(
 		models.WithSyncProjections([]models.SyncProjection[int]{{}}),
-		models.WithDurableDelivery[int](match),
-		models.WithSnapshotErrorHandler(onEvent),
-		models.WithPublishErrorHandler[int](onEvent),
+		models.WithDurableDelivery[int](matchesEveryEvent),
+		models.WithSnapshotErrorHandler(ignoresEventError),
+		models.WithPublishErrorHandler[int](ignoresEventError),
 	)
 	if len(cfg.SyncProjections) != 1 ||
 		cfg.DurableMatch == nil ||
@@ -182,13 +198,7 @@ func TestWithDispatcherFactory_IgnoresNil(
 		t.Fatal("a nil factory must be ignored")
 	}
 
-	factory := func(
-		asynxmd.DispatcherConfig[int],
-	) (asynxmd.Dispatcher[int], error) {
-		return nil,
-			nil
-	}
-	cfg = apply(models.WithDispatcherFactory[int](factory))
+	cfg = apply(models.WithDispatcherFactory[int](buildsNoDispatcher))
 	if cfg.DispatcherFactory == nil {
 		t.Fatal("a factory must be recorded")
 	}

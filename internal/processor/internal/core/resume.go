@@ -71,7 +71,7 @@ func (p *Processor[T]) Resume(
 	backlogs, _, err := p.pendingByAggregate(
 		ctx,
 		batch,
-		membership(halted),
+		halted,
 	)
 	if err != nil {
 		return err
@@ -85,70 +85,27 @@ func (p *Processor[T]) Resume(
 	)
 }
 
-func membership(
-	ids []string,
-) func(string) bool {
-	set := make(
-		map[string]struct{},
-		len(ids),
-	)
-	for _, id := range ids {
-		set[id] = struct{}{}
-	}
-
-	return func(
-		id string,
-	) bool {
-		_, member := set[id]
-		return member
-	}
-}
-
 func (p *Processor[T]) resumeAll(
 	ctx context.Context,
 	parks map[string]uint64,
 	halted []string,
 	backlogs map[string][]asynxmd.Delivery,
 ) error {
-	resumeOne := func(
-		agg string,
-	) error {
-		return p.resumeAggregate(
-			ctx,
-			agg,
-			parks[agg],
-			backlogs[agg],
+	var failures []error
+	for i := 0; i < len(halted) &&
+		ctx.Err() == nil; i++ {
+		failures = append(
+			failures,
+			p.resumeAggregate(
+				ctx,
+				halted[i],
+				parks[halted[i]],
+				backlogs[halted[i]],
+			),
 		)
 	}
-	return resumeUntilDone(
-		ctx,
-		halted,
-		resumeOne,
-	)
-}
 
-func resumeUntilDone(
-	ctx context.Context,
-	aggregates []string,
-	resumeOne func(string) error,
-) error {
-	if len(aggregates) == 0 {
-		return nil
-	}
-
-	err := resumeOne(aggregates[0])
-	if ctx.Err() != nil {
-		return err
-	}
-
-	return errors.Join(
-		err,
-		resumeUntilDone(
-			ctx,
-			aggregates[1:],
-			resumeOne,
-		),
-	)
+	return errors.Join(failures...)
 }
 
 func (p *Processor[T]) resumeAggregate(
@@ -157,7 +114,25 @@ func (p *Processor[T]) resumeAggregate(
 	park uint64,
 	scanned []asynxmd.Delivery,
 ) error {
-	locked := func() error {
+	return p.executor.WithLock(
+		ctx,
+		agg,
+		p.redeliveringParked(
+			agg,
+			park,
+			scanned,
+		),
+	)
+}
+
+func (p *Processor[T]) redeliveringParked(
+	agg string,
+	park uint64,
+	scanned []asynxmd.Delivery,
+) func(context.Context) error {
+	return func(
+		ctx context.Context,
+	) error {
 		return p.redeliverParked(
 			ctx,
 			agg,
@@ -165,11 +140,6 @@ func (p *Processor[T]) resumeAggregate(
 			scanned,
 		)
 	}
-	return p.executor.WithLock(
-		ctx,
-		agg,
-		locked,
-	)
 }
 
 func (p *Processor[T]) redeliverParked(
@@ -234,17 +204,22 @@ func stillUndelivered(
 	undelivered []int64,
 	remaining []int64,
 ) []int64 {
-	notRemaining := func(
-		v int64,
-	) bool {
-		_, notEnqueued := slices.BinarySearch(
-			remaining,
-			v,
-		)
-		return !notEnqueued
-	}
 	return slices.DeleteFunc(
 		slices.Clone(undelivered),
-		notRemaining,
+		absentFrom(remaining),
 	)
+}
+
+func absentFrom(
+	sorted []int64,
+) func(int64) bool {
+	return func(
+		v int64,
+	) bool {
+		_, found := slices.BinarySearch(
+			sorted,
+			v,
+		)
+		return !found
+	}
 }

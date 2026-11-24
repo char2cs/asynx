@@ -3,6 +3,8 @@ package reader
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
 	asynxmd "github.com/char2cs/asynx/models"
@@ -33,22 +35,37 @@ func (r *Reader[T]) sealUpcastLockFree(
 		return
 	}
 
-	storeIfStreamHolds := func() {
+	if r.guard == nil {
+		r.storeAutoSnapshotIfStreamHolds(
+			ctx,
+			aggregateID,
+			loaded,
+		)
+		return
+	}
+
+	r.guard(
+		aggregateID,
+		r.guardedStore(
+			ctx,
+			aggregateID,
+			loaded,
+		),
+	)
+}
+
+func (r *Reader[T]) guardedStore(
+	ctx context.Context,
+	aggregateID string,
+	loaded loadedState[T],
+) func() {
+	return func() {
 		r.storeAutoSnapshotIfStreamHolds(
 			ctx,
 			aggregateID,
 			loaded,
 		)
 	}
-	if r.guard == nil {
-		storeIfStreamHolds()
-		return
-	}
-
-	r.guard(
-		aggregateID,
-		storeIfStreamHolds,
-	)
 }
 
 func (r *Reader[T]) storeAutoSnapshotIfStreamHolds(
@@ -56,12 +73,28 @@ func (r *Reader[T]) storeAutoSnapshotIfStreamHolds(
 	aggregateID string,
 	loaded loadedState[T],
 ) {
-	if !r.streamHolds(
+	holds, err := r.streamHolds(
 		ctx,
 		aggregateID,
 		loaded.version,
 		loaded.lastEventID,
-	) {
+	)
+	if err != nil {
+		r.reportSnapshotError(
+			ctx,
+			aggregateID,
+			loaded,
+			fmt.Errorf(
+				"check the stream before the auto-snapshot of %s at version %d: %w",
+				aggregateID,
+				loaded.version,
+				err,
+			),
+		)
+		return
+	}
+
+	if !holds {
 		return
 	}
 
@@ -103,7 +136,7 @@ func (r *Reader[T]) reportSnapshotError(
 		return
 	}
 
-	defer dropSnapshotHandlerPanic()
+	defer writeSnapshotHandlerPanicToStderr()
 	r.onSnapshotError(
 		ctx,
 		asynxmd.Event[T]{
@@ -117,10 +150,17 @@ func (r *Reader[T]) reportSnapshotError(
 	)
 }
 
-func dropSnapshotHandlerPanic() {
-	if recover() != nil {
+func writeSnapshotHandlerPanicToStderr() {
+	recovered := recover()
+	if recovered == nil {
 		return
 	}
+
+	fmt.Fprintf(
+		os.Stderr,
+		"asynx: the snapshot error handler panicked and was contained: %v\n",
+		recovered,
+	)
 }
 
 func (r *Reader[T]) streamHolds(
@@ -128,24 +168,32 @@ func (r *Reader[T]) streamHolds(
 	aggregateID string,
 	version int64,
 	eventID string,
-) bool {
+) (bool, error) {
 	blobs, err := r.eventStore.ReadRange(
 		ctx,
 		"events:"+aggregateID,
 		version,
 		1,
 	)
-	if err != nil ||
-		len(blobs) != 1 {
-		return false
+	if err != nil {
+		return false,
+			err
+	}
+
+	if len(blobs) != 1 {
+		return false,
+			nil
 	}
 
 	events, err := deserializeEvents(blobs)
 	if err != nil {
-		return false
+		return false,
+			err
 	}
 
-	return events[0].Version == version && events[0].ID == eventID
+	return events[0].Version == version &&
+			events[0].ID == eventID,
+		nil
 }
 
 func (r *Reader[T]) writeAutoSnapshot(

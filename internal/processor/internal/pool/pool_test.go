@@ -998,36 +998,30 @@ func BenchmarkPool_Send_Parallel(
 	)
 	defer p.Drain(context.Background())
 
-	ctx := context.Background()
-
 	b.ReportAllocs()
 	b.ResetTimer()
 
-	work := func(
-		pb *testing.PB,
-	) {
-		benchParallel(
-			executor,
-			ctx,
-			pb,
-			p,
-		)
+	sending := &parallelSender{
+		executor: executor,
+		pool:     p,
 	}
-	b.RunParallel(work)
+	b.RunParallel(sending.sendUntilDone)
 }
 
-func benchParallel(
-	executor models.Executor[order],
-	ctx context.Context,
+type parallelSender struct {
+	executor models.Executor[order]
+	pool     *pool.ShardPool[order]
+}
+
+func (s *parallelSender) sendUntilDone(
 	pb *testing.PB,
-	p *pool.ShardPool[order],
 ) {
 	idx := 0
 	for pb.Next() {
 		benchSend(
-			executor,
-			ctx,
-			p.Shards()[idx%8],
+			s.executor,
+			context.Background(),
+			s.pool.Shards()[idx%8],
 		)
 		idx++
 	}

@@ -14,19 +14,13 @@ func (e *CommandExecutor[T]) runSyncProjections(
 	tx asynxmd.Tx,
 	evt asynxmd.Event[T],
 ) error {
-	run := func(
-		p models.SyncProjection[T],
-	) error {
-		return runProjection(
-			ctx,
-			tx,
-			p,
-			evt,
-		)
-	}
 	err := firsterror.Of(
 		e.syncs,
-		run,
+		projecting(
+			ctx,
+			tx,
+			evt,
+		),
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -37,6 +31,23 @@ func (e *CommandExecutor[T]) runSyncProjections(
 	}
 
 	return nil
+}
+
+func projecting[T any](
+	ctx context.Context,
+	tx asynxmd.Tx,
+	evt asynxmd.Event[T],
+) func(models.SyncProjection[T]) error {
+	return func(
+		p models.SyncProjection[T],
+	) error {
+		return runProjection(
+			ctx,
+			tx,
+			p,
+			evt,
+		)
+	}
 }
 
 func runProjection[T any](

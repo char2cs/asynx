@@ -152,66 +152,44 @@ func (s *Shard[T]) serve(
 	job *models.CommandJob[T],
 ) {
 	aggregateID := job.Envelope.Cmd.AggregateID()
-	if !s.claim(
-		aggregateID,
-		job,
-	) {
-		return
-	}
-
-	for job != nil {
-		job.Envelope.GrantTurn()
-		job = s.next(aggregateID)
-	}
-}
-
-func (s *Shard[T]) claim(
-	aggregateID string,
-	job *models.CommandJob[T],
-) bool {
 	s.mailboxMu.Lock()
 	mailbox, running := s.mailboxes[aggregateID]
 	if !running {
 		s.mailboxes[aggregateID] = nil
 		s.mailboxMu.Unlock()
-		return true
-	}
-
-	isFull := len(mailbox) >= s.mailboxLimit
-	if !isFull {
-		s.mailboxes[aggregateID] = append(
-			mailbox,
+		s.grantInTurn(
+			aggregateID,
 			job,
 		)
+		return
 	}
 
-	s.mailboxMu.Unlock()
-
-	if isFull {
+	if len(mailbox) >= s.mailboxLimit {
+		s.mailboxMu.Unlock()
 		job.Envelope.Reject(asynxmd.ErrQueueFull)
+		return
 	}
 
-	return false
+	s.mailboxes[aggregateID] = append(
+		mailbox,
+		job,
+	)
+	s.mailboxMu.Unlock()
 }
 
-func (s *Shard[T]) next(
+func (s *Shard[T]) grantInTurn(
 	aggregateID string,
-) *models.CommandJob[T] {
-	s.mailboxMu.Lock()
-	defer s.mailboxMu.Unlock()
-	mailbox := s.mailboxes[aggregateID]
-	if len(mailbox) == 0 {
-		delete(
-			s.mailboxes,
-			aggregateID,
-		)
-		return nil
+	first *models.CommandJob[T],
+) {
+	turns := &aggregateTurns[T]{
+		shard:       s,
+		aggregateID: aggregateID,
+		job:         first,
 	}
-
-	job := mailbox[0]
-	mailbox[0] = nil
-	s.mailboxes[aggregateID] = mailbox[1:]
-	return job
+	for turns.job != nil {
+		turns.job.Envelope.GrantTurn()
+		turns.advance()
+	}
 }
 
 func (s *Shard[T]) signalStop() {

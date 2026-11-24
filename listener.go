@@ -81,32 +81,28 @@ func (l *listener[T]) sendBounded(
 		return
 	}
 
-	if !l.deliver(evt) {
-		return
-	}
-
-	go l.unsubscribeWhenPublished()
+	l.deliver(evt)
 }
 
 func (l *listener[T]) deliver(
 	evt models.Event[T],
-) (isLast bool) {
+) {
 	l.sendMu.Lock()
 	defer l.sendMu.Unlock()
 
 	if l.closed.Load() {
-		return false
+		return
 	}
 
 	l.ch <- evt
 	l.delivered++
-	isLast = l.delivered == int64(l.count)
-	if isLast {
-		l.closed.Store(true)
-		l.closeChLocked()
+	if l.delivered < int64(l.count) {
+		return
 	}
 
-	return isLast
+	l.closed.Store(true)
+	l.closeChLocked()
+	go l.unsubscribeWhenPublished()
 }
 
 func (l *listener[T]) unsubscribeWhenPublished() {

@@ -2,7 +2,6 @@ package channel
 
 import (
 	"context"
-	"regexp"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -22,8 +21,9 @@ import (
 // Publish never takes a lock on the subscription path; Subscribe and
 // Unsubscribe serialise among themselves and build a new index each time.
 // Patterns without regexp metacharacters match by equality, the rest are
-// compiled lazily on first use and cached for the life of the bus (a pattern
-// that does not compile never matches and is remembered as such).
+// compiled once when they are subscribed and kept for the life of the bus (a
+// pattern that does not compile never matches; its compile error is kept with
+// it).
 //
 // Close stops new work and drains in-flight handlers; after it a bus rejects
 // Subscribe, Publish and PublishSync with ErrBusClosed. A Bus is safe for
@@ -38,7 +38,7 @@ type Bus[T any] struct {
 	inFlightWg sync.WaitGroup
 
 	patternMu sync.RWMutex
-	patterns  map[string]*regexp.Regexp
+	patterns  map[string]compiledPattern
 
 	onPanic   asynxmd.PanicHandler[T]
 	onTimeout asynxmd.TimeoutHandler[T]
@@ -53,7 +53,7 @@ func New[T any](
 ) *Bus[T] {
 	b := &Bus[T]{
 		subscriptions: make(map[string]*models.Subscription[T]),
-		patterns:      make(map[string]*regexp.Regexp),
+		patterns:      make(map[string]compiledPattern),
 	}
 	b.idx.Store(&models.PublishIndex[T]{
 		ExactSubs: make(map[string][]*models.Subscription[T]),
@@ -137,6 +137,10 @@ func (b *Bus[T]) register(
 		Handler:         handler,
 		FallbackHandler: cfg.Fallback,
 		Timeout:         cfg.Timeout,
+	}
+
+	if !routing.IsExactPattern(pattern) {
+		b.rememberPattern(pattern)
 	}
 
 	b.subscriptions[subID] = sub
@@ -271,7 +275,16 @@ func (b *Bus[T]) regexMatching(
 	subs []*models.Subscription[T],
 	eventName string,
 ) []*models.Subscription[T] {
-	doesNotMatch := func(
+	return slices.DeleteFunc(
+		slices.Clone(subs),
+		b.patternRejects(eventName),
+	)
+}
+
+func (b *Bus[T]) patternRejects(
+	eventName string,
+) func(*models.Subscription[T]) bool {
+	return func(
 		sub *models.Subscription[T],
 	) bool {
 		return !b.matchesRegex(
@@ -279,11 +292,6 @@ func (b *Bus[T]) regexMatching(
 			sub.Pattern,
 		)
 	}
-
-	return slices.DeleteFunc(
-		slices.Clone(subs),
-		doesNotMatch,
-	)
 }
 
 func (b *Bus[T]) reserve(
@@ -376,57 +384,21 @@ func (b *Bus[T]) matchesRegex(
 	eventName,
 	pattern string,
 ) bool {
-	expr := b.patternFor(pattern)
-	return expr != nil &&
-		expr.MatchString(eventName)
-}
-
-func (b *Bus[T]) patternFor(
-	pattern string,
-) *regexp.Regexp {
-	expr, known := b.cachedPattern(pattern)
-	if known {
-		return expr
-	}
-
-	expr = compileOrNever(pattern)
-	b.rememberPattern(
-		pattern,
-		expr,
-	)
-	return expr
-}
-
-func (b *Bus[T]) cachedPattern(
-	pattern string,
-) (expr *regexp.Regexp, known bool) {
 	b.patternMu.RLock()
 	defer b.patternMu.RUnlock()
 
-	expr, known = b.patterns[pattern]
-	return expr,
-		known
+	return b.patterns[pattern].matches(eventName)
 }
 
 func (b *Bus[T]) rememberPattern(
 	pattern string,
-	expr *regexp.Regexp,
 ) {
+	compiled := compilePattern(pattern)
+
 	b.patternMu.Lock()
 	defer b.patternMu.Unlock()
 
-	b.patterns[pattern] = expr
-}
-
-func compileOrNever(
-	pattern string,
-) *regexp.Regexp {
-	expr, err := regexp.Compile(pattern)
-	if err != nil {
-		return nil
-	}
-
-	return expr
+	b.patterns[pattern] = compiled
 }
 
 // WaitForHandlers blocks until every handler started by Publish has finished,

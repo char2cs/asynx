@@ -385,16 +385,10 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(
 ) {
 	s := store.New()
 	b := bus.New[order]()
-	release := make(chan struct{})
-	blocked := func(
-		context.Context,
-		asynxmd.Event[order],
-	) {
-		<-release
-	}
+	blocked := &releaseWaiter{release: make(chan struct{})}
 	if _, err := b.Subscribe(
 		"OrderCreated",
-		blocked,
+		blocked.wait,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -420,19 +414,12 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(
 	)
 	defer p.Drain(context.Background())
 
-	send := func(
-		id string,
-	) *models.CommandEnvelope[order] {
-		env := newWaitingEnvelope(
-			executor,
-			context.Background(),
-			mocks.CreateOrderCmd{ID: id, Total: 1},
-		)
-		p.Shards()[0].CommandChan() <- env
-		return env
+	sender := &envelopeSender{
+		executor: executor,
+		shard:    p.Shards()[0],
 	}
 
-	first := send("order1")
+	first := sender.sendWaitingCreate("order1")
 	select {
 	case res := <-first.ResultChan:
 		checkFirstResult(
@@ -443,7 +430,7 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(
 		t.Fatal("worker is held by a blocked handler: first result never arrived")
 	}
 
-	second := send("order2")
+	second := sender.sendWaitingCreate("order2")
 	select {
 	case res := <-second.ResultChan:
 		failIf(
@@ -454,7 +441,47 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(
 		t.Fatal("second aggregate stalled behind the first one's handler")
 	}
 
-	close(release)
+	close(blocked.release)
+}
+
+type releaseWaiter struct {
+	release chan struct{}
+}
+
+func (w *releaseWaiter) wait(
+	context.Context,
+	asynxmd.Event[order],
+) {
+	<-w.release
+}
+
+type envelopeSender struct {
+	executor models.Executor[order]
+	shard    *pool.Shard[order]
+}
+
+func (s *envelopeSender) send(
+	cmd asynxmd.Command[order],
+) *models.CommandEnvelope[order] {
+	env := newEnvelope(
+		s.executor,
+		context.Background(),
+		cmd,
+	)
+	s.shard.CommandChan() <- env
+	return env
+}
+
+func (s *envelopeSender) sendWaitingCreate(
+	id string,
+) *models.CommandEnvelope[order] {
+	env := newWaitingEnvelope(
+		s.executor,
+		context.Background(),
+		mocks.CreateOrderCmd{ID: id, Total: 1},
+	)
+	s.shard.CommandChan() <- env
+	return env
 }
 
 func checkFirstResult(
@@ -537,28 +564,21 @@ func TestPool_Drain_AnswersEnvelopesLeftInTheQueue(
 		chan struct{},
 		1,
 	)
-	send := func(
-		cmd asynxmd.Command[order],
-	) *models.CommandEnvelope[order] {
-		env := newEnvelope(
-			executor,
-			context.Background(),
-			cmd,
-		)
-		p.Shards()[0].CommandChan() <- env
-		return env
+	sender := &envelopeSender{
+		executor: executor,
+		shard:    p.Shards()[0],
 	}
 	var envs []*models.CommandEnvelope[order]
 	envs = append(
 		envs,
-		send(gatedUpdate{UpdateOrderCmd: mocks.UpdateOrderCmd{ID: "a", NewState: order{ID: "a"}}, entered: entered, gate: gate}),
+		sender.send(gatedUpdate{UpdateOrderCmd: mocks.UpdateOrderCmd{ID: "a", NewState: order{ID: "a"}}, entered: entered, gate: gate}),
 	)
 	<-entered
 	for i := range 5 {
 		id := string(rune('b' + i))
 		envs = append(
 			envs,
-			send(mocks.UpdateOrderCmd{ID: id, NewState: order{ID: id}}),
+			sender.send(mocks.UpdateOrderCmd{ID: id, NewState: order{ID: id}}),
 		)
 	}
 
@@ -645,22 +665,15 @@ func TestShard_ABusyAggregateLeavesTheOtherWorkersFree(
 		chan struct{},
 		1,
 	)
-	send := func(
-		cmd asynxmd.Command[order],
-	) *models.CommandEnvelope[order] {
-		env := newEnvelope(
-			executor,
-			context.Background(),
-			cmd,
-		)
-		p.Shards()[0].CommandChan() <- env
-		return env
+	sender := &envelopeSender{
+		executor: executor,
+		shard:    p.Shards()[0],
 	}
 
-	hot := send(gatedUpdate{UpdateOrderCmd: mocks.UpdateOrderCmd{ID: "hot", NewState: order{ID: "hot"}}, entered: entered, gate: gate})
+	hot := sender.send(gatedUpdate{UpdateOrderCmd: mocks.UpdateOrderCmd{ID: "hot", NewState: order{ID: "hot"}}, entered: entered, gate: gate})
 	<-entered
-	queued := send(mocks.UpdateOrderCmd{ID: "hot", NewState: order{ID: "hot", Total: 2}})
-	cold := send(mocks.CreateOrderCmd{ID: "cold", Total: 1})
+	queued := sender.send(mocks.UpdateOrderCmd{ID: "hot", NewState: order{ID: "hot", Total: 2}})
+	cold := sender.send(mocks.CreateOrderCmd{ID: "cold", Total: 1})
 
 	select {
 	case res := <-cold.ResultChan:
@@ -745,26 +758,19 @@ func TestShard_AMailboxKeepsTheOrderOfItsCommands(
 		chan struct{},
 		1,
 	)
-	send := func(
-		cmd asynxmd.Command[order],
-	) *models.CommandEnvelope[order] {
-		env := newEnvelope(
-			executor,
-			context.Background(),
-			cmd,
-		)
-		p.Shards()[0].CommandChan() <- env
-		return env
+	sender := &envelopeSender{
+		executor: executor,
+		shard:    p.Shards()[0],
 	}
 
 	envs := []*models.CommandEnvelope[order]{
-		send(gatedCreate{CreateOrderCmd: mocks.CreateOrderCmd{ID: "a", Total: 1}, entered: entered, gate: gate}),
+		sender.send(gatedCreate{CreateOrderCmd: mocks.CreateOrderCmd{ID: "a", Total: 1}, entered: entered, gate: gate}),
 	}
 	<-entered
 	for i := 2; i <= 4; i++ {
 		envs = append(
 			envs,
-			send(mocks.UpdateOrderCmd{ID: "a", NewState: order{ID: "a", Total: float64(i)}}),
+			sender.send(mocks.UpdateOrderCmd{ID: "a", NewState: order{ID: "a", Total: float64(i)}}),
 		)
 		waitForBacklog(
 			t,
@@ -837,25 +843,18 @@ func TestShard_AMailboxRefusesWhatExceedsTheQueueDepth(
 		chan struct{},
 		1,
 	)
-	send := func(
-		cmd asynxmd.Command[order],
-	) *models.CommandEnvelope[order] {
-		env := newEnvelope(
-			executor,
-			context.Background(),
-			cmd,
-		)
-		p.Shards()[0].CommandChan() <- env
-		return env
+	sender := &envelopeSender{
+		executor: executor,
+		shard:    p.Shards()[0],
 	}
 
-	running := send(gatedUpdate{UpdateOrderCmd: mocks.UpdateOrderCmd{ID: "hot", NewState: order{ID: "hot"}}, entered: entered, gate: gate})
+	running := sender.send(gatedUpdate{UpdateOrderCmd: mocks.UpdateOrderCmd{ID: "hot", NewState: order{ID: "hot"}}, entered: entered, gate: gate})
 	<-entered
 	var waiting []*models.CommandEnvelope[order]
 	for i := range 2 {
 		waiting = append(
 			waiting,
-			send(mocks.UpdateOrderCmd{ID: "hot", NewState: order{ID: "hot", Total: float64(i)}}),
+			sender.send(mocks.UpdateOrderCmd{ID: "hot", NewState: order{ID: "hot", Total: float64(i)}}),
 		)
 		waitForBacklog(
 			t,
@@ -864,7 +863,7 @@ func TestShard_AMailboxRefusesWhatExceedsTheQueueDepth(
 		)
 	}
 
-	overflow := send(mocks.UpdateOrderCmd{ID: "hot", NewState: order{ID: "hot", Total: 9}})
+	overflow := sender.send(mocks.UpdateOrderCmd{ID: "hot", NewState: order{ID: "hot", Total: 9}})
 	select {
 	case res := <-overflow.ResultChan:
 		requireQueueFull(

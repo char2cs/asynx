@@ -314,7 +314,7 @@ type PanicEvent[T any] struct {
 
 ### Panic Handler Is Also Panic-Safe
 
-If the registered panic handler itself panics, Asynx recovers that too and silently continues. The system never crashes due to panic — everything is protected.
+If the registered panic handler itself panics, Asynx recovers that too, writes one line about it to stderr, and continues. The system never crashes due to panic — everything is protected.
 
 ---
 

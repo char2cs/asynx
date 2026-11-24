@@ -62,20 +62,26 @@ func TestNew_SendsACommandThroughTheProcessor(
 	}
 }
 
+type failingFactory struct {
+	err error
+}
+
+func (f failingFactory) build(
+	asynxmd.DispatcherConfig[mocks.Order],
+) (asynxmd.Dispatcher[mocks.Order], error) {
+	return nil,
+		f.err
+}
+
 func TestNew_ReturnsANilProcessorWhenTheFactoryFails(
 	t *testing.T,
 ) {
 	boom := errors.New("boom")
-	failing := func(
-		asynxmd.DispatcherConfig[mocks.Order],
-	) (asynxmd.Dispatcher[mocks.Order], error) {
-		return nil,
-			boom
-	}
+	failing := failingFactory{err: boom}
 	p, err := processor.New[mocks.Order](
 		newStore(),
 		nil,
-		models.WithDispatcherFactory(failing),
+		models.WithDispatcherFactory(failing.build),
 	)
 	if !errors.Is(
 		err,

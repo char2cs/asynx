@@ -411,17 +411,6 @@ func waitPublishThenClose(
 	close(idle)
 }
 
-func holdIfSlow(
-	id string,
-	entered chan<- struct{},
-	release <-chan struct{},
-) {
-	if id == "slow" {
-		entered <- struct{}{}
-		<-release
-	}
-}
-
 func TestProcessor_Shutdown_WaitsForForgetInFlightUntilItsContextEnds(
 	t *testing.T,
 ) {
@@ -437,18 +426,10 @@ func TestProcessor_Shutdown_WaitsForForgetInFlightUntilItsContextEnds(
 		t.Fatal(err)
 	}
 
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	block := func(
-		context.Context,
-		asynxmd.Event[order],
-	) {
-		close(entered)
-		<-release
-	}
+	gate := newHandlerGate(0)
 	f.b.Subscribe(
 		"asynx\\.aggregate\\.forget",
-		block,
+		gate.block,
 	)
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -459,7 +440,7 @@ func TestProcessor_Shutdown_WaitsForForgetInFlightUntilItsContextEnds(
 		"o1",
 		&wg,
 	)
-	<-entered
+	<-gate.entered
 
 	short, cancel := context.WithTimeout(
 		ctx,
@@ -476,7 +457,7 @@ func TestProcessor_Shutdown_WaitsForForgetInFlightUntilItsContextEnds(
 		)
 	}
 
-	close(release)
+	close(gate.release)
 	wg.Wait()
 }
 
@@ -543,18 +524,10 @@ func TestProcessor_Shutdown_CanBeRetriedAfterItsContextEnds(
 		nil,
 	)
 	b := bus.New[order]()
-	release := make(chan struct{})
-	entered := make(chan struct{})
-	block := func(
-		context.Context,
-		asynxmd.Event[order],
-	) {
-		close(entered)
-		<-release
-	}
+	gate := newHandlerGate(0)
 	b.Subscribe(
 		"OrderUpdated",
-		block,
+		gate.block,
 	)
 	p := mustNew(
 		t,
@@ -571,7 +544,7 @@ func TestProcessor_Shutdown_CanBeRetriedAfterItsContextEnds(
 		t.Fatal(err)
 	}
 
-	<-entered
+	<-gate.entered
 
 	short, cancel := context.WithTimeout(
 		context.Background(),
@@ -582,7 +555,7 @@ func TestProcessor_Shutdown_CanBeRetriedAfterItsContextEnds(
 		t.Fatal("Shutdown succeeded with a handler still running")
 	}
 
-	close(release)
+	close(gate.release)
 	if err := p.Shutdown(context.Background()); err != nil {
 		t.Fatalf(
 			"retried Shutdown: %v",
@@ -686,24 +659,10 @@ func TestProcessor_WaitPublish_DoesNotFailCommandsSentWhileItWaits(
 		store.New(),
 	)
 	ctx := context.Background()
-	entered := make(
-		chan struct{},
-		1,
-	)
-	release := make(chan struct{})
-	holdSlow := func(
-		_ context.Context,
-		e asynxmd.Event[order],
-	) {
-		holdIfSlow(
-			e.AggregateID,
-			entered,
-			release,
-		)
-	}
+	gate := newHandlerGate(1)
 	if _, err := f.b.Subscribe(
 		"OrderCreated",
-		holdSlow,
+		gate.holdIfSlow,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -715,7 +674,7 @@ func TestProcessor_WaitPublish_DoesNotFailCommandsSentWhileItWaits(
 		t.Fatal(err)
 	}
 
-	<-entered
+	<-gate.entered
 
 	idle := make(chan struct{})
 	go waitPublishThenClose(
@@ -740,7 +699,7 @@ func TestProcessor_WaitPublish_DoesNotFailCommandsSentWhileItWaits(
 		)
 	}
 
-	close(release)
+	close(gate.release)
 	<-idle
 }
 

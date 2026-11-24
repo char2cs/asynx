@@ -17,20 +17,14 @@ func TestSubscriberCall_ATimedOutHandlerIsReportedOnceAndStillWaitedFor(
 		t,
 		acked("test.event"),
 	)
-	slow := func(
-		context.Context,
-		asynxmd.Event[int],
-	) error {
-		time.Sleep(30 * time.Millisecond)
-		return nil
-	}
+	slow := sleepingHandler{pause: 30 * time.Millisecond}
 	call := &subscriberCall[int]{
 		deliverer: f.deliverer.(*durableDeliverer[int]),
 		job:       job,
 		sub: asynxmd.DurableSub[int]{
 			Name:    "slow",
 			Timeout: time.Millisecond,
-			Handler: slow,
+			Handler: slow.sleepThenSucceed,
 		},
 		attempt: 1,
 	}
@@ -60,16 +54,10 @@ func TestSubscriberCall_APanicBecomesAnErrorAndIsReportedToThePanicHandler(
 		t,
 		acked("test.event"),
 	)
-	panicking := func(
-		context.Context,
-		asynxmd.Event[int],
-	) error {
-		panic("boom")
-	}
 	call := &subscriberCall[int]{
 		deliverer: f.deliverer.(*durableDeliverer[int]),
 		job:       job,
-		sub:       asynxmd.DurableSub[int]{Name: "panicking", Handler: panicking},
+		sub:       asynxmd.DurableSub[int]{Name: "panicking", Handler: panicWithBoom},
 		attempt:   1,
 	}
 
@@ -86,4 +74,23 @@ func TestSubscriberCall_APanicBecomesAnErrorAndIsReportedToThePanicHandler(
 			f.reports.panics,
 		)
 	}
+}
+
+type sleepingHandler struct {
+	pause time.Duration
+}
+
+func (h sleepingHandler) sleepThenSucceed(
+	context.Context,
+	asynxmd.Event[int],
+) error {
+	time.Sleep(h.pause)
+	return nil
+}
+
+func panicWithBoom(
+	context.Context,
+	asynxmd.Event[int],
+) error {
+	panic("boom")
 }

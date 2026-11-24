@@ -9,7 +9,9 @@ import (
 // All other operations succeed silently.
 type ErrBus[T any] struct{ Err error }
 
-// Publish returns Err.
+// Publish ignores the event and context and returns Err on every call, so
+// tests can exercise the failure path of an asynchronous publish. Nothing is
+// delivered to any subscriber.
 func (b *ErrBus[T]) Publish(
 	_ context.Context,
 	_ models.Event[T],
@@ -17,7 +19,9 @@ func (b *ErrBus[T]) Publish(
 	return b.Err
 }
 
-// PublishSync returns Err.
+// PublishSync ignores the event and context and returns Err on every call, so
+// tests can exercise the failure path of a synchronous publish. Nothing is
+// delivered to any subscriber.
 func (b *ErrBus[T]) PublishSync(
 	_ context.Context,
 	_ models.Event[T],

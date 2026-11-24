@@ -16,6 +16,118 @@ import (
 
 type order = mocks.Order
 
+type eventCollector struct {
+	events []asynxmd.Event[order]
+}
+
+func (c *eventCollector) collect(
+	_ context.Context,
+	e asynxmd.Event[order],
+) {
+	c.events = append(
+		c.events,
+		e,
+	)
+}
+
+type passthroughUpcaster struct{}
+
+func (passthroughUpcaster) upcast(
+	_ context.Context,
+	_ string,
+	payload []byte,
+) ([]byte, error) {
+	return payload,
+		nil
+}
+
+type hookRecorder struct {
+	sawVersion int64
+	called     bool
+	err        error
+}
+
+func (h *hookRecorder) enqueueDelivery(
+	ctx context.Context,
+	tx asynxmd.Tx,
+	e asynxmd.Event[order],
+) error {
+	h.sawVersion = e.Version
+	return tx.EnqueueDelivery(
+		ctx,
+		e.AggregateID,
+		e.Version,
+	)
+}
+
+func (h *hookRecorder) failWithConfiguredError(
+	context.Context,
+	asynxmd.Tx,
+	asynxmd.Event[order],
+) error {
+	return h.err
+}
+
+func (h *hookRecorder) markCalled(
+	context.Context,
+	asynxmd.Tx,
+	asynxmd.Event[order],
+) error {
+	h.called = true
+	return nil
+}
+
+func isPipelineFailed(
+	err error,
+) bool {
+	return errors.Is(
+		err,
+		asynxmd.ErrPipelineFailed,
+	)
+}
+
+type corruptionRecorder struct {
+	called bool
+}
+
+func (c *corruptionRecorder) record(
+	error,
+) {
+	c.called = true
+}
+
+type validationGate struct {
+	t           *testing.T
+	aCommitted  chan struct{}
+	bInValidate chan struct{}
+}
+
+func (g validationGate) hold(
+	cur *order,
+) {
+	expectPending(
+		g.t,
+		cur,
+	)
+	close(g.bInValidate)
+	<-g.aCommitted
+}
+
+type cancelCounter struct {
+	cancels int
+}
+
+func (c *cancelCounter) count(
+	_ context.Context,
+	e asynxmd.Event[order],
+) {
+	incrementIf(
+		e.EventName,
+		"OrderCancelled",
+		&c.cancels,
+	)
+}
+
 func cmd(
 	newState order,
 ) mocks.UpdateOrderCmd {
@@ -365,22 +477,13 @@ func TestReplay_VisitsAllEvents(
 		cmd(order{Status: "Delivered", Total: 100}),
 	)
 
-	var got []asynxmd.Event[order]
-	replayFn := func(
-		ctx context.Context,
-		e asynxmd.Event[order],
-	) {
-		got = append(
-			got,
-			e,
-		)
-	}
+	var collector eventCollector
 	err := es.Replay(
 		ctx,
 		"agg1",
 		1,
 		0,
-		replayFn,
+		collector.collect,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -389,6 +492,7 @@ func TestReplay_VisitsAllEvents(
 		)
 	}
 
+	got := collector.events
 	if len(got) != 3 {
 		t.Fatalf(
 			"expected 3 events, got %d",
@@ -429,22 +533,13 @@ func TestReplay_WithVersionRange(
 		cmd(order{Status: "v3"}),
 	)
 
-	var got []asynxmd.Event[order]
-	replayFn := func(
-		ctx context.Context,
-		e asynxmd.Event[order],
-	) {
-		got = append(
-			got,
-			e,
-		)
-	}
+	var collector eventCollector
 	err := es.Replay(
 		ctx,
 		"agg1",
 		2,
 		3,
-		replayFn,
+		collector.collect,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -453,6 +548,7 @@ func TestReplay_WithVersionRange(
 		)
 	}
 
+	got := collector.events
 	if len(got) != 2 {
 		t.Fatalf(
 			"expected 2 events for range [2,3], got %d",
@@ -464,16 +560,8 @@ func TestReplay_WithVersionRange(
 func TestWrite_Get_WithUpcasting(
 	t *testing.T,
 ) {
-	fn := func(
-		_ context.Context,
-		_ string,
-		p []byte,
-	) ([]byte, error) {
-		return p,
-			nil
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: fn,
+		1: passthroughUpcaster{}.upcast,
 	}
 	es := New[order](
 		store.New(),
@@ -502,22 +590,15 @@ func TestWrite_Get_WithUpcasting(
 		)
 	}
 
-	var rawBlobs [][]byte
-	replayFn := func(
-		ctx context.Context,
-		e asynxmd.Event[order],
-	) {
-		_ = e
-	}
+	var collector eventCollector
 	esV1.Replay(
 		ctx,
 		"agg1",
 		1,
 		0,
-		replayFn,
+		collector.collect,
 	)
 
-	_ = rawBlobs
 	_ = es
 }
 
@@ -600,17 +681,9 @@ func concurrentWritesConflict(
 
 	close(start)
 	wg.Wait()
-	containsFuncFn := func(
-		err error,
-	) bool {
-		return errors.Is(
-			err,
-			asynxmd.ErrPipelineFailed,
-		)
-	}
 	return slices.ContainsFunc(
 		errs,
-		containsFuncFn,
+		isPipelineFailed,
 	)
 }
 
@@ -743,16 +816,8 @@ func TestWrite_Get_SharedStore_WithUpcasting(
 		)
 	}
 
-	fn := func(
-		_ context.Context,
-		_ string,
-		p []byte,
-	) ([]byte, error) {
-		return p,
-			nil
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: fn,
+		1: passthroughUpcaster{}.upcast,
 	}
 	esV2 := New[order](
 		s,
@@ -813,25 +878,20 @@ func TestNew_WithCorruptionHook_CalledOnCorruptSnapshot(
 		[]byte(`not-valid-json`),
 	)
 
-	var hookCalled bool
-	newFn := func(
-		err error,
-	) {
-		hookCalled = true
-	}
+	var corruption corruptionRecorder
 	eventstore := New[order](
 		es,
 		ss,
 		nil,
 		1,
-		newFn,
+		corruption.record,
 	)
 
 	_, _ = eventstore.Get(
 		ctx,
 		"agg1",
 	)
-	if !hookCalled {
+	if !corruption.called {
 		t.Error("WithCorruptionHook: hook was not called on corrupt snapshot")
 	}
 }
@@ -1051,33 +1111,21 @@ func TestWriteTx_HookRunsInsideTheAppendTransaction(
 	)
 	ctx := context.Background()
 
-	var sawVersion int64
-	writeTxFn := func(
-		_ context.Context,
-		tx asynxmd.Tx,
-		e asynxmd.Event[order],
-	) error {
-		sawVersion = e.Version
-		return tx.EnqueueDelivery(
-			ctx,
-			e.AggregateID,
-			e.Version,
-		)
-	}
+	var hook hookRecorder
 	evt, err := es.WriteTx(
 		ctx,
 		cmd(order{ID: "agg1", Total: 3}),
-		writeTxFn,
+		hook.enqueueDelivery,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if sawVersion != 1 ||
+	if hook.sawVersion != 1 ||
 		evt.Version != 1 {
 		t.Fatalf(
 			"hook saw v%d, event v%d; want 1",
-			sawVersion,
+			hook.sawVersion,
 			evt.Version,
 		)
 	}
@@ -1106,17 +1154,11 @@ func TestWriteTx_HookErrorRollsBackTheEvent(
 	)
 	ctx := context.Background()
 	boom := errors.New("hook failed")
-	writeTxFn := func(
-		context.Context,
-		asynxmd.Tx,
-		asynxmd.Event[order],
-	) error {
-		return boom
-	}
+	hook := hookRecorder{err: boom}
 	_, err := es.WriteTx(
 		ctx,
 		cmd(order{ID: "agg1"}),
-		writeTxFn,
+		hook.failWithConfiguredError,
 	)
 	if !errors.Is(
 		err,
@@ -1247,29 +1289,21 @@ func TestWriteTx_ValidationFailureWritesNothingAndSkipsTheHook(
 		1,
 		nil,
 	)
-	called := false
-	writeTxFn := func(
-		context.Context,
-		asynxmd.Tx,
-		asynxmd.Event[order],
-	) error {
-		called = true
-		return nil
-	}
+	var hook hookRecorder
 	_, err := es.WriteTx(
 		context.Background(),
 		mocks.CreateOrderCmd{ID: "agg1", Total: -1},
-		writeTxFn,
+		hook.markCalled,
 	)
 	if !errors.Is(
 		err,
 		asynxmd.ErrValidation,
 	) ||
-		called {
+		hook.called {
 		t.Fatalf(
 			"err = %v, hook called = %v; want ErrValidation and no hook",
 			err,
-			called,
+			hook.called,
 		)
 	}
 
@@ -1360,7 +1394,7 @@ type gatedCancel struct {
 	)
 }
 
-// AggregateID returns the id of the aggregate being cancelled.
+// AggregateID names the one stream the cancellation is appended to; it is fixed when the command is built and never derived from state.
 func (c gatedCancel) AggregateID() string { return c.id }
 
 // EventName returns the name of the cancellation event.
@@ -1417,19 +1451,12 @@ func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(
 		)
 	}
 
-	aCommitted := make(chan struct{})
-	bInValidate := make(chan struct{})
-	onValidate2 := func(
-		cur *order,
-	) {
-		expectPending(
-			t,
-			cur,
-		)
-		close(bInValidate)
-		<-aCommitted
+	gate := validationGate{
+		t:           t,
+		aCommitted:  make(chan struct{}),
+		bInValidate: make(chan struct{}),
 	}
-	bCmd := gatedCancel{id: "X", onValidate: onValidate2}
+	bCmd := gatedCancel{id: "X", onValidate: gate.hold}
 
 	var bErr error
 	bDone := make(chan struct{})
@@ -1441,7 +1468,7 @@ func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(
 		close(bDone)
 	}()
 
-	<-bInValidate
+	<-gate.bInValidate
 	if _, err := es.Write(
 		ctx,
 		gatedCancel{id: "X"},
@@ -1452,7 +1479,7 @@ func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(
 		)
 	}
 
-	close(aCommitted)
+	close(gate.aCommitted)
 	<-bDone
 
 	if !errors.Is(
@@ -1465,23 +1492,13 @@ func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(
 		)
 	}
 
-	cancels := 0
-	replayFn := func(
-		_ context.Context,
-		e asynxmd.Event[order],
-	) {
-		incrementIf(
-			e.EventName,
-			"OrderCancelled",
-			&cancels,
-		)
-	}
+	var counter cancelCounter
 	if err := es.Replay(
 		ctx,
 		"X",
 		1,
 		0,
-		replayFn,
+		counter.count,
 	); err != nil {
 		t.Fatalf(
 			"replay: %v",
@@ -1489,10 +1506,10 @@ func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(
 		)
 	}
 
-	if cancels != 1 {
+	if counter.cancels != 1 {
 		t.Fatalf(
 			"order X cancelled %d times, want exactly 1",
-			cancels,
+			counter.cancels,
 		)
 	}
 }

@@ -29,6 +29,46 @@ func newTestWriter(
 	)
 }
 
+type eventAppend[T any] struct {
+	writer          *Writer[T]
+	aggregateID     string
+	eventName       string
+	expectedVersion int64
+	previousState   T
+	newState        T
+	evt             asynxmd.Event[T]
+}
+
+func (a *eventAppend[T]) inTransaction(
+	ctx context.Context,
+) func(asynxmd.Tx) error {
+	return func(
+		tx asynxmd.Tx,
+	) error {
+		return a.appendIn(
+			ctx,
+			tx,
+		)
+	}
+}
+
+func (a *eventAppend[T]) appendIn(
+	ctx context.Context,
+	tx asynxmd.Tx,
+) error {
+	evt, err := a.writer.AppendTx(
+		ctx,
+		tx,
+		a.aggregateID,
+		a.eventName,
+		a.expectedVersion,
+		a.previousState,
+		a.newState,
+	)
+	a.evt = evt
+	return err
+}
+
 func appendEvent[T any](
 	ctx context.Context,
 	w *Writer[T],
@@ -37,32 +77,25 @@ func appendEvent[T any](
 	expectedVersion int64,
 	previousState T,
 	newState T,
-) (evt asynxmd.Event[T], err error) {
-	appendInTx := func(
-		tx asynxmd.Tx,
-	) (txErr error) {
-		evt, txErr = w.AppendTx(
-			ctx,
-			tx,
-			aggregateID,
-			eventName,
-			expectedVersion,
-			previousState,
-			newState,
-		)
-		return txErr
+) (asynxmd.Event[T], error) {
+	pending := &eventAppend[T]{
+		writer:          w,
+		aggregateID:     aggregateID,
+		eventName:       eventName,
+		expectedVersion: expectedVersion,
+		previousState:   previousState,
+		newState:        newState,
 	}
-
-	err = w.EventStore().Atomically(
+	err := w.EventStore().Atomically(
 		ctx,
-		appendInTx,
+		pending.inTransaction(ctx),
 	)
 	if err != nil {
 		return asynxmd.Event[T]{},
 			err
 	}
 
-	return evt,
+	return pending.evt,
 		nil
 }
 

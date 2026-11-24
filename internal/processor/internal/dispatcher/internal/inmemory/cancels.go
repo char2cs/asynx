@@ -7,42 +7,35 @@ import (
 
 type cancels struct {
 	mu     sync.Mutex
-	next   uint64
-	live   map[uint64]context.CancelFunc
+	live   map[*liveCancel]struct{}
 	closed bool
 }
 
 func newCancels() *cancels {
-	return &cancels{live: make(map[uint64]context.CancelFunc)}
+	return &cancels{live: make(map[*liveCancel]struct{})}
 }
 
 func (c *cancels) add(
-	cancel context.CancelFunc,
-) (release context.CancelFunc) {
+	live *liveCancel,
+) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		cancel()
-		return cancel
+		live.cancel()
+		return
 	}
 
-	c.next++
-	id := c.next
-	c.live[id] = cancel
+	c.live[live] = struct{}{}
 	c.mu.Unlock()
-	return func() {
-		c.remove(id)
-		cancel()
-	}
 }
 
 func (c *cancels) remove(
-	id uint64,
+	live *liveCancel,
 ) {
 	c.mu.Lock()
 	delete(
 		c.live,
-		id,
+		live,
 	)
 	c.mu.Unlock()
 }
@@ -55,10 +48,10 @@ func (c *cancels) cancelAll() {
 		0,
 		len(c.live),
 	)
-	for _, cancel := range c.live {
+	for live := range c.live {
 		pending = append(
 			pending,
-			cancel,
+			live.cancel,
 		)
 	}
 

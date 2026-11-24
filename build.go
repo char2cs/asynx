@@ -263,16 +263,9 @@ func (b *Builder[T]) finish(
 	built *instance[T],
 	proc processor.Processor[T],
 ) error {
-	register := func(
-		fn models.ForgetHandler[T],
-	) error {
-		_, err := built.OnForget(fn)
-		return err
-	}
-
 	err := firsterror.Of(
 		b.forgetHandlers,
-		register,
+		built.subscribeForget,
 	)
 	if err != nil {
 		return err

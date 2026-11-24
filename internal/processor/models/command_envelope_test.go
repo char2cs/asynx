@@ -178,19 +178,31 @@ func TestCommandEnvelope_APanickingExecutorStillReleasesTheWorker(
 ) {
 	envelope := newEnvelope()
 	close(envelope.Turn)
-	func() {
-		defer func() { _ = recover() }()
-		envelope.Execute(
-			context.Background(),
-			&countingExecutor{panic: true},
-		)
-	}()
+	recovered := executeRecovering(
+		envelope,
+		&countingExecutor{panic: true},
+	)
+	if recovered == nil {
+		t.Fatal("the executor's panic did not reach the sender")
+	}
 
 	requireClosed(
 		t,
 		envelope.Done,
 		"Done",
 	)
+}
+
+func executeRecovering(
+	envelope *models.CommandEnvelope[mocks.Order],
+	executor models.Executor[mocks.Order],
+) (recovered any) {
+	defer func() { recovered = recover() }()
+	envelope.Execute(
+		context.Background(),
+		executor,
+	)
+	return nil
 }
 
 func noWait(

@@ -4,7 +4,9 @@ import (
 	"github.com/char2cs/asynx/models"
 )
 
-// CancelOrderCmd cancels an Order.
+// CancelOrderCmd is the test command that cancels the Order with the given ID.
+// It is valid only for an Order that exists and is not already cancelled, emits
+// OrderCancelled and never asks for a snapshot.
 type CancelOrderCmd struct {
 	ID string
 }

@@ -15,24 +15,17 @@ import (
 func TestRetryLoop_SettlesTheJobAfterTheFirstAttempt(
 	t *testing.T,
 ) {
-	var runs atomic.Int32
 	var job jobs.Job[int]
-	settledAtSecond := make(
-		chan bool,
-		1,
-	)
-	match := func(
-		string,
-	) bool {
-		return true
+	recorder := &recordsSettlementAtSecondRun{
+		settledAtSecond: make(
+			chan bool,
+			1,
+		),
+		job: &job,
 	}
 	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
-		Match: match,
-		Handler: settledAtSecondRunHandler(
-			&runs,
-			settledAtSecond,
-			&job,
-		),
+		Match:   matchAnyEvent,
+		Handler: recorder.recordSettlement,
 	}}})
 	job, halt := f.begin(
 		t,
@@ -51,7 +44,7 @@ func TestRetryLoop_SettlesTheJobAfterTheFirstAttempt(
 		)
 	}
 
-	if !<-settledAtSecond {
+	if !<-recorder.settledAtSecond {
 		t.Fatal("the job was not settled after its first, failed attempt")
 	}
 }
@@ -59,27 +52,11 @@ func TestRetryLoop_SettlesTheJobAfterTheFirstAttempt(
 func TestRetryLoop_RetriesOnlyTheFailedSubscribers(
 	t *testing.T,
 ) {
-	var goodRuns, flakyRuns atomic.Int32
-	match2 := func(
-		string,
-	) bool {
-		return true
-	}
-	handler := func(
-		context.Context,
-		asynxmd.Event[int],
-	) error {
-		goodRuns.Add(1)
-		return nil
-	}
-	match3 := func(
-		string,
-	) bool {
-		return true
-	}
+	var good countingHandler
+	var flaky failsTwiceThenSucceeds
 	f := newFixture(asynxmd.DispatcherConfig[int]{MaxAttempts: 5, DurableSubs: []asynxmd.DurableSub[int]{
-		{Match: match2, Handler: handler},
-		{Match: match3, Handler: flakyHandler(&flakyRuns)},
+		{Match: matchAnyEvent, Handler: good.countRun},
+		{Match: matchAnyEvent, Handler: flaky.failTwiceThenSucceed},
 	}})
 	job, halt := f.begin(
 		t,
@@ -98,12 +75,12 @@ func TestRetryLoop_RetriesOnlyTheFailedSubscribers(
 		)
 	}
 
-	if goodRuns.Load() != 1 ||
-		flakyRuns.Load() != 3 {
+	if good.runs.Load() != 1 ||
+		flaky.runs.Load() != 3 {
 		t.Fatalf(
 			"good ran %d, flaky %d; want 1 and 3",
-			goodRuns.Load(),
-			flakyRuns.Load(),
+			good.runs.Load(),
+			flaky.runs.Load(),
 		)
 	}
 }
@@ -111,22 +88,10 @@ func TestRetryLoop_RetriesOnlyTheFailedSubscribers(
 func TestRetryLoop_StopsAtTheAttemptCap(
 	t *testing.T,
 ) {
-	var runs atomic.Int32
-	match4 := func(
-		string,
-	) bool {
-		return true
-	}
-	handler2 := func(
-		context.Context,
-		asynxmd.Event[int],
-	) error {
-		runs.Add(1)
-		return errors.New("down")
-	}
+	down := countingHandler{err: errors.New("down")}
 	f := newFixture(asynxmd.DispatcherConfig[int]{MaxAttempts: 4, DurableSubs: []asynxmd.DurableSub[int]{{
-		Match:   match4,
-		Handler: handler2,
+		Match:   matchAnyEvent,
+		Handler: down.countRun,
 	}}})
 	job, halt := f.begin(
 		t,
@@ -148,10 +113,10 @@ func TestRetryLoop_StopsAtTheAttemptCap(
 		)
 	}
 
-	if runs.Load() != 4 {
+	if down.runs.Load() != 4 {
 		t.Fatalf(
 			"runs = %d, want exactly the cap (4)",
-			runs.Load(),
+			down.runs.Load(),
 		)
 	}
 }
@@ -255,61 +220,33 @@ func requireParkedWait(
 	}
 }
 
-func settledAtSecondRunHandler(
-	runs *atomic.Int32,
-	settledAtSecond chan bool,
-	job *jobs.Job[int],
-) func(context.Context, asynxmd.Event[int]) error {
-	return func(
-		p0 context.Context,
-		p1 asynxmd.Event[int],
-	) error {
-		return recordSettledAtSecondRun(
-			runs,
-			settledAtSecond,
-			job,
-			p0,
-			p1,
-		)
-	}
+type recordsSettlementAtSecondRun struct {
+	runs            atomic.Int32
+	settledAtSecond chan bool
+	job             *jobs.Job[int]
 }
 
-func recordSettledAtSecondRun(
-	runs *atomic.Int32,
-	settledAtSecond chan bool,
-	job *jobs.Job[int],
-	_ context.Context,
-	_ asynxmd.Event[int],
+func (r *recordsSettlementAtSecondRun) recordSettlement(
+	context.Context,
+	asynxmd.Event[int],
 ) error {
-	if (*runs).Add(1) == 1 {
+	if r.runs.Add(1) == 1 {
 		return errors.New("not yet")
 	}
 
-	settledAtSecond <- isClosed((*job).Ticket().Settled)
+	r.settledAtSecond <- isClosed((*r.job).Ticket().Settled)
 	return nil
 }
 
-func flakyHandler(
-	flakyRuns *atomic.Int32,
-) func(context.Context, asynxmd.Event[int]) error {
-	return func(
-		p0 context.Context,
-		p1 asynxmd.Event[int],
-	) error {
-		return failTwiceThenSucceed(
-			flakyRuns,
-			p0,
-			p1,
-		)
-	}
+type failsTwiceThenSucceeds struct {
+	runs atomic.Int32
 }
 
-func failTwiceThenSucceed(
-	flakyRuns *atomic.Int32,
-	_ context.Context,
-	_ asynxmd.Event[int],
+func (f *failsTwiceThenSucceeds) failTwiceThenSucceed(
+	context.Context,
+	asynxmd.Event[int],
 ) error {
-	if (*flakyRuns).Add(1) < 3 {
+	if f.runs.Add(1) < 3 {
 		return errors.New("flaky")
 	}
 

@@ -101,6 +101,300 @@ func newJob(
 	}
 }
 
+type eventHandler = func(
+	context.Context,
+	models.Event[string],
+)
+
+type panicObserver = func(
+	context.Context,
+	models.Event[string],
+	any,
+)
+
+type timeoutObserver = func(
+	context.Context,
+	models.Event[string],
+	time.Duration,
+)
+
+func panicsWith(
+	value any,
+) eventHandler {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		panic(value)
+	}
+}
+
+func signals(
+	done chan<- struct{},
+) eventHandler {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		done <- struct{}{}
+	}
+}
+
+func sleepsFor(
+	d time.Duration,
+) eventHandler {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		time.Sleep(d)
+	}
+}
+
+func blocksUntilReleased(
+	release <-chan struct{},
+) eventHandler {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		<-release
+	}
+}
+
+func announcesStartThenBlocks(
+	started chan<- struct{},
+	release <-chan struct{},
+) eventHandler {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		close(started)
+		<-release
+	}
+}
+
+func blocksUntilReleasedThenPanics(
+	release <-chan struct{},
+	value any,
+) eventHandler {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		<-release
+		panic(value)
+	}
+}
+
+func countsCallsThenPanics(
+	calls *atomic.Int32,
+	value any,
+) eventHandler {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		calls.Add(1)
+		panic(value)
+	}
+}
+
+func sendsContext(
+	received chan<- context.Context,
+) eventHandler {
+	return func(
+		got context.Context,
+		_ models.Event[string],
+	) {
+		received <- got
+	}
+}
+
+func sendsContextThenPanics(
+	received chan<- context.Context,
+	value any,
+) eventHandler {
+	return func(
+		got context.Context,
+		_ models.Event[string],
+	) {
+		received <- got
+		panic(value)
+	}
+}
+
+func sendsContextOnPanic(
+	received chan<- context.Context,
+) panicObserver {
+	return func(
+		got context.Context,
+		_ models.Event[string],
+		_ any,
+	) {
+		received <- got
+	}
+}
+
+func forwardsPanicValue(
+	got chan<- any,
+) panicObserver {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+		value any,
+	) {
+		got <- value
+	}
+}
+
+func countsPanics(
+	panics *atomic.Int32,
+) panicObserver {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+		_ any,
+	) {
+		panics.Add(1)
+	}
+}
+
+func panicsWhenObservingPanic(
+	value any,
+) panicObserver {
+	return func(
+		context.Context,
+		models.Event[string],
+		any,
+	) {
+		panic(value)
+	}
+}
+
+func signalsTimeout(
+	fired chan<- struct{},
+) timeoutObserver {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+		_ time.Duration,
+	) {
+		fired <- struct{}{}
+	}
+}
+
+func countsTimeouts(
+	timeouts *atomic.Int32,
+) timeoutObserver {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+		_ time.Duration,
+	) {
+		timeouts.Add(1)
+	}
+}
+
+func sendsContextOnTimeout(
+	observed chan<- context.Context,
+) timeoutObserver {
+	return func(
+		got context.Context,
+		_ models.Event[string],
+		_ time.Duration,
+	) {
+		observed <- got
+	}
+}
+
+func releasesThenPanicsWhenObservingTimeout(
+	release chan struct{},
+	value any,
+) timeoutObserver {
+	return func(
+		context.Context,
+		models.Event[string],
+		time.Duration,
+	) {
+		close(release)
+		panic(value)
+	}
+}
+
+func forwardsRecoveredValue(
+	got chan<- any,
+) func(any) {
+	return func(
+		value any,
+	) {
+		got <- value
+	}
+}
+
+func panicsWhenRecoveredValueArrives(
+	value any,
+) func(any) {
+	return func(
+		any,
+	) {
+		panic(value)
+	}
+}
+
+func signalsOnTimeout(
+	fired chan<- struct{},
+) func() {
+	return func() {
+		fired <- struct{}{}
+	}
+}
+
+func reportingPanic(
+	value any,
+	job *exec.HandlerJob[string],
+) func() {
+	return func() {
+		exec.OnHandlerPanic[string](
+			value,
+			job,
+		)
+	}
+}
+
+func reportingTimeout(
+	event models.Event[string],
+	timeout time.Duration,
+) func() {
+	return func() {
+		exec.OnHandlerTimeout[string](
+			event,
+			timeout,
+		)
+	}
+}
+
+type jobRun struct {
+	job     *exec.HandlerJob[string]
+	started <-chan struct{}
+}
+
+func (r jobRun) untilDone() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go exec.Handler(
+		context.Background(),
+		&wg,
+		r.job,
+	)
+	if r.started != nil {
+		<-r.started
+	}
+
+	wg.Wait()
+}
+
 func TestHandler_Normal(
 	t *testing.T,
 ) {
@@ -108,26 +402,13 @@ func TestHandler_Normal(
 		chan struct{},
 		1,
 	)
-	newJobFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		called <- struct{}{}
-	}
 	job := newJob(
-		newJobFn,
+		signals(called),
 		nil,
 		0,
 	)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go exec.Handler(
-		context.Background(),
-		&wg,
-		job,
-	)
-	wg.Wait()
+	jobRun{job: job}.untilDone()
 
 	select {
 	case <-called:
@@ -139,33 +420,15 @@ func TestHandler_Normal(
 func TestHandler_PanicNoFallbackNoTimeout(
 	t *testing.T,
 ) {
-	newJobFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("boom")
-	}
 	job := newJob(
-		newJobFn,
+		panicsWith("boom"),
 		nil,
 		0,
 	)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	var output string
-	captureStderrFn := func() {
-		go exec.Handler(
-			context.Background(),
-			&wg,
-			job,
-		)
-		wg.Wait()
-	}
-	output = captureStderr(
+	output := captureStderr(
 		t,
-		captureStderrFn,
+		jobRun{job: job}.untilDone,
 	)
 	if !strings.Contains(
 		output,
@@ -195,37 +458,15 @@ func TestHandler_PanicWithFallback(
 		chan struct{},
 		1,
 	)
-	newJobFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("oops")
-	}
-	newJobFn2 := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		fallbackCalled <- struct{}{}
-	}
 	job := newJob(
-		newJobFn,
-		newJobFn2,
+		panicsWith("oops"),
+		signals(fallbackCalled),
 		0,
 	)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	captureStderrFn := func() {
-		go exec.Handler(
-			context.Background(),
-			&wg,
-			job,
-		)
-		wg.Wait()
-	}
 	captureStderr(
 		t,
-		captureStderrFn,
+		jobRun{job: job}.untilDone,
 	)
 
 	select {
@@ -238,33 +479,15 @@ func TestHandler_PanicWithFallback(
 func TestHandler_PanicWithTimeout(
 	t *testing.T,
 ) {
-	newJobFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("hidden")
-	}
 	job := newJob(
-		newJobFn,
+		panicsWith("hidden"),
 		nil,
 		5*time.Second,
 	)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	var output string
-	captureStderrFn := func() {
-		go exec.Handler(
-			context.Background(),
-			&wg,
-			job,
-		)
-		wg.Wait()
-	}
-	output = captureStderr(
+	output := captureStderr(
 		t,
-		captureStderrFn,
+		jobRun{job: job}.untilDone,
 	)
 	if !strings.Contains(
 		output,
@@ -280,89 +503,38 @@ func TestHandler_PanicWithTimeout(
 func TestHandler_DoublePanic(
 	t *testing.T,
 ) {
-	handler := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("primary")
-	}
-	fallbackHandler := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("fallback")
-	}
 	job := &exec.HandlerJob[string]{
-		Handler: handler,
+		Handler: panicsWith("primary"),
 
-		FallbackHandler: fallbackHandler,
+		FallbackHandler: panicsWith("fallback"),
 
 		Timeout: 0,
 		Event:   ev("test"),
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	captureStderrFn := func() {
-		go exec.Handler(
-			context.Background(),
-			&wg,
-			job,
-		)
-		wg.Wait()
-	}
 	captureStderr(
 		t,
-		captureStderrFn,
+		jobRun{job: job}.untilDone,
 	)
 }
 
 func TestHandler_DoublePanic_BothLogged(
 	t *testing.T,
 ) {
-	var panicCount int32
-	handler := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("primary")
-	}
-	fallbackHandler := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("fallback")
-	}
-	onPanic := func(
-		_ context.Context,
-		_ models.Event[string],
-		_ any,
-	) {
-		atomic.AddInt32(
-			&panicCount,
-			1,
-		)
-	}
+	var panics atomic.Int32
 	job := &exec.HandlerJob[string]{
-		Handler: handler,
+		Handler: panicsWith("primary"),
 
-		FallbackHandler: fallbackHandler,
+		FallbackHandler: panicsWith("fallback"),
 
 		Timeout: 0,
 		Event:   ev("test"),
-		OnPanic: onPanic,
+		OnPanic: countsPanics(&panics),
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go exec.Handler(
-		context.Background(),
-		&wg,
-		job,
-	)
-	wg.Wait()
+	jobRun{job: job}.untilDone()
 
-	if count := atomic.LoadInt32(&panicCount); count != 2 {
+	if count := panics.Load(); count != 2 {
 		t.Errorf(
 			"expected OnPanic called 2 times, got %d",
 			count,
@@ -373,22 +545,20 @@ func TestHandler_DoublePanic_BothLogged(
 func TestWithTimeout_ZeroTimeout(
 	t *testing.T,
 ) {
-	called := false
-	withTimeoutFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		called = true
-	}
+	called := make(
+		chan struct{},
+		1,
+	)
 	exec.WithTimeout(
 		context.Background(),
-		withTimeoutFn,
+		signals(called),
 		ev("x"),
 		0,
 		nil,
 		nil,
 	)
-	if !called {
+
+	if _, ok := receiveNow(called); !ok {
 		t.Error("handler not called with zero timeout")
 	}
 }
@@ -400,15 +570,9 @@ func TestWithTimeout_FinishesBeforeTimeout(
 		chan struct{},
 		1,
 	)
-	withTimeoutFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		called <- struct{}{}
-	}
 	exec.WithTimeout(
 		context.Background(),
-		withTimeoutFn,
+		signals(called),
 		ev("x"),
 		5*time.Second,
 		nil,
@@ -432,21 +596,16 @@ func TestWithTimeout_HandlerTimesOut(
 	)
 	block := make(chan struct{})
 	defer close(block)
-	withTimeoutFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		close(started)
-		<-block
-	}
-	withTimeoutFn2 := func() { timedOut <- struct{}{} }
 	exec.WithTimeout(
 		context.Background(),
-		withTimeoutFn,
+		announcesStartThenBlocks(
+			started,
+			block,
+		),
 		ev("slow-event"),
 		20*time.Millisecond,
 		nil,
-		withTimeoutFn2,
+		signalsOnTimeout(timedOut),
 	)
 	<-started
 
@@ -460,15 +619,9 @@ func TestWithTimeout_HandlerTimesOut(
 func TestWithTimeout_PanicInsideGoroutine(
 	t *testing.T,
 ) {
-	withTimeoutFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("inner")
-	}
 	exec.WithTimeout(
 		context.Background(),
-		withTimeoutFn,
+		panicsWith("inner"),
 		ev("x"),
 		5*time.Second,
 		nil,
@@ -483,23 +636,12 @@ func TestWithTimeout_PanicCallsOnPanic(
 		chan any,
 		1,
 	)
-	withTimeoutFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("boom")
-	}
-	withTimeoutFn2 := func(
-		v any,
-	) {
-		got <- v
-	}
 	exec.WithTimeout(
 		context.Background(),
-		withTimeoutFn,
+		panicsWith("boom"),
 		ev("x"),
 		5*time.Second,
-		withTimeoutFn2,
+		forwardsRecoveredValue(got),
 		nil,
 	)
 
@@ -517,40 +659,17 @@ func TestHandler_CustomPanicCallback(
 		chan any,
 		1,
 	)
-	handler := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("custom-panic")
-	}
-	onPanic := func(
-		_ context.Context,
-		_ models.Event[string],
-		v any,
-	) {
-		got <- v
-	}
 	job := &exec.HandlerJob[string]{
-		Handler: handler,
+		Handler: panicsWith("custom-panic"),
 
 		Timeout: 0,
 		Event:   ev("test"),
-		OnPanic: onPanic,
+		OnPanic: forwardsPanicValue(got),
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	captureStderrFn := func() {
-		go exec.Handler(
-			context.Background(),
-			&wg,
-			job,
-		)
-		wg.Wait()
-	}
 	output := captureStderr(
 		t,
-		captureStderrFn,
+		jobRun{job: job}.untilDone,
 	)
 	if strings.Contains(
 		output,
@@ -575,34 +694,22 @@ func TestHandler_DefaultTimeoutCallback(
 	started := make(chan struct{})
 	block := make(chan struct{})
 	defer close(block)
-	handler := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		close(started)
-		<-block
-	}
 	job := &exec.HandlerJob[string]{
-		Handler: handler,
+		Handler: announcesStartThenBlocks(
+			started,
+			block,
+		),
 
 		Timeout: 20 * time.Millisecond,
 		Event:   ev("SlowEvent"),
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	captureStderrFn := func() {
-		go exec.Handler(
-			context.Background(),
-			&wg,
-			job,
-		)
-		<-started
-		wg.Wait()
-	}
 	output := captureStderr(
 		t,
-		captureStderrFn,
+		jobRun{
+			job:     job,
+			started: started,
+		}.untilDone,
 	)
 	if !strings.Contains(
 		output,
@@ -625,42 +732,23 @@ func TestHandler_CustomTimeoutCallback(
 	started := make(chan struct{})
 	block := make(chan struct{})
 	defer close(block)
-	handler := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		close(started)
-		<-block
-	}
-	onTimeout := func(
-		_ context.Context,
-		_ models.Event[string],
-		_ time.Duration,
-	) {
-		fired <- struct{}{}
-	}
 	job := &exec.HandlerJob[string]{
-		Handler: handler,
+		Handler: announcesStartThenBlocks(
+			started,
+			block,
+		),
 
 		Timeout:   20 * time.Millisecond,
 		Event:     ev("test"),
-		OnTimeout: onTimeout,
+		OnTimeout: signalsTimeout(fired),
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	captureStderrFn := func() {
-		go exec.Handler(
-			context.Background(),
-			&wg,
-			job,
-		)
-		<-started
-		wg.Wait()
-	}
 	output := captureStderr(
 		t,
-		captureStderrFn,
+		jobRun{
+			job:     job,
+			started: started,
+		}.untilDone,
 	)
 	if strings.Contains(
 		output,
@@ -688,15 +776,12 @@ func TestOnHandlerPanic_Smoke(
 		0,
 	)
 	job.Event = ev("MyEvent")
-	captureStderrFn := func() {
-		exec.OnHandlerPanic[string](
-			"something bad",
-			job,
-		)
-	}
 	output := captureStderr(
 		t,
-		captureStderrFn,
+		reportingPanic(
+			"something bad",
+			job,
+		),
 	)
 	if !strings.Contains(
 		output,
@@ -732,16 +817,12 @@ func TestOnHandlerPanic_Smoke(
 func TestOnHandlerTimeout_Smoke(
 	t *testing.T,
 ) {
-	timeout := 42 * time.Millisecond
-	captureStderrFn := func() {
-		exec.OnHandlerTimeout[string](
-			ev("SlowEvent"),
-			timeout,
-		)
-	}
 	output := captureStderr(
 		t,
-		captureStderrFn,
+		reportingTimeout(
+			ev("SlowEvent"),
+			42*time.Millisecond,
+		),
 	)
 	if !strings.Contains(
 		output,
@@ -777,64 +858,29 @@ func TestOnHandlerTimeout_Smoke(
 func TestWithTimeout_PanicCallbackPanics(
 	t *testing.T,
 ) {
-	done := make(chan struct{})
-	withTimeoutFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("handler panics")
-	}
-	withTimeoutFn2 := func(
-		_ any,
-	) {
-		panic("callback panics")
-	}
 	exec.WithTimeout(
 		context.Background(),
-		withTimeoutFn,
+		panicsWith("handler panics"),
 		ev("x"),
 		5*time.Second,
-		withTimeoutFn2,
+		panicsWhenRecoveredValueArrives("callback panics"),
 		nil,
 	)
-	close(done)
 }
 
 func TestHandler_PanicInAnObserverLeavesATraceOnStderr(
 	t *testing.T,
 ) {
-	handler := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("handler")
-	}
-	onPanic := func(
-		context.Context,
-		models.Event[string],
-		any,
-	) {
-		panic("observer failure")
-	}
 	job := newJob(
-		handler,
+		panicsWith("handler"),
 		nil,
 		0,
 	)
-	job.OnPanic = onPanic
+	job.OnPanic = panicsWhenObservingPanic("observer failure")
 
-	runJob := func() {
-		var wg sync.WaitGroup
-		wg.Add(1)
-		exec.Handler(
-			context.Background(),
-			&wg,
-			job,
-		)
-	}
 	out := captureStderr(
 		t,
-		runJob,
+		jobRun{job: job}.untilDone,
 	)
 	if !strings.Contains(
 		out,
@@ -853,24 +899,11 @@ func TestHandler_PanicInTheObserversIsSwallowed(
 	var wg sync.WaitGroup
 
 	wg.Add(1)
-	handler := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("handler")
-	}
-	onPanic := func(
-		context.Context,
-		models.Event[string],
-		any,
-	) {
-		panic("observer")
-	}
 	panicking := &exec.HandlerJob[string]{
-		Handler: handler,
+		Handler: panicsWith("handler"),
 
 		Event:   ev("test"),
-		OnPanic: onPanic,
+		OnPanic: panicsWhenObservingPanic("observer"),
 	}
 	go exec.Handler(
 		context.Background(),
@@ -880,26 +913,15 @@ func TestHandler_PanicInTheObserversIsSwallowed(
 
 	wg.Add(1)
 	release := make(chan struct{})
-	handler2 := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		<-release
-	}
-	onTimeout := func(
-		context.Context,
-		models.Event[string],
-		time.Duration,
-	) {
-		close(release)
-		panic("observer")
-	}
 	slow := &exec.HandlerJob[string]{
-		Handler: handler2,
+		Handler: blocksUntilReleased(release),
 
-		Timeout:   time.Millisecond,
-		Event:     ev("test"),
-		OnTimeout: onTimeout,
+		Timeout: time.Millisecond,
+		Event:   ev("test"),
+		OnTimeout: releasesThenPanicsWhenObservingTimeout(
+			release,
+			"observer",
+		),
 	}
 	go exec.Handler(
 		context.Background(),
@@ -915,32 +937,13 @@ func TestHandler_PanicInTheObserverOfTheFallbackIsSwallowed(
 ) {
 	var wg sync.WaitGroup
 	wg.Add(1)
-	handler := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("handler")
-	}
-	fallbackHandler := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("fallback")
-	}
-	onPanic := func(
-		context.Context,
-		models.Event[string],
-		any,
-	) {
-		panic("observer")
-	}
 	job := &exec.HandlerJob[string]{
-		Handler: handler,
+		Handler: panicsWith("handler"),
 
-		FallbackHandler: fallbackHandler,
+		FallbackHandler: panicsWith("fallback"),
 
 		Event:   ev("test"),
-		OnPanic: onPanic,
+		OnPanic: panicsWhenObservingPanic("observer"),
 	}
 	go exec.Handler(
 		context.Background(),
@@ -964,32 +967,15 @@ func TestHandler_PassesTheContextToHandlerFallbackAndObservers(
 		chan context.Context,
 		4,
 	)
-	handle := func(
-		got context.Context,
-		_ models.Event[string],
-	) {
-		received <- got
-		panic("boom")
-	}
-	fallback := func(
-		got context.Context,
-		_ models.Event[string],
-	) {
-		received <- got
-	}
-	onPanic := func(
-		got context.Context,
-		_ models.Event[string],
-		_ any,
-	) {
-		received <- got
-	}
 	job := newJob(
-		handle,
-		fallback,
+		sendsContextThenPanics(
+			received,
+			"boom",
+		),
+		sendsContext(received),
 		0,
 	)
-	job.OnPanic = onPanic
+	job.OnPanic = sendsContextOnPanic(received)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -1015,14 +1001,12 @@ func TestHandler_PassesTheContextToHandlerFallbackAndObservers(
 		)
 	}
 
-	isForeign := func(
-		got context.Context,
-	) bool {
-		return got != ctx
-	}
-	if slices.ContainsFunc(
+	if !slices.Equal(
 		contexts,
-		isForeign,
+		slices.Repeat(
+			[]context.Context{ctx},
+			len(contexts),
+		),
 	) {
 		t.Error("a callback got a different context")
 	}
@@ -1040,25 +1024,12 @@ func TestHandler_PassesTheContextToTheTimeoutObserver(
 		chan context.Context,
 		1,
 	)
-	slow := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		time.Sleep(50 * time.Millisecond)
-	}
-	onTimeout := func(
-		observed context.Context,
-		_ models.Event[string],
-		_ time.Duration,
-	) {
-		got <- observed
-	}
 	job := newJob(
-		slow,
+		sleepsFor(50*time.Millisecond),
 		nil,
 		time.Millisecond,
 	)
-	job.OnTimeout = onTimeout
+	job.OnTimeout = sendsContextOnTimeout(got)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -1126,14 +1097,8 @@ var stderrMu sync.Mutex
 func BenchmarkHandler_PanicRecovery(
 	b *testing.B,
 ) {
-	handler := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("bench")
-	}
 	job := &exec.HandlerJob[string]{
-		Handler: handler,
+		Handler: panicsWith("bench"),
 
 		Event: models.Event[string]{EventName: "test"},
 	}
@@ -1368,14 +1333,8 @@ func TestHandler_PanicUnderTimeoutRunsTheFallback(
 		"caller",
 	)
 	probe := newFallbackProbe()
-	handle := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("boom")
-	}
 	job := newJob(
-		handle,
+		panicsWith("boom"),
 		probe.fallback,
 		5*time.Second,
 	)
@@ -1419,25 +1378,13 @@ func TestHandler_TimeoutRunsTheFallbackAndAbandonsThePrimary(
 	)
 	probe := newFallbackProbe()
 	release := make(chan struct{})
-	handle := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		<-release
-	}
 	var timeouts atomic.Int32
 	job := newJob(
-		handle,
+		blocksUntilReleased(release),
 		probe.fallback,
 		10*time.Millisecond,
 	)
-	job.OnTimeout = func(
-		_ context.Context,
-		_ models.Event[string],
-		_ time.Duration,
-	) {
-		timeouts.Add(1)
-	}
+	job.OnTimeout = countsTimeouts(&timeouts)
 
 	awaitClosed(
 		t,
@@ -1473,14 +1420,8 @@ func TestHandler_TimeoutWithWaitAfterTimeoutRunsFallbackOnlyAfterPrimaryReturns(
 	baseline := runtime.NumGoroutine()
 	probe := newFallbackProbe()
 	release := make(chan struct{})
-	handle := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		<-release
-	}
 	job := newJob(
-		handle,
+		blocksUntilReleased(release),
 		probe.fallback,
 		10*time.Millisecond,
 	)
@@ -1532,15 +1473,11 @@ func TestHandler_PrimaryPanicAfterTimeoutIsReportedWithoutASecondFallback(
 	baseline := runtime.NumGoroutine()
 	probe := newFallbackProbe()
 	release := make(chan struct{})
-	handle := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		<-release
-		panic("late")
-	}
 	job := newJob(
-		handle,
+		blocksUntilReleasedThenPanics(
+			release,
+			"late",
+		),
 		probe.fallback,
 		10*time.Millisecond,
 	)
@@ -1585,23 +1522,13 @@ func TestHandler_FallbackPanicUnderTimeoutIsReportedOnceWithoutASecondFallback(
 ) {
 	baseline := runtime.NumGoroutine()
 	var fallbackCalls atomic.Int32
-	handle := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("primary")
-	}
-	fallback := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		fallbackCalls.Add(1)
-		panic("fallback")
-	}
 	probe := newFallbackProbe()
 	job := newJob(
-		handle,
-		fallback,
+		panicsWith("primary"),
+		countsCallsThenPanics(
+			&fallbackCalls,
+			"fallback",
+		),
 		5*time.Second,
 	)
 	job.OnPanic = probe.onPanic

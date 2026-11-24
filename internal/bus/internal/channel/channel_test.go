@@ -99,6 +99,241 @@ func closeAndWait(
 	}
 }
 
+type eventHandler = func(
+	context.Context,
+	models.Event[string],
+)
+
+func panicsWith(
+	value any,
+) eventHandler {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		panic(value)
+	}
+}
+
+func countsCalls(
+	calls *atomic.Int32,
+) eventHandler {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		calls.Add(1)
+	}
+}
+
+func signals(
+	done chan<- struct{},
+) eventHandler {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		done <- struct{}{}
+	}
+}
+
+func sendsEvent(
+	received chan<- models.Event[string],
+) eventHandler {
+	return func(
+		_ context.Context,
+		event models.Event[string],
+	) {
+		received <- event
+	}
+}
+
+func forwardsContextValue(
+	received chan<- string,
+) eventHandler {
+	return func(
+		ctx context.Context,
+		_ models.Event[string],
+	) {
+		forwardCtxValue(
+			ctx,
+			received,
+		)
+	}
+}
+
+func blocksUntilReleased(
+	release <-chan struct{},
+) eventHandler {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		<-release
+	}
+}
+
+func announcesStartThenBlocks(
+	started chan<- struct{},
+	release <-chan struct{},
+) eventHandler {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		close(started)
+		<-release
+	}
+}
+
+func blocksThenMarks(
+	release <-chan struct{},
+	finished *atomic.Bool,
+) eventHandler {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		<-release
+		finished.Store(true)
+	}
+}
+
+func announcesStartBlocksThenMarks(
+	started chan<- struct{},
+	release <-chan struct{},
+	finished *atomic.Bool,
+) eventHandler {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		close(started)
+		<-release
+		finished.Store(true)
+	}
+}
+
+func forwardsPanicValue(
+	got chan<- any,
+) models.PanicHandler[string] {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+		value any,
+	) {
+		got <- value
+	}
+}
+
+func marksPanicSeen(
+	seen *atomic.Bool,
+) models.PanicHandler[string] {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+		_ any,
+	) {
+		seen.Store(true)
+	}
+}
+
+func signalsThenPanicsWhenObservingPanic(
+	called chan<- struct{},
+	value any,
+) models.PanicHandler[string] {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+		_ any,
+	) {
+		called <- struct{}{}
+		panic(value)
+	}
+}
+
+func signalsTimeout(
+	fired chan<- struct{},
+) models.TimeoutHandler[string] {
+	return func(
+		_ context.Context,
+		_ models.Event[string],
+		_ time.Duration,
+	) {
+		fired <- struct{}{}
+	}
+}
+
+func closesOnFirstTimeout(
+	timeouts *atomic.Int32,
+	timedOut chan struct{},
+) models.TimeoutHandler[string] {
+	return func(
+		context.Context,
+		models.Event[string],
+		time.Duration,
+	) {
+		closeOnFirst(
+			timeouts,
+			timedOut,
+		)
+	}
+}
+
+func countsAndReportsTimeout(
+	timeouts *atomic.Int32,
+	reported chan<- struct{},
+) models.TimeoutHandler[string] {
+	return func(
+		context.Context,
+		models.Event[string],
+		time.Duration,
+	) {
+		timeouts.Add(1)
+		reported <- struct{}{}
+	}
+}
+
+type busClient struct {
+	bus   models.Bus[string]
+	ready <-chan struct{}
+}
+
+func (c busClient) publishTest() {
+	c.bus.Publish(
+		context.Background(),
+		ev("test"),
+	)
+}
+
+func (c busClient) publishSyncTest() {
+	c.bus.PublishSync(
+		context.Background(),
+		ev("test"),
+	)
+}
+
+func (c busClient) subscribeIgnoringEvents() {
+	c.bus.Subscribe(
+		"test",
+		ignoresEvents,
+	)
+}
+
+func (c busClient) publishOrderCreatedOnceReady() {
+	<-c.ready
+	c.bus.Publish(
+		context.Background(),
+		ev("order.created"),
+	)
+}
+
+func ignoresEvents(
+	_ context.Context,
+	_ models.Event[string],
+) {
+}
+
 var _ models.Bus[string] = (*channel.Bus[string])(nil)
 
 func TestSubscribeEmptyPattern(
@@ -231,18 +466,8 @@ func TestSubscribeWithFallback(
 		chan struct{},
 		1,
 	)
-	subscribeFn := func(
-		_ context.Context,
-		e models.Event[string],
-	) {
-		panic("boom")
-	}
-	withFallbackFn := func(
-		_ context.Context,
-		e models.Event[string],
-	) {
-		fallbackCalled <- struct{}{}
-	}
+	subscribeFn := panicsWith("boom")
+	withFallbackFn := signals(fallbackCalled)
 	_, err := b.Subscribe(
 		"test",
 		subscribeFn,
@@ -279,13 +504,10 @@ func TestSubscribeWithHandlerTimeout(
 	started := make(chan struct{})
 	block := make(chan struct{})
 	defer close(block)
-	subscribeFn := func(
-		_ context.Context,
-		e models.Event[string],
-	) {
-		close(started)
-		<-block
-	}
+	subscribeFn := announcesStartThenBlocks(
+		started,
+		block,
+	)
 	_, err := b.Subscribe(
 		"test",
 		subscribeFn,
@@ -323,16 +545,8 @@ func TestUnsubscribeRemovesHandler(
 ) {
 	b := newBus[string]()
 
-	var called int32
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		atomic.AddInt32(
-			&called,
-			1,
-		)
-	}
+	var called atomic.Int32
+	subscribeFn := countsCalls(&called)
 	id, _ := b.Subscribe(
 		"test",
 		subscribeFn,
@@ -348,7 +562,7 @@ func TestUnsubscribeRemovesHandler(
 		b,
 	)
 
-	if atomic.LoadInt32(&called) != 0 {
+	if called.Load() != 0 {
 		t.Error("handler called after unsubscribe")
 	}
 }
@@ -449,12 +663,7 @@ func TestPublishExactMatch(
 		chan struct{},
 		1,
 	)
-	subscribeFn := func(
-		_ context.Context,
-		e models.Event[string],
-	) {
-		called <- struct{}{}
-	}
+	subscribeFn := signals(called)
 	b.Subscribe(
 		"OrderPlaced",
 		subscribeFn,
@@ -481,16 +690,8 @@ func TestPublishExactMatchNoFalsePositive(
 ) {
 	b := newBus[string]()
 
-	var called int32
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		atomic.AddInt32(
-			&called,
-			1,
-		)
-	}
+	var called atomic.Int32
+	subscribeFn := countsCalls(&called)
 	b.Subscribe(
 		"OrderPlaced",
 		subscribeFn,
@@ -505,7 +706,7 @@ func TestPublishExactMatchNoFalsePositive(
 		b,
 	)
 
-	if atomic.LoadInt32(&called) != 0 {
+	if called.Load() != 0 {
 		t.Error("handler called for non-matching event")
 	}
 }
@@ -515,16 +716,8 @@ func TestPublishRegexMatch(
 ) {
 	b := newBus[string]()
 
-	var count int32
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		atomic.AddInt32(
-			&count,
-			1,
-		)
-	}
+	var count atomic.Int32
+	subscribeFn := countsCalls(&count)
 	b.Subscribe(
 		"^Order.*",
 		subscribeFn,
@@ -547,10 +740,10 @@ func TestPublishRegexMatch(
 		b,
 	)
 
-	if atomic.LoadInt32(&count) != 2 {
+	if count.Load() != 2 {
 		t.Errorf(
 			"expected 2 calls, got %d",
-			count,
+			count.Load(),
 		)
 	}
 }
@@ -560,16 +753,8 @@ func TestPublishMultipleHandlers(
 ) {
 	b := newBus[string]()
 
-	var count int32
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		atomic.AddInt32(
-			&count,
-			1,
-		)
-	}
+	var count atomic.Int32
+	subscribeFn := countsCalls(&count)
 	for range 3 {
 		b.Subscribe(
 			"test",
@@ -586,10 +771,10 @@ func TestPublishMultipleHandlers(
 		b,
 	)
 
-	if atomic.LoadInt32(&count) != 3 {
+	if count.Load() != 3 {
 		t.Errorf(
 			"expected 3 handler calls, got %d",
-			count,
+			count.Load(),
 		)
 	}
 }
@@ -603,12 +788,7 @@ func TestPublishEventDataPropagated(
 		chan models.Event[string],
 		1,
 	)
-	subscribeFn := func(
-		_ context.Context,
-		e models.Event[string],
-	) {
-		received <- e
-	}
+	subscribeFn := sendsEvent(received)
 	b.Subscribe(
 		"test",
 		subscribeFn,
@@ -717,15 +897,7 @@ func TestPublish_CtxPropagatedToHandler(
 		chan string,
 		1,
 	)
-	subscribeFn := func(
-		ctx context.Context,
-		_ models.Event[string],
-	) {
-		forwardCtxValue(
-			ctx,
-			received,
-		)
-	}
+	subscribeFn := forwardsContextValue(received)
 	b.Subscribe(
 		"test",
 		subscribeFn,
@@ -769,21 +941,8 @@ func TestPublish_CtxPropagatedToFallback(
 		chan string,
 		1,
 	)
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("boom")
-	}
-	withFallbackFn := func(
-		ctx context.Context,
-		_ models.Event[string],
-	) {
-		forwardCtxValue(
-			ctx,
-			received,
-		)
-	}
+	subscribeFn := panicsWith("boom")
+	withFallbackFn := forwardsContextValue(received)
 	b.Subscribe(
 		"test",
 		subscribeFn,
@@ -826,22 +985,11 @@ func TestChannelBus_WithPanicHandler(
 		chan any,
 		1,
 	)
-	withPanicHandlerFn := func(
-		_ context.Context,
-		_ models.Event[string],
-		v any,
-	) {
-		got <- v
-	}
+	withPanicHandlerFn := forwardsPanicValue(got)
 	b := bus.New[string](
 		bus.WithPanicHandler[string](withPanicHandlerFn),
 	)
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("bus-panic")
-	}
+	subscribeFn := panicsWith("bus-panic")
 	b.Subscribe(
 		"test",
 		subscribeFn,
@@ -880,23 +1028,14 @@ func TestChannelBus_WithTimeoutHandler(
 	started := make(chan struct{})
 	block := make(chan struct{})
 	defer close(block)
-	withTimeoutHandlerFn := func(
-		_ context.Context,
-		_ models.Event[string],
-		_ time.Duration,
-	) {
-		fired <- struct{}{}
-	}
+	withTimeoutHandlerFn := signalsTimeout(fired)
 	b := bus.New[string](
 		bus.WithTimeoutHandler[string](withTimeoutHandlerFn),
 	)
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		close(started)
-		<-block
-	}
+	subscribeFn := announcesStartThenBlocks(
+		started,
+		block,
+	)
 	b.Subscribe(
 		"test",
 		subscribeFn,
@@ -927,26 +1066,13 @@ func TestHandlerPanicDoesNotBlockOtherHandlers(
 ) {
 	b := newBus[string]()
 
-	var normalCalled int32
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("boom")
-	}
+	var normalCalled atomic.Int32
+	subscribeFn := panicsWith("boom")
 	b.Subscribe(
 		"test",
 		subscribeFn,
 	)
-	subscribeFn2 := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		atomic.AddInt32(
-			&normalCalled,
-			1,
-		)
-	}
+	subscribeFn2 := countsCalls(&normalCalled)
 	b.Subscribe(
 		"test",
 		subscribeFn2,
@@ -961,7 +1087,7 @@ func TestHandlerPanicDoesNotBlockOtherHandlers(
 		b,
 	)
 
-	if atomic.LoadInt32(&normalCalled) != 1 {
+	if normalCalled.Load() != 1 {
 		t.Error("normal handler not called after sibling handler panic")
 	}
 }
@@ -975,18 +1101,8 @@ func TestFallbackCalledOnPanic(
 		chan struct{},
 		1,
 	)
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("oops")
-	}
-	withFallbackFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		fallbackCalled <- struct{}{}
-	}
+	subscribeFn := panicsWith("oops")
+	withFallbackFn := signals(fallbackCalled)
 	b.Subscribe(
 		"test",
 		subscribeFn,
@@ -1018,18 +1134,8 @@ func TestFallbackReceivesOriginalEvent(
 		chan models.Event[string],
 		1,
 	)
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("oops")
-	}
-	withFallbackFn := func(
-		_ context.Context,
-		e models.Event[string],
-	) {
-		received <- e
-	}
+	subscribeFn := panicsWith("oops")
+	withFallbackFn := sendsEvent(received)
 	b.Subscribe(
 		"test",
 		subscribeFn,
@@ -1066,16 +1172,8 @@ func TestInvalidRegexTreatedAsNoMatch(
 ) {
 	b := newBus[string]()
 
-	var called int32
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		atomic.AddInt32(
-			&called,
-			1,
-		)
-	}
+	var called atomic.Int32
+	subscribeFn := countsCalls(&called)
 	b.Subscribe(
 		"^Order[",
 		subscribeFn,
@@ -1090,7 +1188,7 @@ func TestInvalidRegexTreatedAsNoMatch(
 		b,
 	)
 
-	if atomic.LoadInt32(&called) != 0 {
+	if called.Load() != 0 {
 		t.Error("handler called for subscription with invalid regex")
 	}
 }
@@ -1100,16 +1198,8 @@ func TestRegexAlternation(
 ) {
 	b := newBus[string]()
 
-	var count int32
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		atomic.AddInt32(
-			&count,
-			1,
-		)
-	}
+	var count atomic.Int32
+	subscribeFn := countsCalls(&count)
 	b.Subscribe(
 		"^(Order|Payment).*",
 		subscribeFn,
@@ -1132,10 +1222,10 @@ func TestRegexAlternation(
 		b,
 	)
 
-	if atomic.LoadInt32(&count) != 2 {
+	if count.Load() != 2 {
 		t.Errorf(
 			"expected 2 calls, got %d",
-			count,
+			count.Load(),
 		)
 	}
 }
@@ -1145,16 +1235,8 @@ func TestLazyPatternCompilationCached(
 ) {
 	b := newBus[string]()
 
-	var count int32
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		atomic.AddInt32(
-			&count,
-			1,
-		)
-	}
+	var count atomic.Int32
+	subscribeFn := countsCalls(&count)
 	b.Subscribe(
 		"^Event.*",
 		subscribeFn,
@@ -1172,10 +1254,10 @@ func TestLazyPatternCompilationCached(
 		b,
 	)
 
-	if atomic.LoadInt32(&count) != 5 {
+	if count.Load() != 5 {
 		t.Errorf(
 			"expected 5 calls, got %d",
-			count,
+			count.Load(),
 		)
 	}
 }
@@ -1185,16 +1267,8 @@ func TestInvalidRegexCompilationCached(
 ) {
 	b := newBus[string]()
 
-	var called int32
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		atomic.AddInt32(
-			&called,
-			1,
-		)
-	}
+	var called atomic.Int32
+	subscribeFn := countsCalls(&called)
 	b.Subscribe(
 		"^Order[",
 		subscribeFn,
@@ -1212,7 +1286,7 @@ func TestInvalidRegexCompilationCached(
 		b,
 	)
 
-	if atomic.LoadInt32(&called) != 0 {
+	if called.Load() != 0 {
 		t.Error("handler called for subscription with invalid regex")
 	}
 }
@@ -1224,13 +1298,10 @@ func TestCloseWaitsForHandlers(
 
 	var handlerDone atomic.Bool
 	block := make(chan struct{})
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		<-block
-		handlerDone.Store(true)
-	}
+	subscribeFn := blocksThenMarks(
+		block,
+		&handlerDone,
+	)
 	b.Subscribe(
 		"test",
 		subscribeFn,
@@ -1265,12 +1336,7 @@ func TestCloseDeadlineExceeded(
 
 	block := make(chan struct{})
 	defer close(block)
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		<-block
-	}
+	subscribeFn := blocksUntilReleased(block)
 	b.Subscribe(
 		"test",
 		subscribeFn,
@@ -1356,28 +1422,15 @@ func TestConcurrentPublishes(
 ) {
 	b := newBus[string]()
 
-	var count int32
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		atomic.AddInt32(
-			&count,
-			1,
-		)
-	}
+	var count atomic.Int32
+	subscribeFn := countsCalls(&count)
 	b.Subscribe(
 		"test",
 		subscribeFn,
 	)
 
 	var wg sync.WaitGroup
-	publishFn := func() {
-		b.Publish(
-			context.Background(),
-			ev("test"),
-		)
-	}
+	publishFn := busClient{bus: b}.publishTest
 	for range 100 {
 		spawn(
 			&wg,
@@ -1392,10 +1445,10 @@ func TestConcurrentPublishes(
 		b,
 	)
 
-	if atomic.LoadInt32(&count) != 100 {
+	if count.Load() != 100 {
 		t.Errorf(
 			"expected 100 handler calls, got %d",
-			count,
+			count.Load(),
 		)
 	}
 }
@@ -1406,22 +1459,9 @@ func TestConcurrentSubscribeAndPublish(
 	b := newBus[string]()
 
 	var wg sync.WaitGroup
-	subscribeFn := func() {
-		b.Subscribe(
-			"test",
-			func(
-				_ context.Context,
-				_ models.Event[string],
-			) {
-			},
-		)
-	}
-	publishFn := func() {
-		b.Publish(
-			context.Background(),
-			ev("test"),
-		)
-	}
+	client := busClient{bus: b}
+	subscribeFn := client.subscribeIgnoringEvents
+	publishFn := client.publishTest
 	for range 50 {
 		spawn(
 			&wg,
@@ -1463,12 +1503,7 @@ func TestConcurrentUnsubscribeAndPublish(
 	}
 
 	var wg sync.WaitGroup
-	publishFn := func() {
-		b.Publish(
-			context.Background(),
-			ev("test"),
-		)
-	}
+	publishFn := busClient{bus: b}.publishTest
 	for _, id := range ids {
 		spawn(
 			&wg,
@@ -1523,14 +1558,11 @@ func TestPublishSync_BlocksUntilHandlersDone(
 	var done atomic.Bool
 	block := make(chan struct{})
 	started := make(chan struct{})
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		close(started)
-		<-block
-		done.Store(true)
-	}
+	subscribeFn := announcesStartBlocksThenMarks(
+		started,
+		block,
+		&done,
+	)
 	b.Subscribe(
 		"test",
 		subscribeFn,
@@ -1569,12 +1601,7 @@ func TestPublishSync_ExactMatch(
 		chan struct{},
 		1,
 	)
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		called <- struct{}{}
-	}
+	subscribeFn := signals(called)
 	b.Subscribe(
 		"OrderPlaced",
 		subscribeFn,
@@ -1602,12 +1629,7 @@ func TestPublishSync_RegexMatch(
 	)
 
 	var count atomic.Int32
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		count.Add(1)
-	}
+	subscribeFn := countsCalls(&count)
 	b.Subscribe(
 		"^Order.*",
 		subscribeFn,
@@ -1644,12 +1666,7 @@ func TestPublishSync_MultipleHandlers(
 	)
 
 	var count atomic.Int32
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		count.Add(1)
-	}
+	subscribeFn := countsCalls(&count)
 	for range 3 {
 		b.Subscribe(
 			"test",
@@ -1761,13 +1778,7 @@ func TestPublishSync_PanicHandledDoesNotBlock(
 	t *testing.T,
 ) {
 	var panicCaught atomic.Bool
-	withPanicHandlerFn := func(
-		_ context.Context,
-		_ models.Event[string],
-		_ any,
-	) {
-		panicCaught.Store(true)
-	}
+	withPanicHandlerFn := marksPanicSeen(&panicCaught)
 	b := bus.New[string](
 		bus.WithPanicHandler[string](withPanicHandlerFn),
 	)
@@ -1775,12 +1786,7 @@ func TestPublishSync_PanicHandledDoesNotBlock(
 		t,
 		b,
 	)
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("boom")
-	}
+	subscribeFn := panicsWith("boom")
 	b.Subscribe(
 		"test",
 		subscribeFn,
@@ -1809,12 +1815,7 @@ func TestPublishSync_EventDataPropagated(
 		chan models.Event[string],
 		1,
 	)
-	subscribeFn := func(
-		_ context.Context,
-		e models.Event[string],
-	) {
-		received <- e
-	}
+	subscribeFn := sendsEvent(received)
 	b.Subscribe(
 		"test",
 		subscribeFn,
@@ -1851,24 +1852,14 @@ func TestPublishSync_ConcurrentCalls(
 	)
 
 	var count atomic.Int32
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		count.Add(1)
-	}
+	subscribeFn := countsCalls(&count)
 	b.Subscribe(
 		"test",
 		subscribeFn,
 	)
 
 	var wg sync.WaitGroup
-	publishSyncFn := func() {
-		b.PublishSync(
-			context.Background(),
-			ev("test"),
-		)
-	}
+	publishSyncFn := busClient{bus: b}.publishSyncTest
 	for range 50 {
 		spawn(
 			&wg,
@@ -1909,13 +1900,10 @@ func TestGetCompiledPattern_ConcurrentSamePattern(
 
 	var wg sync.WaitGroup
 	ready := make(chan struct{})
-	publishWhenReady := func() {
-		<-ready
-		b.Publish(
-			context.Background(),
-			ev("order.created"),
-		)
-	}
+	publishWhenReady := busClient{
+		bus:   b,
+		ready: ready,
+	}.publishOrderCreatedOnceReady
 	for range goroutines {
 		spawn(
 			&wg,
@@ -1939,14 +1927,11 @@ func TestWaitForHandlers_BlocksUntilDone(
 	var done atomic.Bool
 	block := make(chan struct{})
 	started := make(chan struct{})
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		close(started)
-		<-block
-		done.Store(true)
-	}
+	subscribeFn := announcesStartBlocksThenMarks(
+		started,
+		block,
+		&done,
+	)
 	b.Subscribe(
 		"test",
 		subscribeFn,
@@ -1975,28 +1960,19 @@ func TestPublishSync_WaitsForATimedOutHandler(
 	var timeouts atomic.Int32
 	var finished atomic.Bool
 	timedOut := make(chan struct{})
-	withTimeoutHandlerFn := func(
-		context.Context,
-		models.Event[string],
-		time.Duration,
-	) {
-		closeOnFirst(
-			&timeouts,
-			timedOut,
-		)
-	}
+	withTimeoutHandlerFn := closesOnFirstTimeout(
+		&timeouts,
+		timedOut,
+	)
 	b := bus.New[string](bus.WithTimeoutHandler[string](withTimeoutHandlerFn))
 	defer closeAndWait(
 		t,
 		b,
 	)
-	subscribeFn := func(
-		context.Context,
-		models.Event[string],
-	) {
-		<-timedOut
-		finished.Store(true)
-	}
+	subscribeFn := blocksThenMarks(
+		timedOut,
+		&finished,
+	)
 	b.Subscribe(
 		"slow",
 		subscribeFn,
@@ -2031,21 +2007,12 @@ func TestPublish_StillAbandonsATimedOutHandler(
 		chan struct{},
 		1,
 	)
-	withTimeoutHandlerFn := func(
-		context.Context,
-		models.Event[string],
-		time.Duration,
-	) {
-		timeouts.Add(1)
-		reported <- struct{}{}
-	}
+	withTimeoutHandlerFn := countsAndReportsTimeout(
+		&timeouts,
+		reported,
+	)
 	b := bus.New[string](bus.WithTimeoutHandler[string](withTimeoutHandlerFn))
-	subscribeFn := func(
-		context.Context,
-		models.Event[string],
-	) {
-		<-release
-	}
+	subscribeFn := blocksUntilReleased(release)
 	b.Subscribe(
 		"slow",
 		subscribeFn,
@@ -2081,23 +2048,14 @@ func TestChannelBus_APanicHandlerThatPanicsDoesNotCrashTheProcess(
 		chan struct{},
 		1,
 	)
-	withPanicHandlerFn := func(
-		_ context.Context,
-		_ models.Event[string],
-		_ any,
-	) {
-		called <- struct{}{}
-		panic("observer panic")
-	}
+	withPanicHandlerFn := signalsThenPanicsWhenObservingPanic(
+		called,
+		"observer panic",
+	)
 	b := bus.New[string](
 		bus.WithPanicHandler[string](withPanicHandlerFn),
 	)
-	subscribeFn := func(
-		_ context.Context,
-		_ models.Event[string],
-	) {
-		panic("handler panic")
-	}
+	subscribeFn := panicsWith("handler panic")
 	b.Subscribe(
 		"test",
 		subscribeFn,

@@ -8,18 +8,11 @@ package firsterror
 func Of[E any](
 	items []E,
 	try func(E) error,
-) error {
-	if len(items) == 0 {
-		return nil
+) (err error) {
+	for i := 0; i < len(items) &&
+		err == nil; i++ {
+		err = try(items[i])
 	}
 
-	err := try(items[0])
-	if err != nil {
-		return err
-	}
-
-	return Of(
-		items[1:],
-		try,
-	)
+	return err
 }

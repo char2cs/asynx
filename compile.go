@@ -9,47 +9,41 @@ import (
 )
 
 func (b *Builder[T]) compileSyncProjections() ([]procmodels.SyncProjection[T], error) {
-	return compileFrom(
+	return compileAll(
 		b.syncProjections,
-		0,
-		make(
-			[]procmodels.SyncProjection[T],
-			0,
-			len(b.syncProjections),
-		),
 		compileSyncProjection[T],
 	)
 }
 
-func compileFrom[D any, R any](
+func compileAll[D any, R any](
 	defs []D,
-	start int,
-	out []R,
 	compile func(int, D) (R, error),
-) ([]R, error) {
-	if start == len(defs) {
-		return out,
-			nil
+) (compiled []R, err error) {
+	compiled = make(
+		[]R,
+		0,
+		len(defs),
+	)
+	for i := 0; i < len(defs) &&
+		err == nil; i++ {
+		var next R
+		next, err = compile(
+			i,
+			defs[i],
+		)
+		compiled = append(
+			compiled,
+			next,
+		)
 	}
 
-	compiled, err := compile(
-		start,
-		defs[start],
-	)
 	if err != nil {
 		return nil,
 			err
 	}
 
-	return compileFrom(
-		defs,
-		start+1,
-		append(
-			out,
-			compiled,
-		),
-		compile,
-	)
+	return compiled,
+		nil
 }
 
 func compileSyncProjection[T any](
@@ -96,14 +90,8 @@ func (b *Builder[T]) compileDurable() ([]models.DurableSub[T], func(string) bool
 }
 
 func (b *Builder[T]) compileSubscribers() ([]models.DurableSub[T], error) {
-	return compileFrom(
+	return compileAll(
 		b.subscribers,
-		0,
-		make(
-			[]models.DurableSub[T],
-			0,
-			len(b.subscribers),
-		),
 		compileSubscriber[T],
 	)
 }

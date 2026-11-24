@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates"
+	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates/contracts"
 )
 
 func TestNew_KnowsNoAggregate(
@@ -36,16 +37,20 @@ func TestNew_AcceptsNilHooks(
 	t *testing.T,
 ) {
 	r := aggregates.New(aggregates.Hooks[*fakeItem]{})
-	admission, err := r.Enqueue(liveItem(
-		"a",
-		1,
-	))
-	if err != nil ||
+	var admission contracts.Admission
+	r.Enqueue(
+		liveItem(
+			"a",
+			1,
+		),
+		&admission,
+	)
+	if admission.Err != nil ||
 		!closed(admission.Turn) {
 		t.Fatalf(
 			"Enqueue = %+v, %v",
 			admission,
-			err,
+			admission.Err,
 		)
 	}
 }

@@ -10,6 +10,18 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
+func sendsLabel(
+	marker chan<- string,
+	label string,
+) eventHandler {
+	return func(
+		_ context.Context,
+		_ asynxmd.Event[string],
+	) {
+		marker <- label
+	}
+}
+
 func TestMakeJob_AllFieldsMapped(
 	t *testing.T,
 ) {
@@ -20,23 +32,17 @@ func TestMakeJob_AllFieldsMapped(
 		chan string,
 		2,
 	)
-	handler := func(
-		_ context.Context,
-		_ asynxmd.Event[string],
-	) {
-		marker <- "handler"
-	}
-	fallbackHandler := func(
-		_ context.Context,
-		_ asynxmd.Event[string],
-	) {
-		marker <- "fallback"
-	}
 	sub := &models.Subscription[string]{
 		Pattern: "OrderPlaced",
-		Handler: handler,
+		Handler: sendsLabel(
+			marker,
+			"handler",
+		),
 
-		FallbackHandler: fallbackHandler,
+		FallbackHandler: sendsLabel(
+			marker,
+			"fallback",
+		),
 
 		Timeout: timeout,
 	}

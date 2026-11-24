@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates"
+	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates/contracts"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
 	asynxmd "github.com/char2cs/asynx/models"
 	"maps"
@@ -225,22 +226,10 @@ func TestDeliver_GiveUpParksBeforeTheParkedErrorIsReported(
 func TestDeliver_AnAckedJobUnderAClosedHaltRunsNothing(
 	t *testing.T,
 ) {
-	var runs atomic.Int32
-	match := func(
-		string,
-	) bool {
-		return true
-	}
-	handler := func(
-		context.Context,
-		asynxmd.Event[int],
-	) error {
-		runs.Add(1)
-		return nil
-	}
+	var counted countingHandler
 	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
-		Match:   match,
-		Handler: handler,
+		Match:   matchAnyEvent,
+		Handler: counted.countRun,
 	}}})
 	job, halt := f.begin(
 		t,
@@ -263,10 +252,10 @@ func TestDeliver_AnAckedJobUnderAClosedHaltRunsNothing(
 		)
 	}
 
-	if runs.Load() != 0 {
+	if counted.runs.Load() != 0 {
 		t.Fatalf(
 			"handler ran %d times under a closed halt",
-			runs.Load(),
+			counted.runs.Load(),
 		)
 	}
 }
@@ -274,28 +263,15 @@ func TestDeliver_AnAckedJobUnderAClosedHaltRunsNothing(
 func TestDeliver_ATombstoneIsNeverDeadLettered(
 	t *testing.T,
 ) {
-	var dead atomic.Int32
-	deadLetter := func(
-		context.Context,
-		asynxmd.Event[int],
-		error,
-	) error {
-		dead.Add(1)
-		return nil
-	}
+	var deadLetters countingDeadLetter
 	f := newFixture(asynxmd.DispatcherConfig[int]{
 		DurableSubs: []asynxmd.DurableSub[int]{failing(errors.New("cannot forget"))},
 		MaxAttempts: 1,
-		DeadLetter:  deadLetter,
+		DeadLetter:  deadLetters.countCall,
 	})
-	ack := func(
-		context.Context,
-	) error {
-		return nil
-	}
 	job, halt := f.begin(
 		t,
-		tombstone(ack),
+		tombstone(acknowledgeAtOnce),
 	)
 
 	if err := f.deliverer.Deliver(
@@ -313,10 +289,10 @@ func TestDeliver_ATombstoneIsNeverDeadLettered(
 		)
 	}
 
-	if dead.Load() != 0 {
+	if deadLetters.calls.Load() != 0 {
 		t.Fatalf(
 			"dead-letter handler called %d times for a tombstone",
-			dead.Load(),
+			deadLetters.calls.Load(),
 		)
 	}
 }
@@ -324,19 +300,11 @@ func TestDeliver_ATombstoneIsNeverDeadLettered(
 func TestDeliver_AJobWithoutAnAckIsNeverDeadLetteredNorParked(
 	t *testing.T,
 ) {
-	var dead atomic.Int32
-	deadLetter2 := func(
-		context.Context,
-		asynxmd.Event[int],
-		error,
-	) error {
-		dead.Add(1)
-		return nil
-	}
+	var deadLetters countingDeadLetter
 	f := newFixture(asynxmd.DispatcherConfig[int]{
 		DurableSubs: []asynxmd.DurableSub[int]{failing(errors.New("down"))},
 		MaxAttempts: 1,
-		DeadLetter:  deadLetter2,
+		DeadLetter:  deadLetters.countCall,
 	})
 	job, halt := f.begin(
 		t,
@@ -358,11 +326,11 @@ func TestDeliver_AJobWithoutAnAckIsNeverDeadLetteredNorParked(
 		)
 	}
 
-	if dead.Load() != 0 ||
+	if deadLetters.calls.Load() != 0 ||
 		len(f.registry.Parks()) != 0 {
 		t.Fatalf(
 			"dead letters = %d, parks = %v; want neither for a nil-Ack job",
-			dead.Load(),
+			deadLetters.calls.Load(),
 			f.registry.Parks(),
 		)
 	}
@@ -371,22 +339,10 @@ func TestDeliver_AJobWithoutAnAckIsNeverDeadLetteredNorParked(
 func TestDeliver_ATombstoneReachesEverySubscriber(
 	t *testing.T,
 ) {
-	var runs atomic.Int32
-	match2 := func(
-		string,
-	) bool {
-		return false
-	}
-	handler2 := func(
-		context.Context,
-		asynxmd.Event[int],
-	) error {
-		runs.Add(1)
-		return nil
-	}
+	var counted countingHandler
 	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
-		Match:   match2,
-		Handler: handler2,
+		Match:   matchNoEvent,
+		Handler: counted.countRun,
 	}}})
 	job, halt := f.begin(
 		t,
@@ -405,10 +361,10 @@ func TestDeliver_ATombstoneReachesEverySubscriber(
 		)
 	}
 
-	if runs.Load() != 1 {
+	if counted.runs.Load() != 1 {
 		t.Fatalf(
 			"a non-matching subscriber ran %d times for a tombstone, want 1",
-			runs.Load(),
+			counted.runs.Load(),
 		)
 	}
 }
@@ -504,17 +460,10 @@ func TestDeliver_AParkDuringTheBackoffEndsTheDelivery(
 func TestDeliver_ADeadLetterHandlerPanicParksTheAggregate(
 	t *testing.T,
 ) {
-	deadLetter3 := func(
-		context.Context,
-		asynxmd.Event[int],
-		error,
-	) error {
-		panic("dead-letter store down")
-	}
 	f := newFixture(asynxmd.DispatcherConfig[int]{
 		DurableSubs: []asynxmd.DurableSub[int]{failing(errors.New("down"))},
 		MaxAttempts: 1,
-		DeadLetter:  deadLetter3,
+		DeadLetter:  panicOnDeadLetter,
 	})
 	job, halt := f.begin(
 		t,
@@ -552,15 +501,10 @@ func TestDeliver_ADeadLetterHandlerPanicParksTheAggregate(
 func TestDeliver_AHandlerPanicIsReportedAndRetried(
 	t *testing.T,
 ) {
-	var runs atomic.Int32
-	match3 := func(
-		string,
-	) bool {
-		return true
-	}
+	var panicking panicsOnFirstRun
 	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
-		Match:   match3,
-		Handler: panicOnFirstRunHandler(&runs),
+		Match:   matchAnyEvent,
+		Handler: panicking.panicThenSucceed,
 	}}})
 	job, halt := f.begin(
 		t,
@@ -580,11 +524,11 @@ func TestDeliver_AHandlerPanicIsReportedAndRetried(
 	}
 
 	if len(f.reports.panics) != 1 ||
-		runs.Load() != 2 {
+		panicking.runs.Load() != 2 {
 		t.Fatalf(
 			"panics = %v, runs = %d; want one panic then a successful retry",
 			f.reports.panics,
-			runs.Load(),
+			panicking.runs.Load(),
 		)
 	}
 }
@@ -592,24 +536,12 @@ func TestDeliver_AHandlerPanicIsReportedAndRetried(
 func TestDeliver_ATimedOutHandlerIsReportedAndWaitedFor(
 	t *testing.T,
 ) {
-	release := make(chan struct{})
-	match4 := func(
-		string,
-	) bool {
-		return true
-	}
-	handler3 := func(
-		context.Context,
-		asynxmd.Event[int],
-	) error {
-		<-release
-		return nil
-	}
+	blocked := blockedUntilReleased{release: make(chan struct{})}
 	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
 		Name:    "slow",
-		Match:   match4,
+		Match:   matchAnyEvent,
 		Timeout: time.Millisecond,
-		Handler: handler3,
+		Handler: blocked.waitForRelease,
 	}}})
 	job, halt := f.begin(
 		t,
@@ -641,7 +573,7 @@ func TestDeliver_ATimedOutHandlerIsReportedAndWaitedFor(
 	default:
 	}
 
-	close(release)
+	close(blocked.release)
 	if err := <-done; err != nil {
 		t.Fatalf(
 			"Deliver = %v",
@@ -727,8 +659,13 @@ func (f *fixture) begin(
 		request,
 		func() {},
 	)
-	if _, err := f.registry.Enqueue(job); err != nil {
-		t.Fatal(err)
+	var admission contracts.Admission
+	f.registry.Enqueue(
+		job,
+		&admission,
+	)
+	if admission.Err != nil {
+		t.Fatal(admission.Err)
 	}
 
 	halt, ok := f.registry.Begin(job)
@@ -743,14 +680,9 @@ func (f *fixture) begin(
 func acked(
 	name string,
 ) asynxmd.DispatchRequest[int] {
-	ack2 := func(
-		context.Context,
-	) error {
-		return nil
-	}
 	return asynxmd.DispatchRequest[int]{
 		Event: asynxmd.Event[int]{AggregateID: "a", Version: 1, EventName: name},
-		Ack:   ack2,
+		Ack:   acknowledgeAtOnce,
 	}
 }
 
@@ -767,21 +699,11 @@ func tombstone(
 func failing(
 	err error,
 ) asynxmd.DurableSub[int] {
-	match5 := func(
-		string,
-	) bool {
-		return true
-	}
-	handler4 := func(
-		context.Context,
-		asynxmd.Event[int],
-	) error {
-		return err
-	}
+	failer := &countingHandler{err: err}
 	return asynxmd.DurableSub[int]{
 		Name:    "failing",
-		Match:   match5,
-		Handler: handler4,
+		Match:   matchAnyEvent,
+		Handler: failer.countRun,
 	}
 }
 
@@ -860,27 +782,79 @@ type report struct {
 	parked []string
 }
 
-func panicOnFirstRunHandler(
-	runs *atomic.Int32,
-) func(context.Context, asynxmd.Event[int]) error {
-	return func(
-		p0 context.Context,
-		p1 asynxmd.Event[int],
-	) error {
-		return panicOnFirstRun(
-			runs,
-			p0,
-			p1,
-		)
-	}
+func matchAnyEvent(
+	string,
+) bool {
+	return true
 }
 
-func panicOnFirstRun(
-	runs *atomic.Int32,
-	_ context.Context,
-	_ asynxmd.Event[int],
+func matchNoEvent(
+	string,
+) bool {
+	return false
+}
+
+func acknowledgeAtOnce(
+	context.Context,
 ) error {
-	if (*runs).Add(1) == 1 {
+	return nil
+}
+
+type countingHandler struct {
+	runs atomic.Int32
+	err  error
+}
+
+func (c *countingHandler) countRun(
+	context.Context,
+	asynxmd.Event[int],
+) error {
+	c.runs.Add(1)
+	return c.err
+}
+
+type countingDeadLetter struct {
+	calls atomic.Int32
+}
+
+func (c *countingDeadLetter) countCall(
+	context.Context,
+	asynxmd.Event[int],
+	error,
+) error {
+	c.calls.Add(1)
+	return nil
+}
+
+func panicOnDeadLetter(
+	context.Context,
+	asynxmd.Event[int],
+	error,
+) error {
+	panic("dead-letter store down")
+}
+
+type blockedUntilReleased struct {
+	release chan struct{}
+}
+
+func (b *blockedUntilReleased) waitForRelease(
+	context.Context,
+	asynxmd.Event[int],
+) error {
+	<-b.release
+	return nil
+}
+
+type panicsOnFirstRun struct {
+	runs atomic.Int32
+}
+
+func (p *panicsOnFirstRun) panicThenSucceed(
+	context.Context,
+	asynxmd.Event[int],
+) error {
+	if p.runs.Add(1) == 1 {
 		panic("boom")
 	}
 

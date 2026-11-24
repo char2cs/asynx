@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates"
+	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates/contracts"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
 	asynxmd "github.com/char2cs/asynx/models"
 	"slices"
@@ -29,17 +30,12 @@ func TestPool_PublishesLiveThenDeliversThenAcks(
 	t *testing.T,
 ) {
 	f := newFixture(t)
-	ack := func(
-		context.Context,
-	) error {
-		f.journal.add("ack")
-		return nil
-	}
+	ack := journaledAck{journal: f.journal}
 	ticket := f.enqueue(
 		t,
 		event(
 			1,
-			ack,
+			ack.recordAck,
 		),
 	)
 
@@ -69,23 +65,13 @@ func TestPool_NeverAcksADeliveryThatDidNotSucceed(
 ) {
 	f := newFixture(t)
 	down := errors.New("down")
-	f.deliverer.deliver = func(
-		jobs.Job[int],
-	) error {
-		return down
-	}
-	var acks atomic.Int32
-	ack2 := func(
-		context.Context,
-	) error {
-		acks.Add(1)
-		return nil
-	}
+	f.deliverer.deliver = failingDelivery{err: down}.failDelivery
+	var acks countingAck
 	ticket := f.enqueue(
 		t,
 		event(
 			1,
-			ack2,
+			acks.countAck,
 		),
 	)
 
@@ -102,7 +88,7 @@ func TestPool_NeverAcksADeliveryThatDidNotSucceed(
 		)
 	}
 
-	if acks.Load() != 0 {
+	if acks.calls.Load() != 0 {
 		t.Fatal("a delivery that failed was acknowledged")
 	}
 }
@@ -112,16 +98,12 @@ func TestPool_AnAckFailureParksBeforeItIsReported(
 ) {
 	f := newFixture(t)
 	storeDown := errors.New("store down")
-	ack3 := func(
-		context.Context,
-	) error {
-		return storeDown
-	}
+	ack := failingAck{err: storeDown}
 	ticket := f.enqueue(
 		t,
 		event(
 			1,
-			ack3,
+			ack.failAck,
 		),
 	)
 
@@ -225,14 +207,9 @@ func TestPool_ARedeliverySkipsTheLiveSubscribers(
 	t *testing.T,
 ) {
 	f := newFixture(t)
-	ack4 := func(
-		context.Context,
-	) error {
-		return nil
-	}
 	request := event(
 		1,
-		ack4,
+		acknowledgeAtOnce,
 	)
 	request.Kind = asynxmd.DispatchRedelivery
 	ticket := f.enqueue(
@@ -265,21 +242,12 @@ func TestPool_ABusPanicIsReportedAndTheDeliveryGoesOn(
 	t *testing.T,
 ) {
 	f := newFixture(t)
-	f.bus.publish = func(
-		asynxmd.Event[int],
-	) error {
-		panic("bus exploded")
-	}
-	ack5 := func(
-		context.Context,
-	) error {
-		return nil
-	}
+	f.bus.publish = panicOnPublish
 	ticket := f.enqueue(
 		t,
 		event(
 			1,
-			ack5,
+			acknowledgeAtOnce,
 		),
 	)
 
@@ -320,21 +288,12 @@ func TestPool_ADispatcherPanicIsReportedAndEndsTheJob(
 	t *testing.T,
 ) {
 	f := newFixture(t)
-	f.deliverer.deliver = func(
-		jobs.Job[int],
-	) error {
-		panic("dispatcher bug")
-	}
-	ack6 := func(
-		context.Context,
-	) error {
-		return nil
-	}
+	f.deliverer.deliver = panicOnDelivery
 	ticket := f.enqueue(
 		t,
 		event(
 			1,
-			ack6,
+			acknowledgeAtOnce,
 		),
 	)
 
@@ -378,15 +337,10 @@ func TestPool_AParkedAckedJobRunsNothing(
 	t *testing.T,
 ) {
 	f := newFixture(t)
-	ack7 := func(
-		context.Context,
-	) error {
-		return nil
-	}
 	job := jobs.New(
 		event(
 			1,
-			ack7,
+			acknowledgeAtOnce,
 		),
 		func() {},
 	)
@@ -495,11 +449,6 @@ func TestPool_AJobAParkDroppedRunsNothingAndStillHandsItsTurnOn(
 	f := newFixture(t)
 	gate := make(chan struct{})
 	f.bus.publish = versionGate{gate: gate}.publish
-	ack := func(
-		context.Context,
-	) error {
-		return nil
-	}
 	running := f.enqueue(
 		t,
 		event(
@@ -511,7 +460,7 @@ func TestPool_AJobAParkDroppedRunsNothingAndStillHandsItsTurnOn(
 		t,
 		event(
 			2,
-			ack,
+			acknowledgeAtOnce,
 		),
 	)
 	behind := f.enqueue(
@@ -606,18 +555,12 @@ func TestPool_RunPassesItsContextToEveryStep(
 	t *testing.T,
 ) {
 	f := newFixture(t)
-	var acked context.Context
-	ack := func(
-		ctx context.Context,
-	) error {
-		acked = ctx
-		return nil
-	}
+	var ack contextKeepingAck
 	ticket := f.enqueue(
 		t,
 		event(
 			1,
-			ack,
+			ack.keepContext,
 		),
 	)
 	if err := final(
@@ -643,7 +586,7 @@ func TestPool_RunPassesItsContextToEveryStep(
 	assertSender(
 		t,
 		"ack",
-		acked,
+		ack.ctx,
 	)
 }
 
@@ -666,18 +609,14 @@ func TestPool_AReportedErrorCarriesTheContext(
 	t *testing.T,
 ) {
 	f := newFixture(t)
-	ack := func(
-		context.Context,
-	) error {
-		return errors.New("store down")
-	}
+	ack := failingAck{err: errors.New("store down")}
 	if err := final(
 		t,
 		f.enqueue(
 			t,
 			event(
 				1,
-				ack,
+				ack.failAck,
 			),
 		),
 	); err == nil {
@@ -761,9 +700,13 @@ func (f *fixture) enqueue(
 		request,
 		func() {},
 	)
-	admission, err := f.registry.Enqueue(job)
-	if err != nil {
-		t.Fatal(err)
+	var admission contracts.Admission
+	f.registry.Enqueue(
+		job,
+		&admission,
+	)
+	if admission.Err != nil {
+		t.Fatal(admission.Err)
 	}
 
 	if admission.Parked {
@@ -1020,4 +963,75 @@ func (j *journal) list() []string {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	return slices.Clone(j.entries)
+}
+
+func acknowledgeAtOnce(
+	context.Context,
+) error {
+	return nil
+}
+
+type journaledAck struct {
+	journal *journal
+}
+
+func (a journaledAck) recordAck(
+	context.Context,
+) error {
+	a.journal.add("ack")
+	return nil
+}
+
+type countingAck struct {
+	calls atomic.Int32
+}
+
+func (a *countingAck) countAck(
+	context.Context,
+) error {
+	a.calls.Add(1)
+	return nil
+}
+
+type failingAck struct {
+	err error
+}
+
+func (a failingAck) failAck(
+	context.Context,
+) error {
+	return a.err
+}
+
+type contextKeepingAck struct {
+	ctx context.Context
+}
+
+func (a *contextKeepingAck) keepContext(
+	ctx context.Context,
+) error {
+	a.ctx = ctx
+	return nil
+}
+
+type failingDelivery struct {
+	err error
+}
+
+func (d failingDelivery) failDelivery(
+	jobs.Job[int],
+) error {
+	return d.err
+}
+
+func panicOnDelivery(
+	jobs.Job[int],
+) error {
+	panic("dispatcher bug")
+}
+
+func panicOnPublish(
+	asynxmd.Event[int],
+) error {
+	panic("bus exploded")
 }

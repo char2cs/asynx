@@ -7,7 +7,9 @@ type Backlog[J any] interface {
 	// aggregate's previous job: Admission.Turn closes when that one has
 	// finished. It never blocks on handlers and never fails for a full queue.
 	//
-	// After Close it returns ErrDispatcherClosed and does nothing else.
+	// What became of the job is written into admission, in the same hold of
+	// the mutex that decided it. After Close, admission.Err is
+	// ErrDispatcherClosed and nothing else is done.
 	//
 	// A durable job (see Item.Acked) for a parked aggregate is not queued:
 	// its version is recorded as undelivered and it is marked unrun with
@@ -20,7 +22,8 @@ type Backlog[J any] interface {
 	// Begin once its Turn has closed, and then a Finish with its Done.
 	Enqueue(
 		job J,
-	) (Admission, error)
+		admission *Admission,
+	)
 
 	// Begin starts job's turn: it removes job from its aggregate's FIFO and
 	// returns the halt channel it is delivered under. Reading both under one

@@ -56,21 +56,21 @@ func asStrings(
 	return out
 }
 
+func failedOutcome(
+	_ string,
+	err error,
+) bool {
+	return err != nil
+}
+
 func wantAllFailed(
 	t testing.TB,
 	outcomes map[string]error,
 ) {
 	t.Helper()
-	failed := func(
-		_ string,
-		err error,
-	) bool {
-		return err != nil
-	}
-
 	maps.DeleteFunc(
 		outcomes,
-		failed,
+		failedOutcome,
 	)
 	if len(outcomes) != 0 {
 		t.Errorf(

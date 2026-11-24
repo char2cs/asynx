@@ -39,10 +39,11 @@ package contracts
 //	| any               | ParkIfCurrent(halt), halt closed           | unchanged     | someone else already settled it                                                          |
 //	| any               | Inspect                                    | unchanged     | read parked, generation, cause, undelivered; zero status unless parked                   |
 //
-// Enqueue, Begin, Lift, SettleIfParked and the park methods are each a single
-// test-and-set under the mutex: they change the record and report what they
-// found in one step, because a separate query could be overtaken between the
-// two calls.
+// Enqueue and Lift are commands that write what they found into a value the
+// caller passes (an Admission, a LiftOutcome), in the same hold of the mutex
+// that changed the record, because a separate query could be overtaken between
+// the two calls. Begin, SettleIfParked and the park methods are single
+// test-and-sets under the mutex for the same reason.
 type Registry[J any] interface {
 	Backlog[J]
 	Parking[J]

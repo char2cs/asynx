@@ -153,7 +153,22 @@ func (e *CommandExecutor[T]) recordRejection(
 	commandID string,
 	cause error,
 ) error {
-	record := func(
+	return e.es.Store().Atomically(
+		ctx,
+		recordingRejection(
+			ctx,
+			commandID,
+			cause,
+		),
+	)
+}
+
+func recordingRejection(
+	ctx context.Context,
+	commandID string,
+	cause error,
+) func(asynxmd.Tx) error {
+	return func(
 		tx asynxmd.Tx,
 	) error {
 		return tx.PutReceipt(
@@ -162,10 +177,6 @@ func (e *CommandExecutor[T]) recordRejection(
 			asynxmd.Receipt{Rejection: cause.Error()},
 		)
 	}
-	return e.es.Store().Atomically(
-		ctx,
-		record,
-	)
 }
 
 func (e *CommandExecutor[T]) answerFromReceipt(
@@ -248,25 +259,34 @@ func (e *CommandExecutor[T]) replayReceipt(
 		AggregateID: receipt.AggregateID,
 		Version:     receipt.Version,
 	}
-	capture := func(
-		_ context.Context,
-		evt asynxmd.Event[T],
-	) {
-		event = pickReceiptEvent(
-			event,
-			evt,
-			receipt,
-		)
-	}
 	err = e.es.Replay(
 		ctx,
 		receipt.AggregateID,
 		receipt.Version,
 		receipt.Version,
-		capture,
+		capturingReceiptEvent(
+			&event,
+			receipt,
+		),
 	)
 	return event,
 		err
+}
+
+func capturingReceiptEvent[T any](
+	event *asynxmd.Event[T],
+	receipt asynxmd.Receipt,
+) asynxmd.ProjectionHandler[T] {
+	return func(
+		_ context.Context,
+		evt asynxmd.Event[T],
+	) {
+		*event = pickReceiptEvent(
+			*event,
+			evt,
+			receipt,
+		)
+	}
 }
 
 func idempotencyKey[T any](

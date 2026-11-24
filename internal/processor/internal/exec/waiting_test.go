@@ -12,6 +12,37 @@ import (
 	"testing"
 )
 
+type handlerFlag struct {
+	done atomic.Bool
+}
+
+func (f *handlerFlag) markDone() {
+	f.done.Store(true)
+}
+
+type waitedResult struct {
+	evt asynxmd.Event[order]
+	err error
+}
+
+type waitingCaller struct {
+	executor *CommandExecutor[order]
+	got      chan waitedResult
+}
+
+func (c *waitingCaller) run(
+	ctx context.Context,
+) {
+	evt, err := c.executor.ExecuteWait(
+		ctx,
+		update(
+			"agg",
+			1,
+		),
+	)
+	c.got <- waitedResult{evt, err}
+}
+
 func TestExecute_WaitHandlersTrue_HandlersDoneBeforeReturn(
 	t *testing.T,
 ) {
@@ -24,12 +55,9 @@ func TestExecute_WaitHandlersTrue_HandlersDoneBeforeReturn(
 		nil,
 	)
 
-	var handlerDone atomic.Bool
-	markDone := func() {
-		handlerDone.Store(true)
-	}
+	handler := &handlerFlag{}
 	callbackBus := &recordingBus[order]{
-		onPublishSync: markDone,
+		onPublishSync: handler.markDone,
 	}
 	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: callbackBus})
 	t.Cleanup(func() { d.Close(context.Background()) })
@@ -53,7 +81,7 @@ func TestExecute_WaitHandlersTrue_HandlersDoneBeforeReturn(
 		)
 	}
 
-	if !handlerDone.Load() {
+	if !handler.done.Load() {
 		t.Error("Execute with waitHandlers=true returned before PublishSync completed")
 	}
 }
@@ -143,44 +171,25 @@ func TestExecute_WaitingForHandlersGivesUpWithTheCommittedEvent(
 	t *testing.T,
 ) {
 	ex, _, _, _, b := newEnv(t)
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-	block := func(
-		context.Context,
-		asynxmd.Event[order],
-	) {
-		close(entered)
-		<-release
-	}
+	gate := newHandlerGate()
+	t.Cleanup(func() { close(gate.release) })
 	b.Subscribe(
 		"OrderUpdated",
-		block,
+		gate.hold,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	type result struct {
-		evt asynxmd.Event[order]
-		err error
+	caller := &waitingCaller{
+		executor: ex,
+		got: make(
+			chan waitedResult,
+			1,
+		),
 	}
-	got := make(
-		chan result,
-		1,
-	)
-	run := func() {
-		evt, err := ex.ExecuteWait(
-			ctx,
-			update(
-				"agg",
-				1,
-			),
-		)
-		got <- result{evt, err}
-	}
-	go run()
-	<-entered
+	go caller.run(ctx)
+	<-gate.entered
 	cancel()
-	r := <-got
+	r := <-caller.got
 	if !errors.Is(
 		r.err,
 		asynxmd.ErrContextCancelled,
@@ -197,15 +206,9 @@ func TestExecute_WaitingForHandlersGivesUpWithTheCommittedEvent(
 func TestExecute_WaitingOnAParkedAggregateReportsNoHandlerRan(
 	t *testing.T,
 ) {
-	succeed := func(
-		context.Context,
-		asynxmd.Event[order],
-	) error {
-		return nil
-	}
 	ex := durableEnv(
 		t,
-		succeed,
+		acceptsEveryEvent,
 	)
 	ex.dispatcher.Park(
 		"agg",

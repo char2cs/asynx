@@ -36,6 +36,7 @@ type Processor[T any] struct {
 	executor      *exec.CommandExecutor[T]
 	dispatcher    asynxmd.Dispatcher[T]
 	onPublishErr  asynxmd.PublishErrorHandler[T]
+	onPanic       asynxmd.PanicHandler[T]
 	bus           asynxmd.Bus[T]
 	shuttingDown  atomic.Bool
 	lifeMu        sync.Mutex
@@ -116,6 +117,7 @@ func assemble[T any](
 		executor:     executor,
 		dispatcher:   d,
 		onPublishErr: cfg.PublishErrorHandler,
+		onPanic:      cfg.Dispatcher.OnPanic,
 		bus:          bus,
 	}
 }
@@ -151,9 +153,10 @@ func newDispatcher[T any](
 		factory = defaultDispatcher[T]
 	}
 
-	cfg.Dispatcher.Bus = bus
-	cfg.Dispatcher.OnPublishError = cfg.PublishErrorHandler
-	d, err := factory(cfg.Dispatcher)
+	wiring := cfg.Dispatcher
+	wiring.Bus = bus
+	wiring.OnPublishError = cfg.PublishErrorHandler
+	d, err := factory(wiring)
 	if err != nil {
 		return nil,
 			fmt.Errorf(
@@ -223,12 +226,6 @@ func defaultDispatcher[T any](
 		nil
 }
 
-func discardPanic() {
-	if r := recover(); r != nil {
-		return
-	}
-}
-
 func (p *Processor[T]) reportPublishError(
 	ctx context.Context,
 	event asynxmd.Event[T],
@@ -238,10 +235,30 @@ func (p *Processor[T]) reportPublishError(
 		return
 	}
 
-	defer discardPanic()
+	defer p.forwardPanic(
+		ctx,
+		event,
+	)
 	p.onPublishErr(
 		ctx,
 		event,
 		err,
+	)
+}
+
+func (p *Processor[T]) forwardPanic(
+	ctx context.Context,
+	event asynxmd.Event[T],
+) {
+	recovered := recover()
+	if recovered == nil ||
+		p.onPanic == nil {
+		return
+	}
+
+	p.onPanic(
+		ctx,
+		event,
+		recovered,
 	)
 }

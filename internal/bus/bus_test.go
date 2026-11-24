@@ -22,6 +22,52 @@ func TestIsExactPattern_DistinguishesLiteralsFromRegexps(
 	}
 }
 
+func forwardsPanicValue(
+	panicked chan<- any,
+) asynxmd.PanicHandler[mocks.Order] {
+	return func(
+		_ context.Context,
+		_ asynxmd.Event[mocks.Order],
+		value any,
+	) {
+		panicked <- value
+	}
+}
+
+func signalsTimeout(
+	timedOut chan<- struct{},
+) asynxmd.TimeoutHandler[mocks.Order] {
+	return func(
+		_ context.Context,
+		_ asynxmd.Event[mocks.Order],
+		_ time.Duration,
+	) {
+		timedOut <- struct{}{}
+	}
+}
+
+func panicsWith(
+	value any,
+) asynxmd.ProjectionHandler[mocks.Order] {
+	return func(
+		context.Context,
+		asynxmd.Event[mocks.Order],
+	) {
+		panic(value)
+	}
+}
+
+func sleepsFor(
+	d time.Duration,
+) asynxmd.ProjectionHandler[mocks.Order] {
+	return func(
+		context.Context,
+		asynxmd.Event[mocks.Order],
+	) {
+		time.Sleep(d)
+	}
+}
+
 func TestNew_WithHandlers_RoutesPanicAndTimeoutToThem(
 	t *testing.T,
 ) {
@@ -33,34 +79,14 @@ func TestNew_WithHandlers_RoutesPanicAndTimeoutToThem(
 		chan struct{},
 		1,
 	)
-	withPanicHandlerFn := func(
-		_ context.Context,
-		_ asynxmd.Event[mocks.Order],
-		v any,
-	) {
-		panicked <- v
-	}
-	withTimeoutHandlerFn := func(
-		_ context.Context,
-		_ asynxmd.Event[mocks.Order],
-		_ time.Duration,
-	) {
-		timedOut <- struct{}{}
-	}
 	b := bus.New[mocks.Order](
-		bus.WithPanicHandler[mocks.Order](withPanicHandlerFn),
-		bus.WithTimeoutHandler[mocks.Order](withTimeoutHandlerFn),
+		bus.WithPanicHandler[mocks.Order](forwardsPanicValue(panicked)),
+		bus.WithTimeoutHandler[mocks.Order](signalsTimeout(timedOut)),
 	)
 	defer b.Close(context.Background())
-	subscribeFn := func(
-		context.Context,
-		asynxmd.Event[mocks.Order],
-	) {
-		panic("boom")
-	}
 	_, err := b.Subscribe(
 		"Boom",
-		subscribeFn,
+		panicsWith("boom"),
 	)
 	if err != nil {
 		t.Fatalf(
@@ -69,15 +95,9 @@ func TestNew_WithHandlers_RoutesPanicAndTimeoutToThem(
 		)
 	}
 
-	subscribeFn2 := func(
-		context.Context,
-		asynxmd.Event[mocks.Order],
-	) {
-		time.Sleep(50 * time.Millisecond)
-	}
 	_, err = b.Subscribe(
 		"Slow",
-		subscribeFn2,
+		sleepsFor(50*time.Millisecond),
 		asynxmd.WithHandlerTimeout[mocks.Order](5*time.Millisecond),
 	)
 	if err != nil {

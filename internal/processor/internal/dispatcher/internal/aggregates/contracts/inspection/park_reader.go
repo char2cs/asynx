@@ -1,4 +1,4 @@
-package contracts
+package inspection
 
 import asynxmd "github.com/char2cs/asynx/models"
 

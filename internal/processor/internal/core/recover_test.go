@@ -177,20 +177,14 @@ func TestProcessor_Recover_ParksAnAggregateWhoseEventCannotBeRebuilt(
 		1,
 		[]byte("!!!"),
 	)
-	enqueueBad := func(
-		tx asynxmd.Tx,
-	) error {
-		return enqueueVersions(
+	s.Atomically(
+		ctx,
+		enqueuingVersions(
 			ctx,
-			tx,
 			"bad",
 			1,
 			2,
-		)
-	}
-	s.Atomically(
-		ctx,
-		enqueueBad,
+		),
 	)
 
 	var got atomic.Int32
@@ -368,11 +362,13 @@ func TestProcessor_Recover_APanickingPublishErrorHandlerDoesNotCrash(
 
 	var called atomic.Int32
 	var delivered sync.Map
+	handed := &callCounter{}
 	p := mustNew(
 		t,
 		es,
 		bus.New[order](),
 		panickingReporter(&called),
+		models.WithDeliveryPanicHandler(handed.onDeliveryPanic),
 		storingSubs(&delivered),
 	)
 	t.Cleanup(func() { p.Shutdown(ctx) })
@@ -390,6 +386,14 @@ func TestProcessor_Recover_APanickingPublishErrorHandlerDoesNotCrash(
 	p.WaitPublish()
 	if called.Load() == 0 {
 		t.Fatal("the publish error handler was not called")
+	}
+
+	if handed.calls.Load() != called.Load() {
+		t.Errorf(
+			"panics handed to the delivery panic handler = %d, want %d",
+			handed.calls.Load(),
+			called.Load(),
+		)
 	}
 
 	assertRecovered(
@@ -466,19 +470,13 @@ func TestProcessor_Recover_ReportsAnAckFailureForAVanishedEvent(
 ) {
 	s := ackErrStore{store.New()}
 	ctx := context.Background()
-	enqueueGhost := func(
-		tx asynxmd.Tx,
-	) error {
-		return enqueueVersions(
-			ctx,
-			tx,
-			"ghost",
-			1,
-		)
-	}
 	s.Atomically(
 		ctx,
-		enqueueGhost,
+		enqueuingVersions(
+			ctx,
+			"ghost",
+			1,
+		),
 	)
 	es := eventstore.New[order](
 		s,
@@ -584,19 +582,13 @@ func TestProcessor_Recover_ReplaysAnAggregatesStreamOnce(
 		)
 	}
 
-	enqueueAll := func(
-		tx asynxmd.Tx,
-	) error {
-		return enqueueUpTo(
-			ctx,
-			tx,
-			"a",
-			events,
-		)
-	}
 	s.Atomically(
 		ctx,
-		enqueueAll,
+		enqueuingUpTo(
+			ctx,
+			"a",
+			events,
+		),
 	)
 
 	var mu sync.Mutex
@@ -684,22 +676,11 @@ func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(
 		t.Fatal(err)
 	}
 
-	var upcasts atomic.Int32
-	upcaster := func(
-		_ context.Context,
-		_ string,
-		patches []byte,
-	) ([]byte, error) {
-		return failThirdUpcast(
-			&upcasts,
-			s.acked,
-			patches,
-		)
-	}
+	failing := &thirdUpcastFailure{acked: s.acked}
 	es := eventstore.New[order](
 		s,
 		store.NewSnapshots(),
-		map[int]asynxmd.Upcaster{1: upcaster},
+		map[int]asynxmd.Upcaster{1: failing.upcast},
 		2,
 		nil,
 	)
@@ -800,20 +781,14 @@ func TestProcessor_Recover_DeliversWhatPrecedesAnUnreadableEvent(
 		3,
 		[]byte("!!!"),
 	)
-	enqueueA := func(
-		tx asynxmd.Tx,
-	) error {
-		return enqueueVersions(
+	s.Atomically(
+		ctx,
+		enqueuingVersions(
 			ctx,
-			tx,
 			"a",
 			1,
 			3,
-		)
-	}
-	s.Atomically(
-		ctx,
-		enqueueA,
+		),
 	)
 
 	var got atomic.Int32
@@ -1065,6 +1040,23 @@ func isOrderUpdated(
 	return name == "OrderUpdated"
 }
 
+func enqueuingVersions(
+	ctx context.Context,
+	aggregateID string,
+	versions ...int64,
+) func(asynxmd.Tx) error {
+	return func(
+		tx asynxmd.Tx,
+	) error {
+		return enqueueVersions(
+			ctx,
+			tx,
+			aggregateID,
+			versions...,
+		)
+	}
+}
+
 func enqueueVersions(
 	ctx context.Context,
 	tx asynxmd.Tx,
@@ -1143,18 +1135,23 @@ func awaitFirst(
 	}
 }
 
-func failThirdUpcast(
-	upcasts *atomic.Int32,
-	acked chan struct{},
+type thirdUpcastFailure struct {
+	upcasts atomic.Int32
+	acked   chan struct{}
+}
+
+func (f *thirdUpcastFailure) upcast(
+	_ context.Context,
+	_ string,
 	patches []byte,
 ) ([]byte, error) {
-	if upcasts.Add(1) != 3 {
+	if f.upcasts.Add(1) != 3 {
 		return patches,
 			nil
 	}
 
 	for range 2 {
-		awaitAck(acked)
+		awaitAck(f.acked)
 	}
 
 	return nil,

@@ -246,28 +246,17 @@ func TestGuarantee_DurableFallbackIsRejectedAtBuild(
 func TestBuild_AnInvalidSubscriberStopsTheValidationOfTheNextOnes(
 	t *testing.T,
 ) {
-	handler := func(
-		context.Context,
-		models.Event[mocks.Order],
-	) error {
-		return nil
-	}
-	optionRan := false
-	option := func(
-		*models.SubscriptionConfig[mocks.Order],
-	) {
-		optionRan = true
-	}
+	var options callTally
 
 	inst, err := eight(store.New()).
 		WithSubscriber(
 			"",
-			handler,
+			noopSubscriber,
 		).
 		WithSubscriber(
 			"OrderCreated",
-			handler,
-			option,
+			noopSubscriber,
+			options.countOption,
 		).
 		Build()
 	if inst != nil ||
@@ -282,7 +271,7 @@ func TestBuild_AnInvalidSubscriberStopsTheValidationOfTheNextOnes(
 		)
 	}
 
-	if optionRan {
+	if options.total() != 0 {
 		t.Error("the options of a later subscriber ran after an earlier one was rejected")
 	}
 }

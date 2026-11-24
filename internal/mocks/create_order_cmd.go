@@ -4,7 +4,9 @@ import (
 	"github.com/char2cs/asynx/models"
 )
 
-// CreateOrderCmd creates an Order.
+// CreateOrderCmd is the test command that creates an Order with the given ID
+// and Total. It is valid only for a positive Total, emits OrderCreated, leaves
+// the new Order Pending and never asks for a snapshot.
 type CreateOrderCmd struct {
 	ID    string
 	Total float64

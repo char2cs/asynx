@@ -18,28 +18,30 @@ type aggregateRegistry[J Item] struct {
 }
 
 // Enqueue appends job to its aggregate's FIFO, or refuses it as described on
-// Registry.Enqueue. A refused durable job is completed after the mutex is
-// released.
+// Registry.Enqueue, and writes what became of it into admission. A refused
+// durable job is completed after the mutex is released.
 func (r *aggregateRegistry[J]) Enqueue(
 	job J,
-) (contracts.Admission, error) {
-	admission, err := r.queueUnderLock(job)
+	admission *contracts.Admission,
+) {
+	r.queueUnderLock(
+		job,
+		admission,
+	)
 	if admission.Parked {
 		job.Complete(asynxmd.ErrDeliveryParked)
 	}
-
-	return admission,
-		err
 }
 
 func (r *aggregateRegistry[J]) queueUnderLock(
 	job J,
-) (contracts.Admission, error) {
+	admission *contracts.Admission,
+) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return contracts.Admission{},
-			asynxmd.ErrDispatcherClosed
+		*admission = contracts.Admission{Err: asynxmd.ErrDispatcherClosed}
+		return
 	}
 
 	agg := job.AggregateID()
@@ -51,13 +53,14 @@ func (r *aggregateRegistry[J]) queueUnderLock(
 			current,
 			job,
 		)
-		return contracts.Admission{Parked: true},
-			nil
+		*admission = contracts.Admission{Parked: true}
+		return
 	}
 
-	rec := r.recordOf(agg)
+	r.open(agg)
+	rec := r.records[agg]
 	done := make(chan struct{})
-	admission := contracts.Admission{
+	*admission = contracts.Admission{
 		Turn: rec.tail,
 		Done: done,
 	}
@@ -68,8 +71,6 @@ func (r *aggregateRegistry[J]) queueUnderLock(
 		rec.jobs,
 		job,
 	)
-	return admission,
-		nil
 }
 
 // Begin removes job from its aggregate's queue and returns the halt channel
@@ -122,10 +123,11 @@ func (r *aggregateRegistry[J]) Park(
 ) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	rec := r.park(
+	r.park(
 		aggregateID,
 		cause,
 	)
+	rec := r.records[aggregateID]
 	for _, v := range undelivered {
 		rec.undelivered[v] = asynxmd.ErrDeliveryParked
 	}
@@ -177,28 +179,31 @@ func (r *aggregateRegistry[J]) SettleIfParked(
 	return true
 }
 
-// Lift lifts the park of the given generation and returns its undelivered
-// versions in ascending order (see Registry.Lift).
+// Lift lifts the park of the given generation and writes whether it did, with
+// the undelivered versions in ascending order, into outcome (see
+// Registry.Lift).
 func (r *aggregateRegistry[J]) Lift(
 	aggregateID string,
 	generation uint64,
-) (bool, []int64) {
+	outcome *contracts.LiftOutcome,
+) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec, ok := r.records[aggregateID]
 	current := ok && rec.parked && rec.generation == generation
 	if !current {
-		return false,
-			nil
+		*outcome = contracts.LiftOutcome{}
+		return
 	}
 
-	undelivered := slices.Sorted(maps.Keys(rec.undelivered))
+	*outcome = contracts.LiftOutcome{
+		Lifted:      true,
+		Undelivered: slices.Sorted(maps.Keys(rec.undelivered)),
+	}
 	r.lift(
 		aggregateID,
 		rec,
 	)
-	return true,
-		undelivered
 }
 
 // Supersede parks the aggregate and lifts the park at once (see
@@ -208,13 +213,13 @@ func (r *aggregateRegistry[J]) Supersede(
 ) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	rec := r.park(
+	r.park(
 		aggregateID,
 		nil,
 	)
 	r.lift(
 		aggregateID,
-		rec,
+		r.records[aggregateID],
 	)
 }
 
@@ -280,21 +285,18 @@ func (r *aggregateRegistry[J]) Close() {
 	r.closed = true
 }
 
-func (r *aggregateRegistry[J]) recordOf(
+func (r *aggregateRegistry[J]) open(
 	agg string,
-) *record[J] {
-	rec, ok := r.records[agg]
-	if ok {
-		return rec
+) {
+	if _, ok := r.records[agg]; ok {
+		return
 	}
 
-	rec = &record[J]{
+	r.records[agg] = &record[J]{
 		tail:        turnReady(),
 		halt:        make(chan struct{}),
 		undelivered: make(map[int64]error),
 	}
-	r.records[agg] = rec
-	return rec
 }
 
 func (r *aggregateRegistry[J]) admit(
@@ -310,14 +312,15 @@ func (r *aggregateRegistry[J]) admit(
 func (r *aggregateRegistry[J]) park(
 	agg string,
 	cause error,
-) *record[J] {
-	rec := r.recordOf(agg)
+) {
+	r.open(agg)
+	rec := r.records[agg]
 	if rec.cause == nil {
 		rec.cause = cause
 	}
 
 	if rec.parked {
-		return rec
+		return
 	}
 
 	r.generation++
@@ -325,7 +328,6 @@ func (r *aggregateRegistry[J]) park(
 	rec.generation = r.generation
 	close(rec.halt)
 	r.dropAcked(rec)
-	return rec
 }
 
 func (r *aggregateRegistry[J]) dropAcked(

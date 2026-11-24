@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -180,17 +179,10 @@ func TestExecute_Idempotent_StorageFailureLeavesNoReceiptSoRetryRuns(
 func TestExecute_Idempotent_SyncProjectionFailureLeavesNoReceipt(
 	t *testing.T,
 ) {
-	fail := true
-	projection := func(
-		context.Context,
-		asynxmd.Tx,
-		asynxmd.Event[order],
-	) error {
-		return readModelState(fail)
-	}
+	readModel := &switchableReadModel{down: true}
 	ex, s, _, _, _ := newEnv(
 		t,
-		syncAll(projection),
+		syncAll(readModel.project),
 	)
 	cmd := idemUpdate{UpdateOrderCmd: update(
 		"agg",
@@ -211,7 +203,7 @@ func TestExecute_Idempotent_SyncProjectionFailureLeavesNoReceipt(
 		t.Fatal("rolled-back write left a receipt")
 	}
 
-	fail = false
+	readModel.down = false
 	if _, err := ex.Execute(
 		context.Background(),
 		cmd,
@@ -367,18 +359,23 @@ func (s phantomDuplicateStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
 ) error {
-	wrap := func(
-		tx asynxmd.Tx,
-	) error {
-		return fn(phantomTx{tx})
-	}
 	return s.Memory.Atomically(
 		ctx,
-		wrap,
+		phantomRun(fn).inPhantomTx,
 	)
 }
 
 type phantomTx struct{ asynxmd.Tx }
+
+type phantomRun func(
+	asynxmd.Tx,
+) error
+
+func (r phantomRun) inPhantomTx(
+	tx asynxmd.Tx,
+) error {
+	return r(phantomTx{tx})
+}
 
 // PutReceipt always fails with ErrDuplicateReceipt, as if another writer had
 // recorded the command first.
@@ -494,14 +491,9 @@ func (s *raceLostStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
 ) error {
-	wrap := func(
-		tx asynxmd.Tx,
-	) error {
-		return fn(phantomTx{tx})
-	}
 	return s.Memory.Atomically(
 		ctx,
-		wrap,
+		phantomRun(fn).inPhantomTx,
 	)
 }
 
@@ -544,18 +536,23 @@ func (s putReceiptFailStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
 ) error {
-	wrap := func(
-		tx asynxmd.Tx,
-	) error {
-		return fn(failingReceiptTx{tx})
-	}
 	return s.Memory.Atomically(
 		ctx,
-		wrap,
+		failingReceiptRun(fn).inFailingTx,
 	)
 }
 
 type failingReceiptTx struct{ asynxmd.Tx }
+
+type failingReceiptRun func(
+	asynxmd.Tx,
+) error
+
+func (r failingReceiptRun) inFailingTx(
+	tx asynxmd.Tx,
+) error {
+	return r(failingReceiptTx{tx})
+}
 
 // PutReceipt always fails with "receipt table locked".
 func (failingReceiptTx) PutReceipt(
@@ -623,14 +620,9 @@ func (s *rejectionRaceStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
 ) error {
-	wrap := func(
-		tx asynxmd.Tx,
-	) error {
-		return fn(phantomTx{tx})
-	}
 	return s.Memory.Atomically(
 		ctx,
-		wrap,
+		phantomRun(fn).inPhantomTx,
 	)
 }
 
@@ -802,23 +794,11 @@ func TestExecute_Idempotent_RetryWaitsForTheOriginalEventsHandlers(
 	t *testing.T,
 ) {
 	ex, _, _, _, b := newEnv(t)
-	entered := make(
-		chan struct{},
-		1,
-	)
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	hold := func(
-		context.Context,
-		asynxmd.Event[order],
-	) {
-		entered <- struct{}{}
-		<-release
-	}
+	gate := newReusableGate(1)
+	t.Cleanup(gate.open)
 	if _, err := b.Subscribe(
 		"OrderUpdated",
-		hold,
+		gate.hold,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -839,7 +819,7 @@ func TestExecute_Idempotent_RetryWaitsForTheOriginalEventsHandlers(
 
 	within(
 		t,
-		entered,
+		gate.entered,
 		"the handler",
 	)
 
@@ -875,7 +855,7 @@ func TestExecute_Idempotent_RetryWaitsForTheOriginalEventsHandlers(
 		)
 	}
 
-	releaseOnce.Do(func() { close(release) })
+	gate.open()
 	if err := wait(ctx); err != nil {
 		t.Fatalf(
 			"wait after the handler finished = %v",
@@ -966,15 +946,9 @@ func TestExecute_Idempotent_RetryWithoutADispatcherHasNothingToWaitOn(
 func TestExecute_Idempotent_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWasTold(
 	t *testing.T,
 ) {
-	acceptAll := func(
-		context.Context,
-		asynxmd.Event[order],
-	) error {
-		return nil
-	}
 	ex := durableEnv(
 		t,
-		acceptAll,
+		acceptsEveryEvent,
 	)
 	ctx := context.Background()
 	delivered := idemUpdate{UpdateOrderCmd: update(
@@ -1036,6 +1010,13 @@ func TestExecute_Idempotent_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWas
 		ex,
 		delivered,
 	)
+}
+
+func acceptsEveryEvent(
+	context.Context,
+	asynxmd.Event[order],
+) error {
+	return nil
 }
 
 func awaitNothingToWaitOn(

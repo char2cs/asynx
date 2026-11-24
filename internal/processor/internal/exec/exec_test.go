@@ -807,23 +807,10 @@ func TestExecute_SameAggregateFlood_NoSpuriousFailuresAndOrderedDelivery(
 ) {
 	ex, _, _, d, b := newEnv(t)
 
-	var mu sync.Mutex
-	var seen []int64
-	record := func(
-		_ context.Context,
-		e asynxmd.Event[order],
-	) {
-		time.Sleep(200 * time.Microsecond)
-		mu.Lock()
-		seen = append(
-			seen,
-			e.Version,
-		)
-		mu.Unlock()
-	}
+	recorder := &versionRecorder{}
 	if _, err := b.Subscribe(
 		"OrderUpdated",
-		record,
+		recorder.record,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -855,20 +842,20 @@ func TestExecute_SameAggregateFlood_NoSpuriousFailuresAndOrderedDelivery(
 
 	d.WaitIdle()
 
-	mu.Lock()
-	defer mu.Unlock()
-	if len(seen) != n {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if len(recorder.seen) != n {
 		t.Fatalf(
 			"handler saw %d events, want %d",
-			len(seen),
+			len(recorder.seen),
 			n,
 		)
 	}
 
-	for i, v := range seen {
+	for i, v := range recorder.seen {
 		requireVersion(
 			t,
-			seen,
+			recorder.seen,
 			i,
 			v,
 		)
@@ -914,21 +901,10 @@ func TestExecute_DifferentAggregatesRunInParallel(
 ) {
 	ex, _, _, _, b := newEnv(t)
 
-	release := make(chan struct{})
-	started := make(
-		chan struct{},
-		2,
-	)
-	signal := func(
-		context.Context,
-		asynxmd.Event[order],
-	) {
-		started <- struct{}{}
-		<-release
-	}
+	gate := newReusableGate(2)
 	if _, err := b.Subscribe(
 		"OrderUpdated",
-		signal,
+		gate.hold,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -947,11 +923,11 @@ func TestExecute_DifferentAggregatesRunInParallel(
 	for range 2 {
 		awaitStarted(
 			t,
-			started,
+			gate.entered,
 		)
 	}
 
-	close(release)
+	gate.open()
 }
 
 func mustExecute(
@@ -978,19 +954,6 @@ func awaitStarted(
 	case <-time.After(2 * time.Second):
 		t.Fatal("handlers of different aggregates did not run in parallel")
 	}
-}
-
-func holdFirst(
-	e asynxmd.Event[order],
-	entered chan<- struct{},
-	release <-chan struct{},
-) {
-	if e.Version != 1 {
-		return
-	}
-
-	entered <- struct{}{}
-	<-release
 }
 
 func awaitSecond(
@@ -1027,86 +990,42 @@ func TestExecute_SendWaitDoesNotHoldAggregateLockWhileHandlersRun(
 ) {
 	ex, _, _, _, b := newEnv(t)
 
-	release := make(chan struct{})
-	entered := make(
-		chan struct{},
-		1,
-	)
-	hold := func(
-		_ context.Context,
-		e asynxmd.Event[order],
-	) {
-		holdFirst(
-			e,
-			entered,
-			release,
-		)
-	}
+	gate := newReusableGate(1)
 	if _, err := b.Subscribe(
 		"OrderUpdated",
-		hold,
+		gate.holdFirstVersion,
 	); err != nil {
 		t.Fatal(err)
 	}
 
-	waited := make(chan struct{})
-	waitFirst := func() {
-		_, _ = ex.ExecuteWait(
-			context.Background(),
-			update(
-				"agg",
-				1,
-			),
-		)
-		close(waited)
+	sender := &waitingSender{
+		executor: ex,
+		waited:   make(chan struct{}),
+		committed: make(
+			chan error,
+			1,
+		),
 	}
-	go waitFirst()
-	<-entered
+	go sender.waitForHandlers()
+	<-gate.entered
 
-	committed := make(
-		chan error,
-		1,
-	)
-	commitSecond := func() {
-		_, err := ex.Execute(
-			context.Background(),
-			update(
-				"agg",
-				2,
-			),
-		)
-		committed <- err
-	}
-	go commitSecond()
+	go sender.commitSecond()
 	awaitSecond(
 		t,
-		committed,
+		sender.committed,
 	)
 
-	close(release)
-	<-waited
+	gate.open()
+	<-sender.waited
 }
 
 func TestExecute_LockWaitHonoursContext(
 	t *testing.T,
 ) {
-	release := make(chan struct{})
-	entered := make(
-		chan struct{},
-		1,
-	)
-	blockProjection := func(
-		context.Context,
-		asynxmd.Tx,
-		asynxmd.Event[order],
-	) error {
-		entered <- struct{}{}
-		<-release
-		return nil
-	}
+	gate := newReusableGate(1)
 	ex, _, _, _, _ := newEnv(
 		t,
-		syncAll(blockProjection),
+		syncAll(gate.holdProjection),
 	)
 
 	go ex.Execute(
@@ -1116,7 +1035,7 @@ func TestExecute_LockWaitHonoursContext(
 			1,
 		),
 	)
-	<-entered
+	<-gate.entered
 
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
@@ -1140,34 +1059,21 @@ func TestExecute_LockWaitHonoursContext(
 		)
 	}
 
-	close(release)
+	gate.open()
 }
 
 func TestExecute_SnapshotFailureIsNonFatalAndStillDispatches(
 	t *testing.T,
 ) {
-	var reported atomic.Int32
-	onSnapshotError := func(
-		context.Context,
-		asynxmd.Event[order],
-		error,
-	) {
-		reported.Add(1)
-	}
+	reported := &eventCounter{}
 	ex, _, ss, d, b := newEnv(
 		t,
-		WithSnapshotErrorHandler[order](onSnapshotError),
+		WithSnapshotErrorHandler[order](reported.onSnapshotError),
 	)
-	var delivered atomic.Int32
-	count := func(
-		context.Context,
-		asynxmd.Event[order],
-	) {
-		delivered.Add(1)
-	}
+	delivered := &eventCounter{}
 	b.Subscribe(
 		"OrderUpdated",
-		count,
+		delivered.onEvent,
 	)
 
 	ss.SetError(
@@ -1196,17 +1102,17 @@ func TestExecute_SnapshotFailureIsNonFatalAndStillDispatches(
 		)
 	}
 
-	if reported.Load() != 1 {
+	if reported.calls.Load() != 1 {
 		t.Errorf(
 			"snapshot errors reported = %d, want 1",
-			reported.Load(),
+			reported.calls.Load(),
 		)
 	}
 
-	if delivered.Load() != 1 {
+	if delivered.calls.Load() != 1 {
 		t.Errorf(
 			"deliveries = %d, want 1 (dispatch must not depend on the snapshot)",
-			delivered.Load(),
+			delivered.calls.Load(),
 		)
 	}
 }
@@ -1244,21 +1150,10 @@ func TestExecute_DurableDeliveryIsPendingUntilHandlersFinish(
 		t,
 		WithDurableDelivery[order](matchAll),
 	)
-	release := make(chan struct{})
-	entered := make(
-		chan struct{},
-		1,
-	)
-	hold := func(
-		context.Context,
-		asynxmd.Event[order],
-	) {
-		entered <- struct{}{}
-		<-release
-	}
+	gate := newReusableGate(1)
 	b.Subscribe(
 		"OrderUpdated",
-		hold,
+		gate.hold,
 	)
 
 	if _, err := ex.Execute(
@@ -1271,7 +1166,7 @@ func TestExecute_DurableDeliveryIsPendingUntilHandlersFinish(
 		t.Fatal(err)
 	}
 
-	<-entered
+	<-gate.entered
 
 	pending, _ := s.PendingDeliveries(
 		context.Background(),
@@ -1286,7 +1181,7 @@ func TestExecute_DurableDeliveryIsPendingUntilHandlersFinish(
 		)
 	}
 
-	close(release)
+	gate.open()
 	d.WaitIdle()
 
 	pending, _ = s.PendingDeliveries(
@@ -1352,35 +1247,6 @@ func TestExecute_ValidationErrorPassesThroughUnwrapped(
 	}
 }
 
-func reactOnce(
-	ctx context.Context,
-	t *testing.T,
-	ex *CommandExecutor[order],
-	e asynxmd.Event[order],
-	release <-chan struct{},
-	reacted chan<- struct{},
-) {
-	if e.Version != 1 {
-		return
-	}
-
-	<-release
-	if _, err := ex.Execute(
-		ctx,
-		update(
-			"agg",
-			999,
-		),
-	); err != nil {
-		t.Errorf(
-			"reaction Execute: %v",
-			err,
-		)
-	}
-
-	close(reacted)
-}
-
 func floodAggregate(
 	t *testing.T,
 	ex *CommandExecutor[order],
@@ -1421,24 +1287,15 @@ func TestExecute_ReactionToOwnAggregateDoesNotDeadlockUnderBacklog(
 ) {
 	ex, _, _, d, b := newEnv(t)
 
-	release := make(chan struct{})
-	reacted := make(chan struct{})
-	react := func(
-		ctx context.Context,
-		e asynxmd.Event[order],
-	) {
-		reactOnce(
-			ctx,
-			t,
-			ex,
-			e,
-			release,
-			reacted,
-		)
+	reaction := &ownAggregateReaction{
+		t:       t,
+		ex:      ex,
+		release: make(chan struct{}),
+		reacted: make(chan struct{}),
 	}
 	b.Subscribe(
 		"OrderUpdated",
-		react,
+		reaction.react,
 	)
 
 	if _, err := ex.Execute(
@@ -1464,9 +1321,9 @@ func TestExecute_ReactionToOwnAggregateDoesNotDeadlockUnderBacklog(
 		t.Fatal("commands deadlocked behind a slow handler")
 	}
 
-	close(release)
+	close(reaction.release)
 	select {
-	case <-reacted:
+	case <-reaction.reacted:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the reaction never completed")
 	}
@@ -1481,18 +1338,12 @@ func TestExecute_DurableDeliveryOnlyForEventsADurableSubscriberWants(
 		t,
 		WithDurableDelivery[order](matchUpdated),
 	)
-	release := make(chan struct{})
-	waitRelease := func(
-		context.Context,
-		asynxmd.Event[order],
-	) {
-		<-release
-	}
+	gate := newReusableGate(1)
 	b.Subscribe(
 		"OrderUpdated",
-		waitRelease,
+		gate.waitForRelease,
 	)
-	t.Cleanup(func() { close(release) })
+	t.Cleanup(gate.open)
 	ctx := context.Background()
 
 	if _, err := ex.Execute(
@@ -1690,30 +1541,22 @@ func TestWithLockIfFree_RunsWhenFreeAndSkipsWhenHeld(
 		t.Fatal("fn did not run on a free aggregate")
 	}
 
-	var ranWhileHeld, reportedRunning bool
-	markRan := func() { ranWhileHeld = true }
-	probe := func() error {
-		reportedRunning = executor.WithLockIfFree(
-			"agg",
-			markRan,
-		)
-		return nil
-	}
+	probe := &lockProbe{executor: executor}
 	err := executor.WithLock(
 		context.Background(),
 		"agg",
-		probe,
+		probe.tryWhileHeld,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if ranWhileHeld ||
-		reportedRunning {
+	if probe.ranWhileHeld ||
+		probe.reportedRunning {
 		t.Errorf(
 			"WithLockIfFree ran = %v, reported running = %v while the lock was held",
-			ranWhileHeld,
-			reportedRunning,
+			probe.ranWhileHeld,
+			probe.reportedRunning,
 		)
 	}
 
@@ -1967,6 +1810,224 @@ func TestExecute_EnqueueFailureParksWithTheEnqueueError(
 		t.Fatalf(
 			"Inspect = %+v, want parked with the enqueue error",
 			got,
+		)
+	}
+}
+
+type handlerGate struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newHandlerGate() *handlerGate {
+	return &handlerGate{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (g *handlerGate) hold(
+	context.Context,
+	asynxmd.Event[order],
+) {
+	close(g.entered)
+	<-g.release
+}
+
+type reusableGate struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newReusableGate(
+	entries int,
+) *reusableGate {
+	return &reusableGate{
+		entered: make(
+			chan struct{},
+			entries,
+		),
+		release: make(chan struct{}),
+	}
+}
+
+func (g *reusableGate) hold(
+	context.Context,
+	asynxmd.Event[order],
+) {
+	g.entered <- struct{}{}
+	<-g.release
+}
+
+func (g *reusableGate) holdFirstVersion(
+	ctx context.Context,
+	e asynxmd.Event[order],
+) {
+	if e.Version != 1 {
+		return
+	}
+
+	g.hold(
+		ctx,
+		e,
+	)
+}
+
+func (g *reusableGate) holdProjection(
+	_ context.Context,
+	_ asynxmd.Tx,
+	_ asynxmd.Event[order],
+) error {
+	g.entered <- struct{}{}
+	<-g.release
+	return nil
+}
+
+func (g *reusableGate) waitForRelease(
+	context.Context,
+	asynxmd.Event[order],
+) {
+	<-g.release
+}
+
+func (g *reusableGate) open() {
+	g.once.Do(g.close)
+}
+
+func (g *reusableGate) close() {
+	close(g.release)
+}
+
+type eventCounter struct {
+	calls atomic.Int32
+}
+
+func (c *eventCounter) onEvent(
+	context.Context,
+	asynxmd.Event[order],
+) {
+	c.calls.Add(1)
+}
+
+func (c *eventCounter) onSnapshotError(
+	context.Context,
+	asynxmd.Event[order],
+	error,
+) {
+	c.calls.Add(1)
+}
+
+type versionRecorder struct {
+	mu   sync.Mutex
+	seen []int64
+}
+
+func (r *versionRecorder) record(
+	_ context.Context,
+	e asynxmd.Event[order],
+) {
+	time.Sleep(200 * time.Microsecond)
+	r.mu.Lock()
+	r.seen = append(
+		r.seen,
+		e.Version,
+	)
+	r.mu.Unlock()
+}
+
+type waitingSender struct {
+	executor  *CommandExecutor[order]
+	waited    chan struct{}
+	committed chan error
+}
+
+func (s *waitingSender) waitForHandlers() {
+	_, _ = s.executor.ExecuteWait(
+		context.Background(),
+		update(
+			"agg",
+			1,
+		),
+	)
+	close(s.waited)
+}
+
+func (s *waitingSender) commitSecond() {
+	_, err := s.executor.Execute(
+		context.Background(),
+		update(
+			"agg",
+			2,
+		),
+	)
+	s.committed <- err
+}
+
+type ownAggregateReaction struct {
+	t       *testing.T
+	ex      *CommandExecutor[order]
+	release chan struct{}
+	reacted chan struct{}
+}
+
+func (r *ownAggregateReaction) react(
+	ctx context.Context,
+	e asynxmd.Event[order],
+) {
+	if e.Version != 1 {
+		return
+	}
+
+	<-r.release
+	if _, err := r.ex.Execute(
+		ctx,
+		update(
+			"agg",
+			999,
+		),
+	); err != nil {
+		r.t.Errorf(
+			"reaction Execute: %v",
+			err,
+		)
+	}
+
+	close(r.reacted)
+}
+
+type lockProbe struct {
+	executor        *CommandExecutor[order]
+	ranWhileHeld    bool
+	reportedRunning bool
+}
+
+func (p *lockProbe) markRan() {
+	p.ranWhileHeld = true
+}
+
+func (p *lockProbe) tryWhileHeld(
+	context.Context,
+) error {
+	p.reportedRunning = p.executor.WithLockIfFree(
+		"agg",
+		p.markRan,
+	)
+	return nil
+}
+
+func enqueuingDelivery(
+	ctx context.Context,
+	aggregateID string,
+	version int64,
+) func(asynxmd.Tx) error {
+	return func(
+		tx asynxmd.Tx,
+	) error {
+		return tx.EnqueueDelivery(
+			ctx,
+			aggregateID,
+			version,
 		)
 	}
 }

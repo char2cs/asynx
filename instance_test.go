@@ -414,19 +414,13 @@ func TestReplay_Success(
 		cmd,
 	)
 
-	count := 0
-	fn := func(
-		ctx context.Context,
-		evt models.Event[mocks.Order],
-	) {
-		count++
-	}
+	var replayed callTally
 	err := instance.Replay(
 		context.Background(),
 		"order-1",
 		1,
 		0,
-		fn,
+		replayed.countEvent,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -435,7 +429,7 @@ func TestReplay_Success(
 		)
 	}
 
-	if count == 0 {
+	if replayed.total() == 0 {
 		t.Fatal("expected at least one event, got 0")
 	}
 }
@@ -444,19 +438,13 @@ func TestReplay_EmptyRange(
 	t *testing.T,
 ) {
 	instance := newInstance(t)
-	count := 0
-	fn := func(
-		ctx context.Context,
-		evt models.Event[mocks.Order],
-	) {
-		count++
-	}
+	var replayed callTally
 	err := instance.Replay(
 		context.Background(),
 		"nonexistent",
 		1,
 		0,
-		fn,
+		replayed.countEvent,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -465,10 +453,10 @@ func TestReplay_EmptyRange(
 		)
 	}
 
-	if count != 0 {
+	if replayed.total() != 0 {
 		t.Fatalf(
 			"expected 0 events for nonexistent aggregate, got %d",
-			count,
+			replayed.total(),
 		)
 	}
 }
@@ -509,17 +497,11 @@ func TestIntegration_FullCommandCycle(
 ) {
 	instance := newInstance(t)
 
-	handlerCalled := atomic.Int32{}
-	handler := func(
-		ctx context.Context,
-		evt models.Event[mocks.Order],
-	) {
-		handlerCalled.Add(1)
-	}
+	var handled callTally
 
 	subID, err := instance.Subscribe(
 		"OrderCreated",
-		handler,
+		handled.countEvent,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -565,7 +547,7 @@ func TestIntegration_FullCommandCycle(
 		)
 	}
 
-	if handlerCalled.Load() == 0 {
+	if handled.total() == 0 {
 		t.Fatal("handler was not called")
 	}
 }
@@ -1610,6 +1592,7 @@ func TestSubscribeWait_EventArrivesBeforeDeadline(
 	defer cancel()
 
 	stop := feedOrders(
+		t,
 		instance,
 		"sw",
 	)
@@ -1770,6 +1753,7 @@ func TestSubscribeWait_ConcurrentDifferentPatterns(
 	)
 
 	stop := feedOrders(
+		t,
 		instance,
 		"conc",
 		cancelCmd,
@@ -1810,6 +1794,7 @@ func TestSubscribeWait_AutoUnsubscribes(
 	defer cancel()
 
 	stop := feedOrders(
+		t,
 		instance,
 		"feed",
 	)
@@ -3643,25 +3628,70 @@ func TestFailure_RestartAfterAFailedForgetDeliversTheMarkerFirst(
 	}
 }
 
+type orderFeeder struct {
+	t       *testing.T
+	quit    chan struct{}
+	stopped chan error
+	once    sync.Once
+}
+
+func (f *orderFeeder) stop() {
+	f.once.Do(f.shutDown)
+}
+
+func (f *orderFeeder) shutDown() {
+	close(f.quit)
+	reportFeederStop(
+		f.t,
+		<-f.stopped,
+	)
+}
+
 func feedOrders(
+	t *testing.T,
 	instance asynx.Asynx[mocks.Order],
 	prefix string,
 	followUps ...func(id string) models.Command[mocks.Order],
 ) (stop func()) {
-	quit := make(chan struct{})
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		feedUntil(
-			quit,
-			instance,
-			prefix,
-			followUps,
+	feeder := &orderFeeder{
+		t:    t,
+		quit: make(chan struct{}),
+		stopped: make(
+			chan error,
+			1,
+		),
+	}
+	go feeder.feed(
+		instance,
+		prefix,
+		followUps,
+	)
+
+	return feeder.stop
+}
+
+func (f *orderFeeder) feed(
+	instance asynx.Asynx[mocks.Order],
+	prefix string,
+	followUps []func(id string) models.Command[mocks.Order],
+) {
+	f.stopped <- feedUntil(
+		f.quit,
+		instance,
+		prefix,
+		followUps,
+	)
+}
+
+func reportFeederStop(
+	t *testing.T,
+	err error,
+) {
+	if err != nil {
+		t.Logf(
+			"order feeder stopped early: %v",
+			err,
 		)
-	}()
-	var once sync.Once
-	return func() {
-		once.Do(func() { close(quit); <-finished })
 	}
 }
 
@@ -3670,17 +3700,22 @@ func feedOne(
 	prefix string,
 	i int,
 	followUps []func(id string) models.Command[mocks.Order],
-) bool {
+) error {
 	id := fmt.Sprintf(
 		"%s-%d",
 		prefix,
 		i,
 	)
-	if _, err := instance.SendWait(
+	_, err := instance.SendWait(
 		context.Background(),
 		mocks.CreateOrderCmd{ID: id, Total: 1},
-	); err != nil {
-		return false
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"feed %s: %w",
+			id,
+			err,
+		)
 	}
 
 	for _, followUp := range followUps {
@@ -3690,7 +3725,7 @@ func feedOne(
 		)
 	}
 
-	return true
+	return nil
 }
 
 func feedUntil(
@@ -3698,14 +3733,17 @@ func feedUntil(
 	instance asynx.Asynx[mocks.Order],
 	prefix string,
 	followUps []func(id string) models.Command[mocks.Order],
-) {
-	for i := 0; !isClosed(quit) && feedOne(
-		instance,
-		prefix,
-		i,
-		followUps,
-	); i++ {
+) (err error) {
+	for i := 0; !isClosed(quit) && err == nil; i++ {
+		err = feedOne(
+			instance,
+			prefix,
+			i,
+			followUps,
+		)
 	}
+
+	return err
 }
 
 func isClosed(
@@ -4734,6 +4772,7 @@ func BenchmarkAllocations_Get(
 type cancelCounter struct {
 	mu        sync.Mutex
 	successes int
+	rejected  []error
 }
 
 func (c *cancelCounter) attempt(
@@ -4748,13 +4787,44 @@ func (c *cancelCounter) attempt(
 		ctx,
 		mocks.CancelOrderCmd{ID: "X"},
 	)
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if err != nil {
+		c.rejected = append(
+			c.rejected,
+			err,
+		)
 		return
 	}
 
+	c.successes++
+}
+
+func (c *cancelCounter) expectValidationRejections(
+	t *testing.T,
+) {
+	t.Helper()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.successes++
+	unexpected := slices.DeleteFunc(
+		slices.Clone(c.rejected),
+		isValidationError,
+	)
+	if len(unexpected) != 0 {
+		t.Errorf(
+			"cancels were rejected with %v, want only ErrValidation",
+			errors.Join(unexpected...),
+		)
+	}
+}
+
+func isValidationError(
+	err error,
+) bool {
+	return errors.Is(
+		err,
+		models.ErrValidation,
+	)
 }
 
 func countConcurrentCancelSuccesses(
@@ -4806,6 +4876,7 @@ func countConcurrentCancelSuccesses(
 
 	close(start)
 	wg.Wait()
+	counter.expectValidationRejections(t)
 
 	counter.mu.Lock()
 	defer counter.mu.Unlock()

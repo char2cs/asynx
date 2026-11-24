@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/char2cs/asynx/internal/eventstore/internal/replayer"
@@ -67,20 +70,21 @@ func (s *afterReadStore) ReadFrom(
 		err
 }
 
+func keepPayloadUpcaster(
+	_ context.Context,
+	_ string,
+	payload []byte,
+) ([]byte, error) {
+	return payload,
+		nil
+}
+
 func upcastingReader(
 	es asynxmd.Store,
 	ss asynxmd.SnapshotStore,
 ) *Reader[order] {
-	fn := func(
-		_ context.Context,
-		_ string,
-		p []byte,
-	) ([]byte, error) {
-		return p,
-			nil
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: fn,
+		1: keepPayloadUpcaster,
 	}
 	return New[order](
 		es,
@@ -256,13 +260,19 @@ func TestGet_AutoSnapshot_NotWrittenWhenTheStreamCannotBeReChecked(
 		mem,
 		ss,
 	)
-	if r.streamHolds(
+	holds, err := r.streamHolds(
 		ctx,
 		"agg2",
 		1,
 		"e1",
-	) {
-		t.Fatal("an unreadable event was taken for the expected one")
+	)
+	if holds ||
+		err == nil {
+		t.Fatalf(
+			"holds = %v, err = %v; want an unreadable event reported, not taken for the expected one",
+			holds,
+			err,
+		)
 	}
 }
 
@@ -720,14 +730,7 @@ func TestGet_AutoSnapshotFailure_HandlerPanicDoesNotBreakTheRead(
 		mem,
 		ss,
 	)
-	panicking := func(
-		context.Context,
-		asynxmd.Event[order],
-		error,
-	) {
-		panic("handler blew up")
-	}
-	r.SetSnapshotErrorHandler(panicking)
+	r.SetSnapshotErrorHandler(panicOnSnapshotFailure)
 
 	state, err := r.Get(
 		context.Background(),
@@ -739,6 +742,146 @@ func TestGet_AutoSnapshotFailure_HandlerPanicDoesNotBreakTheRead(
 			"Get = %+v, %v; want Shipped, nil",
 			state,
 			err,
+		)
+	}
+}
+
+func panicOnSnapshotFailure(
+	context.Context,
+	asynxmd.Event[order],
+	error,
+) {
+	panic("handler blew up")
+}
+
+func TestGet_AutoSnapshotFailure_HandlerPanicIsWrittenToStderr(
+	t *testing.T,
+) {
+	mem := store.New()
+	ss := store.NewSnapshots()
+	seedUpcastableOrder(
+		t,
+		mem,
+	)
+	ss.SetError(
+		"agg1",
+		storageErr,
+	)
+	var corruption corruptionCapture
+	r := New[order](
+		mem,
+		ss,
+		replayer.New[order](
+			mem,
+			map[int]asynxmd.Upcaster{1: keepPayloadUpcaster},
+			2,
+			order{},
+		),
+		2,
+		order{},
+		corruption.record,
+	)
+	r.SetSnapshotErrorHandler(panicOnSnapshotFailure)
+	var stderr stderrCapture
+	stderr.begin(t)
+
+	_, err := r.Get(
+		context.Background(),
+		"agg1",
+	)
+	written := stderr.end(t)
+	if err != nil {
+		t.Fatalf(
+			"Get: %v",
+			err,
+		)
+	}
+
+	if !strings.Contains(
+		written,
+		"handler blew up",
+	) {
+		t.Errorf(
+			"stderr = %q, want the contained panic written to it",
+			written,
+		)
+	}
+
+	if corruption.err != nil {
+		t.Errorf(
+			"a handler panic reached the corruption callback: %v",
+			corruption.err,
+		)
+	}
+}
+
+type stderrCapture struct {
+	original *os.File
+	reader   *os.File
+}
+
+func (c *stderrCapture) begin(
+	t *testing.T,
+) {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c.original = os.Stderr
+	c.reader = reader
+	os.Stderr = writer
+}
+
+func (c *stderrCapture) end(
+	t *testing.T,
+) string {
+	t.Helper()
+	os.Stderr.Close()
+	os.Stderr = c.original
+	captured, err := io.ReadAll(c.reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return string(captured)
+}
+
+func TestGet_AutoSnapshot_UnreadableStreamCheckIsReportedToTheHandler(
+	t *testing.T,
+) {
+	mem := store.New()
+	seedUpcastableOrder(
+		t,
+		mem,
+	)
+	r := upcastingReader(
+		&readRangeFailsStore{Store: mem},
+		store.NewSnapshots(),
+	)
+	var failures []snapshotFailure
+	r.SetSnapshotErrorHandler(recordSnapshotFailures(&failures))
+
+	_, err := r.Get(
+		context.Background(),
+		"agg1",
+	)
+	if err != nil {
+		t.Fatalf(
+			"Get: %v",
+			err,
+		)
+	}
+
+	if len(failures) != 1 ||
+		!errors.Is(
+			failures[0].err,
+			storageErr,
+		) {
+		t.Fatalf(
+			"handler saw %v, want one error wrapping the stream-check failure",
+			failures,
 		)
 	}
 }

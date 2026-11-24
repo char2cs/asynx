@@ -235,19 +235,13 @@ func TestProcessor_EventPublishedToRealBus(
 
 	ctx := context.Background()
 
-	eventReceived := make(
+	forwarded := &eventForwarder{events: make(
 		chan asynxmd.Event[order],
 		1,
-	)
-	forward := func(
-		ctx context.Context,
-		e asynxmd.Event[order],
-	) {
-		eventReceived <- e
-	}
+	)}
 	channelBus.Subscribe(
 		"OrderCreated",
-		forward,
+		forwarded.forward,
 	)
 
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
@@ -263,7 +257,7 @@ func TestProcessor_EventPublishedToRealBus(
 	}
 
 	select {
-	case event := <-eventReceived:
+	case event := <-forwarded.events:
 		expectEventName(
 			t,
 			event.EventName,
@@ -308,19 +302,13 @@ func TestProcessor_PublishUsesDetachedContext(
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	contextReceived := make(
+	forwarded := &contextForwarder{contexts: make(
 		chan context.Context,
 		1,
-	)
-	forwardCtx := func(
-		ctx context.Context,
-		e asynxmd.Event[order],
-	) {
-		contextReceived <- ctx
-	}
+	)}
 	channelBus.Subscribe(
 		"OrderCreated",
-		forwardCtx,
+		forwarded.forward,
 	)
 
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
@@ -338,7 +326,7 @@ func TestProcessor_PublishUsesDetachedContext(
 	cancel()
 
 	select {
-	case <-contextReceived:
+	case <-forwarded.contexts:
 	case <-time.After(1 * time.Second):
 		t.Fatalf("event not published within timeout")
 	}
@@ -458,21 +446,8 @@ func TestProcessor_NegativeOptionsIgnored(
 func TestWithPublishErrorHandler_IsInvokedOnPublishError(
 	t *testing.T,
 ) {
-	var got struct {
-		sync.Mutex
-		called bool
-	}
-
+	reported := &publishErrorFlag{}
 	s := store.New()
-	handler := func(
-		_ context.Context,
-		_ asynxmd.Event[mocks.Order],
-		_ error,
-	) {
-		got.Lock()
-		got.called = true
-		got.Unlock()
-	}
 
 	proc := mustNew(
 		t,
@@ -484,7 +459,7 @@ func TestWithPublishErrorHandler_IsInvokedOnPublishError(
 			nil,
 		),
 		&mockbuses.ErrBus[mocks.Order]{Err: errors.New("bus down")},
-		models.WithPublishErrorHandler[mocks.Order](handler),
+		models.WithPublishErrorHandler[mocks.Order](reported.report),
 	)
 
 	_, err := proc.Send(
@@ -500,13 +475,132 @@ func TestWithPublishErrorHandler_IsInvokedOnPublishError(
 
 	proc.WaitPublish()
 
-	got.Lock()
-	called := got.called
-	got.Unlock()
-
-	if !called {
+	if !reported.wasCalled() {
 		t.Error("PublishErrorHandler was not called after bus error")
 	}
+}
+
+type eventForwarder struct {
+	events chan asynxmd.Event[order]
+}
+
+func (f *eventForwarder) forward(
+	_ context.Context,
+	e asynxmd.Event[order],
+) {
+	f.events <- e
+}
+
+type contextForwarder struct {
+	contexts chan context.Context
+}
+
+func (f *contextForwarder) forward(
+	ctx context.Context,
+	_ asynxmd.Event[order],
+) {
+	f.contexts <- ctx
+}
+
+type publishErrorFlag struct {
+	mu     sync.Mutex
+	called bool
+}
+
+func (f *publishErrorFlag) report(
+	context.Context,
+	asynxmd.Event[mocks.Order],
+	error,
+) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.called = true
+}
+
+func (f *publishErrorFlag) wasCalled() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.called
+}
+
+type handlerGate struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newHandlerGate(
+	entries int,
+) *handlerGate {
+	return &handlerGate{
+		entered: make(
+			chan struct{},
+			entries,
+		),
+		release: make(chan struct{}),
+	}
+}
+
+func (g *handlerGate) block(
+	context.Context,
+	asynxmd.Event[order],
+) {
+	close(g.entered)
+	<-g.release
+}
+
+func (g *handlerGate) holdIfSlow(
+	_ context.Context,
+	e asynxmd.Event[order],
+) {
+	if e.AggregateID == "slow" {
+		g.entered <- struct{}{}
+		<-g.release
+	}
+}
+
+type callCounter struct {
+	calls atomic.Int32
+}
+
+func (c *callCounter) onEvent(
+	context.Context,
+	asynxmd.Event[order],
+) {
+	c.calls.Add(1)
+}
+
+func (c *callCounter) onProjection(
+	context.Context,
+	asynxmd.Tx,
+	asynxmd.Event[order],
+) error {
+	c.calls.Add(1)
+	return nil
+}
+
+func (c *callCounter) onSnapshotError(
+	context.Context,
+	asynxmd.Event[order],
+	error,
+) {
+	c.calls.Add(1)
+}
+
+func (c *callCounter) onDeliveryError(
+	context.Context,
+	asynxmd.Event[order],
+	error,
+	int,
+) {
+	c.calls.Add(1)
+}
+
+func (c *callCounter) onDeliveryPanic(
+	context.Context,
+	asynxmd.Event[order],
+	any,
+) {
+	c.calls.Add(1)
 }
 
 type blockingTestBus[T any] struct {
@@ -600,37 +694,38 @@ func updateCmd(
 	return mocks.UpdateOrderCmd{ID: id, NewState: order{ID: id, Total: total}}
 }
 
-func downUnlessHealthy(
-	healthy *atomic.Bool,
+type healthGatedDelivery struct {
+	healthy *atomic.Bool
+}
+
+func (g healthGatedDelivery) deliver(
+	context.Context,
+	asynxmd.Event[order],
 ) error {
-	if healthy.Load() {
+	if g.healthy.Load() {
 		return nil
 	}
 
 	return errors.New("down")
 }
 
+func updatedEvent(
+	name string,
+) bool {
+	return name == "OrderUpdated"
+}
+
 func parkingOpts(
 	healthy *atomic.Bool,
 	extra ...models.Opt[order],
 ) []models.Opt[order] {
-	isUpdated := func(
-		name string,
-	) bool {
-		return name == "OrderUpdated"
-	}
-	handler := func(
-		context.Context,
-		asynxmd.Event[order],
-	) error {
-		return downUnlessHealthy(healthy)
-	}
+	gated := healthGatedDelivery{healthy: healthy}
 	subs := []asynxmd.DurableSub[order]{{
 		Match:   always,
-		Handler: handler,
+		Handler: gated.deliver,
 	}}
 	base := []models.Opt[order]{
-		models.WithDurableDelivery[order](isUpdated),
+		models.WithDurableDelivery[order](updatedEvent),
 		models.WithDurableSubscribers(subs),
 		models.WithDeliveryRetry[order](
 			time.Millisecond,
@@ -647,32 +742,18 @@ func parkingOpts(
 func TestProcessor_Options_SyncProjectionsDurableDeliverySnapshotErrors(
 	t *testing.T,
 ) {
-	var projected, snapErrs atomic.Int32
+	projected := &callCounter{}
+	snapErrs := &callCounter{}
 	s := store.New()
-	project := func(
-		context.Context,
-		asynxmd.Tx,
-		asynxmd.Event[order],
-	) error {
-		projected.Add(1)
-		return nil
-	}
-	countSnapErr := func(
-		context.Context,
-		asynxmd.Event[order],
-		error,
-	) {
-		snapErrs.Add(1)
-	}
 	f := newFixture(
 		t,
 		s,
 		models.WithSyncProjections([]models.SyncProjection[order]{{
 			Match: always,
-			Fn:    project,
+			Fn:    projected.onProjection,
 		}}),
 		models.WithDurableDelivery[order](always),
-		models.WithSnapshotErrorHandler(countSnapErr),
+		models.WithSnapshotErrorHandler(snapErrs.onSnapshotError),
 	)
 	f.snap.SetError(
 		"o1",
@@ -690,12 +771,12 @@ func TestProcessor_Options_SyncProjectionsDurableDeliverySnapshotErrors(
 
 	f.p.WaitPublish()
 
-	if projected.Load() != 1 ||
-		snapErrs.Load() != 1 {
+	if projected.calls.Load() != 1 ||
+		snapErrs.calls.Load() != 1 {
 		t.Errorf(
 			"projected=%d snapshotErrors=%d, want 1 and 1",
-			projected.Load(),
-			snapErrs.Load(),
+			projected.calls.Load(),
+			snapErrs.calls.Load(),
 		)
 	}
 
@@ -710,10 +791,15 @@ func TestProcessor_Options_SyncProjectionsDurableDeliverySnapshotErrors(
 	}
 }
 
-func flakyHandler(
-	attempts *atomic.Int32,
+type flakyDelivery struct {
+	attempts atomic.Int32
+}
+
+func (d *flakyDelivery) deliver(
+	context.Context,
+	asynxmd.Event[order],
 ) error {
-	switch attempts.Add(1) {
+	switch d.attempts.Add(1) {
 	case 1:
 		return errors.New("transient")
 	case 2:
@@ -726,44 +812,20 @@ func flakyHandler(
 func TestProcessor_DurableDeliveryOptions_RetryReportAndPanicHandling(
 	t *testing.T,
 ) {
-	var attempts, reports, panics atomic.Int32
+	flaky := &flakyDelivery{}
+	reports := &callCounter{}
+	panics := &callCounter{}
 	s := store.New()
-	isUpdated := func(
-		name string,
-	) bool {
-		return name == "OrderUpdated"
-	}
-	handler := func(
-		context.Context,
-		asynxmd.Event[order],
-	) error {
-		return flakyHandler(&attempts)
-	}
-	countReport := func(
-		context.Context,
-		asynxmd.Event[order],
-		error,
-		int,
-	) {
-		reports.Add(1)
-	}
-	countPanic := func(
-		context.Context,
-		asynxmd.Event[order],
-		any,
-	) {
-		panics.Add(1)
-	}
 	f := newFixture(
 		t,
 		s,
-		models.WithDurableDelivery[order](isUpdated),
+		models.WithDurableDelivery[order](updatedEvent),
 		models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
 			Match:   always,
-			Handler: handler,
+			Handler: flaky.deliver,
 		}}),
-		models.WithDeliveryErrorHandler(countReport),
-		models.WithDeliveryPanicHandler(countPanic),
+		models.WithDeliveryErrorHandler(reports.onDeliveryError),
+		models.WithDeliveryPanicHandler(panics.onDeliveryPanic),
 		models.WithDeliveryRetry[order](
 			time.Millisecond,
 			2*time.Millisecond,
@@ -780,14 +842,14 @@ func TestProcessor_DurableDeliveryOptions_RetryReportAndPanicHandling(
 
 	f.p.WaitPublish()
 
-	if attempts.Load() != 3 ||
-		reports.Load() != 2 ||
-		panics.Load() != 1 {
+	if flaky.attempts.Load() != 3 ||
+		reports.calls.Load() != 2 ||
+		panics.calls.Load() != 1 {
 		t.Fatalf(
 			"attempts=%d reports=%d panics=%d; want 3, 2, 1",
-			attempts.Load(),
-			reports.Load(),
-			panics.Load(),
+			flaky.attempts.Load(),
+			reports.calls.Load(),
+			panics.calls.Load(),
 		)
 	}
 
@@ -821,28 +883,33 @@ func requireVersionOne(
 	}
 }
 
+type deadLetterRecorder struct {
+	versions chan int64
+}
+
+func (r *deadLetterRecorder) record(
+	_ context.Context,
+	e asynxmd.Event[order],
+	_ error,
+) error {
+	r.versions <- e.Version
+	return nil
+}
+
 func TestProcessor_Options_DeadLetter(
 	t *testing.T,
 ) {
 	var healthy atomic.Bool
-	dead := make(
+	dead := &deadLetterRecorder{versions: make(
 		chan int64,
 		4,
-	)
-	record := func(
-		_ context.Context,
-		e asynxmd.Event[order],
-		_ error,
-	) error {
-		dead <- e.Version
-		return nil
-	}
+	)}
 	f := newFixture(
 		t,
 		store.New(),
 		parkingOpts(
 			&healthy,
-			models.WithDeadLetterHandler(record),
+			models.WithDeadLetterHandler(dead.record),
 		)...,
 	)
 	if _, err := f.p.Send(
@@ -856,7 +923,7 @@ func TestProcessor_Options_DeadLetter(
 	}
 
 	select {
-	case v := <-dead:
+	case v := <-dead.versions:
 		requireVersionOne(
 			t,
 			v,
@@ -937,30 +1004,16 @@ func TestProcessor_HandlerMayWaitOnAnotherInstanceUnderTheSameID(
 		t.Fatal(err)
 	}
 
-	got := make(
-		chan error,
-		2,
-	)
-	waitOther := func(
-		hctx context.Context,
-		e asynxmd.Event[order],
-	) {
-		_, err := b.p.SendWait(
-			hctx,
-			updateCmd(
-				e.AggregateID,
-				2,
-			),
-		)
-		got <- err
-		got <- b.p.Forget(
-			hctx,
-			e.AggregateID,
-		)
+	waiting := &crossInstanceWait{
+		other: b.p,
+		got: make(
+			chan error,
+			2,
+		),
 	}
 	a.b.Subscribe(
 		"OrderUpdated",
-		waitOther,
+		waiting.wait,
 	)
 	if _, err := a.p.Send(
 		ctx,
@@ -975,10 +1028,33 @@ func TestProcessor_HandlerMayWaitOnAnotherInstanceUnderTheSameID(
 	for _, what := range []string{"SendWait", "Forget"} {
 		awaitOtherInstance(
 			t,
-			got,
+			waiting.got,
 			what,
 		)
 	}
+}
+
+type crossInstanceWait struct {
+	other *Processor[order]
+	got   chan error
+}
+
+func (w *crossInstanceWait) wait(
+	ctx context.Context,
+	e asynxmd.Event[order],
+) {
+	_, err := w.other.SendWait(
+		ctx,
+		updateCmd(
+			e.AggregateID,
+			2,
+		),
+	)
+	w.got <- err
+	w.got <- w.other.Forget(
+		ctx,
+		e.AggregateID,
+	)
 }
 
 func awaitOtherInstance(
@@ -1064,21 +1140,41 @@ func TestNew_AFactoryReplacesTheDefaultDispatcher(
 	}
 }
 
+type failingFactory struct {
+	err error
+}
+
+func (f failingFactory) build(
+	asynxmd.DispatcherConfig[order],
+) (asynxmd.Dispatcher[order], error) {
+	return nil,
+		f.err
+}
+
+func noDispatcherFactory(
+	asynxmd.DispatcherConfig[order],
+) (asynxmd.Dispatcher[order], error) {
+	return nil,
+		nil
+}
+
+func typedNilDispatcherFactory(
+	asynxmd.DispatcherConfig[order],
+) (asynxmd.Dispatcher[order], error) {
+	return (*mockbuses.Dispatcher[order])(nil),
+		nil
+}
+
 func TestNew_AFactoryErrorIsReturned(
 	t *testing.T,
 ) {
 	sentinel := errors.New("factory failed")
-	factory := func(
-		asynxmd.DispatcherConfig[order],
-	) (asynxmd.Dispatcher[order], error) {
-		return nil,
-			sentinel
-	}
+	factory := failingFactory{err: sentinel}
 
 	p, err := New(
 		newES(),
 		bus.New[order](),
-		models.WithDispatcherFactory(factory),
+		models.WithDispatcherFactory(factory.build),
 	)
 	if !errors.Is(
 		err,
@@ -1107,17 +1203,10 @@ func TestNew_AFactoryErrorIsReturned(
 func TestNew_ANilDispatcherWithoutAnErrorFails(
 	t *testing.T,
 ) {
-	factory := func(
-		asynxmd.DispatcherConfig[order],
-	) (asynxmd.Dispatcher[order], error) {
-		return nil,
-			nil
-	}
-
 	p, err := New(
 		newES(),
 		bus.New[order](),
-		models.WithDispatcherFactory(factory),
+		models.WithDispatcherFactory(noDispatcherFactory),
 	)
 	if err == nil ||
 		p != nil {
@@ -1196,9 +1285,9 @@ func TestNew_TheFactoryReceivesTheConfigWithDefaultsApplied(
 		},
 	}
 	for _, tt := range tests {
-		runFactoryCase(
-			t,
-			tt,
+		t.Run(
+			tt.name,
+			tt.check,
 		)
 	}
 }
@@ -1211,25 +1300,23 @@ type factoryCase struct {
 	max      time.Duration
 }
 
-func runFactoryCase(
+func (tt factoryCase) check(
 	t *testing.T,
-	tt factoryCase,
 ) {
-	check := func(
-		t *testing.T,
-	) {
-		assertFactoryConfig(
-			t,
-			tt.opts,
-			tt.attempts,
-			tt.initial,
-			tt.max,
-		)
-	}
-	t.Run(
-		tt.name,
-		check,
+	assertFactoryConfig(
+		t,
+		tt.opts,
+		tt.attempts,
+		tt.initial,
+		tt.max,
 	)
+}
+
+func ignoresPublishError(
+	context.Context,
+	asynxmd.Event[order],
+	error,
+) {
 }
 
 func assertFactoryConfig(
@@ -1240,17 +1327,11 @@ func assertFactoryConfig(
 	max time.Duration,
 ) {
 	t.Helper()
-	handled := func(
-		context.Context,
-		asynxmd.Event[order],
-		error,
-	) {
-	}
 	fake := mockbuses.NewDispatcher[order]()
 	opts = append(
 		opts,
 		models.WithDispatcherFactory(fake.Factory()),
-		models.WithPublishErrorHandler(handled),
+		models.WithPublishErrorHandler(ignoresPublishError),
 	)
 	mustNew(
 		t,
@@ -1285,17 +1366,10 @@ func assertFactoryConfig(
 func TestNew_ATypedNilDispatcherWithoutAnErrorFails(
 	t *testing.T,
 ) {
-	factory := func(
-		asynxmd.DispatcherConfig[order],
-	) (asynxmd.Dispatcher[order], error) {
-		return (*mockbuses.Dispatcher[order])(nil),
-			nil
-	}
-
 	p, err := New(
 		newES(),
 		bus.New[order](),
-		models.WithDispatcherFactory(factory),
+		models.WithDispatcherFactory(typedNilDispatcherFactory),
 	)
 
 	notRejected := p != nil || err == nil || !strings.Contains(
@@ -1396,19 +1470,10 @@ func TestProcessor_IntegrationOrderPreservation(
 	ctx := context.Background()
 	aggregateID := "order1"
 
-	var eventCount int32
-	countEvent := func(
-		ctx context.Context,
-		e asynxmd.Event[order],
-	) {
-		atomic.AddInt32(
-			&eventCount,
-			1,
-		)
-	}
+	events := &callCounter{}
 	channelBus.Subscribe(
 		"OrderUpdated",
-		countEvent,
+		events.onEvent,
 	)
 
 	for i := 1; i <= 50; i++ {
@@ -1434,7 +1499,7 @@ func TestProcessor_IntegrationOrderPreservation(
 
 	p.WaitPublish()
 
-	count := atomic.LoadInt32(&eventCount)
+	count := events.calls.Load()
 	if count > 0 {
 		t.Logf(
 			"Integration: %d update events processed",
@@ -1703,19 +1768,13 @@ func TestProcessor_IntegrationEventPublishingReliability(
 		100,
 	)
 
-	buffer := func(
-		ctx context.Context,
-		e asynxmd.Event[order],
-	) {
-		bufferOrDrop(
-			t,
-			eventsChan,
-			e,
-		)
+	buffered := &eventBuffer{
+		t:      t,
+		events: eventsChan,
 	}
 	channelBus.Subscribe(
 		"OrderCreated",
-		buffer,
+		buffered.bufferOrDrop,
 	)
 
 	commandCount := 20
@@ -1752,15 +1811,19 @@ func TestProcessor_IntegrationEventPublishingReliability(
 	)
 }
 
-func bufferOrDrop(
-	t *testing.T,
-	eventsChan chan asynxmd.Event[order],
+type eventBuffer struct {
+	t      *testing.T
+	events chan asynxmd.Event[order]
+}
+
+func (b *eventBuffer) bufferOrDrop(
+	_ context.Context,
 	e asynxmd.Event[order],
 ) {
 	select {
-	case eventsChan <- e:
+	case b.events <- e:
 	default:
-		t.Logf("Event buffer full, dropped event")
+		b.t.Logf("Event buffer full, dropped event")
 	}
 }
 
@@ -1819,9 +1882,9 @@ func TestProcessor_IntegrationDefaultQueueDepthScaling(
 	}
 
 	for _, tt := range tests {
-		runQueueDepthCase(
-			t,
-			tt,
+		t.Run(
+			tt.name,
+			tt.check,
 		)
 	}
 }
@@ -1832,27 +1895,8 @@ type queueDepthCase struct {
 	expectedMinQD int
 }
 
-func runQueueDepthCase(
+func (tt queueDepthCase) check(
 	t *testing.T,
-	tt queueDepthCase,
-) {
-	check := func(
-		t *testing.T,
-	) {
-		checkQueueDepth(
-			t,
-			tt,
-		)
-	}
-	t.Run(
-		tt.name,
-		check,
-	)
-}
-
-func checkQueueDepth(
-	t *testing.T,
-	tt queueDepthCase,
 ) {
 	memStore := store.New()
 	channelBus := bus.New[order]()

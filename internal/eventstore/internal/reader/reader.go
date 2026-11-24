@@ -45,7 +45,9 @@ type Reader[T any] struct {
 // are populated. For a lock-free Get the callback runs inside the snapshot
 // guard, so the aggregate's command lock is held while it runs and it should
 // return quickly. A panic in the callback is contained and never breaks the
-// read. A nil callback, the default, drops the failure. Call it before the
+// read; one line about it is written to stderr. A
+// failure to re-check the stream before a lock-free write is reported to the
+// callback like a failed write. A nil callback, the default, drops the failure. Call it before the
 // reader is used from more than one goroutine.
 func (r *Reader[T]) SetSnapshotErrorHandler(
 	fn func(context.Context, asynxmd.Event[T], error),

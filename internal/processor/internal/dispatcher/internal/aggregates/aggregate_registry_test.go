@@ -105,13 +105,30 @@ func newRegistry() (*testRegistry, *hookRecorder) {
 // Enqueue enqueues job and remembers the channel it hands its turn on with.
 func (r *testRegistry) Enqueue(
 	job *fakeItem,
-) (contracts.Admission, error) {
-	admission, err := r.Registry.Enqueue(job)
+	admission *contracts.Admission,
+) {
+	r.Registry.Enqueue(
+		job,
+		admission,
+	)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.dones[job] = admission.Done
-	return admission,
-		err
+}
+
+func liftPark(
+	r *testRegistry,
+	aggregateID string,
+	generation uint64,
+) (bool, []int64) {
+	var outcome contracts.LiftOutcome
+	r.Lift(
+		aggregateID,
+		generation,
+		&outcome,
+	)
+	return outcome.Lifted,
+		outcome.Undelivered
 }
 
 // Pop begins the oldest job of the aggregate that is neither begun nor
@@ -226,15 +243,18 @@ func enqueue(
 	t *testing.T,
 	r *testRegistry,
 	job *fakeItem,
-) contracts.Admission {
+) (admission contracts.Admission) {
 	t.Helper()
-	admission, err := r.Enqueue(job)
-	if err != nil {
+	r.Enqueue(
+		job,
+		&admission,
+	)
+	if admission.Err != nil {
 		t.Fatalf(
 			"Enqueue(%s/%d) = %v",
 			job.aggregateID,
 			job.version,
-			err,
+			admission.Err,
 		)
 	}
 
@@ -504,13 +524,18 @@ func TestEnqueue_RefusedAfterClose(
 		"a",
 		1,
 	)
-	if _, err := r.Enqueue(job); !errors.Is(
-		err,
+	var refused contracts.Admission
+	r.Enqueue(
+		job,
+		&refused,
+	)
+	if !errors.Is(
+		refused.Err,
 		asynxmd.ErrDispatcherClosed,
 	) {
 		t.Fatalf(
 			"Enqueue after Close = %v, want ErrDispatcherClosed",
-			err,
+			refused.Err,
 		)
 	}
 
@@ -680,7 +705,8 @@ func TestPark_OfAParkedAggregateMergesTheVersionsAndKeepsTheGeneration(
 		t.Fatal("a second Park dropped or did not record versions")
 	}
 
-	if _, undelivered := r.Lift(
+	if _, undelivered := liftPark(
+		r,
 		"a",
 		g,
 	); !slices.Equal(
@@ -836,7 +862,8 @@ func TestPark_TakesANewGenerationEachTimeItIsImposed(
 		t.Fatal("two aggregates share a generation")
 	}
 
-	r.Lift(
+	liftPark(
+		r,
 		"a",
 		first,
 	)
@@ -882,7 +909,8 @@ func TestResumeUndelivered_ReturnsWhatTheParkLeftUndeliveredAndForgetsIt(
 		"a",
 	)
 
-	lifted, undelivered := r.Lift(
+	lifted, undelivered := liftPark(
+		r,
 		"a",
 		g,
 	)
@@ -916,7 +944,8 @@ func TestResumeUndelivered_ReturnsWhatTheParkLeftUndeliveredAndForgetsIt(
 		t.Fatal("Unrun still answers after the lift")
 	}
 
-	if lifted, _ := r.Lift(
+	if lifted, _ := liftPark(
+		r,
 		"a",
 		g,
 	); lifted {
@@ -990,7 +1019,8 @@ func TestResumeUndelivered_ReturnsTheVersionsAscending(
 		errHalted,
 		5,
 	)
-	_, undelivered := r.Lift(
+	_, undelivered := liftPark(
+		r,
 		"a",
 		generation(
 			t,
@@ -1023,7 +1053,8 @@ func TestResumeUndelivered_LeavesAParkImposedAgainSinceItWasListed(
 		r,
 		"a",
 	)
-	r.Lift(
+	liftPark(
+		r,
 		"a",
 		stale,
 	)
@@ -1038,7 +1069,8 @@ func TestResumeUndelivered_LeavesAParkImposedAgainSinceItWasListed(
 		"a",
 	)
 
-	lifted, undelivered := r.Lift(
+	lifted, undelivered := liftPark(
+		r,
 		"a",
 		stale,
 	)
@@ -1095,7 +1127,8 @@ func TestResumeUndelivered_WithAStaleGenerationChangesNothing(
 		"a",
 	)
 
-	if lifted, undelivered := r.Lift(
+	if lifted, undelivered := liftPark(
+		r,
 		"a",
 		g+1,
 	); lifted ||
@@ -1148,7 +1181,8 @@ func TestResumeUndelivered_OfAnUnparkedAggregateDoesNothing(
 			1,
 		),
 	)
-	if lifted, undelivered := r.Lift(
+	if lifted, undelivered := liftPark(
+		r,
 		"a",
 		0,
 	); lifted ||
@@ -1395,7 +1429,8 @@ func TestParkIfCurrent_AfterALiftDoesNotParkAgain(
 		"a",
 		errHalted,
 	)
-	r.Lift(
+	liftPark(
+		r,
 		"a",
 		generation(
 			t,
@@ -1489,7 +1524,8 @@ func TestSettleIfParked_AfterTheLiftSettlesWithoutARecord(
 		"a",
 		errHalted,
 	)
-	r.Lift(
+	liftPark(
+		r,
 		"a",
 		generation(
 			t,
@@ -1707,7 +1743,8 @@ func TestFinish_KeepsTheRecordOfAParkedAggregate(
 		t.Fatal("a live job after the last Finish had to wait")
 	}
 
-	if _, undelivered := r.Lift(
+	if _, undelivered := liftPark(
+		r,
 		"a",
 		g,
 	); !slices.Equal(
@@ -1744,7 +1781,8 @@ func TestFinish_ThenLiftLeavesNoRecord(
 		1,
 	)
 	r.finish(first)
-	r.Lift(
+	liftPark(
+		r,
 		"a",
 		generation(
 			t,
@@ -1881,7 +1919,8 @@ func parkAndLift(
 			errHalted,
 		)
 		violations.Add(popWhileParked(r))
-		r.Lift(
+		liftPark(
+			r,
 			"a",
 			r.Parks()["a"],
 		)
@@ -2186,7 +2225,8 @@ func TestInspect_GenerationChangesWhenAParkIsImposedAgain(
 		)
 	}
 
-	r.Lift(
+	liftPark(
+		r,
 		"a",
 		first,
 	)
@@ -2233,7 +2273,8 @@ func TestInspect_IsClearAfterTheParkLifts(
 		errHalted,
 		3,
 	)
-	r.Lift(
+	liftPark(
+		r,
 		"a",
 		generation(
 			t,

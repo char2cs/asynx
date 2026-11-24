@@ -11,7 +11,10 @@ func TestCancels_CancelAllCancelsLiveContexts(
 ) {
 	c := newCancels()
 	ctx, cancel := context.WithCancel(context.Background())
-	release := c.add(cancel)
+	release := addLive(
+		c,
+		cancel,
+	)
 
 	c.cancelAll()
 
@@ -30,7 +33,10 @@ func TestCancels_AddAfterCancelAllIsAlreadyCancelled(
 	c.cancelAll()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	release := c.add(cancel)
+	release := addLive(
+		c,
+		cancel,
+	)
 
 	if ctx.Err() == nil {
 		t.Fatal("context added after cancelAll is not cancelled")
@@ -50,7 +56,10 @@ func TestCancels_ReleaseDeregistersAndCancels(
 ) {
 	c := newCancels()
 	ctx, cancel := context.WithCancel(context.Background())
-	release := c.add(cancel)
+	release := addLive(
+		c,
+		cancel,
+	)
 
 	release()
 
@@ -66,12 +75,27 @@ func TestCancels_ReleaseDeregistersAndCancels(
 	}
 }
 
+func addLive(
+	c *cancels,
+	cancel context.CancelFunc,
+) context.CancelFunc {
+	live := newLiveCancel(
+		c,
+		cancel,
+	)
+	c.add(live)
+	return live.release
+}
+
 func addAndRelease(
 	t *testing.T,
 	c *cancels,
 ) {
 	ctx, cancel := context.WithCancel(context.Background())
-	release := c.add(cancel)
+	release := addLive(
+		c,
+		cancel,
+	)
 	release()
 	if ctx.Err() == nil {
 		t.Error("context not cancelled after release")

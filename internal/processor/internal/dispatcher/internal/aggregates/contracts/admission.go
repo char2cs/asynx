@@ -1,6 +1,7 @@
 package contracts
 
-// Admission tells the caller of Enqueue what became of the job.
+// Admission is what Enqueue writes for its caller: what became of the job,
+// read from the fields once Enqueue has returned.
 type Admission struct {
 	// Parked is true when the job was refused because its aggregate is parked:
 	// it was not queued, its version is recorded as undelivered, and it has
@@ -14,4 +15,7 @@ type Admission struct {
 	// Done is the channel the job hands its turn on with, through
 	// Winddown.Finish: the next job of the aggregate waits for it.
 	Done chan<- struct{}
+	// Err is ErrDispatcherClosed when the registry is closed, in which case
+	// nothing else is set; nil otherwise.
+	Err error
 }

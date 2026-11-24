@@ -10,23 +10,67 @@ import (
 
 const timeout = 5 * time.Second
 
+type laneErrors []error
+
+func (l laneErrors) errorOfLane(
+	i int,
+) error {
+	return l[i]
+}
+
+type meetingPoint struct {
+	arrivals sync.WaitGroup
+	done     chan struct{}
+}
+
+func newMeetingPoint(
+	lanes int,
+) *meetingPoint {
+	m := &meetingPoint{done: make(chan struct{})}
+	m.arrivals.Add(lanes)
+	return m
+}
+
+func (m *meetingPoint) waitForEveryLane(
+	int,
+) error {
+	m.arrivals.Done()
+	m.arrivals.Wait()
+	return nil
+}
+
+func (m *meetingPoint) runLanes(
+	lanes int,
+) {
+	All(
+		lanes,
+		m.waitForEveryLane,
+	)
+	close(m.done)
+}
+
+type unexpectedLaneRun struct{ t *testing.T }
+
+func (u unexpectedLaneRun) fail(
+	int,
+) error {
+	u.t.Error("run was called for zero lanes")
+	return nil
+}
+
 func TestAll_ReturnsEachLanesErrorByIndex(
 	t *testing.T,
 ) {
 	errThird := errors.New("third")
-	run := func(
-		i int,
-	) error {
-		return []error{nil, nil, errThird}[i]
-	}
+	want := laneErrors{nil, nil, errThird}
 
 	got := All(
 		3,
-		run,
+		want.errorOfLane,
 	)
 	if !slices.Equal(
 		got,
-		[]error{nil, nil, errThird},
+		want,
 	) {
 		t.Fatalf(
 			"All = %v, want the error of each lane at its own index",
@@ -39,26 +83,11 @@ func TestAll_RunsTheLanesConcurrently(
 	t *testing.T,
 ) {
 	const lanesCount = 8
-	var meet sync.WaitGroup
-	meet.Add(lanesCount)
-	run := func(
-		int,
-	) error {
-		meet.Done()
-		meet.Wait()
-		return nil
-	}
-	finished := make(chan struct{})
-	go func() {
-		All(
-			lanesCount,
-			run,
-		)
-		close(finished)
-	}()
+	meeting := newMeetingPoint(lanesCount)
+	go meeting.runLanes(lanesCount)
 
 	select {
-	case <-finished:
+	case <-meeting.done:
 	case <-time.After(timeout):
 		t.Fatal("the lanes never all ran at once, so they did not overlap")
 	}
@@ -67,16 +96,11 @@ func TestAll_RunsTheLanesConcurrently(
 func TestAll_ZeroLanesReturnsNothing(
 	t *testing.T,
 ) {
-	run := func(
-		int,
-	) error {
-		t.Error("run was called for zero lanes")
-		return nil
-	}
+	unexpected := unexpectedLaneRun{t}
 
 	if got := All(
 		0,
-		run,
+		unexpected.fail,
 	); len(got) != 0 {
 		t.Fatalf(
 			"All(0) = %v, want no results",

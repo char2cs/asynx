@@ -136,11 +136,11 @@ func TestJob_CompleteRunsOnce(
 	}
 
 	if callbacks.Load() != 1 ||
-		cancels.Load() != 1 {
+		cancels.calls.Load() != 1 {
 		t.Fatalf(
 			"callbacks=%d cancels=%d, want 1 and 1",
 			callbacks.Load(),
-			cancels.Load(),
+			cancels.calls.Load(),
 		)
 	}
 }
@@ -178,11 +178,11 @@ func TestJob_ConcurrentCompleteRunsOnce(
 	wg.Wait()
 
 	if callbacks.Load() != 1 ||
-		cancels.Load() != 1 {
+		cancels.calls.Load() != 1 {
 		t.Fatalf(
 			"callbacks=%d cancels=%d, want 1 and 1",
 			callbacks.Load(),
-			cancels.Load(),
+			cancels.calls.Load(),
 		)
 	}
 }

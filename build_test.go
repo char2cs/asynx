@@ -67,20 +67,7 @@ func TestBuildMultipleTimesIndependent(
 func TestBuilderFluent(
 	t *testing.T,
 ) {
-	upcaster := func(
-		ctx context.Context,
-		eventName string,
-		raw []byte,
-	) ([]byte, error) {
-		return raw,
-			nil
-	}
-	panicHandler := func(
-		_ context.Context,
-		_ models.Event[mocks.Order],
-		_ any,
-	) {
-	}
+	var calls callTally
 
 	_, err := asynx.New[mocks.Order]().
 		WithEventStore(&mockstores.Store{}).
@@ -90,13 +77,13 @@ func TestBuilderFluent(
 		WithSchemaVersion(3).
 		WithUpcaster(
 			1,
-			upcaster,
+			identityUpcaster,
 		).
 		WithUpcaster(
 			2,
-			upcaster,
+			identityUpcaster,
 		).
-		WithPanicHandler(panicHandler).
+		WithPanicHandler(calls.countPanic).
 		Build()
 	if err != nil {
 		t.Fatalf(
@@ -109,17 +96,12 @@ func TestBuilderFluent(
 func TestBuilderWithCorruptionHook(
 	t *testing.T,
 ) {
-	called := false
-	hook := func(
-		err error,
-	) {
-		called = true
-	}
+	var calls callTally
 
 	_, err := asynx.New[mocks.Order]().
 		WithEventStore(&mockstores.Store{}).
 		WithSnapshotStore(&mockstores.SnapshotStore{}).
-		WithCorruptionHook(hook).
+		WithCorruptionHook(calls.countCorruption).
 		Build()
 	if err != nil {
 		t.Fatalf(
@@ -127,26 +109,17 @@ func TestBuilderWithCorruptionHook(
 			err,
 		)
 	}
-
-	_ = called
 }
 
 func TestBuilderWithPublishErrorHandler(
 	t *testing.T,
 ) {
-	called := false
-	handler := func(
-		_ context.Context,
-		_ models.Event[mocks.Order],
-		_ error,
-	) {
-		called = true
-	}
+	var calls callTally
 
 	_, err := asynx.New[mocks.Order]().
 		WithEventStore(&mockstores.Store{}).
 		WithSnapshotStore(&mockstores.SnapshotStore{}).
-		WithPublishErrorHandler(handler).
+		WithPublishErrorHandler(calls.countError).
 		Build()
 	if err != nil {
 		t.Fatalf(
@@ -154,8 +127,6 @@ func TestBuilderWithPublishErrorHandler(
 			err,
 		)
 	}
-
-	_ = called
 }
 
 func TestBuildWithWorkersPerShard(
@@ -492,20 +463,21 @@ func countingSubscriber(
 	}
 }
 
+func enqueueGhost(
+	tx models.Tx,
+) error {
+	return tx.EnqueueDelivery(
+		context.Background(),
+		"ghost",
+		1,
+	)
+}
+
 func TestGuarantee_RecoverySkipsDeliveriesWhoseEventIsGone(
 	t *testing.T,
 ) {
 	s := store.New()
 	ctx := context.Background()
-	enqueueGhost := func(
-		tx models.Tx,
-	) error {
-		return tx.EnqueueDelivery(
-			ctx,
-			"ghost",
-			1,
-		)
-	}
 	s.Atomically(
 		ctx,
 		enqueueGhost,
@@ -543,19 +515,12 @@ func TestGuarantee_AckFailuresAreReportedAndTheDeliveryStaysPending(
 ) {
 	s := store.New()
 	ctx := context.Background()
-	var reported atomic.Int32
-	countReport := func(
-		context.Context,
-		models.Event[mocks.Order],
-		error,
-	) {
-		reported.Add(1)
-	}
+	var reported callTally
 	inst := build(
 		t,
 		eight(nil).
 			WithEventStore(ackErrStore{s}).
-			WithPublishErrorHandler(countReport).
+			WithPublishErrorHandler(reported.countError).
 			WithSubscriber(
 				"OrderUpdated",
 				noopSubscriber,
@@ -577,10 +542,10 @@ func TestGuarantee_AckFailuresAreReportedAndTheDeliveryStaysPending(
 		inst,
 	)
 
-	if reported.Load() != 1 {
+	if reported.total() != 1 {
 		t.Fatalf(
 			"ack failures reported = %d, want 1",
-			reported.Load(),
+			reported.total(),
 		)
 	}
 
@@ -819,20 +784,13 @@ func TestGuarantee_SnapshotFailureIsReportedNotFatal(
 	t *testing.T,
 ) {
 	ss := store.NewSnapshots()
-	var reported atomic.Int32
-	countReport := func(
-		context.Context,
-		models.Event[mocks.Order],
-		error,
-	) {
-		reported.Add(1)
-	}
+	var reported callTally
 	inst := build(
 		t,
 		asynx.New[mocks.Order]().
 			WithEventStore(store.New()).
 			WithSnapshotStore(ss).
-			WithSnapshotErrorHandler(countReport),
+			WithSnapshotErrorHandler(reported.countError),
 	)
 
 	ss.SetError(
@@ -852,10 +810,10 @@ func TestGuarantee_SnapshotFailureIsReportedNotFatal(
 		)
 	}
 
-	if reported.Load() != 1 {
+	if reported.total() != 1 {
 		t.Fatalf(
 			"reported = %d, want 1",
-			reported.Load(),
+			reported.total(),
 		)
 	}
 }
@@ -882,22 +840,7 @@ func TestGuarantee_AutoSnapshotFailureOnReadIsReportedNotFatal(
 		)
 	}
 
-	var reported atomic.Int32
-	countReport := func(
-		context.Context,
-		models.Event[mocks.Order],
-		error,
-	) {
-		reported.Add(1)
-	}
-	identity := func(
-		_ context.Context,
-		_ string,
-		patches []byte,
-	) ([]byte, error) {
-		return patches,
-			nil
-	}
+	var reported callTally
 	upgraded := build(
 		t,
 		asynx.New[mocks.Order]().
@@ -906,9 +849,9 @@ func TestGuarantee_AutoSnapshotFailureOnReadIsReportedNotFatal(
 			WithSchemaVersion(2).
 			WithUpcaster(
 				1,
-				identity,
+				identityUpcaster,
 			).
-			WithSnapshotErrorHandler(countReport),
+			WithSnapshotErrorHandler(reported.countError),
 	)
 
 	ss.SetError(
@@ -928,10 +871,10 @@ func TestGuarantee_AutoSnapshotFailureOnReadIsReportedNotFatal(
 		)
 	}
 
-	if reported.Load() != 1 {
+	if reported.total() != 1 {
 		t.Fatalf(
 			"reported = %d, want 1",
-			reported.Load(),
+			reported.total(),
 		)
 	}
 }
@@ -1098,14 +1041,27 @@ func TestGuarantee_FailedBuildShutsTheProcessorDown(
 		requireFailedBuild(t)
 	}
 
-	settled := func() bool {
-		return runtime.NumGoroutine() <= before+5
-	}
 	eventually(
 		t,
 		"goroutines to settle after failed builds",
-		settled,
+		goroutineBudget{limit: before + 5}.withinLimit,
 	)
+}
+
+type goroutineBudget struct{ limit int }
+
+func (g goroutineBudget) withinLimit() bool {
+	return runtime.NumGoroutine() <= g.limit
+}
+
+type deliveryBacklog struct{ s models.Store }
+
+func (d deliveryBacklog) drained() bool {
+	pending, _ := d.s.PendingDeliveries(
+		context.Background(),
+		10,
+	)
+	return len(pending) == 0
 }
 
 type retryLog struct {
@@ -1132,18 +1088,9 @@ func TestGuarantee_DurableSubscriberFailureRetriesAndKeepsOrder(
 	t *testing.T,
 ) {
 	s := store.New()
-	ctx := context.Background()
 
 	log := &retryLog{}
-	var reported atomic.Int32
-	countDelivery := func(
-		context.Context,
-		models.Event[mocks.Order],
-		error,
-		int,
-	) {
-		reported.Add(1)
-	}
+	var reported callTally
 	inst := build(
 		t,
 		eight(s).
@@ -1151,7 +1098,7 @@ func TestGuarantee_DurableSubscriberFailureRetriesAndKeepsOrder(
 				time.Millisecond,
 				5*time.Millisecond,
 			).
-			WithDeliveryErrorHandler(countDelivery).
+			WithDeliveryErrorHandler(reported.countDeliveryError).
 			WithSubscriber(
 				"OrderUpdated",
 				log.handleFlaky,
@@ -1166,17 +1113,10 @@ func TestGuarantee_DurableSubscriberFailureRetriesAndKeepsOrder(
 		)
 	}
 
-	drained := func() bool {
-		pending, _ := s.PendingDeliveries(
-			ctx,
-			10,
-		)
-		return len(pending) == 0
-	}
 	eventually(
 		t,
 		"deliveries to complete",
-		drained,
+		deliveryBacklog{s}.drained,
 	)
 
 	seen := log.snapshot()
@@ -1190,10 +1130,10 @@ func TestGuarantee_DurableSubscriberFailureRetriesAndKeepsOrder(
 		)
 	}
 
-	if reported.Load() != 2 {
+	if reported.total() != 2 {
 		t.Fatalf(
 			"failures reported = %d, want 2",
-			reported.Load(),
+			reported.total(),
 		)
 	}
 }
@@ -1383,14 +1323,7 @@ func TestGuarantee_DurablePanicIsAFailureNotADelivery(
 	t *testing.T,
 ) {
 	flaky := &panicOnce{}
-	var panics atomic.Int32
-	countPanic := func(
-		context.Context,
-		models.Event[mocks.Order],
-		any,
-	) {
-		panics.Add(1)
-	}
+	var panics callTally
 	s := store.New()
 	inst := build(
 		t,
@@ -1399,7 +1332,7 @@ func TestGuarantee_DurablePanicIsAFailureNotADelivery(
 				time.Millisecond,
 				2*time.Millisecond,
 			).
-			WithPanicHandler(countPanic).
+			WithPanicHandler(panics.countPanic).
 			WithSubscriber(
 				"OrderUpdated",
 				flaky.handle,
@@ -1417,24 +1350,30 @@ func TestGuarantee_DurablePanicIsAFailureNotADelivery(
 		t.Fatal(err)
 	}
 
-	completed := func() bool {
-		p, _ := s.PendingDeliveries(
-			context.Background(),
-			1,
-		)
-		return flaky.attempts.Load() >= 2 && len(p) == 0
-	}
 	eventually(
 		t,
 		"the delivery to complete after the panic",
-		completed,
+		panicRecovery{
+			flaky:   flaky,
+			backlog: deliveryBacklog{s},
+		}.completed,
 	)
-	if panics.Load() != 1 {
+	if panics.total() != 1 {
 		t.Fatalf(
 			"panic handler calls = %d, want 1",
-			panics.Load(),
+			panics.total(),
 		)
 	}
+}
+
+type panicRecovery struct {
+	flaky   *panicOnce
+	backlog deliveryBacklog
+}
+
+func (r panicRecovery) completed() bool {
+	return r.flaky.attempts.Load() >= 2 &&
+		r.backlog.drained()
 }
 
 func floodHot(
@@ -1973,4 +1912,56 @@ func TestBuild_ATypedNilDispatcherFailsBuild(
 			err,
 		)
 	}
+}
+
+type callTally struct {
+	n atomic.Int32
+}
+
+func (c *callTally) total() int32 {
+	return c.n.Load()
+}
+
+func (c *callTally) countError(
+	context.Context,
+	models.Event[mocks.Order],
+	error,
+) {
+	c.n.Add(1)
+}
+
+func (c *callTally) countDeliveryError(
+	context.Context,
+	models.Event[mocks.Order],
+	error,
+	int,
+) {
+	c.n.Add(1)
+}
+
+func (c *callTally) countPanic(
+	context.Context,
+	models.Event[mocks.Order],
+	any,
+) {
+	c.n.Add(1)
+}
+
+func (c *callTally) countCorruption(
+	error,
+) {
+	c.n.Add(1)
+}
+
+func (c *callTally) countEvent(
+	context.Context,
+	models.Event[mocks.Order],
+) {
+	c.n.Add(1)
+}
+
+func (c *callTally) countOption(
+	*models.SubscriptionConfig[mocks.Order],
+) {
+	c.n.Add(1)
 }

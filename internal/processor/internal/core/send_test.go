@@ -10,7 +10,6 @@ import (
 	"github.com/char2cs/asynx/internal/processor/models"
 	asynxmd "github.com/char2cs/asynx/models"
 	"github.com/char2cs/asynx/store"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -381,16 +380,10 @@ func TestProcessor_SendWait_HandlersCompleteBeforeReturn(
 	)
 	defer p.Shutdown(context.Background())
 
-	var handlerDone atomic.Bool
-	markDone := func(
-		_ context.Context,
-		_ asynxmd.Event[order],
-	) {
-		handlerDone.Store(true)
-	}
+	handled := &callCounter{}
 	channelBus.Subscribe(
 		"OrderCreated",
-		markDone,
+		handled.onEvent,
 	)
 
 	ctx := context.Background()
@@ -407,7 +400,7 @@ func TestProcessor_SendWait_HandlersCompleteBeforeReturn(
 		)
 	}
 
-	if !handlerDone.Load() {
+	if handled.calls.Load() == 0 {
 		t.Error("handler not done when SendWait returned")
 	}
 }
@@ -530,16 +523,10 @@ func TestProcessor_Forget_ErasesAndNotifiesHandlers(
 	)
 	ctx := context.Background()
 
-	var tombstones atomic.Int32
-	countTombstone := func(
-		context.Context,
-		asynxmd.Event[order],
-	) {
-		tombstones.Add(1)
-	}
+	tombstones := &callCounter{}
 	f.b.Subscribe(
 		"asynx\\.aggregate\\.forget",
-		countTombstone,
+		tombstones.onEvent,
 	)
 
 	if _, err := f.p.Send(
@@ -559,10 +546,10 @@ func TestProcessor_Forget_ErasesAndNotifiesHandlers(
 		)
 	}
 
-	if tombstones.Load() != 1 {
+	if tombstones.calls.Load() != 1 {
 		t.Errorf(
 			"forget handler calls = %d, want 1",
-			tombstones.Load(),
+			tombstones.calls.Load(),
 		)
 	}
 
@@ -598,19 +585,11 @@ func TestProcessor_SendWait_GivesUpWaitingButReturnsTheCommittedEvent(
 		t,
 		store.New(),
 	)
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-	block := func(
-		context.Context,
-		asynxmd.Event[order],
-	) {
-		close(entered)
-		<-release
-	}
+	gate := newHandlerGate(0)
+	t.Cleanup(func() { close(gate.release) })
 	f.b.Subscribe(
 		"OrderUpdated",
-		block,
+		gate.block,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -632,7 +611,7 @@ func TestProcessor_SendWait_GivesUpWaitingButReturnsTheCommittedEvent(
 		)
 		got <- result{evt, err}
 	}()
-	<-entered
+	<-gate.entered
 	cancel()
 	r := <-got
 	if !errors.Is(
@@ -661,26 +640,16 @@ func TestProcessor_SendWait_FromAHandlerOfTheSameAggregateFailsFast(
 		t,
 		store.New(),
 	)
-	got := make(
-		chan error,
-		1,
-	)
-	sendWaitAgain := func(
-		ctx context.Context,
-		e asynxmd.Event[order],
-	) {
-		_, err := f.p.SendWait(
-			ctx,
-			updateCmd(
-				e.AggregateID,
-				2,
-			),
-		)
-		got <- err
+	again := &sendsWaitAgain{
+		processor: f.p,
+		got: make(
+			chan error,
+			1,
+		),
 	}
 	f.b.Subscribe(
 		"OrderUpdated",
-		sendWaitAgain,
+		again.sendWait,
 	)
 	if _, err := f.p.Send(
 		context.Background(),
@@ -693,7 +662,7 @@ func TestProcessor_SendWait_FromAHandlerOfTheSameAggregateFailsFast(
 	}
 
 	select {
-	case err := <-got:
+	case err := <-again.got:
 		requireSendWaitFromHandler(
 			t,
 			err,
@@ -701,6 +670,25 @@ func TestProcessor_SendWait_FromAHandlerOfTheSameAggregateFailsFast(
 	case <-time.After(5 * time.Second):
 		t.Fatal("SendWait from a handler hung")
 	}
+}
+
+type sendsWaitAgain struct {
+	processor *Processor[order]
+	got       chan error
+}
+
+func (s *sendsWaitAgain) sendWait(
+	ctx context.Context,
+	e asynxmd.Event[order],
+) {
+	_, err := s.processor.SendWait(
+		ctx,
+		updateCmd(
+			e.AggregateID,
+			2,
+		),
+	)
+	s.got <- err
 }
 
 func requireSendWaitFromHandler(

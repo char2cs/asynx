@@ -10,12 +10,17 @@ import (
 type memoryTx struct {
 	s    *memoryStore
 	undo []func()
+
+	committed bool
 }
 
-func (t *memoryTx) rollbackUnless(
-	committed *bool,
-) {
-	if *committed {
+func (t *memoryTx) commit() {
+	t.committed = true
+}
+
+func (t *memoryTx) close() {
+	defer t.s.txMu.Unlock()
+	if t.committed {
 		return
 	}
 
@@ -156,14 +161,9 @@ func (t *memoryTx) DropDeliveries(
 	defer s.mu.Unlock()
 
 	old := s.deliveries
-	ofAggregate := func(
-		d models.Delivery,
-	) bool {
-		return d.AggregateID == aggregateID
-	}
 	s.deliveries = slices.DeleteFunc(
 		slices.Clone(old),
-		ofAggregate,
+		aggregateDeliveries(aggregateID).belong,
 	)
 	t.onRollback(func() { s.deliveries = old })
 	return nil

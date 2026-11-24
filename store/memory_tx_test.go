@@ -167,33 +167,183 @@ func pendingCount(
 	return pending
 }
 
-func checkNativeNil(
-	t *testing.T,
+type txBodies struct {
+	t       *testing.T
+	failure error
+	ran     bool
+}
+
+func (b *txBodies) expectNativeNil(
 	tx asynxmd.Tx,
 ) error {
 	if tx.Native() != nil {
-		t.Error("Native() should be nil for the in-memory store")
+		b.t.Error("Native() should be nil for the in-memory store")
 	}
 
 	return nil
 }
 
+func (b *txBodies) markRan(
+	asynxmd.Tx,
+) error {
+	b.ran = true
+	return nil
+}
+
+func (b *txBodies) expectEveryCallCancelled(
+	tx asynxmd.Tx,
+) error {
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	return expectAllCanceled(
+		b.t,
+		cancelledChecks(
+			dead,
+			tx,
+		),
+	)
+}
+
+func (b *txBodies) enqueueFirstDelivery(
+	tx asynxmd.Tx,
+) error {
+	return tx.EnqueueDelivery(
+		context.Background(),
+		"s1",
+		1,
+	)
+}
+
+func (b *txBodies) enqueueFirstVersionForA(
+	tx asynxmd.Tx,
+) error {
+	return tx.EnqueueDelivery(
+		context.Background(),
+		"a",
+		1,
+	)
+}
+
+func (b *txBodies) enqueueTwoVersionsForA(
+	tx asynxmd.Tx,
+) error {
+	ctx := context.Background()
+
+	return errors.Join(
+		tx.EnqueueDelivery(
+			ctx,
+			"a",
+			1,
+		),
+		tx.EnqueueDelivery(
+			ctx,
+			"a",
+			2,
+		),
+	)
+}
+
+func (b *txBodies) deleteAndDropThenFail(
+	tx asynxmd.Tx,
+) error {
+	ctx := context.Background()
+
+	return errors.Join(
+		tx.DeleteStream(
+			ctx,
+			"s1",
+		),
+		tx.DropDeliveries(
+			ctx,
+			"s1",
+		),
+		b.failure,
+	)
+}
+
+func (b *txBodies) appendThenPanic(
+	tx asynxmd.Tx,
+) error {
+	reportErr(
+		b.t,
+		tx.Append(
+			context.Background(),
+			"s1",
+			1,
+			[]byte("x"),
+		),
+	)
+	panic("fn blew up")
+}
+
+func (b *txBodies) enqueueThenAppendScheduledFailure(
+	tx asynxmd.Tx,
+) error {
+	ctx := context.Background()
+
+	return errors.Join(
+		tx.EnqueueDelivery(
+			ctx,
+			"s1",
+			1,
+		),
+		tx.Append(
+			ctx,
+			"s1",
+			1,
+			nil,
+		),
+	)
+}
+
+func (b *txBodies) putReceiptForC1(
+	tx asynxmd.Tx,
+) error {
+	return tx.PutReceipt(
+		context.Background(),
+		"c1",
+		asynxmd.Receipt{Accepted: true},
+	)
+}
+
+func (b *txBodies) interleaveInsertsThenFail(
+	tx asynxmd.Tx,
+) error {
+	ctx := context.Background()
+
+	return errors.Join(
+		tx.Append(
+			ctx,
+			"s1",
+			3,
+			[]byte("three"),
+		),
+		tx.Append(
+			ctx,
+			"s1",
+			1,
+			[]byte("one"),
+		),
+		tx.Append(
+			ctx,
+			"s1",
+			5,
+			[]byte("five"),
+		),
+		b.failure,
+	)
+}
+
 func TestAtomically_NativeIsNilForMemory(
 	t *testing.T,
 ) {
-	check := func(
-		tx asynxmd.Tx,
-	) error {
-		return checkNativeNil(
-			t,
-			tx,
-		)
-	}
+	bodies := &txBodies{t: t}
 
 	mustAtomically(
 		t,
 		New(),
-		check,
+		bodies.expectNativeNil,
 	)
 }
 
@@ -202,27 +352,21 @@ func TestAtomically_CancelledContextDoesNotRun(
 ) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	ran := false
-	fn := func(
-		asynxmd.Tx,
-	) error {
-		ran = true
-		return nil
-	}
+	bodies := &txBodies{t: t}
 
 	err := New().Atomically(
 		ctx,
-		fn,
+		bodies.markRan,
 	)
 	if !errors.Is(
 		err,
 		context.Canceled,
 	) ||
-		ran {
+		bodies.ran {
 		t.Fatalf(
 			"err = %v, ran = %v; want context.Canceled and no run",
 			err,
-			ran,
+			bodies.ran,
 		)
 	}
 }
@@ -294,24 +438,12 @@ func expectCanceled(
 func TestAtomically_TxMethodsRejectCancelledContext(
 	t *testing.T,
 ) {
-	dead, cancel := context.WithCancel(context.Background())
-	cancel()
-	check := func(
-		tx asynxmd.Tx,
-	) error {
-		return expectAllCanceled(
-			t,
-			cancelledChecks(
-				dead,
-				tx,
-			),
-		)
-	}
+	bodies := &txBodies{t: t}
 
 	mustAtomically(
 		t,
 		New(),
-		check,
+		bodies.expectEveryCallCancelled,
 	)
 }
 
@@ -326,45 +458,23 @@ func TestAtomically_RollbackRestoresDeletedStreamAndDroppedDeliveries(
 		"s1",
 		"keep",
 	)
-	enqueue := func(
-		tx asynxmd.Tx,
-	) error {
-		return tx.EnqueueDelivery(
-			ctx,
-			"s1",
-			1,
-		)
+	bodies := &txBodies{
+		t:       t,
+		failure: errors.New("boom"),
 	}
 	mustAtomically(
 		t,
 		s,
-		enqueue,
+		bodies.enqueueFirstDelivery,
 	)
-
-	boom := errors.New("boom")
-	destroy := func(
-		tx asynxmd.Tx,
-	) error {
-		return errors.Join(
-			tx.DeleteStream(
-				ctx,
-				"s1",
-			),
-			tx.DropDeliveries(
-				ctx,
-				"s1",
-			),
-			boom,
-		)
-	}
 
 	err := s.Atomically(
 		ctx,
-		destroy,
+		bodies.deleteAndDropThenFail,
 	)
 	if !errors.Is(
 		err,
-		boom,
+		bodies.failure,
 	) {
 		t.Fatalf(
 			"err = %v",
@@ -422,25 +532,12 @@ func atomicallyPanics(
 	s Memory,
 ) {
 	ctx := context.Background()
-	fn := func(
-		tx asynxmd.Tx,
-	) error {
-		reportErr(
-			t,
-			tx.Append(
-				ctx,
-				"s1",
-				1,
-				[]byte("x"),
-			),
-		)
-		panic("fn blew up")
-	}
+	bodies := &txBodies{t: t}
 	defer requirePanic(t)
 
 	err := s.Atomically(
 		ctx,
-		fn,
+		bodies.appendThenPanic,
 	)
 	t.Errorf(
 		"atomically returned %v instead of panicking",
@@ -494,27 +591,11 @@ func TestAtomically_SetErrorFailsTheTransactionWithThatError(
 		"s1",
 		sentinel,
 	)
-	fn := func(
-		tx asynxmd.Tx,
-	) error {
-		return errors.Join(
-			tx.EnqueueDelivery(
-				ctx,
-				"s1",
-				1,
-			),
-			tx.Append(
-				ctx,
-				"s1",
-				1,
-				nil,
-			),
-		)
-	}
+	bodies := &txBodies{t: t}
 
 	err := s.Atomically(
 		ctx,
-		fn,
+		bodies.enqueueThenAppendScheduledFailure,
 	)
 	if !errors.Is(
 		err,
@@ -543,26 +624,20 @@ func TestPutReceipt_DuplicateAcrossTransactionsIsRejected(
 ) {
 	s := New()
 	ctx := context.Background()
-	fn := func(
-		tx asynxmd.Tx,
-	) error {
-		return tx.PutReceipt(
-			ctx,
-			"c1",
-			asynxmd.Receipt{Accepted: true},
-		)
-	}
-	put := func() error {
-		return s.Atomically(
-			ctx,
-			fn,
-		)
-	}
-	if err := put(); err != nil {
+	bodies := &txBodies{t: t}
+	err := s.Atomically(
+		ctx,
+		bodies.putReceiptForC1,
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := put(); !errors.Is(
+	err = s.Atomically(
+		ctx,
+		bodies.putReceiptForC1,
+	)
+	if !errors.Is(
 		err,
 		asynxmd.ErrDuplicateReceipt,
 	) {
@@ -592,40 +667,18 @@ func TestAtomically_RollbackRemovesOnlyTheVersionsItInserted(
 		4,
 		[]byte("four"),
 	)
-	boom := errors.New("boom")
-	interleave := func(
-		tx asynxmd.Tx,
-	) error {
-		return errors.Join(
-			tx.Append(
-				ctx,
-				"s1",
-				3,
-				[]byte("three"),
-			),
-			tx.Append(
-				ctx,
-				"s1",
-				1,
-				[]byte("one"),
-			),
-			tx.Append(
-				ctx,
-				"s1",
-				5,
-				[]byte("five"),
-			),
-			boom,
-		)
+	bodies := &txBodies{
+		t:       t,
+		failure: errors.New("boom"),
 	}
 
 	err := s.Atomically(
 		ctx,
-		interleave,
+		bodies.interleaveInsertsThenFail,
 	)
 	if !errors.Is(
 		err,
-		boom,
+		bodies.failure,
 	) {
 		t.Fatalf(
 			"err = %v, want boom",

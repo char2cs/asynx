@@ -23,7 +23,10 @@ type Option[T any] func(
 // state was computed and before the read returns; for a lock-free Get it runs
 // while the aggregate's command lock is held, so it should return quickly and
 // must not call back into the aggregate's commands. A panic in fn is contained
-// and never breaks the read. The Event fn receives carries only what a read
+// and never breaks the read; one line about it is written to stderr, the
+// only place left to report it. A failure to
+// re-check the stream before the write is reported to fn like a failed write.
+// The Event fn receives carries only what a read
 // knows: AggregateID, Version (the version the snapshot was meant for), ID (the
 // id of that version's event), SchemaVersion (the current schema version) and
 // Aggregate (the state that was not cached); EventName, OccurredAt and

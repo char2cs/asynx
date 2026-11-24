@@ -49,18 +49,13 @@ func seedOne(
 		es,
 		mocks.CreateOrderCmd{ID: id, Total: 1},
 	)
-	enqueue := func(
-		tx asynxmd.Tx,
-	) error {
-		return tx.EnqueueDelivery(
+	s.Atomically(
+		ctx,
+		enqueuingVersions(
 			ctx,
 			id,
 			1,
-		)
-	}
-	s.Atomically(
-		ctx,
-		enqueue,
+		),
 	)
 }
 
@@ -80,18 +75,13 @@ func seedUnrebuildable(
 		t.Fatal(err)
 	}
 
-	enqueue := func(
-		tx asynxmd.Tx,
-	) error {
-		return tx.EnqueueDelivery(
+	if err := s.Atomically(
+		ctx,
+		enqueuingVersions(
 			ctx,
 			aggregateID,
 			1,
-		)
-	}
-	if err := s.Atomically(
-		ctx,
-		enqueue,
+		),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -715,18 +705,8 @@ func TestProcessor_Resume_DoesNotDeadlockWithACommandSendingToAnotherAggregate(
 		chan struct{},
 		2,
 	)
-	var readA sync.Once
-	redelivering := make(chan struct{})
-	onRead := func(
-		streamID string,
-	) {
-		signalOnStream(
-			streamID,
-			&readA,
-			redelivering,
-		)
-	}
-	s := &readHookStore{Memory: store.New(), onRead: onRead}
+	redelivering := &streamReadSignal{redelivering: make(chan struct{})}
+	s := &readHookStore{Memory: store.New(), onRead: redelivering.onStreamRead}
 	f := newFixture(
 		t,
 		s,
@@ -749,19 +729,15 @@ func TestProcessor_Resume_DoesNotDeadlockWithACommandSendingToAnotherAggregate(
 
 	healthy.Store(true)
 
-	validating := make(chan struct{})
-	validate := func() error {
-		close(validating)
-		return sendToAAfter(
-			ctx,
-			f.p,
-			redelivering,
-		)
+	crossing := &crossAggregateSend{
+		processor:    f.p,
+		redelivering: redelivering.redelivering,
+		validating:   make(chan struct{}),
 	}
 	cmd := validatingUpdate{UpdateOrderCmd: updateCmd(
 		"b",
 		2,
-	), validate: validate}
+	), validate: crossing.validate}
 	sent := make(
 		chan error,
 		1,
@@ -773,7 +749,7 @@ func TestProcessor_Resume_DoesNotDeadlockWithACommandSendingToAnotherAggregate(
 		)
 		sent <- err
 	}()
-	<-validating
+	<-crossing.validating
 
 	resumed := make(
 		chan error,
@@ -833,16 +809,38 @@ func requireNoErrorNamed(
 	}
 }
 
-func signalOnStream(
+type streamReadSignal struct {
+	once         sync.Once
+	redelivering chan struct{}
+}
+
+func (s *streamReadSignal) onStreamRead(
 	streamID string,
-	once *sync.Once,
-	redelivering chan struct{},
 ) {
 	if streamID != "events:a" {
 		return
 	}
 
-	once.Do(func() { close(redelivering) })
+	s.once.Do(s.signal)
+}
+
+func (s *streamReadSignal) signal() {
+	close(s.redelivering)
+}
+
+type crossAggregateSend struct {
+	processor    *Processor[order]
+	redelivering <-chan struct{}
+	validating   chan struct{}
+}
+
+func (c *crossAggregateSend) validate() error {
+	close(c.validating)
+	return sendToAAfter(
+		context.Background(),
+		c.processor,
+		c.redelivering,
+	)
 }
 
 func sendToAAfter(
@@ -1571,12 +1569,11 @@ func TestProcessor_Resume_AnAggregateThatFailsDoesNotStopTheOthers(
 	}
 }
 
-func enqueueUpTo(
+func enqueuingUpTo(
 	ctx context.Context,
-	tx asynxmd.Tx,
 	aggregateID string,
 	last int64,
-) error {
+) func(asynxmd.Tx) error {
 	versions := make(
 		[]int64,
 		0,
@@ -1589,9 +1586,8 @@ func enqueueUpTo(
 		)
 	}
 
-	return enqueueVersions(
+	return enqueuingVersions(
 		ctx,
-		tx,
 		aggregateID,
 		versions...,
 	)

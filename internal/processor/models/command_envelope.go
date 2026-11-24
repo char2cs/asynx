@@ -129,7 +129,7 @@ func (e *CommandEnvelope[T]) run(
 	ctx context.Context,
 	executor Executor[T],
 ) CommandResult[T] {
-	if err := ctx.Err(); err != nil {
+	if ctx.Err() != nil {
 		return CommandResult[T]{Err: asynxmd.ErrContextCancelled}
 	}
 

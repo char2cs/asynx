@@ -45,18 +45,13 @@ func TestForget_ErasesStreamSnapshotAndPendingDeliveries(
 	}
 
 	d.WaitIdle()
-	enqueue := func(
-		tx asynxmd.Tx,
-	) error {
-		return tx.EnqueueDelivery(
+	if err := s.Atomically(
+		ctx,
+		enqueuingDelivery(
 			ctx,
 			"agg",
 			1,
-		)
-	}
-	if err := s.Atomically(
-		ctx,
-		enqueue,
+		),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -115,22 +110,13 @@ func TestForget_DeliversTombstoneWithLastStateBeforeErasing(
 		t.Fatal(err)
 	}
 
-	var gotTotal float64
-	var streamAtHandler int
-	record := func(
-		_ context.Context,
-		e asynxmd.Event[order],
-	) {
-		gotTotal = e.Aggregate.Total
-		streamAtHandler = streamLen(
-			t,
-			s,
-			"agg",
-		)
+	seen := &tombstoneObserver{
+		t:     t,
+		store: s,
 	}
 	b.Subscribe(
 		"asynx\\.aggregate\\.forget",
-		record,
+		seen.observe,
 	)
 
 	if err := ex.Forget(
@@ -140,14 +126,14 @@ func TestForget_DeliversTombstoneWithLastStateBeforeErasing(
 		t.Fatal(err)
 	}
 
-	if gotTotal != 42 {
+	if seen.total != 42 {
 		t.Errorf(
 			"tombstone Aggregate.Total = %v, want 42",
-			gotTotal,
+			seen.total,
 		)
 	}
 
-	if streamAtHandler == 0 {
+	if seen.streamAtHandler == 0 {
 		t.Error("stream was already erased when the forget handler ran")
 	}
 }
@@ -170,7 +156,36 @@ func TestForget_UnknownAggregateIsValidationError(
 	}
 }
 
+type tombstoneObserver struct {
+	t               *testing.T
+	store           store.Memory
+	total           float64
+	streamAtHandler int
+}
+
+func (o *tombstoneObserver) observe(
+	_ context.Context,
+	e asynxmd.Event[order],
+) {
+	o.total = e.Aggregate.Total
+	o.streamAtHandler = streamLen(
+		o.t,
+		o.store,
+		"agg",
+	)
+}
+
 type deleteFailStore struct{ store.Memory }
+
+type deleteFailRun func(
+	asynxmd.Tx,
+) error
+
+func (r deleteFailRun) inFailingTx(
+	tx asynxmd.Tx,
+) error {
+	return r(deleteFailTx{tx})
+}
 
 // Atomically runs fn in a transaction whose DeleteStream fails, simulating a
 // store that cannot erase a stream.
@@ -178,14 +193,9 @@ func (s deleteFailStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
 ) error {
-	wrap := func(
-		tx asynxmd.Tx,
-	) error {
-		return fn(deleteFailTx{tx})
-	}
 	return s.Memory.Atomically(
 		ctx,
-		wrap,
+		deleteFailRun(fn).inFailingTx,
 	)
 }
 
@@ -472,23 +482,12 @@ func failNever(
 func TestForget_RunsSyncProjectionsForTheTombstone(
 	t *testing.T,
 ) {
-	var names []string
-	record := func(
-		_ context.Context,
-		_ asynxmd.Tx,
-		e asynxmd.Event[order],
-	) error {
-		names = append(
-			names,
-			e.EventName,
-		)
-		return nil
-	}
+	projected := &projectedEventNames{}
 	ex, _, _, _, _ := newEnv(
 		t,
 		WithSyncProjections[order]([]models.SyncProjection[order]{{
 			Match: matchTombstone,
-			Fn:    record,
+			Fn:    projected.record,
 		}, {
 			Match: matchNothing,
 			Fn:    failNever,
@@ -512,19 +511,41 @@ func TestForget_RunsSyncProjectionsForTheTombstone(
 		t.Fatal(err)
 	}
 
-	if len(names) != 1 ||
-		names[0] != "asynx.aggregate.forget" {
+	if len(projected.names) != 1 ||
+		projected.names[0] != "asynx.aggregate.forget" {
 		t.Fatalf(
 			"projection saw %v, want the tombstone only",
-			names,
+			projected.names,
 		)
 	}
 }
 
-func readModelState(
-	down bool,
+type projectedEventNames struct {
+	names []string
+}
+
+func (p *projectedEventNames) record(
+	_ context.Context,
+	_ asynxmd.Tx,
+	e asynxmd.Event[order],
 ) error {
-	if down {
+	p.names = append(
+		p.names,
+		e.EventName,
+	)
+	return nil
+}
+
+type switchableReadModel struct {
+	down bool
+}
+
+func (m *switchableReadModel) project(
+	context.Context,
+	asynxmd.Tx,
+	asynxmd.Event[order],
+) error {
+	if m.down {
 		return errors.New("read model down")
 	}
 
@@ -534,17 +555,10 @@ func readModelState(
 func TestForget_SyncProjectionFailureAbortsBeforeErasing(
 	t *testing.T,
 ) {
-	failing := false
-	projection := func(
-		context.Context,
-		asynxmd.Tx,
-		asynxmd.Event[order],
-	) error {
-		return readModelState(failing)
-	}
+	readModel := &switchableReadModel{}
 	ex, s, _, _, _ := newEnv(
 		t,
-		syncAll(projection),
+		syncAll(readModel.project),
 	)
 	ctx := context.Background()
 	if _, err := ex.Execute(
@@ -557,7 +571,7 @@ func TestForget_SyncProjectionFailureAbortsBeforeErasing(
 		t.Fatal(err)
 	}
 
-	failing = true
+	readModel.down = true
 	err := ex.Forget(
 		ctx,
 		"agg",
@@ -902,28 +916,45 @@ func TestForget_SnapshotDeleteFailureReturnsErrForgetFailed(
 	}
 }
 
-func reactToFirstVersion(
-	ctx context.Context,
+type firstVersionReaction struct {
+	executor *CommandExecutor[order]
+	started  chan struct{}
+	release  chan struct{}
+	outcome  chan error
+}
+
+func newFirstVersionReaction(
 	ex *CommandExecutor[order],
+) *firstVersionReaction {
+	return &firstVersionReaction{
+		executor: ex,
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		outcome: make(
+			chan error,
+			1,
+		),
+	}
+}
+
+func (r *firstVersionReaction) react(
+	ctx context.Context,
 	e asynxmd.Event[order],
-	started chan<- struct{},
-	release <-chan struct{},
 ) {
 	if e.Version != 1 {
 		return
 	}
 
-	close(started)
-	<-release
-	if _, err := ex.Execute(
+	close(r.started)
+	<-r.release
+	_, err := r.executor.Execute(
 		ctx,
 		update(
 			"agg",
 			99,
 		),
-	); err != nil {
-		return
-	}
+	)
+	r.outcome <- err
 }
 
 func forgetAsync(
@@ -997,23 +1028,10 @@ func TestForget_DoesNotDeadlockWithAReactionToItsOwnAggregate(
 	ex, s, _, _, b := newEnv(t)
 	ctx := context.Background()
 
-	started := make(chan struct{})
-	release := make(chan struct{})
-	react := func(
-		hctx context.Context,
-		e asynxmd.Event[order],
-	) {
-		reactToFirstVersion(
-			hctx,
-			ex,
-			e,
-			started,
-			release,
-		)
-	}
+	reaction := newFirstVersionReaction(ex)
 	b.Subscribe(
 		"OrderUpdated",
-		react,
+		reaction.react,
 	)
 
 	if _, err := ex.Execute(
@@ -1026,7 +1044,7 @@ func TestForget_DoesNotDeadlockWithAReactionToItsOwnAggregate(
 		t.Fatal(err)
 	}
 
-	<-started
+	<-reaction.started
 
 	forgot := forgetAsync(
 		ctx,
@@ -1040,18 +1058,28 @@ func TestForget_DoesNotDeadlockWithAReactionToItsOwnAggregate(
 	if err := ex.WithLock(
 		ctx,
 		"agg",
-		func() error { return nil },
+		returnsNil,
 	); err != nil {
 		t.Fatal(err)
 	}
 
-	close(release)
+	close(reaction.release)
 
 	requireForgetDone(
 		t,
 		forgot,
 		"Forget deadlocked against a reaction to its own aggregate",
 	)
+
+	if err := <-reaction.outcome; !errors.Is(
+		err,
+		asynxmd.ErrForgetInProgress,
+	) {
+		t.Fatalf(
+			"the reaction's Execute = %v, want ErrForgetInProgress",
+			err,
+		)
+	}
 
 	if n := streamLen(
 		t,
@@ -1113,21 +1141,49 @@ func TestForget_SnapshotIsDeletedBeforeTheStream(
 	}
 }
 
+func returnsNil(
+	context.Context,
+) error {
+	return nil
+}
+
+type runRecorder struct {
+	ran bool
+}
+
+func (r *runRecorder) record(
+	context.Context,
+) error {
+	r.ran = true
+	return nil
+}
+
+type mustNotRun struct {
+	t *testing.T
+}
+
+func (m *mustNotRun) fail(
+	context.Context,
+) error {
+	m.t.Fatal("ran")
+	return nil
+}
+
 func TestWithLock_HonoursContext(
 	t *testing.T,
 ) {
 	ex, _, _, _, _ := newEnv(t)
-	ran := false
+	ran := &runRecorder{}
 	if err := ex.WithLock(
 		context.Background(),
 		"agg",
-		func() error { ran = true; return nil },
+		ran.record,
 	); err != nil ||
-		!ran {
+		!ran.ran {
 		t.Fatalf(
 			"WithLock = %v, ran = %v",
 			err,
-			ran,
+			ran.ran,
 		)
 	}
 
@@ -1136,7 +1192,7 @@ func TestWithLock_HonoursContext(
 	if err := ex.WithLock(
 		ctx,
 		"agg",
-		func() error { t.Fatal("ran"); return nil },
+		(&mustNotRun{t: t}).fail,
 	); !errors.Is(
 		err,
 		asynxmd.ErrContextCancelled,
@@ -1163,18 +1219,10 @@ func TestForget_SecondConcurrentForgetIsRefusedWhileOneRuns(
 		t.Fatal(err)
 	}
 
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	hold := func(
-		context.Context,
-		asynxmd.Event[order],
-	) {
-		close(entered)
-		<-release
-	}
+	gate := newHandlerGate()
 	b.Subscribe(
 		"asynx\\.aggregate\\.forget",
-		hold,
+		gate.hold,
 	)
 
 	first := forgetAsync(
@@ -1182,7 +1230,7 @@ func TestForget_SecondConcurrentForgetIsRefusedWhileOneRuns(
 		ex,
 		"agg",
 	)
-	<-entered
+	<-gate.entered
 
 	if err := ex.Forget(
 		ctx,
@@ -1213,7 +1261,7 @@ func TestForget_SecondConcurrentForgetIsRefusedWhileOneRuns(
 		)
 	}
 
-	close(release)
+	close(gate.release)
 	if err := <-first; err != nil {
 		t.Fatalf(
 			"first Forget: %v",
@@ -1236,18 +1284,10 @@ func TestForget_AbortsWhenTheCallerGivesUpWaitingForHandlers(
 		t.Fatal(err)
 	}
 
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	hold := func(
-		context.Context,
-		asynxmd.Event[order],
-	) {
-		close(entered)
-		<-release
-	}
+	gate := newHandlerGate()
 	b.Subscribe(
 		"asynx\\.aggregate\\.forget",
-		hold,
+		gate.hold,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1256,7 +1296,7 @@ func TestForget_AbortsWhenTheCallerGivesUpWaitingForHandlers(
 		ex,
 		"agg",
 	)
-	<-entered
+	<-gate.entered
 	cancel()
 	if err := <-got; !errors.Is(
 		err,
@@ -1268,7 +1308,7 @@ func TestForget_AbortsWhenTheCallerGivesUpWaitingForHandlers(
 		)
 	}
 
-	close(release)
+	close(gate.release)
 
 	if n := streamLen(
 		t,
@@ -1450,14 +1490,17 @@ func TestForget_DoesNotEraseWhenADurableSubscriberCannotTakeTheTombstone(
 	}
 }
 
-func forgetOwnAggregate(
+type forgetsItsOwnAggregate struct {
+	executor *CommandExecutor[order]
+	got      chan error
+}
+
+func (h *forgetsItsOwnAggregate) handle(
 	ctx context.Context,
-	ex *CommandExecutor[order],
 	e asynxmd.Event[order],
-	got chan<- error,
 ) error {
 	if e.EventName != asynxmd.ForgetEventName {
-		got <- ex.Forget(
+		h.got <- h.executor.Forget(
 			ctx,
 			e.AggregateID,
 		)
@@ -1469,26 +1512,15 @@ func forgetOwnAggregate(
 func TestForget_FromAHandlerOfTheSameAggregateFailsFast(
 	t *testing.T,
 ) {
-	var ex *CommandExecutor[order]
-	got := make(
+	reaction := &forgetsItsOwnAggregate{got: make(
 		chan error,
 		1,
-	)
-	handler := func(
-		ctx context.Context,
-		e asynxmd.Event[order],
-	) error {
-		return forgetOwnAggregate(
-			ctx,
-			ex,
-			e,
-			got,
-		)
-	}
-	ex = durableEnv(
+	)}
+	ex := durableEnv(
 		t,
-		handler,
+		reaction.handle,
 	)
+	reaction.executor = ex
 	if _, err := ex.ExecuteWait(
 		context.Background(),
 		update(
@@ -1499,7 +1531,7 @@ func TestForget_FromAHandlerOfTheSameAggregateFailsFast(
 		t.Fatal(err)
 	}
 
-	if err := <-got; !errors.Is(
+	if err := <-reaction.got; !errors.Is(
 		err,
 		asynxmd.ErrForgetFromHandler,
 	) {
@@ -1514,15 +1546,18 @@ func TestForget_FromAHandlerOfTheSameAggregateFailsFast(
 	}
 }
 
-func forgetOtherAggregate(
+type forgetsAnotherAggregate struct {
+	executor *CommandExecutor[order]
+	got      chan error
+}
+
+func (h *forgetsAnotherAggregate) handle(
 	ctx context.Context,
-	ex *CommandExecutor[order],
 	e asynxmd.Event[order],
-	got chan<- error,
 ) error {
 	if e.EventName != asynxmd.ForgetEventName &&
 		e.AggregateID == "a" {
-		got <- ex.Forget(
+		h.got <- h.executor.Forget(
 			ctx,
 			"b",
 		)
@@ -1534,26 +1569,15 @@ func forgetOtherAggregate(
 func TestForget_FromAHandlerOfAnotherAggregateIsAllowed(
 	t *testing.T,
 ) {
-	var ex *CommandExecutor[order]
-	got := make(
+	reaction := &forgetsAnotherAggregate{got: make(
 		chan error,
 		1,
-	)
-	handler := func(
-		ctx context.Context,
-		e asynxmd.Event[order],
-	) error {
-		return forgetOtherAggregate(
-			ctx,
-			ex,
-			e,
-			got,
-		)
-	}
-	ex = durableEnv(
+	)}
+	ex := durableEnv(
 		t,
-		handler,
+		reaction.handle,
 	)
+	reaction.executor = ex
 	ctx := context.Background()
 	if _, err := ex.ExecuteWait(
 		ctx,
@@ -1575,7 +1599,7 @@ func TestForget_FromAHandlerOfAnotherAggregateIsAllowed(
 		t.Fatal(err)
 	}
 
-	if err := <-got; err != nil {
+	if err := <-reaction.got; err != nil {
 		t.Fatalf(
 			"Forget(b) from a's handler: %v",
 			err,
@@ -1583,15 +1607,19 @@ func TestForget_FromAHandlerOfAnotherAggregateIsAllowed(
 	}
 }
 
-func failUnlessTombstone(
+type failsUnlessTombstone struct {
+	attempted chan struct{}
+}
+
+func (h *failsUnlessTombstone) handle(
+	_ context.Context,
 	e asynxmd.Event[order],
-	attempted chan<- struct{},
 ) error {
 	if e.EventName == asynxmd.ForgetEventName {
 		return nil
 	}
 
-	attempted <- struct{}{}
+	h.attempted <- struct{}{}
 	return errors.New("poison")
 }
 
@@ -1604,22 +1632,13 @@ func slowRetries(
 func TestForget_LetsAFailingDeliveryGoWhenTheTombstoneIsAccepted(
 	t *testing.T,
 ) {
-	attempted := make(
+	poison := &failsUnlessTombstone{attempted: make(
 		chan struct{},
 		8,
-	)
-	poison := func(
-		_ context.Context,
-		e asynxmd.Event[order],
-	) error {
-		return failUnlessTombstone(
-			e,
-			attempted,
-		)
-	}
+	)}
 	ex := durableEnv(
 		t,
-		poison,
+		poison.handle,
 		slowRetries,
 	)
 	ctx := context.Background()
@@ -1633,7 +1652,7 @@ func TestForget_LetsAFailingDeliveryGoWhenTheTombstoneIsAccepted(
 		t.Fatal(err)
 	}
 
-	<-attempted
+	<-poison.attempted
 
 	done := forgetAsync(
 		ctx,
@@ -1658,15 +1677,30 @@ func (s deliveryFailStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
 ) error {
-	wrap := func(
-		tx asynxmd.Tx,
-	) error {
-		return fn(deliveryFailTx{Tx: tx, drop: s.drop, enqueue: s.enqueue})
+	failing := deliveryFailRun{
+		run:     fn,
+		drop:    s.drop,
+		enqueue: s.enqueue,
 	}
 	return s.Memory.Atomically(
 		ctx,
-		wrap,
+		failing.inFailingTx,
 	)
+}
+
+type deliveryFailRun struct {
+	run           func(asynxmd.Tx) error
+	drop, enqueue bool
+}
+
+func (r deliveryFailRun) inFailingTx(
+	tx asynxmd.Tx,
+) error {
+	return r.run(deliveryFailTx{
+		Tx:      tx,
+		drop:    r.drop,
+		enqueue: r.enqueue,
+	})
 }
 
 type deliveryFailTx struct {
@@ -1728,17 +1762,22 @@ func runDeliveryLogFailure(
 	name string,
 	s deliveryFailStore,
 ) {
-	run := func(
-		t *testing.T,
-	) {
-		requireTombstoneRollsBack(
-			t,
-			s,
-		)
-	}
 	t.Run(
 		name,
-		run,
+		rollbackCase{store: s}.run,
+	)
+}
+
+type rollbackCase struct {
+	store deliveryFailStore
+}
+
+func (c rollbackCase) run(
+	t *testing.T,
+) {
+	requireTombstoneRollsBack(
+		t,
+		c.store,
 	)
 }
 
@@ -1798,14 +1837,18 @@ func requireTombstoneRollsBack(
 	}
 }
 
-func blockUnlessTombstone(
+type blocksUnlessTombstone struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h *blocksUnlessTombstone) handle(
+	_ context.Context,
 	e asynxmd.Event[order],
-	entered chan<- struct{},
-	release <-chan struct{},
 ) error {
 	if e.EventName != asynxmd.ForgetEventName {
-		entered <- struct{}{}
-		<-release
+		h.entered <- struct{}{}
+		<-h.release
 	}
 
 	return nil
@@ -1814,24 +1857,16 @@ func blockUnlessTombstone(
 func TestForget_GivesUpWhenShutdownBegins(
 	t *testing.T,
 ) {
-	entered := make(
-		chan struct{},
-		1,
-	)
-	release := make(chan struct{})
-	block := func(
-		_ context.Context,
-		e asynxmd.Event[order],
-	) error {
-		return blockUnlessTombstone(
-			e,
-			entered,
-			release,
-		)
+	block := &blocksUnlessTombstone{
+		entered: make(
+			chan struct{},
+			1,
+		),
+		release: make(chan struct{}),
 	}
 	ex := durableEnv(
 		t,
-		block,
+		block.handle,
 	)
 	ctx := context.Background()
 	if _, _, err := ex.ExecuteAsync(
@@ -1846,7 +1881,7 @@ func TestForget_GivesUpWhenShutdownBegins(
 
 	within(
 		t,
-		entered,
+		block.entered,
 		"the handler",
 	)
 
@@ -1869,7 +1904,7 @@ func TestForget_GivesUpWhenShutdownBegins(
 	default:
 	}
 
-	t.Cleanup(func() { close(release) })
+	t.Cleanup(func() { close(block.release) })
 	ex.dispatcher.Interrupt()
 	err := within(
 		t,
@@ -2026,12 +2061,16 @@ func TestForget_ErasePhaseFailureParksWithTheForgetError(
 	}
 }
 
-func holdTombstone(
+type holdsTombstone struct {
+	release chan struct{}
+}
+
+func (h *holdsTombstone) handle(
+	_ context.Context,
 	e asynxmd.Event[order],
-	release <-chan struct{},
 ) error {
 	if e.EventName == asynxmd.ForgetEventName {
-		<-release
+		<-h.release
 	}
 
 	return nil
@@ -2040,21 +2079,12 @@ func holdTombstone(
 func TestForget_GivingUpOnTheTombstoneParksWithTheWaitError(
 	t *testing.T,
 ) {
-	release := make(chan struct{})
-	hold := func(
-		_ context.Context,
-		e asynxmd.Event[order],
-	) error {
-		return holdTombstone(
-			e,
-			release,
-		)
-	}
+	hold := &holdsTombstone{release: make(chan struct{})}
 	ex := durableEnv(
 		t,
-		hold,
+		hold.handle,
 	)
-	defer close(release)
+	defer close(hold.release)
 	if _, err := ex.ExecuteWait(
 		context.Background(),
 		update(

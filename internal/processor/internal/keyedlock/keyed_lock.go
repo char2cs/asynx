@@ -2,6 +2,7 @@ package keyedlock
 
 import (
 	"context"
+	"errors"
 	"sync"
 )
 
@@ -19,70 +20,80 @@ type KeyedLock struct {
 	entries map[string]*lockEntry
 }
 
-// Lock blocks until the key is free or ctx is done. On success the returned
-// unlock releases the key; calling it more than once is a no-op, so it is safe
-// to defer and to call early. If ctx is already done, or ends while waiting,
-// Lock returns ctx.Err() and the key is untouched: the waiter leaves no entry
-// behind and never holds the key. Lock is the only way to wait for a key; a
-// holder must release it from any goroutine exactly as it would a sync.Mutex.
+// Lock blocks until the key is free or ctx is done. On success the caller
+// holds the key and must release it with Unlock. If ctx is already done, or
+// ends while waiting, Lock returns ctx.Err() and the key is untouched: the
+// waiter leaves no entry behind and never holds the key. Lock is the only way
+// to wait for a key; a holder may release it from any goroutine exactly as it
+// would a sync.Mutex.
 func (k *KeyedLock) Lock(
 	ctx context.Context,
 	key string,
-) (unlock func(), err error) {
+) error {
 	if err := ctx.Err(); err != nil {
-		return nil,
-			err
+		return err
 	}
 
 	k.join(key)
 	e := k.entryOf(key)
 	select {
 	case <-e.ch:
+		return nil
 	case <-ctx.Done():
 		k.leave(
 			key,
 			e,
 		)
-		return nil,
-			ctx.Err()
+		return ctx.Err()
 	}
-
-	return k.unlocker(
-			key,
-			e,
-		),
-		nil
 }
 
-// TryLock takes the key if it is free right now and reports whether it did,
-// like sync.Mutex.TryLock. It never waits, and it does not jump a waiter that
-// was already handed the key. On success the returned unlock releases the key
-// and is idempotent as in Lock; on failure unlock is nil and nothing is held.
-//
-// TryLock is the one operation that both mutates and answers: taking a free
-// key and learning that it was free is a single atomic test-and-set, and
-// splitting it into a query and a command would let two callers both see the
-// key free. The executor's WithLockIfFree is its only caller.
+// ErrHeld is what TryLock returns when the key is held by someone else.
+var ErrHeld = errors.New("keyedlock: the key is held")
+
+// TryLock takes the key if it is free right now and returns ErrHeld when it is
+// not, like sync.Mutex.TryLock. It never waits, and it does not jump a waiter
+// that was already handed the key. On success the caller holds the key and
+// releases it with Unlock; on failure nothing is held. The executor's
+// WithLockIfFree is its only caller.
 func (k *KeyedLock) TryLock(
 	key string,
-) (unlock func(), ok bool) {
+) error {
 	k.join(key)
 	e := k.entryOf(key)
 	select {
 	case <-e.ch:
-		return k.unlocker(
-				key,
-				e,
-			),
-			true
+		return nil
 	default:
 		k.leave(
 			key,
 			e,
 		)
-		return nil,
-			false
+		return ErrHeld
 	}
+}
+
+// Unlock releases a key taken by Lock or TryLock, waking the next waiter if
+// there is one. Unlocking a key that is not held, for instance a second time
+// right after the first, is a no-op, so it is safe to defer and to call early;
+// the holder must still release exactly once, as another holder may have taken
+// the key in between.
+func (k *KeyedLock) Unlock(
+	key string,
+) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	e := k.entries[key]
+	if e == nil ||
+		len(e.ch) > 0 {
+		return
+	}
+
+	e.ch <- struct{}{}
+	k.drop(
+		key,
+		e,
+	)
 }
 
 func (k *KeyedLock) join(
@@ -118,29 +129,22 @@ func (k *KeyedLock) entryOf(
 	return k.entries[key]
 }
 
-func (k *KeyedLock) unlocker(
-	key string,
-	e *lockEntry,
-) func() {
-	var once sync.Once
-	free := func() {
-		e.ch <- struct{}{}
-		k.leave(
-			key,
-			e,
-		)
-	}
-	return func() {
-		once.Do(free)
-	}
-}
-
 func (k *KeyedLock) leave(
 	key string,
 	e *lockEntry,
 ) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	k.drop(
+		key,
+		e,
+	)
+}
+
+func (k *KeyedLock) drop(
+	key string,
+	e *lockEntry,
+) {
 	e.refs--
 	if e.refs == 0 {
 		delete(

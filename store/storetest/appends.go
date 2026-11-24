@@ -195,19 +195,9 @@ func concurrentSameVersion(
 		t,
 		s,
 	)
-	writeVersionOne := func(
-		i int,
-	) error {
-		return f.try(write.Blob(
-			"s1",
-			1,
-			[]byte{byte(i)},
-		))
-	}
-
 	results := race.All(
 		writers,
-		writeVersionOne,
+		f.writeVersionOne,
 	)
 
 	f.wantOneWinner(results)
@@ -231,26 +221,9 @@ func concurrentDistinctVersions(
 		t,
 		s,
 	)
-	writeOwnVersion := func(
-		i int,
-	) error {
-		version := int64(i + 1)
-		return f.try(
-			write.Blob(
-				"s1",
-				version,
-				[]byte{byte(version)},
-			),
-			write.Delivery(deliveryOf(
-				"s1",
-				version,
-			)),
-		)
-	}
-
 	results := race.All(
 		writers,
-		writeOwnVersion,
+		f.writeOwnVersion,
 	)
 
 	f.wantAllCommitted(results)

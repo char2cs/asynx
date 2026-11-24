@@ -33,19 +33,10 @@ func newJob() jobs.Job[string] {
 func TestReporter_PublishErrorCallsHandler(
 	t *testing.T,
 ) {
-	var gotErr error
-	var gotEvent asynxmd.Event[string]
-	var gotCtx context.Context
+	var calls recordedCalls
 	want := errors.New("boom")
-	onPublishError := func(
-		ctx context.Context,
-		e asynxmd.Event[string],
-		err error,
-	) {
-		gotCtx, gotEvent, gotErr = ctx, e, err
-	}
 	rep := reporter.New(
-		onPublishError,
+		calls.recordPublishError,
 		nil,
 		nil,
 	)
@@ -57,18 +48,18 @@ func TestReporter_PublishErrorCallsHandler(
 	)
 
 	if !errors.Is(
-		gotErr,
+		calls.err,
 		want,
 	) ||
-		gotEvent.AggregateID != "agg" {
+		calls.event.AggregateID != "agg" {
 		t.Fatalf(
 			"got err=%v event=%+v",
-			gotErr,
-			gotEvent,
+			calls.err,
+			calls.event,
 		)
 	}
 
-	if gotCtx.Value(ctxKey{}) != "marker" {
+	if calls.ctx.Value(ctxKey{}) != "marker" {
 		t.Fatal("handler did not get the job context")
 	}
 }
@@ -76,20 +67,11 @@ func TestReporter_PublishErrorCallsHandler(
 func TestReporter_DeliveryErrorCallsHandler(
 	t *testing.T,
 ) {
-	var gotErr error
-	var gotAttempt int
+	var calls recordedCalls
 	want := errors.New("boom")
-	onDeliveryError := func(
-		_ context.Context,
-		_ asynxmd.Event[string],
-		err error,
-		attempt int,
-	) {
-		gotErr, gotAttempt = err, attempt
-	}
 	rep := reporter.New(
 		nil,
-		onDeliveryError,
+		calls.recordDeliveryError,
 		nil,
 	)
 
@@ -101,14 +83,14 @@ func TestReporter_DeliveryErrorCallsHandler(
 	)
 
 	if !errors.Is(
-		gotErr,
+		calls.err,
 		want,
 	) ||
-		gotAttempt != 4 {
+		calls.attempt != 4 {
 		t.Fatalf(
 			"got err=%v attempt=%d",
-			gotErr,
-			gotAttempt,
+			calls.err,
+			calls.attempt,
 		)
 	}
 }
@@ -116,18 +98,11 @@ func TestReporter_DeliveryErrorCallsHandler(
 func TestReporter_PanicCallsHandler(
 	t *testing.T,
 ) {
-	var got any
-	onPanic := func(
-		_ context.Context,
-		_ asynxmd.Event[string],
-		recovered any,
-	) {
-		got = recovered
-	}
+	var calls recordedCalls
 	rep := reporter.New(
 		nil,
 		nil,
-		onPanic,
+		calls.recordPanic,
 	)
 
 	rep.Panic(
@@ -136,10 +111,11 @@ func TestReporter_PanicCallsHandler(
 		"oops",
 	)
 
-	if got != "oops" {
+	if len(calls.panics) != 1 ||
+		calls.panics[0] != "oops" {
 		t.Fatalf(
 			"got %v",
-			got,
+			calls.panics,
 		)
 	}
 }
@@ -175,36 +151,11 @@ func TestReporter_NilHandlersAreNoOps(
 func TestReporter_ForwardsAnErrorHandlerPanicToThePanicHandler(
 	t *testing.T,
 ) {
-	var got []any
-	onPublishError := func(
-		context.Context,
-		asynxmd.Event[string],
-		error,
-	) {
-		panic("publish")
-	}
-	onDeliveryError := func(
-		context.Context,
-		asynxmd.Event[string],
-		error,
-		int,
-	) {
-		panic("delivery")
-	}
-	onPanic := func(
-		_ context.Context,
-		_ asynxmd.Event[string],
-		recovered any,
-	) {
-		got = append(
-			got,
-			recovered,
-		)
-	}
+	var calls recordedCalls
 	rep := reporter.New(
-		onPublishError,
-		onDeliveryError,
-		onPanic,
+		panicOnPublishError,
+		panicOnDeliveryError,
+		calls.recordPanic,
 	)
 	job := newJob()
 
@@ -220,12 +171,12 @@ func TestReporter_ForwardsAnErrorHandlerPanicToThePanicHandler(
 		1,
 	)
 
-	if len(got) != 2 ||
-		got[0] != "publish" ||
-		got[1] != "delivery" {
+	if len(calls.panics) != 2 ||
+		calls.panics[0] != "publish" ||
+		calls.panics[1] != "delivery" {
 		t.Fatalf(
 			"panic handler saw %v, want the publish and delivery panics",
-			got,
+			calls.panics,
 		)
 	}
 }
@@ -233,17 +184,10 @@ func TestReporter_ForwardsAnErrorHandlerPanicToThePanicHandler(
 func TestReporter_DropsAPanicOfThePanicHandler(
 	t *testing.T,
 ) {
-	onPanic := func(
-		context.Context,
-		asynxmd.Event[string],
-		any,
-	) {
-		panic("panic")
-	}
 	rep := reporter.New[string](
 		nil,
 		nil,
-		onPanic,
+		panicOnPanic,
 	)
 
 	rep.Panic(
@@ -256,15 +200,8 @@ func TestReporter_DropsAPanicOfThePanicHandler(
 func TestReporter_RecoversErrorHandlerPanicsWithoutAPanicHandler(
 	t *testing.T,
 ) {
-	onPublishError := func(
-		context.Context,
-		asynxmd.Event[string],
-		error,
-	) {
-		panic("publish")
-	}
 	rep := reporter.New(
-		onPublishError,
+		panicOnPublishError,
 		nil,
 		nil,
 	)
@@ -274,4 +211,76 @@ func TestReporter_RecoversErrorHandlerPanicsWithoutAPanicHandler(
 		newJob(),
 		errors.New("x"),
 	)
+}
+
+type recordedCalls struct {
+	ctx        context.Context
+	event      asynxmd.Event[string]
+	err        error
+	attempt    int
+	publishes  int
+	deliveries int
+	panics     []any
+}
+
+func (c *recordedCalls) recordPublishError(
+	ctx context.Context,
+	event asynxmd.Event[string],
+	err error,
+) {
+	c.publishes++
+	c.ctx = ctx
+	c.event = event
+	c.err = err
+}
+
+func (c *recordedCalls) recordDeliveryError(
+	ctx context.Context,
+	event asynxmd.Event[string],
+	err error,
+	attempt int,
+) {
+	c.deliveries++
+	c.ctx = ctx
+	c.event = event
+	c.err = err
+	c.attempt = attempt
+}
+
+func (c *recordedCalls) recordPanic(
+	ctx context.Context,
+	event asynxmd.Event[string],
+	recovered any,
+) {
+	c.ctx = ctx
+	c.event = event
+	c.panics = append(
+		c.panics,
+		recovered,
+	)
+}
+
+func panicOnPublishError(
+	context.Context,
+	asynxmd.Event[string],
+	error,
+) {
+	panic("publish")
+}
+
+func panicOnDeliveryError(
+	context.Context,
+	asynxmd.Event[string],
+	error,
+	int,
+) {
+	panic("delivery")
+}
+
+func panicOnPanic(
+	context.Context,
+	asynxmd.Event[string],
+	any,
+) {
+	panic("panic")
 }

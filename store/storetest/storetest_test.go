@@ -14,15 +14,16 @@ import (
 func TestRun_PassesOnTheMemoryStore(
 	t *testing.T,
 ) {
-	newStore := func(
-		*testing.T,
-	) models.Store {
-		return store.New()
-	}
 	Run(
 		t,
-		newStore,
+		memoryStore,
 	)
+}
+
+func memoryStore(
+	*testing.T,
+) models.Store {
+	return store.New()
 }
 
 func runOnMemoryStore(

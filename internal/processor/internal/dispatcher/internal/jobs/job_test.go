@@ -13,18 +13,29 @@ import (
 func newJob(
 	t *testing.T,
 	request asynxmd.DispatchRequest[string],
-) (jobs.Job[string], *atomic.Int32) {
+) (jobs.Job[string], *cancelCounter) {
 	t.Helper()
-	var cancels atomic.Int32
-	cancel := func() {
-		cancels.Add(1)
-	}
+	cancels := &cancelCounter{}
 	job := jobs.New(
 		request,
-		cancel,
+		cancels.countCancel,
 	)
 	return job,
-		&cancels
+		cancels
+}
+
+type cancelCounter struct {
+	calls atomic.Int32
+}
+
+func (c *cancelCounter) countCancel() {
+	c.calls.Add(1)
+}
+
+func acknowledgeAtOnce(
+	context.Context,
+) error {
+	return nil
 }
 
 func closed(
@@ -71,11 +82,6 @@ func TestNew_ExposesTheEvent(
 func TestNew_KindsDecideRouting(
 	t *testing.T,
 ) {
-	ack := func(
-		context.Context,
-	) error {
-		return nil
-	}
 	forgetEvent := asynxmd.Event[string]{AggregateID: "agg", EventName: asynxmd.ForgetEventName}
 	tests := []struct {
 		name     string
@@ -85,9 +91,9 @@ func TestNew_KindsDecideRouting(
 		skipLive bool
 	}{
 		{"live event", eventRequest(), false, false, false},
-		{"durable event", asynxmd.DispatchRequest[string]{Ack: ack}, true, false, false},
+		{"durable event", asynxmd.DispatchRequest[string]{Ack: acknowledgeAtOnce}, true, false, false},
 		{"tombstone", asynxmd.DispatchRequest[string]{Kind: asynxmd.DispatchTombstone}, true, true, false},
-		{"redelivery", asynxmd.DispatchRequest[string]{Ack: ack, Kind: asynxmd.DispatchRedelivery}, true, false, true},
+		{"redelivery", asynxmd.DispatchRequest[string]{Ack: acknowledgeAtOnce, Kind: asynxmd.DispatchRedelivery}, true, false, true},
 		{"forget redelivery", asynxmd.DispatchRequest[string]{Event: forgetEvent, Kind: asynxmd.DispatchRedelivery}, true, true, true},
 	}
 	for _, tt := range tests {

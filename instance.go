@@ -261,3 +261,10 @@ func (i *instance[T]) OnForget(
 		models.ProjectionHandler[T](fn),
 	)
 }
+
+func (i *instance[T]) subscribeForget(
+	fn models.ForgetHandler[T],
+) error {
+	_, err := i.OnForget(fn)
+	return err
+}

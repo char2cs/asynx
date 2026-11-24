@@ -87,8 +87,9 @@ func (es *EventStore[T]) GuardAutoSnapshots(
 // carrying the aggregate id (AggregateID), the version the snapshot was for
 // (Version), the id of that version's event (ID), the schema version
 // (SchemaVersion) and the state that failed to be cached (Aggregate); the
-// other fields are zero. A panic in the callback is contained. A nil callback,
-// the default, drops the failure. Call it once, while wiring, before the store
+// other fields are zero. A panic in the callback is contained and written to
+// stderr as one line. A nil callback, the
+// default, drops the failure. Call it once, while wiring, before the store
 // is used from several goroutines.
 func (es *EventStore[T]) ObserveAutoSnapshotErrors(
 	fn func(context.Context, asynxmd.Event[T], error),
@@ -258,32 +259,25 @@ func (es *EventStore[T]) appendAtomically(
 	loadedVersion int64,
 	previousState T,
 	newState T,
-) (evt asynxmd.Event[T], err error) {
-	appendInTx := func(
-		tx asynxmd.Tx,
-	) (txErr error) {
-		evt, txErr = es.appendWithHook(
-			ctx,
-			tx,
-			cmd,
-			hook,
-			loadedVersion,
-			previousState,
-			newState,
-		)
-		return txErr
+) (asynxmd.Event[T], error) {
+	pending := &pendingAppend[T]{
+		store:         es,
+		cmd:           cmd,
+		hook:          hook,
+		loadedVersion: loadedVersion,
+		previousState: previousState,
+		newState:      newState,
 	}
-
-	err = es.writer.EventStore().Atomically(
+	err := es.writer.EventStore().Atomically(
 		ctx,
-		appendInTx,
+		pending.inTransaction(ctx),
 	)
 	if err != nil {
 		return asynxmd.Event[T]{},
 			err
 	}
 
-	return evt,
+	return pending.evt,
 		nil
 }
 

@@ -40,7 +40,7 @@ func (p *Processor[T]) Send(
 
 	defer p.sends.Done()
 
-	if err := ctx.Err(); err != nil {
+	if ctx.Err() != nil {
 		return asynxmd.Event[T]{},
 			asynxmd.ErrContextCancelled
 	}
@@ -107,7 +107,7 @@ func (p *Processor[T]) refuseSendWait(
 		return asynxmd.ErrSendWaitFromHandler
 	}
 
-	if err := ctx.Err(); err != nil {
+	if ctx.Err() != nil {
 		return asynxmd.ErrContextCancelled
 	}
 
@@ -243,7 +243,7 @@ func (p *Processor[T]) Forget(
 
 	defer p.forgets.Done()
 
-	if err := ctx.Err(); err != nil {
+	if ctx.Err() != nil {
 		return asynxmd.ErrContextCancelled
 	}
 

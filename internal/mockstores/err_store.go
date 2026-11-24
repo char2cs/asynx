@@ -18,7 +18,8 @@ func (e *ErrStore) Atomically(
 	return fn(e.tx())
 }
 
-// GetReceipt returns Err.
+// GetReceipt reports no receipt and returns Err on every call, whatever the
+// command ID.
 func (e *ErrStore) GetReceipt(
 	context.Context,
 	string,
@@ -28,7 +29,8 @@ func (e *ErrStore) GetReceipt(
 		e.Err
 }
 
-// PendingDeliveries returns Err.
+// PendingDeliveries lists nothing and returns Err on every call, whatever the
+// limit.
 func (e *ErrStore) PendingDeliveries(
 	context.Context,
 	int,
@@ -37,7 +39,8 @@ func (e *ErrStore) PendingDeliveries(
 		e.Err
 }
 
-// AckDelivery returns Err.
+// AckDelivery acknowledges nothing and returns Err on every call, whatever the
+// aggregate and version.
 func (e *ErrStore) AckDelivery(
 	context.Context,
 	string,
@@ -46,7 +49,9 @@ func (e *ErrStore) AckDelivery(
 	return e.Err
 }
 
-// Append returns Err.
+// Append stores nothing and returns Err on every call. Writes made through
+// the transaction handed to Atomically reach this method, so they fail the
+// same way.
 func (e *ErrStore) Append(
 	_ context.Context,
 	_ string,
@@ -56,7 +61,8 @@ func (e *ErrStore) Append(
 	return e.Err
 }
 
-// ReadFrom returns Err.
+// ReadFrom reads nothing and returns Err on every call, whatever the stream
+// and starting version.
 func (e *ErrStore) ReadFrom(
 	_ context.Context,
 	_ string,
@@ -66,7 +72,8 @@ func (e *ErrStore) ReadFrom(
 		e.Err
 }
 
-// ReadRange returns Err.
+// ReadRange reads nothing and returns Err on every call, whatever the stream,
+// starting version and count.
 func (e *ErrStore) ReadRange(
 	_ context.Context,
 	_ string,
@@ -77,7 +84,9 @@ func (e *ErrStore) ReadRange(
 		e.Err
 }
 
-// Delete returns Err.
+// Delete removes nothing and returns Err on every call. Stream deletions made
+// through the transaction handed to Atomically reach this method, so they
+// fail the same way.
 func (e *ErrStore) Delete(
 	_ context.Context,
 	_ string,

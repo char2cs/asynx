@@ -7,7 +7,6 @@ import (
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor/models"
 	asynxmd "github.com/char2cs/asynx/models"
-	"sync/atomic"
 	"testing"
 )
 
@@ -15,27 +14,15 @@ func TestExecute_SyncProjectionErrorRollsBackAndDispatchesNothing(
 	t *testing.T,
 ) {
 	boom := errors.New("read model write failed")
-	failing := func(
-		context.Context,
-		asynxmd.Tx,
-		asynxmd.Event[order],
-	) error {
-		return boom
-	}
+	failing := &failingProjection{err: boom}
 	ex, s, _, d, b := newEnv(
 		t,
-		syncAll(failing),
+		syncAll(failing.project),
 	)
-	var delivered atomic.Int32
-	count := func(
-		context.Context,
-		asynxmd.Event[order],
-	) {
-		delivered.Add(1)
-	}
+	delivered := &eventCounter{}
 	b.Subscribe(
 		"OrderUpdated",
-		count,
+		delivered.onEvent,
 	)
 
 	_, err := ex.Execute(
@@ -76,61 +63,59 @@ func TestExecute_SyncProjectionErrorRollsBackAndDispatchesNothing(
 		)
 	}
 
-	if delivered.Load() != 0 {
+	if delivered.calls.Load() != 0 {
 		t.Errorf(
 			"deliveries = %d, want 0",
-			delivered.Load(),
+			delivered.calls.Load(),
 		)
 	}
 }
 
-func appendSeen(
-	got []string,
+type failingProjection struct {
+	err error
+}
+
+func (p *failingProjection) project(
+	context.Context,
+	asynxmd.Tx,
+	asynxmd.Event[order],
+) error {
+	return p.err
+}
+
+type seenProjection struct {
+	got []string
+}
+
+func (p *seenProjection) record(
+	_ context.Context,
 	tx asynxmd.Tx,
 	e asynxmd.Event[order],
-) ([]string, error) {
+) error {
 	if tx == nil {
-		return got,
-			errors.New("nil tx")
+		return errors.New("nil tx")
 	}
 
-	return append(
-			got,
-			fmt.Sprintf(
-				"%s@%d",
-				e.AggregateID,
-				e.Version,
-			),
+	p.got = append(
+		p.got,
+		fmt.Sprintf(
+			"%s@%d",
+			e.AggregateID,
+			e.Version,
 		),
-		nil
+	)
+	return nil
 }
 
 func TestExecute_SyncProjectionSeesTxAndEvent_OnlyForMatchingEvents(
 	t *testing.T,
 ) {
-	var got []string
-	match := func(
-		name string,
-	) bool {
-		return name == "OrderUpdated"
-	}
-	record := func(
-		_ context.Context,
-		tx asynxmd.Tx,
-		e asynxmd.Event[order],
-	) (err error) {
-		got, err = appendSeen(
-			got,
-			tx,
-			e,
-		)
-		return err
-	}
+	seen := &seenProjection{}
 	ex, _, _, _, _ := newEnv(
 		t,
 		WithSyncProjections[order]([]models.SyncProjection[order]{{
-			Match: match,
-			Fn:    record,
+			Match: matchUpdated,
+			Fn:    seen.record,
 		}}),
 	)
 
@@ -151,11 +136,11 @@ func TestExecute_SyncProjectionSeesTxAndEvent_OnlyForMatchingEvents(
 		t.Fatal(err)
 	}
 
-	if len(got) != 1 ||
-		got[0] != "agg@1" {
+	if len(seen.got) != 1 ||
+		seen.got[0] != "agg@1" {
 		t.Fatalf(
 			"projection calls = %v, want [agg@1]",
-			got,
+			seen.got,
 		)
 	}
 }

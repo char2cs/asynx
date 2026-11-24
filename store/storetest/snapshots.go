@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/char2cs/asynx/models"
 	"github.com/char2cs/asynx/store/storetest/internal/race"
+	"github.com/char2cs/asynx/store/storetest/internal/write"
 	"slices"
 	"testing"
 )
@@ -327,21 +328,13 @@ func snapshotConcurrentPuts(
 	s models.SnapshotStore,
 ) {
 	const writers = 16
-	ctx := context.Background()
-	putOwnPayload := func(
-		i int,
-	) error {
-		return s.Put(
-			ctx,
-			"a",
-			int64(i+1),
-			writerPayload(i),
-		)
-	}
-
 	results := race.All(
 		writers,
-		putOwnPayload,
+		write.SnapshotPuts(
+			s,
+			"a",
+			writerPayload,
+		),
 	)
 
 	if err := errors.Join(results...); err != nil {

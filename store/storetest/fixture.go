@@ -300,27 +300,55 @@ func (f fixture) tryAckDelivery(
 	)
 }
 
+func (f fixture) writeVersionOne(
+	writer int,
+) error {
+	return f.try(write.Blob(
+		"s1",
+		1,
+		[]byte{byte(writer)},
+	))
+}
+
+func (f fixture) writeOwnVersion(
+	writer int,
+) error {
+	version := int64(writer + 1)
+	return f.try(
+		write.Blob(
+			"s1",
+			version,
+			[]byte{byte(version)},
+		),
+		write.Delivery(deliveryOf(
+			"s1",
+			version,
+		)),
+	)
+}
+
+func committed(
+	err error,
+) bool {
+	return err == nil
+}
+
+func versionConflict(
+	err error,
+) bool {
+	return errors.Is(
+		err,
+		models.ErrPipelineFailed,
+	)
+}
+
 func (f fixture) wantOneWinner(
 	results []error,
 ) {
 	f.t.Helper()
-	isCommitted := func(
-		err error,
-	) bool {
-		return err == nil
-	}
-	isConflict := func(
-		err error,
-	) bool {
-		return errors.Is(
-			err,
-			models.ErrPipelineFailed,
-		)
-	}
-
 	losers := slices.DeleteFunc(
 		slices.Clone(results),
-		isCommitted,
+		committed,
 	)
 	if got := len(results) - len(losers); got != 1 {
 		f.t.Fatalf(
@@ -331,7 +359,7 @@ func (f fixture) wantOneWinner(
 
 	unexpected := slices.DeleteFunc(
 		losers,
-		isConflict,
+		versionConflict,
 	)
 	if len(unexpected) != 0 {
 		f.t.Errorf(

@@ -22,6 +22,29 @@ type order = mocks.Order
 
 var storageErr = errors.New("storage failure")
 
+type corruptionCapture struct {
+	err error
+}
+
+func (c *corruptionCapture) record(
+	err error,
+) {
+	c.err = err
+}
+
+type failingUpcaster struct {
+	err error
+}
+
+func (u failingUpcaster) upcast(
+	context.Context,
+	string,
+	[]byte,
+) ([]byte, error) {
+	return nil,
+		u.err
+}
+
 func newTestReader(
 	es asynxmd.Store,
 	ss asynxmd.SnapshotStore,
@@ -396,32 +419,27 @@ func TestGet_WarmPath_CorruptSnapshot_CallsOnCorruption(
 		),
 	)
 
-	var hookErr error
+	var hook corruptionCapture
 	rep := replayer.New[order](
 		es,
 		make(map[int]asynxmd.Upcaster),
 		1,
 		order{},
 	)
-	newFn := func(
-		err error,
-	) {
-		hookErr = err
-	}
 	r := New[order](
 		es,
 		ss,
 		rep,
 		1,
 		order{},
-		newFn,
+		hook.record,
 	)
 
 	_, _ = r.Get(
 		ctx,
 		"agg1",
 	)
-	if hookErr == nil {
+	if hook.err == nil {
 		t.Error("expected onCorruption to be called with an error")
 	}
 }
@@ -576,16 +594,8 @@ func TestGet_AutoSnapshotFail_ReturnsState(
 	es := store.New()
 	ss := store.NewSnapshots()
 	ctx := context.Background()
-	fn := func(
-		_ context.Context,
-		_ string,
-		p []byte,
-	) ([]byte, error) {
-		return p,
-			nil
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: fn,
+		1: keepPayloadUpcaster,
 	}
 	rep := replayer.New[order](
 		es,
@@ -646,16 +656,8 @@ func TestGet_AutoSnapshot_WrittenAfterUpcasting(
 	es := store.New()
 	ss := store.NewSnapshots()
 	ctx := context.Background()
-	fn := func(
-		_ context.Context,
-		_ string,
-		p []byte,
-	) ([]byte, error) {
-		return p,
-			nil
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: fn,
+		1: keepPayloadUpcaster,
 	}
 	rep := replayer.New[order](
 		es,
@@ -904,16 +906,8 @@ func TestGet_WarmPath_AutoSnapshotError_ReturnsStateNotError(
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"New"}]`),
 		),
 	)
-	fn := func(
-		_ context.Context,
-		_ string,
-		p []byte,
-	) ([]byte, error) {
-		return p,
-			nil
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: fn,
+		1: keepPayloadUpcaster,
 	}
 	rep := replayer.New[order](
 		es,
@@ -974,16 +968,8 @@ func TestGet_ColdPath_AutoSnapshotError_ReturnsStateNotError(
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"Pending"}]`),
 		),
 	)
-	fn := func(
-		_ context.Context,
-		_ string,
-		p []byte,
-	) ([]byte, error) {
-		return p,
-			nil
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: fn,
+		1: keepPayloadUpcaster,
 	}
 	rep := replayer.New[order](
 		es,
@@ -1046,16 +1032,8 @@ func TestGet_ColdPath_HydrateError_ReturnsError(
 	)
 
 	sentinel := errors.New("upcaster failed")
-	fn := func(
-		_ context.Context,
-		_ string,
-		_ []byte,
-	) ([]byte, error) {
-		return nil,
-			sentinel
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: fn,
+		1: failingUpcaster{err: sentinel}.upcast,
 	}
 	rep := replayer.New[order](
 		es,
@@ -1277,19 +1255,14 @@ func TestReader_CorruptSnapshotFallsBackToColdPath(
 		order{},
 	)
 
-	var corruptionErr error
-	newFn := func(
-		err error,
-	) {
-		corruptionErr = err
-	}
+	var hook corruptionCapture
 	r := New[order](
 		events,
 		snaps,
 		rep,
 		1,
 		order{},
-		newFn,
+		hook.record,
 	)
 
 	writeEvent(
@@ -1329,7 +1302,7 @@ func TestReader_CorruptSnapshotFallsBackToColdPath(
 		)
 	}
 
-	if corruptionErr == nil {
+	if hook.err == nil {
 		t.Error("onCorruption was not called")
 	}
 }

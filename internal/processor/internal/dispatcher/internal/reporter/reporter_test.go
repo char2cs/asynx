@@ -1,11 +1,8 @@
 package reporter_test
 
 import (
-	"context"
 	"errors"
 	"testing"
-
-	asynxmd "github.com/char2cs/asynx/models"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/reporter"
 )
@@ -13,33 +10,11 @@ import (
 func TestNew_CallsTheHandlersItIsGiven(
 	t *testing.T,
 ) {
-	var publishes, deliveries, panics int
-	onPublishError := func(
-		context.Context,
-		asynxmd.Event[string],
-		error,
-	) {
-		publishes++
-	}
-	onDeliveryError := func(
-		context.Context,
-		asynxmd.Event[string],
-		error,
-		int,
-	) {
-		deliveries++
-	}
-	onPanic := func(
-		context.Context,
-		asynxmd.Event[string],
-		any,
-	) {
-		panics++
-	}
+	var calls recordedCalls
 	r := reporter.New(
-		onPublishError,
-		onDeliveryError,
-		onPanic,
+		calls.recordPublishError,
+		calls.recordDeliveryError,
+		calls.recordPanic,
 	)
 	job := newJob()
 	r.PublishError(
@@ -58,14 +33,14 @@ func TestNew_CallsTheHandlersItIsGiven(
 		job,
 		"boom",
 	)
-	if publishes != 1 ||
-		deliveries != 1 ||
-		panics != 1 {
+	if calls.publishes != 1 ||
+		calls.deliveries != 1 ||
+		len(calls.panics) != 1 {
 		t.Fatalf(
 			"handlers ran %d, %d, %d times; want 1 each",
-			publishes,
-			deliveries,
-			panics,
+			calls.publishes,
+			calls.deliveries,
+			len(calls.panics),
 		)
 	}
 }

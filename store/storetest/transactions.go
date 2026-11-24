@@ -132,18 +132,10 @@ func nativeCallable(
 	t testing.TB,
 	s models.Store,
 ) {
-	callNative := func(
-		_ context.Context,
-		tx models.Tx,
-	) error {
-		tx.Native()
-		return nil
-	}
-
 	newFixture(
 		t,
 		s,
-	).commit(callNative)
+	).commit(write.Native())
 }
 
 func cancelledContext(

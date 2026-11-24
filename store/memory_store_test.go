@@ -1092,18 +1092,10 @@ func TestGetReceipt_ReturnsWhatWasStored(
 ) {
 	ctx := context.Background()
 	s := New()
-	put := func(
-		tx asynxmd.Tx,
-	) error {
-		return tx.PutReceipt(
-			ctx,
-			"c1",
-			asynxmd.Receipt{Accepted: true},
-		)
-	}
+	bodies := &txBodies{t: t}
 	err := s.Atomically(
 		ctx,
-		put,
+		bodies.putReceiptForC1,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1143,25 +1135,10 @@ func TestAckDelivery_RemovesOnlyTheNamedEntry(
 ) {
 	ctx := context.Background()
 	s := New()
-	enqueue := func(
-		tx asynxmd.Tx,
-	) error {
-		return errors.Join(
-			tx.EnqueueDelivery(
-				ctx,
-				"a",
-				1,
-			),
-			tx.EnqueueDelivery(
-				ctx,
-				"a",
-				2,
-			),
-		)
-	}
+	bodies := &txBodies{t: t}
 	err := s.Atomically(
 		ctx,
-		enqueue,
+		bodies.enqueueTwoVersionsForA,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1229,20 +1206,11 @@ func TestPendingDeliveries_NonPositiveLimit_ReturnsNone(
 	t *testing.T,
 ) {
 	s := New()
-	ctx := context.Background()
-	enqueue := func(
-		tx asynxmd.Tx,
-	) error {
-		return tx.EnqueueDelivery(
-			ctx,
-			"a",
-			1,
-		)
-	}
+	bodies := &txBodies{t: t}
 	mustAtomically(
 		t,
 		s,
-		enqueue,
+		bodies.enqueueFirstVersionForA,
 	)
 
 	wantNoneListed(

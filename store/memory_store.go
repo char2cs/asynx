@@ -53,21 +53,25 @@ func (s *memoryStore) Append(
 	version int64,
 	data []byte,
 ) error {
-	write := func(
-		tx models.Tx,
-	) error {
-		return tx.Append(
-			ctx,
-			streamID,
-			version,
-			data,
-		)
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return err
 	}
 
-	return s.Atomically(
+	defer tx.close()
+
+	err = tx.Append(
 		ctx,
-		write,
+		streamID,
+		version,
+		data,
 	)
+	if err != nil {
+		return err
+	}
+
+	tx.commit()
+	return nil
 }
 
 // Delete removes every blob of streamID in its own transaction. Deleting a
@@ -77,19 +81,23 @@ func (s *memoryStore) Delete(
 	ctx context.Context,
 	streamID string,
 ) error {
-	remove := func(
-		tx models.Tx,
-	) error {
-		return tx.DeleteStream(
-			ctx,
-			streamID,
-		)
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return err
 	}
 
-	return s.Atomically(
+	defer tx.close()
+
+	err = tx.DeleteStream(
 		ctx,
-		remove,
+		streamID,
 	)
+	if err != nil {
+		return err
+	}
+
+	tx.commit()
+	return nil
 }
 
 // Atomically runs fn in a transaction, committing when fn returns nil and
@@ -104,23 +112,34 @@ func (s *memoryStore) Atomically(
 	ctx context.Context,
 	fn func(tx models.Tx) error,
 ) error {
-	if err := ctx.Err(); err != nil {
+	tx, err := s.begin(ctx)
+	if err != nil {
 		return err
+	}
+
+	defer tx.close()
+
+	err = fn(tx)
+	if err != nil {
+		return err
+	}
+
+	tx.commit()
+	return nil
+}
+
+func (s *memoryStore) begin(
+	ctx context.Context,
+) (*memoryTx, error) {
+	err := ctx.Err()
+	if err != nil {
+		return nil,
+			err
 	}
 
 	s.txMu.Lock()
-	defer s.txMu.Unlock()
-
-	tx := &memoryTx{s: s}
-	committed := false
-	defer tx.rollbackUnless(&committed)
-
-	if err := fn(tx); err != nil {
-		return err
-	}
-
-	committed = true
-	return nil
+	return &memoryTx{s: s},
+		nil
 }
 
 // ReadFrom returns the blobs of streamID with a version of at least

@@ -7,6 +7,7 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates"
+	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates/contracts"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/delivery"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/reporter"
@@ -105,11 +106,15 @@ func (d *dispatcher[T]) Enqueue(
 		request,
 		release,
 	)
-	admission, err := d.registry.Enqueue(job)
-	if err != nil {
+	var admission contracts.Admission
+	d.registry.Enqueue(
+		job,
+		&admission,
+	)
+	if admission.Err != nil {
 		release()
 		return asynxmd.Ticket{},
-			err
+			admission.Err
 	}
 
 	if !admission.Parked {
@@ -150,8 +155,13 @@ func (d *dispatcher[T]) jobContext(
 		request.Event.AggregateID,
 	)
 	jobCtx, cancel := context.WithCancel(marked)
+	live := newLiveCancel(
+		d.cancels,
+		cancel,
+	)
+	d.cancels.add(live)
 	return jobCtx,
-		d.cancels.add(cancel)
+		live.release
 }
 
 // TicketFor returns the ticket of the event at (aggregateID, version) while its
@@ -224,10 +234,14 @@ func (d *dispatcher[T]) ResumeUndelivered(
 	aggregateID string,
 	generation uint64,
 ) (bool, []int64) {
-	return d.registry.Lift(
+	var outcome contracts.LiftOutcome
+	d.registry.Lift(
 		aggregateID,
 		generation,
+		&outcome,
 	)
+	return outcome.Lifted,
+		outcome.Undelivered
 }
 
 // Inspect reports whether the aggregate is parked, the park's generation, its

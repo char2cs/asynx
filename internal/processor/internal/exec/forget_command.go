@@ -21,7 +21,9 @@ func NewForgetCommand[T any](
 	return &ForgetCommand[T]{id: aggregateID}
 }
 
-// AggregateID returns the ID of the aggregate to forget.
+// AggregateID returns the aggregate the tombstone is written to and later
+// erases. The executor keys the aggregate's command lock and its in-progress
+// mark on it, so a Forget is serialised with every command for that aggregate.
 func (c *ForgetCommand[T]) AggregateID() string { return c.id }
 
 // EventName returns the name of the tombstone event.

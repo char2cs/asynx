@@ -18,6 +18,68 @@ import (
 
 type order = mocks.Order
 
+type eventCollector struct {
+	events []asynxmd.Event[order]
+}
+
+func (c *eventCollector) collect(
+	_ context.Context,
+	e asynxmd.Event[order],
+) {
+	c.events = append(
+		c.events,
+		e,
+	)
+}
+
+func keepPayloadUpcaster(
+	_ context.Context,
+	_ string,
+	payload []byte,
+) ([]byte, error) {
+	return payload,
+		nil
+}
+
+func panickingUpcaster(
+	context.Context,
+	string,
+	[]byte,
+) ([]byte, error) {
+	panic("upcaster panic")
+}
+
+type failingUpcaster struct {
+	err error
+}
+
+func (u failingUpcaster) upcast(
+	context.Context,
+	string,
+	[]byte,
+) ([]byte, error) {
+	return nil,
+		u.err
+}
+
+type upcastStepRecorder struct {
+	calls *[]int
+	step  int
+}
+
+func (u upcastStepRecorder) upcast(
+	_ context.Context,
+	_ string,
+	payload []byte,
+) ([]byte, error) {
+	*u.calls = append(
+		*u.calls,
+		u.step,
+	)
+	return payload,
+		nil
+}
+
 var storageErr = errors.New("storage failure")
 
 func newTestReplayer(
@@ -206,16 +268,8 @@ func TestHydrate_EmptyPatches_NoOp(
 func TestHydrate_WithUpcasting_WritesAutoSnapshot(
 	t *testing.T,
 ) {
-	fn := func(
-		_ context.Context,
-		_ string,
-		p []byte,
-	) ([]byte, error) {
-		return p,
-			nil
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: fn,
+		1: keepPayloadUpcaster,
 	}
 	r := newTestReplayer(
 		store.New(),
@@ -284,16 +338,8 @@ func TestHydrate_NoAutoSnapshot_WhenNoUpcasting(
 func TestHydrate_MarshalSeedError(
 	t *testing.T,
 ) {
-	fn := func(
-		_ context.Context,
-		_ string,
-		p []byte,
-	) ([]byte, error) {
-		return p,
-			nil
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: fn,
+		1: keepPayloadUpcaster,
 	}
 	r := New[mocks.ErrMarshal](
 		store.New(),
@@ -344,16 +390,8 @@ func TestHydrate_UpcasterError_PropagatesFast(
 	t *testing.T,
 ) {
 	upcastErr := errors.New("upcaster broken")
-	fn := func(
-		_ context.Context,
-		_ string,
-		_ []byte,
-	) ([]byte, error) {
-		return nil,
-			upcastErr
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: fn,
+		1: failingUpcaster{err: upcastErr}.upcast,
 	}
 	r := newTestReplayer(
 		store.New(),
@@ -396,15 +434,8 @@ func expectPanicPropagated() {
 func TestHydrate_UpcasterPanic_Propagates(
 	t *testing.T,
 ) {
-	fn := func(
-		_ context.Context,
-		_ string,
-		_ []byte,
-	) ([]byte, error) {
-		panic("upcaster panic")
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: fn,
+		1: panickingUpcaster,
 	}
 	r := newTestReplayer(
 		store.New(),
@@ -433,19 +464,13 @@ func TestReplay_EmptyStore_ReturnsNil(
 		1,
 	)
 
-	var called bool
-	replayFn := func(
-		ctx context.Context,
-		e asynxmd.Event[order],
-	) {
-		called = true
-	}
+	var collector eventCollector
 	err := r.Replay(
 		context.Background(),
 		"agg1",
 		1,
 		0,
-		replayFn,
+		collector.collect,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -454,7 +479,7 @@ func TestReplay_EmptyStore_ReturnsNil(
 		)
 	}
 
-	if called {
+	if len(collector.events) != 0 {
 		t.Error("fn should not be called when store is empty")
 	}
 }
@@ -498,22 +523,13 @@ func TestReplay_AllEvents(
 		1,
 	)
 
-	var got []asynxmd.Event[order]
-	replayFn := func(
-		ctx context.Context,
-		e asynxmd.Event[order],
-	) {
-		got = append(
-			got,
-			e,
-		)
-	}
+	var collector eventCollector
 	err := r.Replay(
 		ctx,
 		"agg1",
 		1,
 		0,
-		replayFn,
+		collector.collect,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -522,6 +538,7 @@ func TestReplay_AllEvents(
 		)
 	}
 
+	got := collector.events
 	if len(got) != 2 {
 		t.Fatalf(
 			"expected 2 events, got %d",
@@ -590,22 +607,13 @@ func TestReplay_WithVersionRange(
 		1,
 	)
 
-	var got []asynxmd.Event[order]
-	replayFn := func(
-		ctx context.Context,
-		e asynxmd.Event[order],
-	) {
-		got = append(
-			got,
-			e,
-		)
-	}
+	var collector eventCollector
 	err := r.Replay(
 		ctx,
 		"agg1",
 		2,
 		2,
-		replayFn,
+		collector.collect,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -614,6 +622,7 @@ func TestReplay_WithVersionRange(
 		)
 	}
 
+	got := collector.events
 	if len(got) != 1 {
 		t.Fatalf(
 			"expected 1 event, got %d",
@@ -674,22 +683,13 @@ func TestReplay_PreviousAggregate_CorrectForMidStreamStart(
 		1,
 	)
 
-	var got []asynxmd.Event[order]
-	replayFn := func(
-		ctx context.Context,
-		e asynxmd.Event[order],
-	) {
-		got = append(
-			got,
-			e,
-		)
-	}
+	var collector eventCollector
 	err := r.Replay(
 		ctx,
 		"agg1",
 		3,
 		3,
-		replayFn,
+		collector.collect,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -698,6 +698,7 @@ func TestReplay_PreviousAggregate_CorrectForMidStreamStart(
 		)
 	}
 
+	got := collector.events
 	if len(got) != 1 {
 		t.Fatalf(
 			"expected 1 event, got %d",
@@ -767,11 +768,7 @@ func TestReplay_ReadRangeError(
 		"agg1",
 		1,
 		2,
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) {
-		},
+		new(eventCollector).collect,
 	)
 	if !errors.Is(
 		err,
@@ -813,16 +810,8 @@ func TestReplay_NoAutoSnapshot(
 	t *testing.T,
 ) {
 	es := store.New()
-	fn := func(
-		_ context.Context,
-		_ string,
-		p []byte,
-	) ([]byte, error) {
-		return p,
-			nil
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: fn,
+		1: keepPayloadUpcaster,
 	}
 	r := newTestReplayer(
 		es,
@@ -867,34 +856,10 @@ func TestUpcast_ChainApplied(
 	t *testing.T,
 ) {
 	var calls []int
-	fn := func(
-		_ context.Context,
-		_ string,
-		p []byte,
-	) ([]byte, error) {
-		calls = append(
-			calls,
-			1,
-		)
-		return p,
-			nil
-	}
-	fn2 := func(
-		_ context.Context,
-		_ string,
-		p []byte,
-	) ([]byte, error) {
-		calls = append(
-			calls,
-			2,
-		)
-		return p,
-			nil
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: fn,
+		1: upcastStepRecorder{calls: &calls, step: 1}.upcast,
 
-		2: fn2,
+		2: upcastStepRecorder{calls: &calls, step: 2}.upcast,
 	}
 	r := newTestReplayer(
 		store.New(),
@@ -934,16 +899,8 @@ func TestUpcast_ChainApplied(
 func TestUpcast_MissingUpcasterSkipped(
 	t *testing.T,
 ) {
-	fn := func(
-		_ context.Context,
-		_ string,
-		p []byte,
-	) ([]byte, error) {
-		return p,
-			nil
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		2: fn,
+		2: keepPayloadUpcaster,
 	}
 	r := newTestReplayer(
 		store.New(),
@@ -975,16 +932,8 @@ func TestUpcast_ErrorWrapped(
 	t *testing.T,
 ) {
 	inner := errors.New("inner")
-	fn := func(
-		_ context.Context,
-		_ string,
-		_ []byte,
-	) ([]byte, error) {
-		return nil,
-			inner
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: fn,
+		1: failingUpcaster{err: inner}.upcast,
 	}
 	r := newTestReplayer(
 		store.New(),
@@ -1168,16 +1117,8 @@ func TestReplay_UpcasterError(
 	t *testing.T,
 ) {
 	upcastErr := errors.New("upcaster broken")
-	fn := func(
-		_ context.Context,
-		_ string,
-		_ []byte,
-	) ([]byte, error) {
-		return nil,
-			upcastErr
-	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: fn,
+		1: failingUpcaster{err: upcastErr}.upcast,
 	}
 	es := store.New()
 	ctx := context.Background()
@@ -1207,11 +1148,7 @@ func TestReplay_UpcasterError(
 		"agg1",
 		1,
 		0,
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) {
-		},
+		new(eventCollector).collect,
 	)
 	if !errors.Is(
 		err,

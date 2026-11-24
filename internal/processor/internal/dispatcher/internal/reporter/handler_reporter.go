@@ -2,6 +2,8 @@ package reporter
 
 import (
 	"context"
+	"fmt"
+	"os"
 
 	asynxmd "github.com/char2cs/asynx/models"
 
@@ -65,8 +67,9 @@ func (r *handlerReporter[T]) DeliveryError(
 
 // Panic calls the panic handler, if any, with the event of job and the
 // recovered value. A panic in the panic handler itself is recovered and
-// dropped: it is the last hook there is, so there is nowhere left to report
-// that panic to, and letting it escape would abandon the delivery.
+// written to stderr as one line: it is the last hook there is, so stderr is the
+// only place left to report it, and letting it escape would abandon the
+// delivery.
 func (r *handlerReporter[T]) Panic(
 	ctx context.Context,
 	job contracts.Job[T],
@@ -76,7 +79,7 @@ func (r *handlerReporter[T]) Panic(
 		return
 	}
 
-	defer dropPanicHandlerPanic()
+	defer writePanicHandlerPanicToStderr()
 	r.onPanic(
 		ctx,
 		job.Event(),
@@ -100,8 +103,15 @@ func (r *handlerReporter[T]) forwardPanic(
 	)
 }
 
-func dropPanicHandlerPanic() {
-	if recover() != nil {
+func writePanicHandlerPanicToStderr() {
+	recovered := recover()
+	if recovered == nil {
 		return
 	}
+
+	fmt.Fprintf(
+		os.Stderr,
+		"asynx: the panic handler panicked and was contained: %v\n",
+		recovered,
+	)
 }

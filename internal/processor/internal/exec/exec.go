@@ -120,7 +120,7 @@ func (e *CommandExecutor[T]) ExecuteAsync(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
 ) (asynxmd.Event[T], func(context.Context) error, error) {
-	unlock, err := e.locks.Lock(
+	err := e.locks.Lock(
 		ctx,
 		cmd.AggregateID(),
 	)
@@ -134,7 +134,7 @@ func (e *CommandExecutor[T]) ExecuteAsync(
 			)
 	}
 
-	defer unlock()
+	defer e.locks.Unlock(cmd.AggregateID())
 
 	if e.isForgetting(cmd.AggregateID()) {
 		return asynxmd.Event[T]{},
@@ -156,14 +156,14 @@ func (e *CommandExecutor[T]) ExecuteAsync(
 // against commands, forgets and other WithLock sections of the same aggregate,
 // never against other aggregates. It returns ErrContextCancelled (wrapping the
 // context error) when ctx ends before the lock is taken, otherwise fn's error.
-// fn must not lock the same aggregate again: the lock is not reentrant. Resume
+// fn receives ctx and must not lock the same aggregate again: the lock is not reentrant. Resume
 // uses it to redeliver an aggregate without a live event overtaking.
 func (e *CommandExecutor[T]) WithLock(
 	ctx context.Context,
 	id string,
-	fn func() error,
+	fn func(context.Context) error,
 ) error {
-	unlock, err := e.locks.Lock(
+	err := e.locks.Lock(
 		ctx,
 		id,
 	)
@@ -175,8 +175,8 @@ func (e *CommandExecutor[T]) WithLock(
 		)
 	}
 
-	defer unlock()
-	return fn()
+	defer e.locks.Unlock(id)
+	return fn(ctx)
 }
 
 // WithLockIfFree runs fn holding the aggregate's command lock, unless someone
@@ -188,12 +188,11 @@ func (e *CommandExecutor[T]) WithLockIfFree(
 	id string,
 	fn func(),
 ) bool {
-	unlock, ok := e.locks.TryLock(id)
-	if !ok {
+	if e.locks.TryLock(id) != nil {
 		return false
 	}
 
-	defer unlock()
+	defer e.locks.Unlock(id)
 	fn()
 	return true
 }
