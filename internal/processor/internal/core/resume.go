@@ -4,7 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/event"
 	"maps"
 	"slices"
 )
@@ -23,12 +24,12 @@ func (p *Processor[T]) Paused() []string {
 // Inspect reports the aggregate's delivery status as the dispatcher sees it:
 // whether it is parked, the park's generation, the error that parked it and
 // the versions the park left undelivered. Without a dispatcher it is the zero
-// DeliveryStatus.
+// dispatch.Status.
 func (p *Processor[T]) Inspect(
 	aggregateID string,
-) asynxmd.DeliveryStatus {
+) dispatch.Status {
 	if p.dispatcher == nil {
-		return asynxmd.DeliveryStatus{}
+		return dispatch.Status{}
 	}
 
 	return p.dispatcher.Inspect(aggregateID)
@@ -89,7 +90,7 @@ func (p *Processor[T]) resumeAll(
 	ctx context.Context,
 	parks map[string]uint64,
 	halted []string,
-	backlogs map[string][]asynxmd.Delivery,
+	backlogs map[string][]event.Delivery,
 ) error {
 	var failures []error
 	for i := 0; i < len(halted) &&
@@ -112,7 +113,7 @@ func (p *Processor[T]) resumeAggregate(
 	ctx context.Context,
 	agg string,
 	park uint64,
-	scanned []asynxmd.Delivery,
+	scanned []event.Delivery,
 ) error {
 	return p.executor.WithLock(
 		ctx,
@@ -128,7 +129,7 @@ func (p *Processor[T]) resumeAggregate(
 func (p *Processor[T]) redeliveringParked(
 	agg string,
 	park uint64,
-	scanned []asynxmd.Delivery,
+	scanned []event.Delivery,
 ) func(context.Context) error {
 	return func(
 		ctx context.Context,
@@ -146,7 +147,7 @@ func (p *Processor[T]) redeliverParked(
 	ctx context.Context,
 	agg string,
 	park uint64,
-	scanned []asynxmd.Delivery,
+	scanned []event.Delivery,
 ) error {
 	lifted, undelivered := p.dispatcher.ResumeUndelivered(
 		agg,
@@ -186,14 +187,14 @@ func (p *Processor[T]) redeliverParked(
 
 func withUndelivered(
 	agg string,
-	scanned []asynxmd.Delivery,
+	scanned []event.Delivery,
 	undelivered []int64,
-) []asynxmd.Delivery {
+) []event.Delivery {
 	backlog := slices.Clone(scanned)
 	for _, v := range undelivered {
 		backlog = append(
 			backlog,
-			asynxmd.Delivery{AggregateID: agg, Version: v},
+			event.Delivery{AggregateID: agg, Version: v},
 		)
 	}
 

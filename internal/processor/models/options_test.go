@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/subscription"
 )
 
 func apply(
@@ -61,7 +63,7 @@ type callLog struct {
 
 func (l *callLog) onError(
 	context.Context,
-	asynxmd.Event[int],
+	event.Event[int],
 	error,
 	int,
 ) {
@@ -73,7 +75,7 @@ func (l *callLog) onError(
 
 func (l *callLog) onPanic(
 	context.Context,
-	asynxmd.Event[int],
+	event.Event[int],
 	any,
 ) {
 	l.calls = append(
@@ -84,7 +86,7 @@ func (l *callLog) onPanic(
 
 func keepsDeadLetters(
 	context.Context,
-	asynxmd.Event[int],
+	event.Event[int],
 	error,
 ) error {
 	return nil
@@ -98,14 +100,14 @@ func matchesEveryEvent(
 
 func ignoresEventError(
 	context.Context,
-	asynxmd.Event[int],
+	event.Event[int],
 	error,
 ) {
 }
 
 func buildsNoDispatcher(
-	asynxmd.DispatcherConfig[int],
-) (asynxmd.Dispatcher[int], error) {
+	dispatcher.Config[int],
+) (dispatcher.Dispatcher[int], error) {
 	return nil,
 		nil
 }
@@ -115,7 +117,7 @@ func TestDelivery_HandlersAndLimitsReachTheDispatcherConfig(
 ) {
 	calls := &callLog{}
 	cfg := apply(
-		models.WithDurableSubscribers([]asynxmd.DurableSub[int]{{}}),
+		models.WithDurableSubscribers([]subscription.Durable[int]{{}}),
 		models.WithDeliveryErrorHandler(calls.onError),
 		models.WithDeliveryPanicHandler(calls.onPanic),
 		models.WithDeadLetterHandler(keepsDeadLetters),

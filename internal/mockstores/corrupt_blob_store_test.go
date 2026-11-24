@@ -2,7 +2,7 @@ package mockstores
 
 import (
 	"context"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/storage"
 	"testing"
 )
 
@@ -83,5 +83,5 @@ func TestCorruptBlobStore_ReadRange_ReturnsCorruptBlob(
 func TestCorruptBlobStore_ImplementsStore(
 	t *testing.T,
 ) {
-	var _ asynxmd.Store = &CorruptBlobStore{}
+	var _ storage.Store = &CorruptBlobStore{}
 }

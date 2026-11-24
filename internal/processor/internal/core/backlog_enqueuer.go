@@ -3,12 +3,15 @@ package core
 import (
 	"context"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 type backlogEnqueuer[T any] struct {
-	dispatcher asynxmd.Dispatcher[T]
-	store      asynxmd.Store
+	dispatcher dispatcher.Dispatcher[T]
+	store      storage.Store
 	aggregate  string
 	vanished   map[int64]struct{}
 	err        error
@@ -16,7 +19,7 @@ type backlogEnqueuer[T any] struct {
 
 func (e *backlogEnqueuer[T]) enqueue(
 	ctx context.Context,
-	evt asynxmd.Event[T],
+	evt event.Event[T],
 ) {
 	if _, wanted := e.vanished[evt.Version]; !wanted ||
 		e.err != nil {
@@ -25,10 +28,10 @@ func (e *backlogEnqueuer[T]) enqueue(
 
 	_, e.err = e.dispatcher.Enqueue(
 		ctx,
-		asynxmd.DispatchRequest[T]{
+		dispatch.Request[T]{
 			Event: evt,
 			Ack:   e.ack(evt.Version),
-			Kind:  asynxmd.DispatchRedelivery,
+			Kind:  dispatch.KindRedelivery,
 		},
 	)
 	if e.err != nil {

@@ -3,7 +3,8 @@ package models
 import (
 	"context"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	"github.com/char2cs/asynx/models/event"
 )
 
 // Executor is the write pipeline an envelope runs its command through. The
@@ -15,6 +16,6 @@ type Executor[T any] interface {
 	// and queued; the returned Wait lets the caller do the waiting.
 	ExecuteAsync(
 		ctx context.Context,
-		cmd asynxmd.Command[T],
-	) (asynxmd.Event[T], func(context.Context) error, error)
+		cmd command.Command[T],
+	) (event.Event[T], func(context.Context) error, error)
 }

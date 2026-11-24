@@ -2,7 +2,7 @@ package held
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/storage"
 	"sync"
 	"testing"
 )
@@ -22,7 +22,7 @@ type Transaction struct {
 // Commit.
 func Begin(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) *Transaction {
 	t.Helper()
 	h := &Transaction{
@@ -44,7 +44,7 @@ func Begin(
 }
 
 func (h *Transaction) run(
-	s models.Store,
+	s storage.Store,
 	signalAppended func(),
 ) {
 	err := s.Atomically(
@@ -57,9 +57,9 @@ func (h *Transaction) run(
 
 func (h *Transaction) appendThenWait(
 	signalAppended func(),
-) func(models.Tx) error {
+) func(storage.Tx) error {
 	return func(
-		tx models.Tx,
+		tx storage.Tx,
 	) error {
 		err := tx.Append(
 			context.Background(),

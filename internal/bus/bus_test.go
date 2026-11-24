@@ -7,7 +7,9 @@ import (
 
 	"github.com/char2cs/asynx/internal/bus"
 	"github.com/char2cs/asynx/internal/mocks"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/subscription"
 )
 
 func TestIsExactPattern_DistinguishesLiteralsFromRegexps(
@@ -24,10 +26,10 @@ func TestIsExactPattern_DistinguishesLiteralsFromRegexps(
 
 func forwardsPanicValue(
 	panicked chan<- any,
-) asynxmd.PanicHandler[mocks.Order] {
+) handler.Panic[mocks.Order] {
 	return func(
 		_ context.Context,
-		_ asynxmd.Event[mocks.Order],
+		_ event.Event[mocks.Order],
 		value any,
 	) {
 		panicked <- value
@@ -36,10 +38,10 @@ func forwardsPanicValue(
 
 func signalsTimeout(
 	timedOut chan<- struct{},
-) asynxmd.TimeoutHandler[mocks.Order] {
+) handler.Timeout[mocks.Order] {
 	return func(
 		_ context.Context,
-		_ asynxmd.Event[mocks.Order],
+		_ event.Event[mocks.Order],
 		_ time.Duration,
 	) {
 		timedOut <- struct{}{}
@@ -48,10 +50,10 @@ func signalsTimeout(
 
 func panicsWith(
 	value any,
-) asynxmd.ProjectionHandler[mocks.Order] {
+) handler.Projection[mocks.Order] {
 	return func(
 		context.Context,
-		asynxmd.Event[mocks.Order],
+		event.Event[mocks.Order],
 	) {
 		panic(value)
 	}
@@ -59,10 +61,10 @@ func panicsWith(
 
 func sleepsFor(
 	d time.Duration,
-) asynxmd.ProjectionHandler[mocks.Order] {
+) handler.Projection[mocks.Order] {
 	return func(
 		context.Context,
-		asynxmd.Event[mocks.Order],
+		event.Event[mocks.Order],
 	) {
 		time.Sleep(d)
 	}
@@ -98,7 +100,7 @@ func TestNew_WithHandlers_RoutesPanicAndTimeoutToThem(
 	_, err = b.Subscribe(
 		"Slow",
 		sleepsFor(50*time.Millisecond),
-		asynxmd.WithHandlerTimeout[mocks.Order](5*time.Millisecond),
+		subscription.WithHandlerTimeout[mocks.Order](5*time.Millisecond),
 	)
 	if err != nil {
 		t.Fatalf(
@@ -137,7 +139,7 @@ func publishSyncNamed(
 
 	err := b.PublishSync(
 		context.Background(),
-		asynxmd.Event[mocks.Order]{EventName: name},
+		event.Event[mocks.Order]{EventName: name},
 	)
 	if err != nil {
 		t.Fatalf(

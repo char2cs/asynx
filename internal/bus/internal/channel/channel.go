@@ -10,7 +10,10 @@ import (
 	"github.com/char2cs/asynx/internal/bus/internal/routing"
 	"github.com/char2cs/asynx/internal/bus/models"
 	"github.com/char2cs/asynx/internal/ids"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/subscription"
 )
 
 // Bus is the in-process event bus: it routes each published event to every
@@ -40,8 +43,8 @@ type Bus[T any] struct {
 	patternMu sync.RWMutex
 	patterns  map[string]compiledPattern
 
-	onPanic   asynxmd.PanicHandler[T]
-	onTimeout asynxmd.TimeoutHandler[T]
+	onPanic   handler.Panic[T]
+	onTimeout handler.Timeout[T]
 }
 
 // New returns a Bus with no subscriptions, ready for use. opts adjust the
@@ -81,20 +84,20 @@ func New[T any](
 // yet taken its snapshot of the subscriptions.
 func (b *Bus[T]) Subscribe(
 	pattern string,
-	handler asynxmd.ProjectionHandler[T],
-	opts ...asynxmd.SubscriptionOpt[T],
+	callback handler.Projection[T],
+	opts ...subscription.Opt[T],
 ) (subID string, err error) {
 	if pattern == "" {
 		return "",
-			asynxmd.ErrEmptyPattern
+			failure.ErrEmptyPattern
 	}
 
-	if handler == nil {
+	if callback == nil {
 		return "",
-			asynxmd.ErrNilHandler
+			failure.ErrNilHandler
 	}
 
-	cfg := &asynxmd.SubscriptionConfig[T]{}
+	cfg := &subscription.Config[T]{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
@@ -104,14 +107,14 @@ func (b *Bus[T]) Subscribe(
 
 	if b.isClosed() {
 		return "",
-			asynxmd.ErrBusClosed
+			failure.ErrBusClosed
 	}
 
 	subID = ids.New()
 	b.register(
 		subID,
 		pattern,
-		handler,
+		callback,
 		cfg,
 	)
 
@@ -129,12 +132,12 @@ func (b *Bus[T]) isClosed() bool {
 func (b *Bus[T]) register(
 	subID string,
 	pattern string,
-	handler asynxmd.ProjectionHandler[T],
-	cfg *asynxmd.SubscriptionConfig[T],
+	callback handler.Projection[T],
+	cfg *subscription.Config[T],
 ) {
 	sub := &models.Subscription[T]{
 		Pattern:         pattern,
-		Handler:         handler,
+		Handler:         callback,
 		FallbackHandler: cfg.Fallback,
 		Timeout:         cfg.Timeout,
 	}
@@ -190,13 +193,13 @@ func (b *Bus[T]) Unsubscribe(
 // Close waits for the handlers Publish started.
 func (b *Bus[T]) Publish(
 	ctx context.Context,
-	event asynxmd.Event[T],
+	evt event.Event[T],
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	matched := b.matching(event.EventName)
+	matched := b.matching(evt.EventName)
 	err := b.reserve(
 		&b.inFlightWg,
 		len(matched),
@@ -208,7 +211,7 @@ func (b *Bus[T]) Publish(
 	b.launch(
 		ctx,
 		&b.inFlightWg,
-		event,
+		evt,
 		matched,
 	)
 
@@ -228,13 +231,13 @@ func (b *Bus[T]) Publish(
 // caller deadlocks.
 func (b *Bus[T]) PublishSync(
 	ctx context.Context,
-	event asynxmd.Event[T],
+	evt event.Event[T],
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	matched := b.matching(event.EventName)
+	matched := b.matching(evt.EventName)
 
 	var localWg sync.WaitGroup
 	err := b.reserve(
@@ -248,7 +251,7 @@ func (b *Bus[T]) PublishSync(
 	b.launchSync(
 		ctx,
 		&localWg,
-		event,
+		evt,
 		matched,
 	)
 
@@ -302,7 +305,7 @@ func (b *Bus[T]) reserve(
 	defer b.publishMu.RUnlock()
 
 	if b.closed {
-		return asynxmd.ErrBusClosed
+		return failure.ErrBusClosed
 	}
 
 	if total > 0 {
@@ -315,7 +318,7 @@ func (b *Bus[T]) reserve(
 func (b *Bus[T]) launch(
 	ctx context.Context,
 	wg *sync.WaitGroup,
-	event asynxmd.Event[T],
+	evt event.Event[T],
 	subs []*models.Subscription[T],
 ) {
 	for _, sub := range subs {
@@ -324,7 +327,7 @@ func (b *Bus[T]) launch(
 			wg,
 			exec.MakeJob(
 				sub,
-				event,
+				evt,
 				b.onPanic,
 				b.onTimeout,
 			),
@@ -335,13 +338,13 @@ func (b *Bus[T]) launch(
 func (b *Bus[T]) launchSync(
 	ctx context.Context,
 	wg *sync.WaitGroup,
-	event asynxmd.Event[T],
+	evt event.Event[T],
 	subs []*models.Subscription[T],
 ) {
 	for _, sub := range subs {
 		job := exec.MakeJob(
 			sub,
-			event,
+			evt,
 			b.onPanic,
 			b.onTimeout,
 		)

@@ -4,13 +4,19 @@ import (
 	"context"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/processor"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/pubsub"
+	"github.com/char2cs/asynx/models/subscription"
 )
 
 type instance[T any] struct {
 	proc processor.Processor[T]
 	es   eventstore.EventStore[T]
-	bus  models.Bus[T]
+	bus  pubsub.Bus[T]
 
 	onListenerError func(error)
 }
@@ -19,8 +25,8 @@ type instance[T any] struct {
 // It delegates to the processor; see CommandSender.Send for the contract.
 func (i *instance[T]) Send(
 	ctx context.Context,
-	cmd models.Command[T],
-) (models.Event[T], error) {
+	cmd command.Command[T],
+) (event.Event[T], error) {
 	return i.proc.Send(
 		ctx,
 		cmd,
@@ -31,8 +37,8 @@ func (i *instance[T]) Send(
 // handlers. See CommandSender.SendWait for the contract.
 func (i *instance[T]) SendWait(
 	ctx context.Context,
-	cmd models.Command[T],
-) (models.Event[T], error) {
+	cmd command.Command[T],
+) (event.Event[T], error) {
 	return i.proc.SendWait(
 		ctx,
 		cmd,
@@ -87,12 +93,12 @@ func (i *instance[T]) Preload(
 // pattern. See SubscriptionManager.Subscribe for the contract.
 func (i *instance[T]) Subscribe(
 	pattern string,
-	handler models.ProjectionHandler[T],
-	opts ...models.SubscriptionOpt[T],
+	callback handler.Projection[T],
+	opts ...subscription.Opt[T],
 ) (string, error) {
 	return i.bus.Subscribe(
 		pattern,
-		handler,
+		callback,
 		opts...,
 	)
 }
@@ -110,7 +116,7 @@ func (i *instance[T]) Unsubscribe(
 func (i *instance[T]) Listen(
 	pattern string,
 	count int,
-) (<-chan models.Event[T], func(), error) {
+) (<-chan event.Event[T], func(), error) {
 	l, err := i.openListener(
 		pattern,
 		count,
@@ -132,7 +138,7 @@ func (i *instance[T]) openListener(
 ) (*listener[T], error) {
 	if pattern == "" {
 		return nil,
-			models.ErrEmptyPattern
+			failure.ErrEmptyPattern
 	}
 
 	l := newListener(
@@ -160,7 +166,7 @@ func (i *instance[T]) openListener(
 func (i *instance[T]) SubscribeWait(
 	ctx context.Context,
 	pattern string,
-) (evt models.Event[T], err error) {
+) (evt event.Event[T], err error) {
 	l, err := i.openListener(
 		pattern,
 		1,
@@ -194,7 +200,7 @@ func (i *instance[T]) Replay(
 	aggregateID string,
 	fromVersion int64,
 	toVersion int64,
-	fn models.ProjectionHandler[T],
+	fn handler.Projection[T],
 ) error {
 	return i.es.Replay(
 		ctx,
@@ -234,7 +240,7 @@ func (i *instance[T]) PausedAggregates() []string {
 // DeliveryControl.InspectDelivery for the contract.
 func (i *instance[T]) InspectDelivery(
 	aggregateID string,
-) models.DeliveryStatus {
+) dispatch.Status {
 	return i.proc.Inspect(aggregateID)
 }
 
@@ -254,16 +260,16 @@ func (i *instance[T]) ResumeDeliveries(
 // subscription pattern are escaped so the bus treats it as a literal, not a
 // wildcard.
 func (i *instance[T]) OnForget(
-	fn models.ForgetHandler[T],
+	fn handler.Forget[T],
 ) (string, error) {
 	return i.bus.Subscribe(
 		"asynx\\.aggregate\\.forget",
-		models.ProjectionHandler[T](fn),
+		handler.Projection[T](fn),
 	)
 }
 
 func (i *instance[T]) subscribeForget(
-	fn models.ForgetHandler[T],
+	fn handler.Forget[T],
 ) error {
 	_, err := i.OnForget(fn)
 	return err

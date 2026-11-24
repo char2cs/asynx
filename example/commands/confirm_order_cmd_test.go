@@ -2,7 +2,7 @@ package commands
 
 import (
 	"github.com/char2cs/asynx/example/domain"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
 	"testing"
 )
 
@@ -49,11 +49,11 @@ func TestConfirmOrderCmd_Validate_NoCurrentOrder(
 ) {
 	cmd := ConfirmOrderCmd{ID: "ORD-001"}
 	err := cmd.Validate(nil)
-	if err != models.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Errorf(
 			"Validate(nil) = %v, want %v",
 			err,
-			models.ErrValidation,
+			failure.ErrValidation,
 		)
 	}
 }
@@ -70,11 +70,11 @@ func TestConfirmOrderCmd_Validate_NotPending(
 		ShipTo: "123 Main St",
 	}
 	err := cmd.Validate(current)
-	if err != models.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Errorf(
 			"Validate(Confirmed) = %v, want %v",
 			err,
-			models.ErrValidation,
+			failure.ErrValidation,
 		)
 	}
 }
@@ -91,11 +91,11 @@ func TestConfirmOrderCmd_Validate_Shipped(
 		ShipTo: "123 Main St",
 	}
 	err := cmd.Validate(current)
-	if err != models.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Errorf(
 			"Validate(Shipped) = %v, want %v",
 			err,
-			models.ErrValidation,
+			failure.ErrValidation,
 		)
 	}
 }

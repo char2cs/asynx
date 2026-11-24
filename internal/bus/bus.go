@@ -4,7 +4,8 @@ import (
 	"github.com/char2cs/asynx/internal/bus/internal/channel"
 	"github.com/char2cs/asynx/internal/bus/internal/routing"
 	"github.com/char2cs/asynx/internal/bus/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/pubsub"
 )
 
 // Bus is the in-process event bus the asynx runtime publishes projection events
@@ -14,7 +15,7 @@ import (
 // implementation behind New stays unexported to this package tree so the
 // runtime depends only on that contract.
 type Bus[T any] interface {
-	asynxmd.Bus[T]
+	pubsub.Bus[T]
 }
 
 // New builds an empty in-process bus. opts are applied in order and may set the
@@ -35,7 +36,7 @@ func New[T any](
 // process.
 // When the option is absent, panics are written to stderr.
 func WithPanicHandler[T any](
-	fn asynxmd.PanicHandler[T],
+	fn handler.Panic[T],
 ) models.Opt[T] {
 	return func(
 		cfg *models.Config[T],
@@ -52,7 +53,7 @@ func WithPanicHandler[T any](
 // running, except under PublishSync, which still waits for it. When the option
 // is absent, timeouts are written to stderr.
 func WithTimeoutHandler[T any](
-	fn asynxmd.TimeoutHandler[T],
+	fn handler.Timeout[T],
 ) models.Opt[T] {
 	return func(
 		cfg *models.Config[T],

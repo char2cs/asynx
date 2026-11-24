@@ -5,15 +5,15 @@ import (
 	"fmt"
 	"os"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/handler"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/contracts"
 )
 
 type handlerReporter[T any] struct {
-	onPublishError  asynxmd.PublishErrorHandler[T]
-	onDeliveryError asynxmd.DeliveryErrorHandler[T]
-	onPanic         asynxmd.PanicHandler[T]
+	onPublishError  handler.PublishError[T]
+	onDeliveryError handler.DeliveryError[T]
+	onPanic         handler.Panic[T]
 }
 
 // PublishError calls the publish error handler, if any, with the event of job

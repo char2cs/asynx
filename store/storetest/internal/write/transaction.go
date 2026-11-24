@@ -2,7 +2,7 @@ package write
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 // Transaction returns the function to pass to Store.Atomically that runs ops
@@ -11,9 +11,9 @@ import (
 // transaction back; with no ops it commits an empty transaction.
 func Transaction(
 	ops ...Op,
-) func(models.Tx) error {
+) func(storage.Tx) error {
 	return func(
-		tx models.Tx,
+		tx storage.Tx,
 	) error {
 		return apply(
 			tx,
@@ -23,7 +23,7 @@ func Transaction(
 }
 
 func apply(
-	tx models.Tx,
+	tx storage.Tx,
 	ops []Op,
 ) (err error) {
 	for i := 0; i < len(ops) && err == nil; i++ {

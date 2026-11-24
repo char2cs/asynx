@@ -3,14 +3,15 @@ package asynx
 import (
 	"context"
 	"fmt"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/pubsub"
 	"sync"
 	"sync/atomic"
 )
 
 type listener[T any] struct {
-	bus     models.Bus[T]
-	ch      chan models.Event[T]
+	bus     pubsub.Bus[T]
+	ch      chan event.Event[T]
 	count   int
 	onError func(error)
 
@@ -26,7 +27,7 @@ type listener[T any] struct {
 }
 
 func newListener[T any](
-	bus models.Bus[T],
+	bus pubsub.Bus[T],
 	count int,
 	onError func(error),
 ) *listener[T] {
@@ -38,7 +39,7 @@ func newListener[T any](
 	return &listener[T]{
 		bus: bus,
 		ch: make(
-			chan models.Event[T],
+			chan event.Event[T],
 			capacity,
 		),
 		count:      count,
@@ -50,7 +51,7 @@ func newListener[T any](
 
 func (l *listener[T]) handle(
 	_ context.Context,
-	evt models.Event[T],
+	evt event.Event[T],
 ) {
 	if l.closed.Load() {
 		return
@@ -65,7 +66,7 @@ func (l *listener[T]) handle(
 }
 
 func (l *listener[T]) sendUnbounded(
-	evt models.Event[T],
+	evt event.Event[T],
 ) {
 	select {
 	case <-l.done:
@@ -74,7 +75,7 @@ func (l *listener[T]) sendUnbounded(
 }
 
 func (l *listener[T]) sendBounded(
-	evt models.Event[T],
+	evt event.Event[T],
 ) {
 	withinCount := l.received.Add(1) <= int64(l.count)
 	if !withinCount {
@@ -85,7 +86,7 @@ func (l *listener[T]) sendBounded(
 }
 
 func (l *listener[T]) deliver(
-	evt models.Event[T],
+	evt event.Event[T],
 ) {
 	l.sendMu.Lock()
 	defer l.sendMu.Unlock()

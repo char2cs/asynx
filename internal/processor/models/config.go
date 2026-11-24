@@ -3,7 +3,9 @@ package models
 import (
 	"context"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/handler"
 )
 
 // Config holds the settings a processor is built with. The zero value selects
@@ -12,10 +14,10 @@ type Config[T any] struct {
 	Shards               int
 	QueueDepth           int
 	WorkersPerShard      int
-	PublishErrorHandler  asynxmd.PublishErrorHandler[T]
+	PublishErrorHandler  handler.PublishError[T]
 	SyncProjections      []SyncProjection[T]
 	DurableMatch         func(eventName string) bool
-	SnapshotErrorHandler func(context.Context, asynxmd.Event[T], error)
-	Dispatcher           asynxmd.DispatcherConfig[T]
-	DispatcherFactory    asynxmd.DispatcherFactory[T]
+	SnapshotErrorHandler func(context.Context, event.Event[T], error)
+	Dispatcher           dispatcher.Config[T]
+	DispatcherFactory    dispatcher.Factory[T]
 }

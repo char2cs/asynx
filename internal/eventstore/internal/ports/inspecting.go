@@ -4,7 +4,8 @@ import (
 	"context"
 
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 // Inspecting gives the command processor access to the machinery under the
@@ -25,7 +26,7 @@ type Inspecting[T any] interface {
 	// Store returns the backing event store, so callers can enlist their own
 	// writes (projections, receipts, deliveries) in the same transaction as an
 	// append.
-	Store() asynxmd.Store
+	Store() storage.Store
 	// Replay feeds fn every event of the aggregate with a version in
 	// fromVersion..toVersion (toVersion 0 means to the end), in version order,
 	// each upcast to the current schema and paired with the state before and
@@ -37,6 +38,6 @@ type Inspecting[T any] interface {
 		aggregateID string,
 		fromVersion int64,
 		toVersion int64,
-		fn asynxmd.ProjectionHandler[T],
+		fn handler.Projection[T],
 	) error
 }

@@ -6,7 +6,11 @@ import (
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates/contracts"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/subscription"
 	"maps"
 	"slices"
 	"sync"
@@ -18,8 +22,8 @@ import (
 func TestNew_TakesTheConfigAsFinal(
 	t *testing.T,
 ) {
-	cfg := asynxmd.DispatcherConfig[int]{
-		DurableSubs:  []asynxmd.DurableSub[int]{failing(errors.New("down"))},
+	cfg := dispatcher.Config[int]{
+		DurableSubs:  []subscription.Durable[int]{failing(errors.New("down"))},
 		RetryInitial: time.Second,
 		RetryMax:     time.Minute,
 		MaxAttempts:  7,
@@ -61,7 +65,7 @@ type retrySettings struct {
 func TestPark_ParksTheAggregateOfAnAckedJob(
 	t *testing.T,
 ) {
-	f := newFixture(asynxmd.DispatcherConfig[int]{})
+	f := newFixture(dispatcher.Config[int]{})
 	job, halt := f.begin(
 		t,
 		acked("test.event"),
@@ -91,7 +95,7 @@ var errStopped = errors.New("stopped")
 func TestPark_RecordsTheCause(
 	t *testing.T,
 ) {
-	f := newFixture(asynxmd.DispatcherConfig[int]{})
+	f := newFixture(dispatcher.Config[int]{})
 	job, halt := f.begin(
 		t,
 		acked("test.event"),
@@ -120,7 +124,7 @@ func TestPark_RecordsTheCause(
 func TestPark_LeavesASettledAggregateAlone(
 	t *testing.T,
 ) {
-	f := newFixture(asynxmd.DispatcherConfig[int]{})
+	f := newFixture(dispatcher.Config[int]{})
 	job, halt := f.begin(
 		t,
 		acked("test.event"),
@@ -145,7 +149,7 @@ func TestPark_LeavesASettledAggregateAlone(
 func TestPark_NeverParksForAJobWithoutAnAck(
 	t *testing.T,
 ) {
-	f := newFixture(asynxmd.DispatcherConfig[int]{})
+	f := newFixture(dispatcher.Config[int]{})
 	job, halt := f.begin(
 		t,
 		tombstone(nil),
@@ -170,8 +174,8 @@ func TestDeliver_GiveUpParksBeforeTheParkedErrorIsReported(
 	t *testing.T,
 ) {
 	down := errors.New("down")
-	f := newFixture(asynxmd.DispatcherConfig[int]{
-		DurableSubs: []asynxmd.DurableSub[int]{failing(down)},
+	f := newFixture(dispatcher.Config[int]{
+		DurableSubs: []subscription.Durable[int]{failing(down)},
 		MaxAttempts: 2,
 	})
 	job, halt := f.begin(
@@ -187,7 +191,7 @@ func TestDeliver_GiveUpParksBeforeTheParkedErrorIsReported(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) ||
 		!errors.Is(
 			err,
@@ -203,7 +207,7 @@ func TestDeliver_GiveUpParksBeforeTheParkedErrorIsReported(
 	last := reports[len(reports)-1]
 	if !errors.Is(
 		last.err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) ||
 		!slices.Equal(
 			last.parked,
@@ -227,7 +231,7 @@ func TestDeliver_AnAckedJobUnderAClosedHaltRunsNothing(
 	t *testing.T,
 ) {
 	var counted countingHandler
-	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
+	f := newFixture(dispatcher.Config[int]{DurableSubs: []subscription.Durable[int]{{
 		Match:   matchAnyEvent,
 		Handler: counted.countRun,
 	}}})
@@ -244,7 +248,7 @@ func TestDeliver_AnAckedJobUnderAClosedHaltRunsNothing(
 		job,
 	); !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"Deliver = %v, want ErrDeliveryParked",
@@ -264,8 +268,8 @@ func TestDeliver_ATombstoneIsNeverDeadLettered(
 	t *testing.T,
 ) {
 	var deadLetters countingDeadLetter
-	f := newFixture(asynxmd.DispatcherConfig[int]{
-		DurableSubs: []asynxmd.DurableSub[int]{failing(errors.New("cannot forget"))},
+	f := newFixture(dispatcher.Config[int]{
+		DurableSubs: []subscription.Durable[int]{failing(errors.New("cannot forget"))},
 		MaxAttempts: 1,
 		DeadLetter:  deadLetters.countCall,
 	})
@@ -281,7 +285,7 @@ func TestDeliver_ATombstoneIsNeverDeadLettered(
 		job,
 	); !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"Deliver = %v, want ErrDeliveryParked",
@@ -301,8 +305,8 @@ func TestDeliver_AJobWithoutAnAckIsNeverDeadLetteredNorParked(
 	t *testing.T,
 ) {
 	var deadLetters countingDeadLetter
-	f := newFixture(asynxmd.DispatcherConfig[int]{
-		DurableSubs: []asynxmd.DurableSub[int]{failing(errors.New("down"))},
+	f := newFixture(dispatcher.Config[int]{
+		DurableSubs: []subscription.Durable[int]{failing(errors.New("down"))},
 		MaxAttempts: 1,
 		DeadLetter:  deadLetters.countCall,
 	})
@@ -318,7 +322,7 @@ func TestDeliver_AJobWithoutAnAckIsNeverDeadLetteredNorParked(
 		job,
 	); !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"Deliver = %v, want ErrDeliveryParked",
@@ -340,7 +344,7 @@ func TestDeliver_ATombstoneReachesEverySubscriber(
 	t *testing.T,
 ) {
 	var counted countingHandler
-	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
+	f := newFixture(dispatcher.Config[int]{DurableSubs: []subscription.Durable[int]{{
 		Match:   matchNoEvent,
 		Handler: counted.countRun,
 	}}})
@@ -372,8 +376,8 @@ func TestDeliver_ATombstoneReachesEverySubscriber(
 func TestDeliver_InterruptParksWithoutReportingAndEndsClosed(
 	t *testing.T,
 ) {
-	f := newFixture(asynxmd.DispatcherConfig[int]{
-		DurableSubs:  []asynxmd.DurableSub[int]{failing(errors.New("down"))},
+	f := newFixture(dispatcher.Config[int]{
+		DurableSubs:  []subscription.Durable[int]{failing(errors.New("down"))},
 		MaxAttempts:  100,
 		RetryInitial: time.Hour,
 		RetryMax:     time.Hour,
@@ -391,7 +395,7 @@ func TestDeliver_InterruptParksWithoutReportingAndEndsClosed(
 		job,
 	); !errors.Is(
 		err,
-		asynxmd.ErrDispatcherClosed,
+		failure.ErrDispatcherClosed,
 	) {
 		t.Fatalf(
 			"Deliver = %v, want ErrDispatcherClosed",
@@ -414,8 +418,8 @@ func TestDeliver_InterruptParksWithoutReportingAndEndsClosed(
 func TestDeliver_AParkDuringTheBackoffEndsTheDelivery(
 	t *testing.T,
 ) {
-	f := newFixture(asynxmd.DispatcherConfig[int]{
-		DurableSubs:  []asynxmd.DurableSub[int]{failing(errors.New("down"))},
+	f := newFixture(dispatcher.Config[int]{
+		DurableSubs:  []subscription.Durable[int]{failing(errors.New("down"))},
 		MaxAttempts:  100,
 		RetryInitial: time.Hour,
 		RetryMax:     time.Hour,
@@ -448,7 +452,7 @@ func TestDeliver_AParkDuringTheBackoffEndsTheDelivery(
 
 	if err := <-done; !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"Deliver = %v, want ErrDeliveryParked",
@@ -460,8 +464,8 @@ func TestDeliver_AParkDuringTheBackoffEndsTheDelivery(
 func TestDeliver_ADeadLetterHandlerPanicParksTheAggregate(
 	t *testing.T,
 ) {
-	f := newFixture(asynxmd.DispatcherConfig[int]{
-		DurableSubs: []asynxmd.DurableSub[int]{failing(errors.New("down"))},
+	f := newFixture(dispatcher.Config[int]{
+		DurableSubs: []subscription.Durable[int]{failing(errors.New("down"))},
 		MaxAttempts: 1,
 		DeadLetter:  panicOnDeadLetter,
 	})
@@ -477,7 +481,7 @@ func TestDeliver_ADeadLetterHandlerPanicParksTheAggregate(
 		job,
 	); !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"Deliver = %v, want ErrDeliveryParked",
@@ -489,7 +493,7 @@ func TestDeliver_ADeadLetterHandlerPanicParksTheAggregate(
 	if len(reports) < 2 ||
 		!errors.Is(
 			reports[1].err,
-			asynxmd.ErrHandlerPanic,
+			failure.ErrHandlerPanic,
 		) {
 		t.Fatalf(
 			"reports = %+v, want the dead-letter panic reported",
@@ -502,7 +506,7 @@ func TestDeliver_AHandlerPanicIsReportedAndRetried(
 	t *testing.T,
 ) {
 	var panicking panicsOnFirstRun
-	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
+	f := newFixture(dispatcher.Config[int]{DurableSubs: []subscription.Durable[int]{{
 		Match:   matchAnyEvent,
 		Handler: panicking.panicThenSucceed,
 	}}})
@@ -537,7 +541,7 @@ func TestDeliver_ATimedOutHandlerIsReportedAndWaitedFor(
 	t *testing.T,
 ) {
 	blocked := blockedUntilReleased{release: make(chan struct{})}
-	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
+	f := newFixture(dispatcher.Config[int]{DurableSubs: []subscription.Durable[int]{{
 		Name:    "slow",
 		Match:   matchAnyEvent,
 		Timeout: time.Millisecond,
@@ -583,7 +587,7 @@ func TestDeliver_ATimedOutHandlerIsReportedAndWaitedFor(
 
 	if got := f.reports.all()[0].err; !errors.Is(
 		got,
-		asynxmd.ErrHandlerTimeout,
+		failure.ErrHandlerTimeout,
 	) {
 		t.Fatalf(
 			"reported %v, want ErrHandlerTimeout",
@@ -625,7 +629,7 @@ type fixture struct {
 }
 
 func newFixture(
-	cfg asynxmd.DispatcherConfig[int],
+	cfg dispatcher.Config[int],
 ) *fixture {
 	registry := aggregates.New(aggregates.Hooks[jobs.Job[int]]{})
 	f := &fixture{
@@ -652,7 +656,7 @@ func newFixture(
 
 func (f *fixture) begin(
 	t *testing.T,
-	request asynxmd.DispatchRequest[int],
+	request dispatch.Request[int],
 ) (jobs.Job[int], <-chan struct{}) {
 	t.Helper()
 	job := jobs.New(
@@ -679,28 +683,28 @@ func (f *fixture) begin(
 
 func acked(
 	name string,
-) asynxmd.DispatchRequest[int] {
-	return asynxmd.DispatchRequest[int]{
-		Event: asynxmd.Event[int]{AggregateID: "a", Version: 1, EventName: name},
+) dispatch.Request[int] {
+	return dispatch.Request[int]{
+		Event: event.Event[int]{AggregateID: "a", Version: 1, EventName: name},
 		Ack:   acknowledgeAtOnce,
 	}
 }
 
 func tombstone(
 	ack func(context.Context) error,
-) asynxmd.DispatchRequest[int] {
-	return asynxmd.DispatchRequest[int]{
-		Event: asynxmd.Event[int]{AggregateID: "a", Version: 2, EventName: asynxmd.ForgetEventName},
+) dispatch.Request[int] {
+	return dispatch.Request[int]{
+		Event: event.Event[int]{AggregateID: "a", Version: 2, EventName: event.ForgetEventName},
 		Ack:   ack,
-		Kind:  asynxmd.DispatchTombstone,
+		Kind:  dispatch.KindTombstone,
 	}
 }
 
 func failing(
 	err error,
-) asynxmd.DurableSub[int] {
+) subscription.Durable[int] {
 	failer := &countingHandler{err: err}
-	return asynxmd.DurableSub[int]{
+	return subscription.Durable[int]{
 		Name:    "failing",
 		Match:   matchAnyEvent,
 		Handler: failer.countRun,
@@ -807,7 +811,7 @@ type countingHandler struct {
 
 func (c *countingHandler) countRun(
 	context.Context,
-	asynxmd.Event[int],
+	event.Event[int],
 ) error {
 	c.runs.Add(1)
 	return c.err
@@ -819,7 +823,7 @@ type countingDeadLetter struct {
 
 func (c *countingDeadLetter) countCall(
 	context.Context,
-	asynxmd.Event[int],
+	event.Event[int],
 	error,
 ) error {
 	c.calls.Add(1)
@@ -828,7 +832,7 @@ func (c *countingDeadLetter) countCall(
 
 func panicOnDeadLetter(
 	context.Context,
-	asynxmd.Event[int],
+	event.Event[int],
 	error,
 ) error {
 	panic("dead-letter store down")
@@ -840,7 +844,7 @@ type blockedUntilReleased struct {
 
 func (b *blockedUntilReleased) waitForRelease(
 	context.Context,
-	asynxmd.Event[int],
+	event.Event[int],
 ) error {
 	<-b.release
 	return nil
@@ -852,7 +856,7 @@ type panicsOnFirstRun struct {
 
 func (p *panicsOnFirstRun) panicThenSucceed(
 	context.Context,
-	asynxmd.Event[int],
+	event.Event[int],
 ) error {
 	if p.runs.Add(1) == 1 {
 		panic("boom")

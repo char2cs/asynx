@@ -3,7 +3,9 @@ package storetest
 import (
 	"context"
 	"errors"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/char2cs/asynx/store/storetest/internal/held"
 	"github.com/char2cs/asynx/store/storetest/internal/write"
 	"testing"
@@ -14,7 +16,7 @@ const readWait = 100 * time.Millisecond
 
 func duplicateVersionRollsBack(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	const unrelatedVersion = 99
 	f := newFixture(
@@ -39,7 +41,7 @@ func duplicateVersionRollsBack(
 	)
 	if !errors.Is(
 		err,
-		models.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) {
 		t.Fatalf(
 			"duplicate Append err = %v, want ErrPipelineFailed",
@@ -57,7 +59,7 @@ func duplicateVersionRollsBack(
 
 func errorRollsBackEverything(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	f := newFixture(
 		t,
@@ -71,7 +73,7 @@ func errorRollsBackEverything(
 		),
 		write.Receipt(
 			"cmd-1",
-			models.Receipt{Accepted: true, EventID: "e1", Version: 1},
+			event.Receipt{Accepted: true, EventID: "e1", Version: 1},
 		),
 		write.Delivery(deliveryOf(
 			"s1",
@@ -99,7 +101,7 @@ func errorRollsBackEverything(
 
 func rollbackRestoresDrop(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	a1 := deliveryOf(
 		"a",
@@ -130,7 +132,7 @@ func rollbackRestoresDrop(
 
 func nativeCallable(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	newFixture(
 		t,
@@ -140,7 +142,7 @@ func nativeCallable(
 
 func cancelledContext(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	f := newFixture(
 		t,
@@ -176,7 +178,7 @@ func cancelledContext(
 
 func readsDuringOpenTransaction(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	f := newFixture(
 		t,
@@ -210,8 +212,8 @@ func readsDuringOpenTransaction(
 	)
 }
 
-func transactionScenarios() map[string]scenario[models.Store] {
-	return map[string]scenario[models.Store]{
+func transactionScenarios() map[string]scenario[storage.Store] {
+	return map[string]scenario[storage.Store]{
 		"DuplicateVersionConflictsAndRollsBack": duplicateVersionRollsBack,
 		"ErrorRollsBackEverything":              errorRollsBackEverything,
 		"RollbackRestoresDroppedDeliveries":     rollbackRestoresDrop,

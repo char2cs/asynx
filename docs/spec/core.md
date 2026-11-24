@@ -375,8 +375,8 @@ Developers can route snapshots to fast, low-durability infrastructure (Redis) se
 **Example**
 ```go
 asynx.New[Order]().
-    WithEventStore(postgresStore).           // durable, slower — models.Store
-    WithSnapshotStore(redisSnapshotStore).   // fast, optional durability — models.SnapshotStore
+    WithEventStore(postgresStore).           // durable, slower — storage.Store
+    WithSnapshotStore(redisSnapshotStore).   // fast, optional durability — storage.SnapshotStore
     Build()
 ```
 

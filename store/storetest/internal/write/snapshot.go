@@ -2,7 +2,7 @@ package write
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 // SnapshotPuts returns the lane function for a concurrent run in which writer i
@@ -10,7 +10,7 @@ import (
 // background context, and returns the error of that Put. Each writer gets its
 // own version, so a store that serializes the writes keeps exactly one payload.
 func SnapshotPuts(
-	s models.SnapshotStore,
+	s storage.SnapshotStore,
 	aggregateID string,
 	payload func(writer int) []byte,
 ) func(writer int) error {

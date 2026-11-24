@@ -6,7 +6,10 @@ import (
 	"slices"
 	"time"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/subscription"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
@@ -18,7 +21,7 @@ import (
 // the defaults). It parks aggregates through registry, reports failures and
 // panics through reports, and stops retrying once interrupted is closed.
 func New[T any](
-	cfg asynxmd.DispatcherConfig[T],
+	cfg dispatcher.Config[T],
 	registry aggregates.Registry[jobs.Job[T]],
 	reports reporter.Reporter[T],
 	interrupted <-chan struct{},
@@ -36,8 +39,8 @@ func New[T any](
 }
 
 type durableDeliverer[T any] struct {
-	subs         []asynxmd.DurableSub[T]
-	deadLetter   asynxmd.DeadLetterHandler[T]
+	subs         []subscription.Durable[T]
+	deadLetter   handler.DeadLetter[T]
 	retryInitial time.Duration
 	retryMax     time.Duration
 	maxAttempts  int
@@ -60,7 +63,7 @@ func (d *durableDeliverer[T]) Deliver(
 	pending := d.subscribersFor(job)
 	if job.Acked() &&
 		isClosed(halt) {
-		return asynxmd.ErrDeliveryParked
+		return failure.ErrDeliveryParked
 	}
 
 	if len(pending) == 0 {
@@ -102,7 +105,7 @@ func (d *durableDeliverer[T]) Park(
 
 func (d *durableDeliverer[T]) subscribersFor(
 	job jobs.Job[T],
-) []asynxmd.DurableSub[T] {
+) []subscription.Durable[T] {
 	return slices.DeleteFunc(
 		slices.Clone(d.subs),
 		notReceiving(job),
@@ -124,11 +127,11 @@ func (d *durableDeliverer[T]) wait(
 			aggregateID,
 			halt,
 			job,
-			asynxmd.ErrDispatcherClosed,
+			failure.ErrDispatcherClosed,
 		)
-		return asynxmd.ErrDispatcherClosed
+		return failure.ErrDispatcherClosed
 	case <-halt:
-		return asynxmd.ErrDeliveryParked
+		return failure.ErrDeliveryParked
 	case <-timer.C:
 		return backoffEnded(
 			job,
@@ -146,7 +149,7 @@ func (d *durableDeliverer[T]) giveUp(
 	attempt int,
 ) error {
 	if isClosed(halt) {
-		return asynxmd.ErrDeliveryParked
+		return failure.ErrDeliveryParked
 	}
 
 	if d.deadLettered(
@@ -160,7 +163,7 @@ func (d *durableDeliverer[T]) giveUp(
 
 	parked := fmt.Errorf(
 		"%w after %d attempts: %w",
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 		attempt,
 		last,
 	)
@@ -249,7 +252,7 @@ func backoffEnded[T any](
 ) error {
 	if job.Acked() &&
 		isClosed(halt) {
-		return asynxmd.ErrDeliveryParked
+		return failure.ErrDeliveryParked
 	}
 
 	return nil
@@ -257,9 +260,9 @@ func backoffEnded[T any](
 
 func notReceiving[T any](
 	job jobs.Job[T],
-) func(asynxmd.DurableSub[T]) bool {
+) func(subscription.Durable[T]) bool {
 	return func(
-		sub asynxmd.DurableSub[T],
+		sub subscription.Durable[T],
 	) bool {
 		return !job.Forget() &&
 			!sub.Match(job.Event().EventName)
@@ -276,7 +279,7 @@ func recoverAsError(
 
 	*err = fmt.Errorf(
 		"%w: %v",
-		asynxmd.ErrHandlerPanic,
+		failure.ErrHandlerPanic,
 		recovered,
 	)
 }

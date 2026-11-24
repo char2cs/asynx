@@ -6,7 +6,11 @@ import (
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates/contracts"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/subscription"
 	"slices"
 	"strings"
 	"sync"
@@ -33,7 +37,7 @@ func TestPool_PublishesLiveThenDeliversThenAcks(
 	ack := journaledAck{journal: f.journal}
 	ticket := f.enqueue(
 		t,
-		event(
+		eventRequest(
 			1,
 			ack.recordAck,
 		),
@@ -69,7 +73,7 @@ func TestPool_NeverAcksADeliveryThatDidNotSucceed(
 	var acks countingAck
 	ticket := f.enqueue(
 		t,
-		event(
+		eventRequest(
 			1,
 			acks.countAck,
 		),
@@ -101,7 +105,7 @@ func TestPool_AnAckFailureParksBeforeItIsReported(
 	ack := failingAck{err: storeDown}
 	ticket := f.enqueue(
 		t,
-		event(
+		eventRequest(
 			1,
 			ack.failAck,
 		),
@@ -141,7 +145,7 @@ func TestPool_ALiveJobRunsNoDurableDelivery(
 	f := newFixture(t)
 	ticket := f.enqueue(
 		t,
-		event(
+		eventRequest(
 			1,
 			nil,
 		),
@@ -172,11 +176,11 @@ func TestPool_ATombstoneWithoutAnAckIsDeliveredAndNeverAcked(
 	t *testing.T,
 ) {
 	f := newFixture(t)
-	request := event(
+	request := eventRequest(
 		1,
 		nil,
 	)
-	request.Kind = asynxmd.DispatchTombstone
+	request.Kind = dispatch.KindTombstone
 	ticket := f.enqueue(
 		t,
 		request,
@@ -207,11 +211,11 @@ func TestPool_ARedeliverySkipsTheLiveSubscribers(
 	t *testing.T,
 ) {
 	f := newFixture(t)
-	request := event(
+	request := eventRequest(
 		1,
 		acknowledgeAtOnce,
 	)
-	request.Kind = asynxmd.DispatchRedelivery
+	request.Kind = dispatch.KindRedelivery
 	ticket := f.enqueue(
 		t,
 		request,
@@ -245,7 +249,7 @@ func TestPool_ABusPanicIsReportedAndTheDeliveryGoesOn(
 	f.bus.publish = panicOnPublish
 	ticket := f.enqueue(
 		t,
-		event(
+		eventRequest(
 			1,
 			acknowledgeAtOnce,
 		),
@@ -291,7 +295,7 @@ func TestPool_ADispatcherPanicIsReportedAndEndsTheJob(
 	f.deliverer.deliver = panicOnDelivery
 	ticket := f.enqueue(
 		t,
-		event(
+		eventRequest(
 			1,
 			acknowledgeAtOnce,
 		),
@@ -321,7 +325,7 @@ func TestPool_ADispatcherPanicIsReportedAndEndsTheJob(
 
 	if next := f.enqueue(
 		t,
-		event(
+		eventRequest(
 			2,
 			nil,
 		),
@@ -338,7 +342,7 @@ func TestPool_AParkedAckedJobRunsNothing(
 ) {
 	f := newFixture(t)
 	job := jobs.New(
-		event(
+		eventRequest(
 			1,
 			acknowledgeAtOnce,
 		),
@@ -359,7 +363,7 @@ func TestPool_AParkedAckedJobRunsNothing(
 		job.Ticket(),
 	); !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"final = %v, want ErrDeliveryParked",
@@ -369,7 +373,7 @@ func TestPool_AParkedAckedJobRunsNothing(
 
 	if err := job.Ticket().Unrun(); !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"unrun = %v, want ErrDeliveryParked",
@@ -391,7 +395,7 @@ func TestPool_HandlesAnAggregatesJobsInQueueOrder(
 	f := newFixture(t)
 	var order []int64
 	f.bus.publish = func(
-		e asynxmd.Event[int],
+		e event.Event[int],
 	) error {
 		order = append(
 			order,
@@ -399,11 +403,11 @@ func TestPool_HandlesAnAggregatesJobsInQueueOrder(
 		)
 		return nil
 	}
-	var last asynxmd.Ticket
+	var last dispatch.Ticket
 	for v := int64(1); v <= 20; v++ {
 		last = f.enqueue(
 			t,
-			event(
+			eventRequest(
 				v,
 				nil,
 			),
@@ -434,7 +438,7 @@ type versionGate struct {
 }
 
 func (g versionGate) publish(
-	e asynxmd.Event[int],
+	e event.Event[int],
 ) error {
 	if e.Version == 1 {
 		<-g.gate
@@ -451,21 +455,21 @@ func TestPool_AJobAParkDroppedRunsNothingAndStillHandsItsTurnOn(
 	f.bus.publish = versionGate{gate: gate}.publish
 	running := f.enqueue(
 		t,
-		event(
+		eventRequest(
 			1,
 			nil,
 		),
 	)
 	dropped := f.enqueue(
 		t,
-		event(
+		eventRequest(
 			2,
 			acknowledgeAtOnce,
 		),
 	)
 	behind := f.enqueue(
 		t,
-		event(
+		eventRequest(
 			3,
 			nil,
 		),
@@ -492,7 +496,7 @@ func TestPool_AJobAParkDroppedRunsNothingAndStillHandsItsTurnOn(
 		dropped,
 	); !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"the dropped job = %v, want ErrDeliveryParked",
@@ -520,20 +524,20 @@ func TestPool_ClosingTheRegistryStillDeliversWhatIsQueued(
 	f := newFixture(t)
 	gate := make(chan struct{})
 	f.bus.publish = func(
-		asynxmd.Event[int],
+		event.Event[int],
 	) error {
 		<-gate
 		return nil
 	}
-	tickets := []asynxmd.Ticket{f.enqueue(
+	tickets := []dispatch.Ticket{f.enqueue(
 		t,
-		event(
+		eventRequest(
 			1,
 			nil,
 		),
 	), f.enqueue(
 		t,
-		event(
+		eventRequest(
 			2,
 			nil,
 		),
@@ -558,7 +562,7 @@ func TestPool_RunPassesItsContextToEveryStep(
 	var ack contextKeepingAck
 	ticket := f.enqueue(
 		t,
-		event(
+		eventRequest(
 			1,
 			ack.keepContext,
 		),
@@ -614,7 +618,7 @@ func TestPool_AReportedErrorCarriesTheContext(
 		t,
 		f.enqueue(
 			t,
-			event(
+			eventRequest(
 				1,
 				ack.failAck,
 			),
@@ -646,7 +650,7 @@ func assertVersion(
 
 func assertCompleted(
 	t *testing.T,
-	ticket asynxmd.Ticket,
+	ticket dispatch.Ticket,
 ) {
 	t.Helper()
 	select {
@@ -693,8 +697,8 @@ func (f *fixture) stop() {
 
 func (f *fixture) enqueue(
 	t *testing.T,
-	request asynxmd.DispatchRequest[int],
-) asynxmd.Ticket {
+	request dispatch.Request[int],
+) dispatch.Ticket {
 	t.Helper()
 	job := jobs.New(
 		request,
@@ -743,19 +747,19 @@ func (f *fixture) run(
 	)
 }
 
-func event(
+func eventRequest(
 	version int64,
 	ack func(context.Context) error,
-) asynxmd.DispatchRequest[int] {
-	return asynxmd.DispatchRequest[int]{
-		Event: asynxmd.Event[int]{AggregateID: "a", Version: version, EventName: "test.event"},
+) dispatch.Request[int] {
+	return dispatch.Request[int]{
+		Event: event.Event[int]{AggregateID: "a", Version: version, EventName: "test.event"},
 		Ack:   ack,
 	}
 }
 
 func final(
 	t *testing.T,
-	ticket asynxmd.Ticket,
+	ticket dispatch.Ticket,
 ) error {
 	t.Helper()
 	select {
@@ -769,7 +773,7 @@ func final(
 
 type fakeBus struct {
 	journal *journal
-	publish func(event asynxmd.Event[int]) error
+	publish func(event event.Event[int]) error
 	mu      sync.Mutex
 	ctx     context.Context
 }
@@ -786,7 +790,7 @@ func (b *fakeBus) seen() context.Context {
 // function, nil without one.
 func (b *fakeBus) PublishSync(
 	ctx context.Context,
-	event asynxmd.Event[int],
+	evt event.Event[int],
 ) error {
 	b.mu.Lock()
 	b.ctx = ctx
@@ -796,14 +800,14 @@ func (b *fakeBus) PublishSync(
 		return nil
 	}
 
-	return b.publish(event)
+	return b.publish(evt)
 }
 
 // Publish does nothing and reports success: the dispatcher publishes through
 // PublishSync only.
 func (b *fakeBus) Publish(
 	context.Context,
-	asynxmd.Event[int],
+	event.Event[int],
 ) error {
 	return nil
 }
@@ -812,8 +816,8 @@ func (b *fakeBus) Publish(
 // dispatcher never subscribes through the bus.
 func (b *fakeBus) Subscribe(
 	string,
-	asynxmd.ProjectionHandler[int],
-	...asynxmd.SubscriptionOpt[int],
+	handler.Projection[int],
+	...subscription.Opt[int],
 ) (string, error) {
 	return "",
 		nil
@@ -1031,7 +1035,7 @@ func panicOnDelivery(
 }
 
 func panicOnPublish(
-	asynxmd.Event[int],
+	event.Event[int],
 ) error {
 	panic("bus exploded")
 }

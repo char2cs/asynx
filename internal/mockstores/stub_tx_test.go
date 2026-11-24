@@ -3,7 +3,8 @@ package mockstores
 import (
 	"context"
 	"errors"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 	"testing"
 )
 
@@ -14,7 +15,7 @@ type txProbe struct {
 }
 
 func (p txProbe) run(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	p.checkAppend(tx)
 	p.checkDelete(tx)
@@ -24,7 +25,7 @@ func (p txProbe) run(
 }
 
 func (p txProbe) checkAppend(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) {
 	err := tx.Append(
 		p.ctx,
@@ -41,7 +42,7 @@ func (p txProbe) checkAppend(
 }
 
 func (p txProbe) checkDelete(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) {
 	err := tx.DeleteStream(
 		p.ctx,
@@ -56,7 +57,7 @@ func (p txProbe) checkDelete(
 }
 
 func (p txProbe) checkNoops(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) {
 	if tx.DropDeliveries(
 		p.ctx,
@@ -65,7 +66,7 @@ func (p txProbe) checkNoops(
 		tx.PutReceipt(
 			p.ctx,
 			"c",
-			asynxmd.Receipt{},
+			event.Receipt{},
 		) != nil ||
 		tx.EnqueueDelivery(
 			p.ctx,
@@ -79,7 +80,7 @@ func (p txProbe) checkNoops(
 
 func checkStubs(
 	t *testing.T,
-	s asynxmd.Store,
+	s storage.Store,
 	wantErr bool,
 ) {
 	ctx := context.Background()
@@ -114,7 +115,7 @@ func checkStubs(
 
 type atomicCase struct {
 	name  string
-	store asynxmd.Store
+	store storage.Store
 }
 
 func (c atomicCase) run(
@@ -149,7 +150,7 @@ func TestMockStores_AtomicallyDelegatesAppendAndDelete(
 	t *testing.T,
 ) {
 	sentinel := errors.New("fail")
-	stores := map[string]asynxmd.Store{
+	stores := map[string]storage.Store{
 		"Store":            &Store{},
 		"ErrStore":         &ErrStore{Err: sentinel},
 		"CorruptBlobStore": &CorruptBlobStore{},

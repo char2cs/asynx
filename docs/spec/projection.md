@@ -27,8 +27,8 @@ Subscribe(pattern string, primaryHandler func(Event[T]), opts ...SubscriptionOpt
 Unsubscribe(id string) error
 
 // Subscription options:
-WithFallback(handler func(Event[T])) SubscriptionOpt
-WithHandlerTimeout(timeout time.Duration) SubscriptionOpt
+WithFallback(handler func(Event[T])) subscription.Opt
+WithHandlerTimeout(timeout time.Duration) subscription.Opt
 ```
 
 ### Method: `Subscribe`

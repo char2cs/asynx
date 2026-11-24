@@ -3,14 +3,16 @@ package store
 import (
 	"context"
 	"errors"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/storage"
 	"testing"
 )
 
 func mustAtomically(
 	t *testing.T,
 	s Memory,
-	fn func(tx asynxmd.Tx) error,
+	fn func(tx storage.Tx) error,
 ) {
 	t.Helper()
 
@@ -150,7 +152,7 @@ func readBlobsInRange(
 func pendingCount(
 	t *testing.T,
 	s Memory,
-) []asynxmd.Delivery {
+) []event.Delivery {
 	t.Helper()
 
 	pending, err := s.PendingDeliveries(
@@ -174,7 +176,7 @@ type txBodies struct {
 }
 
 func (b *txBodies) expectNativeNil(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	if tx.Native() != nil {
 		b.t.Error("Native() should be nil for the in-memory store")
@@ -184,14 +186,14 @@ func (b *txBodies) expectNativeNil(
 }
 
 func (b *txBodies) markRan(
-	asynxmd.Tx,
+	storage.Tx,
 ) error {
 	b.ran = true
 	return nil
 }
 
 func (b *txBodies) expectEveryCallCancelled(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	dead, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -206,7 +208,7 @@ func (b *txBodies) expectEveryCallCancelled(
 }
 
 func (b *txBodies) enqueueFirstDelivery(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	return tx.EnqueueDelivery(
 		context.Background(),
@@ -216,7 +218,7 @@ func (b *txBodies) enqueueFirstDelivery(
 }
 
 func (b *txBodies) enqueueFirstVersionForA(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	return tx.EnqueueDelivery(
 		context.Background(),
@@ -226,7 +228,7 @@ func (b *txBodies) enqueueFirstVersionForA(
 }
 
 func (b *txBodies) enqueueTwoVersionsForA(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	ctx := context.Background()
 
@@ -245,7 +247,7 @@ func (b *txBodies) enqueueTwoVersionsForA(
 }
 
 func (b *txBodies) deleteAndDropThenFail(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	ctx := context.Background()
 
@@ -263,7 +265,7 @@ func (b *txBodies) deleteAndDropThenFail(
 }
 
 func (b *txBodies) appendThenPanic(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	reportErr(
 		b.t,
@@ -278,7 +280,7 @@ func (b *txBodies) appendThenPanic(
 }
 
 func (b *txBodies) enqueueThenAppendScheduledFailure(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	ctx := context.Background()
 
@@ -298,17 +300,17 @@ func (b *txBodies) enqueueThenAppendScheduledFailure(
 }
 
 func (b *txBodies) putReceiptForC1(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	return tx.PutReceipt(
 		context.Background(),
 		"c1",
-		asynxmd.Receipt{Accepted: true},
+		event.Receipt{Accepted: true},
 	)
 }
 
 func (b *txBodies) interleaveInsertsThenFail(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	ctx := context.Background()
 
@@ -373,7 +375,7 @@ func TestAtomically_CancelledContextDoesNotRun(
 
 func cancelledChecks(
 	dead context.Context,
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) map[string]error {
 	return map[string]error{
 		"Append": tx.Append(
@@ -393,7 +395,7 @@ func cancelledChecks(
 		"PutReceipt": tx.PutReceipt(
 			dead,
 			"c",
-			asynxmd.Receipt{},
+			event.Receipt{},
 		),
 		"EnqueueDelivery": tx.EnqueueDelivery(
 			dead,
@@ -639,7 +641,7 @@ func TestPutReceipt_DuplicateAcrossTransactionsIsRejected(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrDuplicateReceipt,
+		failure.ErrDuplicateReceipt,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrDuplicateReceipt",

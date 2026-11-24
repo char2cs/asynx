@@ -2,7 +2,8 @@ package asynx
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/handler"
 )
 
 // EventListener consumes events without registering a handler function:
@@ -30,7 +31,7 @@ type EventListener[T any] interface {
 	Listen(
 		pattern string,
 		count int,
-	) (<-chan models.Event[T], func(), error)
+	) (<-chan event.Event[T], func(), error)
 
 	// SubscribeWait blocks until the first event matching pattern arrives or ctx
 	// is cancelled. The pattern is converted via Topic() internally (through Listen).
@@ -47,7 +48,7 @@ type EventListener[T any] interface {
 	SubscribeWait(
 		ctx context.Context,
 		pattern string,
-	) (models.Event[T], error)
+	) (event.Event[T], error)
 
 	// Replay feeds the events of the aggregate to fn, in version order, each
 	// upcast to the current schema version and carrying both the new and the
@@ -65,6 +66,6 @@ type EventListener[T any] interface {
 		aggregateID string,
 		fromVersion int64,
 		toVersion int64,
-		fn models.ProjectionHandler[T],
+		fn handler.Projection[T],
 	) error
 }

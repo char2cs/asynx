@@ -10,19 +10,21 @@ import (
 
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/mockstores"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/char2cs/asynx/store"
 )
 
 type order = mocks.Order
 
 type eventCollector struct {
-	events []asynxmd.Event[order]
+	events []event.Event[order]
 }
 
 func (c *eventCollector) collect(
 	_ context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) {
 	c.events = append(
 		c.events,
@@ -49,8 +51,8 @@ type hookRecorder struct {
 
 func (h *hookRecorder) enqueueDelivery(
 	ctx context.Context,
-	tx asynxmd.Tx,
-	e asynxmd.Event[order],
+	tx storage.Tx,
+	e event.Event[order],
 ) error {
 	h.sawVersion = e.Version
 	return tx.EnqueueDelivery(
@@ -62,16 +64,16 @@ func (h *hookRecorder) enqueueDelivery(
 
 func (h *hookRecorder) failWithConfiguredError(
 	context.Context,
-	asynxmd.Tx,
-	asynxmd.Event[order],
+	storage.Tx,
+	event.Event[order],
 ) error {
 	return h.err
 }
 
 func (h *hookRecorder) markCalled(
 	context.Context,
-	asynxmd.Tx,
-	asynxmd.Event[order],
+	storage.Tx,
+	event.Event[order],
 ) error {
 	h.called = true
 	return nil
@@ -82,7 +84,7 @@ func isPipelineFailed(
 ) bool {
 	return errors.Is(
 		err,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	)
 }
 
@@ -119,7 +121,7 @@ type cancelCounter struct {
 
 func (c *cancelCounter) count(
 	_ context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) {
 	incrementIf(
 		e.EventName,
@@ -560,7 +562,7 @@ func TestReplay_WithVersionRange(
 func TestWrite_Get_WithUpcasting(
 	t *testing.T,
 ) {
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		1: passthroughUpcaster{}.upcast,
 	}
 	es := New[order](
@@ -704,7 +706,7 @@ func TestGet_ErrNotFound_ForNewAggregate(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrNotFound,
+		failure.ErrNotFound,
 	) {
 		t.Errorf(
 			"err = %v, want ErrNotFound",
@@ -816,7 +818,7 @@ func TestWrite_Get_SharedStore_WithUpcasting(
 		)
 	}
 
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		1: passthroughUpcaster{}.upcast,
 	}
 	esV2 := New[order](
@@ -977,7 +979,7 @@ func TestDeleteSnapshot_NonExistentAggregate_NoError(
 }
 
 type deleteFailsSnapshots struct {
-	asynxmd.SnapshotStore
+	storage.SnapshotStore
 	err error
 }
 
@@ -1250,7 +1252,7 @@ func TestStore_ReturnsTheBackingEventStore(
 		1,
 		nil,
 	)
-	if es.Store() != asynxmd.Store(s) {
+	if es.Store() != storage.Store(s) {
 		t.Fatal("Store() is not the backing event store")
 	}
 }
@@ -1297,7 +1299,7 @@ func TestWriteTx_ValidationFailureWritesNothingAndSkipsTheHook(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrValidation,
+		failure.ErrValidation,
 	) ||
 		hook.called {
 		t.Fatalf(
@@ -1413,7 +1415,7 @@ func (c gatedCancel) Validate(
 
 	if current == nil ||
 		current.Status == "Cancelled" {
-		return asynxmd.ErrValidation
+		return failure.ErrValidation
 	}
 
 	return nil
@@ -1484,7 +1486,7 @@ func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(
 
 	if !errors.Is(
 		bErr,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) {
 		t.Errorf(
 			"B err = %v, want ErrPipelineFailed (stale write must be rejected)",

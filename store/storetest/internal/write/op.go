@@ -2,7 +2,7 @@ package write
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 // Op is one write inside a transaction: it receives the transaction's Tx and
@@ -10,7 +10,7 @@ import (
 // composed by Transaction, which stops at the first one that fails.
 type Op func(
 	ctx context.Context,
-	tx models.Tx,
+	tx storage.Tx,
 ) error
 
 // Abort returns an Op that writes nothing and fails with err, to make a
@@ -20,7 +20,7 @@ func Abort(
 ) Op {
 	return func(
 		context.Context,
-		models.Tx,
+		storage.Tx,
 	) error {
 		return err
 	}
@@ -33,7 +33,7 @@ func Abort(
 func Native() Op {
 	return func(
 		_ context.Context,
-		tx models.Tx,
+		tx storage.Tx,
 	) error {
 		tx.Native()
 		return nil

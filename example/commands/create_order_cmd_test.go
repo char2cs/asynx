@@ -2,7 +2,7 @@ package commands
 
 import (
 	"github.com/char2cs/asynx/example/domain"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
 	"testing"
 )
 
@@ -72,11 +72,11 @@ func TestCreateOrderCmd_Validate_InvalidTotal(
 		ShipTo: "123 Main St",
 	}
 	err := cmd.Validate(nil)
-	if err != models.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Errorf(
 			"Validate(nil) with Total=0 = %v, want %v",
 			err,
-			models.ErrValidation,
+			failure.ErrValidation,
 		)
 	}
 }
@@ -91,11 +91,11 @@ func TestCreateOrderCmd_Validate_NegativeTotal(
 		ShipTo: "123 Main St",
 	}
 	err := cmd.Validate(nil)
-	if err != models.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Errorf(
 			"Validate(nil) with negative Total = %v, want %v",
 			err,
-			models.ErrValidation,
+			failure.ErrValidation,
 		)
 	}
 }
@@ -110,11 +110,11 @@ func TestCreateOrderCmd_Validate_InvalidItems(
 		ShipTo: "123 Main St",
 	}
 	err := cmd.Validate(nil)
-	if err != models.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Errorf(
 			"Validate(nil) with Items=0 = %v, want %v",
 			err,
-			models.ErrValidation,
+			failure.ErrValidation,
 		)
 	}
 }
@@ -129,11 +129,11 @@ func TestCreateOrderCmd_Validate_NegativeItems(
 		ShipTo: "123 Main St",
 	}
 	err := cmd.Validate(nil)
-	if err != models.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Errorf(
 			"Validate(nil) with negative Items = %v, want %v",
 			err,
-			models.ErrValidation,
+			failure.ErrValidation,
 		)
 	}
 }
@@ -155,11 +155,11 @@ func TestCreateOrderCmd_Validate_AlreadyExists(
 		ShipTo: "123 Main St",
 	}
 	err := cmd.Validate(current)
-	if err != models.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Errorf(
 			"Validate(current) when already exists = %v, want %v",
 			err,
-			models.ErrValidation,
+			failure.ErrValidation,
 		)
 	}
 }

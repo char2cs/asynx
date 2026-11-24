@@ -7,15 +7,16 @@ import (
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/tracker"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/event"
 )
 
 func newJob(
 	aggregateID string,
 	version int64,
 ) jobs.Job[string] {
-	request := asynxmd.DispatchRequest[string]{
-		Event: asynxmd.Event[string]{AggregateID: aggregateID, Version: version},
+	request := dispatch.Request[string]{
+		Event: event.Event[string]{AggregateID: aggregateID, Version: version},
 	}
 	return jobs.New(
 		request,
@@ -59,7 +60,7 @@ func observe(
 
 // Ticket closes asked the first time it is called, so a test knows the
 // tracker looked at the job, and then returns the wrapped job's ticket.
-func (j *observedJob) Ticket() asynxmd.Ticket {
+func (j *observedJob) Ticket() dispatch.Ticket {
 	j.once.Do(func() { close(j.asked) })
 	return j.Job.Ticket()
 }

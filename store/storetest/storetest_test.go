@@ -3,7 +3,8 @@ package storetest
 import (
 	"context"
 	"errors"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/char2cs/asynx/store"
 	"runtime"
 	"sync"
@@ -22,13 +23,13 @@ func TestRun_PassesOnTheMemoryStore(
 
 func memoryStore(
 	*testing.T,
-) models.Store {
+) storage.Store {
 	return store.New()
 }
 
 func runOnMemoryStore(
 	t *testing.T,
-	scenarios map[string]scenario[models.Store],
+	scenarios map[string]scenario[storage.Store],
 ) {
 	for name, sc := range scenarios {
 		t.Run(
@@ -39,7 +40,7 @@ func runOnMemoryStore(
 }
 
 func memoryCase(
-	sc scenario[models.Store],
+	sc scenario[storage.Store],
 ) func(*testing.T) {
 	return func(
 		t *testing.T,
@@ -170,24 +171,24 @@ func countFailed(
 	return n
 }
 
-type hollowStore struct{ models.Store }
+type hollowStore struct{ storage.Store }
 
 // Atomically reports success without running fn.
 func (hollowStore) Atomically(
 	context.Context,
-	func(models.Tx) error,
+	func(storage.Tx) error,
 ) error {
 	return nil
 }
 
-type brokenStore struct{ models.Store }
+type brokenStore struct{ storage.Store }
 
 var errBroken = errors.New("broken")
 
 // Atomically always fails.
 func (brokenStore) Atomically(
 	context.Context,
-	func(models.Tx) error,
+	func(storage.Tx) error,
 ) error {
 	return errBroken
 }
@@ -217,8 +218,8 @@ func (brokenStore) ReadRange(
 func (brokenStore) GetReceipt(
 	context.Context,
 	string,
-) (models.Receipt, bool, error) {
-	return models.Receipt{},
+) (event.Receipt, bool, error) {
+	return event.Receipt{},
 		false,
 		errBroken
 }
@@ -227,7 +228,7 @@ func (brokenStore) GetReceipt(
 func (brokenStore) PendingDeliveries(
 	context.Context,
 	int,
-) ([]models.Delivery, error) {
+) ([]event.Delivery, error) {
 	return nil,
 		errBroken
 }
@@ -246,7 +247,7 @@ func TestSuite_FlagsStoresThatDoNotKeepWhatTheyAccepted(
 ) {
 	failed := failures(
 		storeScenarios(),
-		models.Store(hollowStore{Store: store.New()}),
+		storage.Store(hollowStore{Store: store.New()}),
 	)
 
 	if got, total := countFailed(failed), len(failed); got < total/2 {
@@ -267,7 +268,7 @@ func TestSuite_FlagsStoresThatFail(
 ) {
 	failed := failures(
 		storeScenarios(),
-		models.Store(brokenStore{Store: store.New()}),
+		storage.Store(brokenStore{Store: store.New()}),
 	)
 
 	if got, total := countFailed(failed), len(failed); got < total/2 {
@@ -279,12 +280,12 @@ func TestSuite_FlagsStoresThatFail(
 	}
 }
 
-type deafStore struct{ models.Store }
+type deafStore struct{ storage.Store }
 
 // Atomically runs under a fresh context, ignoring cancellation.
 func (d deafStore) Atomically(
 	_ context.Context,
-	fn func(models.Tx) error,
+	fn func(storage.Tx) error,
 ) error {
 	return d.Store.Atomically(
 		context.Background(),
@@ -324,7 +325,7 @@ func (d deafStore) ReadRange(
 func (d deafStore) GetReceipt(
 	_ context.Context,
 	commandID string,
-) (models.Receipt, bool, error) {
+) (event.Receipt, bool, error) {
 	return d.Store.GetReceipt(
 		context.Background(),
 		commandID,
@@ -335,7 +336,7 @@ func (d deafStore) GetReceipt(
 func (d deafStore) PendingDeliveries(
 	_ context.Context,
 	limit int,
-) ([]models.Delivery, error) {
+) ([]event.Delivery, error) {
 	return d.Store.PendingDeliveries(
 		context.Background(),
 		limit,
@@ -360,14 +361,14 @@ func TestSuite_FlagsStoresThatIgnoreCancellation(
 ) {
 	failed := failures(
 		storeScenarios(),
-		models.Store(deafStore{Store: store.New()}),
+		storage.Store(deafStore{Store: store.New()}),
 	)
 	if !failed["CancelledContextFailsEveryOperation"] {
 		t.Fatal("a store that ignores cancelled contexts passed the cancellation scenario")
 	}
 }
 
-type forgetfulSnapshots struct{ models.SnapshotStore }
+type forgetfulSnapshots struct{ storage.SnapshotStore }
 
 // Put reports success without storing anything.
 func (forgetfulSnapshots) Put(
@@ -379,7 +380,7 @@ func (forgetfulSnapshots) Put(
 	return nil
 }
 
-type failingSnapshots struct{ models.SnapshotStore }
+type failingSnapshots struct{ storage.SnapshotStore }
 
 // Put always fails.
 func (failingSnapshots) Put(

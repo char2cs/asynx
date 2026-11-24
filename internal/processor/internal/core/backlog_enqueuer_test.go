@@ -6,7 +6,8 @@ import (
 	"testing"
 
 	"github.com/char2cs/asynx/internal/mockbuses"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/event"
 	"github.com/char2cs/asynx/store"
 )
 
@@ -41,15 +42,15 @@ func TestBacklogEnqueuer_EnqueuesOnlyTheWantedVersionsAsRedeliveries(
 
 	e.enqueue(
 		context.Background(),
-		asynxmd.Event[int]{AggregateID: "a", Version: 1},
+		event.Event[int]{AggregateID: "a", Version: 1},
 	)
 	e.enqueue(
 		context.Background(),
-		asynxmd.Event[int]{AggregateID: "a", Version: 2},
+		event.Event[int]{AggregateID: "a", Version: 2},
 	)
 
 	requests := d.Requests()
-	wrongRequests := len(requests) != 1 || requests[0].Event.Version != 2 || requests[0].Kind != asynxmd.DispatchRedelivery
+	wrongRequests := len(requests) != 1 || requests[0].Event.Version != 2 || requests[0].Kind != dispatch.KindRedelivery
 	if wrongRequests {
 		t.Errorf(
 			"requests = %+v, want one redelivery of version 2",
@@ -81,11 +82,11 @@ func TestBacklogEnqueuer_StopsAfterTheFirstEnqueueFailure(
 
 	e.enqueue(
 		context.Background(),
-		asynxmd.Event[int]{AggregateID: "a", Version: 1},
+		event.Event[int]{AggregateID: "a", Version: 1},
 	)
 	e.enqueue(
 		context.Background(),
-		asynxmd.Event[int]{AggregateID: "a", Version: 2},
+		event.Event[int]{AggregateID: "a", Version: 2},
 	)
 
 	if !errors.Is(

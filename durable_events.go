@@ -3,10 +3,10 @@ package asynx
 import (
 	"slices"
 
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/subscription"
 )
 
-type durableEvents[T any] []models.DurableSub[T]
+type durableEvents[T any] []subscription.Durable[T]
 
 func (d durableEvents[T]) wants(
 	name string,

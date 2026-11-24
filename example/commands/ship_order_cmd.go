@@ -2,7 +2,7 @@ package commands
 
 import (
 	"github.com/char2cs/asynx/example/domain"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 // ShipOrderCmd marks a confirmed order as shipped. It is valid only for an
@@ -21,16 +21,16 @@ func (c ShipOrderCmd) EventName() string { return "OrderShipped" }
 // ShouldSnapshot reports whether a snapshot of the order is written after the command commits.
 func (c ShipOrderCmd) ShouldSnapshot() bool { return true }
 
-// Validate returns models.ErrValidation when the order is not in the state the command requires, and nil otherwise.
+// Validate returns failure.ErrValidation when the order is not in the state the command requires, and nil otherwise.
 func (c ShipOrderCmd) Validate(
 	current *domain.Order,
 ) error {
 	if current == nil {
-		return models.ErrValidation
+		return failure.ErrValidation
 	}
 
 	if current.Status != domain.OrderConfirmed {
-		return models.ErrValidation
+		return failure.ErrValidation
 	}
 
 	return nil

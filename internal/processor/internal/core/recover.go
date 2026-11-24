@@ -5,7 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"github.com/char2cs/asynx/internal/firsterror"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
 	"maps"
 	"slices"
 )
@@ -57,7 +58,7 @@ func (p *Processor[T]) Recover(
 func (p *Processor[T]) recoverEach(
 	ctx context.Context,
 	order []string,
-	backlogs map[string][]asynxmd.Delivery,
+	backlogs map[string][]event.Delivery,
 ) (err error) {
 	for i := 0; i < len(order) &&
 		err == nil; i++ {
@@ -74,7 +75,7 @@ func (p *Processor[T]) recoverEach(
 func (p *Processor[T]) recoverAggregate(
 	ctx context.Context,
 	agg string,
-	backlog []asynxmd.Delivery,
+	backlog []event.Delivery,
 ) error {
 	undelivered, err := p.redeliver(
 		ctx,
@@ -102,7 +103,7 @@ func (p *Processor[T]) recoverAggregate(
 	)
 	p.reportPublishError(
 		ctx,
-		asynxmd.Event[T]{AggregateID: agg, Version: backlog[0].Version},
+		event.Event[T]{AggregateID: agg, Version: backlog[0].Version},
 		fmt.Errorf(
 			"recovery: %w",
 			err,
@@ -126,14 +127,14 @@ func recoveryMustStop(
 
 	return errors.Is(
 		err,
-		asynxmd.ErrDispatcherClosed,
+		failure.ErrDispatcherClosed,
 	)
 }
 
 func (p *Processor[T]) scanPending(
 	ctx context.Context,
 	limit int,
-) ([]asynxmd.Delivery, error) {
+) ([]event.Delivery, error) {
 	pending, err := p.es.Store().PendingDeliveries(
 		ctx,
 		limit,
@@ -161,8 +162,8 @@ func (p *Processor[T]) pendingByAggregate(
 	ctx context.Context,
 	batch int,
 	only []string,
-) (backlogs map[string][]asynxmd.Delivery, order []string, err error) {
-	backlogs = make(map[string][]asynxmd.Delivery)
+) (backlogs map[string][]event.Delivery, order []string, err error) {
+	backlogs = make(map[string][]event.Delivery)
 	pending, err := p.scanPending(
 		ctx,
 		batch,
@@ -182,9 +183,9 @@ func (p *Processor[T]) pendingByAggregate(
 }
 
 func indexDelivery(
-	backlogs map[string][]asynxmd.Delivery,
+	backlogs map[string][]event.Delivery,
 	order []string,
-	d asynxmd.Delivery,
+	d event.Delivery,
 	only []string,
 ) []string {
 	if len(only) > 0 &&
@@ -212,7 +213,7 @@ func indexDelivery(
 func (p *Processor[T]) redeliver(
 	ctx context.Context,
 	agg string,
-	backlog []asynxmd.Delivery,
+	backlog []event.Delivery,
 ) (notEnqueued []int64, err error) {
 	if len(backlog) == 0 {
 		return nil,
@@ -241,7 +242,7 @@ func (p *Processor[T]) redeliver(
 func (p *Processor[T]) enqueueBacklog(
 	ctx context.Context,
 	agg string,
-	backlog []asynxmd.Delivery,
+	backlog []event.Delivery,
 ) (vanished map[int64]struct{}, err error) {
 	vanished, lowest, highest := versionBounds(backlog)
 	enqueuer := &backlogEnqueuer[T]{
@@ -265,7 +266,7 @@ func (p *Processor[T]) enqueueBacklog(
 }
 
 func versionBounds(
-	backlog []asynxmd.Delivery,
+	backlog []event.Delivery,
 ) (versions map[int64]struct{}, lowest, highest int64) {
 	versions = make(
 		map[int64]struct{},
@@ -292,7 +293,7 @@ func versionBounds(
 func (p *Processor[T]) ackVanished(
 	ctx context.Context,
 	agg string,
-	backlog []asynxmd.Delivery,
+	backlog []event.Delivery,
 	vanished map[int64]struct{},
 ) error {
 	return firsterror.Of(
@@ -309,9 +310,9 @@ func (p *Processor[T]) acking(
 	ctx context.Context,
 	agg string,
 	vanished map[int64]struct{},
-) func(asynxmd.Delivery) error {
+) func(event.Delivery) error {
 	return func(
-		d asynxmd.Delivery,
+		d event.Delivery,
 	) error {
 		return p.ackIfVanished(
 			ctx,
@@ -325,7 +326,7 @@ func (p *Processor[T]) acking(
 func (p *Processor[T]) ackIfVanished(
 	ctx context.Context,
 	agg string,
-	d asynxmd.Delivery,
+	d event.Delivery,
 	vanished map[int64]struct{},
 ) error {
 	if _, isVanished := vanished[d.Version]; !isVanished {

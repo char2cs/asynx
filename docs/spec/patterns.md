@@ -8,7 +8,7 @@ generic `Order` aggregate; adapt names to your domain.
 `Tx.Append` enforces `(streamID, version)` uniqueness. Within one process, asynx
 serializes commands per aggregate, so this only happens when several processes
 share a store. When two writers race on the same aggregate, the loser's append
-fails and asynx surfaces `models.ErrPipelineFailed`. This is not a bug — it is the optimistic
+fails and asynx surfaces `failure.ErrPipelineFailed`. This is not a bug — it is the optimistic
 concurrency control signal, and the correct response is to retry: the command
 re-reads current state, re-validates, and appends at the new version.
 
@@ -21,20 +21,20 @@ const maxRetries = 5
 func sendWithRetry[T any](
 	ctx context.Context,
 	ax asynx.Asynx[T],
-	cmd models.Command[T],
-) (models.Event[T], error) {
+	cmd command.Command[T],
+) (event.Event[T], error) {
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		event, err := ax.Send(ctx, cmd)
 		if err == nil {
 			return event, nil
 		}
-		if !errors.Is(err, models.ErrPipelineFailed) {
+		if !errors.Is(err, failure.ErrPipelineFailed) {
 			return event, err // validation and other errors: never retry
 		}
 		lastErr = err
 	}
-	var zero models.Event[T]
+	var zero event.Event[T]
 	return zero, lastErr
 }
 ```
@@ -104,7 +104,7 @@ func recover(ctx context.Context, ax asynx.Asynx[Order], ids []string) error {
 			return err
 		}
 		order, err := ax.Get(ctx, id)
-		if errors.Is(err, models.ErrNotFound) {
+		if errors.Is(err, failure.ErrNotFound) {
 			continue
 		}
 		if err != nil {
@@ -132,13 +132,13 @@ their own storage. Since the event is already durable, a handler can safely
 retry its side effect without risking event loss:
 
 ```go
-ax.Subscribe(asynx.Topic("order.created.*"), func(ctx context.Context, e models.Event[Order]) {
+ax.Subscribe(asynx.Topic("order.created.*"), func(ctx context.Context, e event.Event[Order]) {
 	saveWithRetry(ctx, e) // e.g. 3 attempts with backoff on transient DB errors
 	hub.Broadcast(e)      // fan out to websockets, metrics, etc.
 })
 ```
 
-Combine with `models.WithFallback` for a last-resort handler and
+Combine with `subscription.WithFallback` for a last-resort handler and
 `WithPanicHandler` on the builder for observability. Use
 `WithPublishErrorHandler` to observe async publish failures — the event is
 already stored, so these callbacks are purely for alerting.
@@ -149,7 +149,7 @@ Guidelines proven out by SQL-backed implementations:
 
 - **Enforce uniqueness in the database.** A `UNIQUE(aggregate_id, version)`
   constraint is the only synchronization asynx needs. Map constraint
-  violations to `models.ErrPipelineFailed` so callers can apply the retry
+  violations to `failure.ErrPipelineFailed` so callers can apply the retry
   pattern above.
 - **Keep `Delete` idempotent.** `Forget` relies on it; deleting a missing
   aggregate must not error.
@@ -160,7 +160,7 @@ Guidelines proven out by SQL-backed implementations:
 
 ## Implementing a durable SnapshotStore
 
-`models.SnapshotStore` is a separate, required interface (`Put`/`Get`/`Delete`)
+`storage.SnapshotStore` is a separate, required interface (`Put`/`Get`/`Delete`)
 — not a second `Store`. Guidelines:
 
 - **`Put` must be a true upsert, keyed on `aggregate_id` alone.** A

@@ -7,7 +7,7 @@ Forget as a Service (FaaS) adds the ability to completely erase an aggregate and
 The operation performs three steps in sequence:
 
 1. Writes a tombstone event (`asynx.aggregate.forget`) carrying the aggregate's last known state
-2. Publishes the tombstone synchronously, waiting for all `ForgetHandler` callbacks to complete
+2. Publishes the tombstone synchronously, waiting for all `handler.Forget` callbacks to complete
 3. Deletes all events, snapshots, and cached state for the aggregate from the store
 
 Forget runs under the aggregate's command lock for the tombstone and again for the erase, and fences the aggregate in between: commands for it fail with `ErrForgetInProgress`, so none can race in. It does not occupy a shard worker while waiting for handlers. The full flow, including how a failed Forget leaves the aggregate parked, is in [guarantees.md § Forget](./guarantees.md#forget).
@@ -27,7 +27,7 @@ Forget(ctx context.Context, aggregateID string) error
 ```
 
 **Purpose**
-Erases all stored state for the given aggregate. Notifies all registered `ForgetHandler` callbacks before deletion so they can clean up downstream read models.
+Erases all stored state for the given aggregate. Notifies all registered `handler.Forget` callbacks before deletion so they can clean up downstream read models.
 
 **Parameters**
 - `ctx` — context for cancellation and timeouts; Forget waits for the handlers up to it
@@ -40,12 +40,12 @@ Erases all stored state for the given aggregate. Notifies all registered `Forget
 - **Aggregate must exist** — returns `ErrValidation` if the aggregate has no recorded events
 - **Fenced** — from the tombstone until the erase, commands for the aggregate fail with `ErrForgetInProgress`; a second `Forget` fails the same way
 - **Not from its own handler** — a handler cannot `Forget` the aggregate it is handling (`ErrForgetFromHandler`); the marker would queue behind the handler itself
-- **Handlers complete before deletion** — all `ForgetHandler` callbacks run to completion before store deletion begins
+- **Handlers complete before deletion** — all `handler.Forget` callbacks run to completion before store deletion begins
 - **Deletion is total** — all events, snapshots, and in-memory cache for the aggregate are removed; `Get` returns not-found after Forget returns nil
 
 **Side Effects**
 - Writes a tombstone event to the event store
-- Publishes the tombstone to the bus; all subscriptions matching `"asynx.aggregate.forget"` are called (including `ForgetHandler` registrations)
+- Publishes the tombstone to the bus; all subscriptions matching `"asynx.aggregate.forget"` are called (including `handler.Forget` registrations)
 - Deletes all events and snapshots for the aggregate from both the event store and snapshot store
 - Evicts the aggregate from the in-memory cache
 
@@ -66,10 +66,10 @@ Erases all stored state for the given aggregate. Notifies all registered `Forget
 **Example**
 ```go
 err := ax.Forget(ctx, "order-123")
-if errors.Is(err, models.ErrValidation) {
+if errors.Is(err, failure.ErrValidation) {
     // aggregate never existed
 }
-if errors.Is(err, models.ErrForgetFailed) {
+if errors.Is(err, failure.ErrForgetFailed) {
     // tombstone was published; handlers ran; but store deletion failed — retry
 }
 ```
@@ -79,27 +79,27 @@ if errors.Is(err, models.ErrForgetFailed) {
 #### `OnForget`
 
 ```go
-OnForget(fn models.ForgetHandler[T]) (string, error)
+OnForget(fn handler.Forget[T]) (string, error)
 ```
 
 **Purpose**
 Registers a callback to be invoked whenever an aggregate is forgotten. Returns a subscription ID that can be passed to `Unsubscribe` to deregister the handler. Multiple handlers may be registered.
 
 **Parameters**
-- `fn` — non-nil `ForgetHandler[T]` callback
+- `fn` — non-nil `handler.Forget[T]` callback
 
 **Return Values**
 - `string` — subscription ID, unique for the lifetime of this registration
 - `error` — non-nil if registration failed (e.g., bus is closed)
 
 **Invariants**
-- **Handler is called synchronously** — `Forget` blocks until all `ForgetHandler` callbacks complete before proceeding to store deletion
+- **Handler is called synchronously** — `Forget` blocks until all `handler.Forget` callbacks complete before proceeding to store deletion
 - **Handler receives last known state** — `Event.Aggregate` holds the aggregate state at the moment of deletion
 - **Unsubscribable** — the returned ID can be passed to `Unsubscribe` to stop receiving forget events
 
 **Example**
 ```go
-id, err := ax.OnForget(func(ctx context.Context, e models.Event[Order]) {
+id, err := ax.OnForget(func(ctx context.Context, e event.Event[Order]) {
     readModel.Delete(e.AggregateID)
 })
 // later, to stop listening:
@@ -113,20 +113,20 @@ ax.Unsubscribe(id)
 #### `WithForgetHandler`
 
 ```go
-func (b *Builder[T]) WithForgetHandler(fn models.ForgetHandler[T]) *Builder[T]
+func (b *Builder[T]) WithForgetHandler(fn handler.Forget[T]) *Builder[T]
 ```
 
 **Purpose**
-Registers a `ForgetHandler` at build time. Convenience sugar for the common single-handler case — equivalent to calling `OnForget` after `Build`. Multiple calls to `WithForgetHandler` register multiple handlers.
+Registers a `handler.Forget` at build time. Convenience sugar for the common single-handler case — equivalent to calling `OnForget` after `Build`. Multiple calls to `WithForgetHandler` register multiple handlers.
 
 **Parameters**
-- `fn` — non-nil `ForgetHandler[T]` callback
+- `fn` — non-nil `handler.Forget[T]` callback
 
 **Example**
 ```go
 ax, err := asynx.New[Order]().
     WithEventStore(store).
-    WithForgetHandler(func(ctx context.Context, e models.Event[Order]) {
+    WithForgetHandler(func(ctx context.Context, e event.Event[Order]) {
         readModel.Delete(e.AggregateID)
     }).
     Build()
@@ -134,23 +134,23 @@ ax, err := asynx.New[Order]().
 
 ---
 
-## `models.ForgetHandler[T]`
+## `handler.Forget[T]`
 
-New named type in `models/forget_handler.go`, following the existing `*Handler[T]` convention:
+New named type `handler.Forget[T]` in `models/handler/forget.go`, alongside the other handler types:
 
 ```go
-// ForgetHandler is called when an aggregate is forgotten.
+// Forget is called when an aggregate is forgotten.
 // It receives the tombstone event; Event.Aggregate holds the aggregate's last known state.
-type ForgetHandler[T any] func(context.Context, Event[T])
+type Forget[T any] func(context.Context, event.Event[T])
 ```
 
-Same signature as `ProjectionHandler[T]`. The tombstone event provides the final aggregate state so callers have what they need to clean up read models or trigger downstream side effects.
+Same signature as `handler.Projection[T]`. The tombstone event provides the final aggregate state so callers have what they need to clean up read models or trigger downstream side effects.
 
 ---
 
 > **v0.9.0:** `Forget` fences the aggregate from the tombstone until the erase (commands fail with `ErrForgetInProgress`), delivers the tombstone to forget handlers *and* every durable subscriber, honors its context, and erases through `Store.Atomically` (`DeleteStream` + `DropDeliveries`). See [Write-Path Guarantees](guarantees.md#forget).
 
-## `models.Store` Interface — New Method
+## `storage.Store` Interface — New Method
 
 ```go
 // Delete removes all records for the given aggregateID from the store.
@@ -166,7 +166,7 @@ Called by Forget on both the event store and snapshot store (which may be the sa
 
 ### `forgetCommand[T]`
 
-A package-private struct in the root package implementing `models.Command[T]`. It is not exported — callers use `Forget(ctx, aggregateID)` and never instantiate this type directly.
+A package-private struct in the root package implementing `command.Command[T]`. It is not exported — callers use `Forget(ctx, aggregateID)` and never instantiate this type directly.
 
 It stores the last aggregate state across `Validate` → `EmitEvent` so the tombstone payload carries the final state:
 
@@ -182,7 +182,7 @@ func (c *forgetCommand[T]) ShouldSnapshot() bool  { return false }
 
 func (c *forgetCommand[T]) Validate(current *T) error {
     if current == nil {
-        return fmt.Errorf("%w: aggregate %s not found", models.ErrValidation, c.aggregateID)
+        return fmt.Errorf("%w: aggregate %s not found", failure.ErrValidation, c.aggregateID)
     }
     c.last = current
     return nil
@@ -216,7 +216,7 @@ Forget(ctx, aggregateID)
 
 ## Error Sentinels
 
-`ErrForgetFailed` is a new sentinel in `models/errors.go`:
+`ErrForgetFailed` is a new sentinel in `models/failure/errors.go`:
 
 ```go
 var ErrForgetFailed = errors.New("forget failed")
@@ -225,7 +225,7 @@ var ErrForgetFailed = errors.New("forget failed")
 It is returned when the tombstone has been published and all handlers have completed, but the subsequent store deletion failed. It wraps the underlying store error:
 
 ```go
-return fmt.Errorf("%w: %w", models.ErrForgetFailed, err)
+return fmt.Errorf("%w: %w", failure.ErrForgetFailed, err)
 ```
 
 ---
@@ -235,7 +235,7 @@ return fmt.Errorf("%w: %w", models.ErrForgetFailed, err)
 ### Unit Tests (`asynx_test.go`)
 
 - `Forget` on a non-existent aggregate returns `ErrValidation`
-- `Forget` on an existing aggregate: `ForgetHandler` is called with the correct last state; subsequent `Get` returns not-found
+- `Forget` on an existing aggregate: `handler.Forget` is called with the correct last state; subsequent `Get` returns not-found
 - `Forget` during shutdown returns `ErrShuttingDown`
 - `OnForget` registers a handler; `Unsubscribe` with returned ID stops it from receiving future forget events
 - `WithForgetHandler` on Builder is equivalent to calling `OnForget` after `Build`

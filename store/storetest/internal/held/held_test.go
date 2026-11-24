@@ -3,7 +3,7 @@ package held_test
 import (
 	"context"
 	"errors"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/char2cs/asynx/store"
 	"github.com/char2cs/asynx/store/storetest/internal/held"
 	"runtime"
@@ -38,14 +38,14 @@ func TestBegin_ReturnsWithTheTransactionStillOpenAndCommitFinishesIt(
 	}
 }
 
-type refusingStore struct{ models.Store }
+type refusingStore struct{ storage.Store }
 
 var errRefused = errors.New("refused")
 
 // Atomically refuses to run the function.
 func (refusingStore) Atomically(
 	context.Context,
-	func(models.Tx) error,
+	func(storage.Tx) error,
 ) error {
 	return errRefused
 }

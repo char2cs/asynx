@@ -3,7 +3,7 @@ package projections
 import (
 	"context"
 	"github.com/char2cs/asynx/example/domain"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
 	"sync"
 	"testing"
 )
@@ -13,7 +13,7 @@ func TestOrderReporter_Handle_OrderCreated(
 ) {
 	reporter := &OrderReporter{}
 	ctx := context.Background()
-	event := models.Event[domain.Order]{
+	evt := event.Event[domain.Order]{
 		EventName: "OrderCreated",
 		Aggregate: domain.Order{
 			ID:     "ORD-001",
@@ -27,7 +27,7 @@ func TestOrderReporter_Handle_OrderCreated(
 
 	reporter.Handle(
 		ctx,
-		event,
+		evt,
 	)
 }
 
@@ -36,7 +36,7 @@ func TestOrderReporter_Handle_OrderConfirmed(
 ) {
 	reporter := &OrderReporter{}
 	ctx := context.Background()
-	event := models.Event[domain.Order]{
+	evt := event.Event[domain.Order]{
 		EventName: "OrderConfirmed",
 		Aggregate: domain.Order{
 			ID:     "ORD-001",
@@ -56,7 +56,7 @@ func TestOrderReporter_Handle_OrderConfirmed(
 
 	reporter.Handle(
 		ctx,
-		event,
+		evt,
 	)
 }
 
@@ -65,7 +65,7 @@ func TestOrderReporter_Handle_OrderShipped(
 ) {
 	reporter := &OrderReporter{}
 	ctx := context.Background()
-	event := models.Event[domain.Order]{
+	evt := event.Event[domain.Order]{
 		EventName: "OrderShipped",
 		Aggregate: domain.Order{
 			ID:     "ORD-001",
@@ -85,7 +85,7 @@ func TestOrderReporter_Handle_OrderShipped(
 
 	reporter.Handle(
 		ctx,
-		event,
+		evt,
 	)
 }
 
@@ -97,7 +97,7 @@ func reportCreated(
 	defer wg.Done()
 	reporter.Handle(
 		ctx,
-		models.Event[domain.Order]{
+		event.Event[domain.Order]{
 			EventName: "OrderCreated",
 			Aggregate: domain.Order{
 				ID:     "ORD-001",

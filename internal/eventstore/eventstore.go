@@ -4,7 +4,8 @@ import (
 	"github.com/char2cs/asynx/internal/eventstore/internal/core"
 	"github.com/char2cs/asynx/internal/eventstore/internal/ports"
 	"github.com/char2cs/asynx/internal/eventstore/options"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 // EventStore is the durable store of aggregate state: every command appends one
@@ -32,9 +33,9 @@ type EventStore[T any] interface {
 // callback may run on any goroutine that reads. opts adjust optional
 // behaviour, such as options.WithSnapshotErrorHandler.
 func New[T any](
-	eventStore asynxmd.Store,
-	snapshotStore asynxmd.SnapshotStore,
-	upcasters map[int]asynxmd.Upcaster,
+	eventStore storage.Store,
+	snapshotStore storage.SnapshotStore,
+	upcasters map[int]event.Upcaster,
 	schemaVersion int,
 	onCorruption func(error),
 	opts ...options.Option[T],

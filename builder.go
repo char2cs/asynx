@@ -2,7 +2,12 @@ package asynx
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/pubsub"
+	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/models/subscription"
 	"time"
 )
 
@@ -17,26 +22,26 @@ import (
 // for one Build: building twice from one Builder would share its stores and
 // bus between the two instances. T is the aggregate type of the instance.
 type Builder[T any] struct {
-	eventStore          models.Store
-	snapshotStore       models.SnapshotStore
-	bus                 models.Bus[T]
+	eventStore          storage.Store
+	snapshotStore       storage.SnapshotStore
+	bus                 pubsub.Bus[T]
 	shardingOpts        ShardingOpts
 	schemaVersion       int
-	upcasters           map[int]models.Upcaster
-	panicHandler        models.PanicHandler[T]
+	upcasters           map[int]event.Upcaster
+	panicHandler        handler.Panic[T]
 	corruptionHook      func(error)
-	publishErrorHandler models.PublishErrorHandler[T]
-	forgetHandlers      []models.ForgetHandler[T]
+	publishErrorHandler handler.PublishError[T]
+	forgetHandlers      []handler.Forget[T]
 	syncProjections     []syncProjectionDef[T]
 	subscribers         []subscriberDef[T]
-	snapshotErrHandler  func(context.Context, models.Event[T], error)
+	snapshotErrHandler  func(context.Context, event.Event[T], error)
 	listenerErrHandler  func(error)
-	deliveryErrHandler  models.DeliveryErrorHandler[T]
+	deliveryErrHandler  handler.DeliveryError[T]
 	retryInitial        time.Duration
 	retryMax            time.Duration
 	maxAttempts         int
-	deadLetter          models.DeadLetterHandler[T]
-	dispatcherFactory   models.DispatcherFactory[T]
+	deadLetter          handler.DeadLetter[T]
+	dispatcherFactory   dispatcher.Factory[T]
 }
 
 const defaultShards = 8
@@ -48,31 +53,31 @@ const defaultShards = 8
 func New[T any]() *Builder[T] {
 	return &Builder[T]{
 		schemaVersion: 1,
-		upcasters:     make(map[int]models.Upcaster),
+		upcasters:     make(map[int]event.Upcaster),
 		shardingOpts:  ShardingOpts{Shards: defaultShards},
 	}
 }
 
 // WithEventStore sets the store that holds the event streams, the command
 // receipts and the delivery log. It is required: Build returns
-// models.ErrMissingEventStore without it. The store/storetest suite checks an
-// implementation of models.Store against the guarantees the instance relies on.
+// failure.ErrMissingEventStore without it. The store/storetest suite checks an
+// implementation of storage.Store against the guarantees the instance relies on.
 func (b *Builder[T]) WithEventStore(
-	s models.Store,
+	s storage.Store,
 ) *Builder[T] {
 	b.eventStore = s
 	return b
 }
 
 // WithSnapshotStore sets the store that caches aggregate snapshots. It is
-// required: Build returns models.ErrMissingSnapshotStore without it. Snapshots
+// required: Build returns failure.ErrMissingSnapshotStore without it. Snapshots
 // are a derived cache, so losing them costs read speed, never data.
 //
 // This cannot default to the event store: snapshots are upserted cells keyed
-// by aggregateID (models.SnapshotStore), not append-only versioned streams
-// (models.Store).
+// by aggregateID (storage.SnapshotStore), not append-only versioned streams
+// (storage.Store).
 func (b *Builder[T]) WithSnapshotStore(
-	s models.SnapshotStore,
+	s storage.SnapshotStore,
 ) *Builder[T] {
 	b.snapshotStore = s
 	return b
@@ -80,11 +85,11 @@ func (b *Builder[T]) WithSnapshotStore(
 
 // WithBus replaces the default in-memory bus that delivers committed events to
 // the live subscribers (Subscribe, Listen, OnForget). A custom bus must satisfy
-// models.Bus. The instance owns the bus it is given: Shutdown closes it, and so
+// pubsub.Bus. The instance owns the bus it is given: Shutdown closes it, and so
 // does a failed Build. WithPanicHandler configures only the default bus, so a
 // custom bus handles handler panics its own way.
 func (b *Builder[T]) WithBus(
-	bus models.Bus[T],
+	bus pubsub.Bus[T],
 ) *Builder[T] {
 	b.bus = bus
 	return b
@@ -116,10 +121,10 @@ func (b *Builder[T]) WithSchemaVersion(
 // fromVersion+1. Reads chain the upcasters from an event's version up to the
 // current one (WithSchemaVersion). Registering a second upcaster for the same
 // fromVersion replaces the first. Upcasters must be stateless and safe for
-// concurrent use (see models.Upcaster).
+// concurrent use (see event.Upcaster).
 func (b *Builder[T]) WithUpcaster(
 	fromVersion int,
-	fn models.Upcaster,
+	fn event.Upcaster,
 ) *Builder[T] {
 	b.upcasters[fromVersion] = fn
 	return b
@@ -131,7 +136,7 @@ func (b *Builder[T]) WithUpcaster(
 // durable delivery; a bus supplied with WithBus is responsible for its own
 // panics. The panic never reaches the caller of Send.
 func (b *Builder[T]) WithPanicHandler(
-	fn models.PanicHandler[T],
+	fn handler.Panic[T],
 ) *Builder[T] {
 	b.panicHandler = fn
 	return b
@@ -154,18 +159,18 @@ func (b *Builder[T]) WithCorruptionHook(
 // durably written to the event store; this callback is for observability only.
 // When not set, publish errors are silently dropped.
 func (b *Builder[T]) WithPublishErrorHandler(
-	fn models.PublishErrorHandler[T],
+	fn handler.PublishError[T],
 ) *Builder[T] {
 	b.publishErrorHandler = fn
 	return b
 }
 
-// WithForgetHandler registers a models.ForgetHandler at build time, so no
+// WithForgetHandler registers a handler.Forget at build time, so no
 // Forget can run before it is in place. It is equivalent to calling OnForget on
 // the built instance, except that a registration failure fails Build. Multiple
 // calls register multiple handlers, in the order of the calls.
 func (b *Builder[T]) WithForgetHandler(
-	fn models.ForgetHandler[T],
+	fn handler.Forget[T],
 ) *Builder[T] {
 	b.forgetHandlers = append(
 		b.forgetHandlers,
@@ -185,7 +190,7 @@ func (b *Builder[T]) WithForgetHandler(
 // it contains metacharacters. Projections run in registration order.
 func (b *Builder[T]) WithSyncProjection(
 	pattern string,
-	fn func(ctx context.Context, tx models.Tx, evt models.Event[T]) error,
+	fn func(ctx context.Context, tx storage.Tx, evt event.Event[T]) error,
 ) *Builder[T] {
 	b.syncProjections = append(
 		b.syncProjections,
@@ -212,7 +217,7 @@ func (b *Builder[T]) WithSyncProjection(
 //     (WithDeadLetterHandler) or the aggregate is parked until
 //     ResumeDeliveries. Observe failures with WithDeliveryErrorHandler.
 //   - Every durable subscriber also receives the deletion marker Forget writes
-//     (models.ForgetEventName), whatever its pattern, so state keyed by
+//     (event.ForgetEventName), whatever its pattern, so state keyed by
 //     (AggregateID, Version) can be cleared.
 //   - A timeout (WithHandlerTimeout) is an alarm: it is reported but the handler
 //     is still waited for. WithFallback is not supported and makes Build fail
@@ -227,12 +232,12 @@ func (b *Builder[T]) WithSyncProjection(
 // it contains metacharacters.
 func (b *Builder[T]) WithSubscriber(
 	pattern string,
-	handler models.DurableHandler[T],
-	opts ...models.SubscriptionOpt[T],
+	callback handler.Durable[T],
+	opts ...subscription.Opt[T],
 ) *Builder[T] {
 	b.subscribers = append(
 		b.subscribers,
-		subscriberDef[T]{pattern: pattern, handler: handler, opts: opts},
+		subscriberDef[T]{pattern: pattern, handler: callback, opts: opts},
 	)
 	return b
 }
@@ -258,7 +263,7 @@ func (b *Builder[T]) WithListenerErrorHandler(
 // a durable delivery (handler error, panic or timeout), with the attempt number
 // of the current failing streak. When not set, failures are retried silently.
 func (b *Builder[T]) WithDeliveryErrorHandler(
-	fn models.DeliveryErrorHandler[T],
+	fn handler.DeliveryError[T],
 ) *Builder[T] {
 	b.deliveryErrHandler = fn
 	return b
@@ -294,13 +299,13 @@ func (b *Builder[T]) WithDeliveryMaxAttempts(
 
 // WithDeadLetterHandler sets the handler called when a durable delivery ran out
 // of attempts. Its error argument holds the failure of every subscriber that
-// failed on the last attempt, each a *models.SubscriberError naming the
+// failed on the last attempt, each a *failure.SubscriberError naming the
 // subscriber by pattern and registration order (such as "OrderUpdated#2").
 // Returning nil acknowledges the event as dealt with (typically
 // after storing it somewhere for inspection) and lets the aggregate's later
 // events flow; returning an error parks the aggregate.
 func (b *Builder[T]) WithDeadLetterHandler(
-	fn models.DeadLetterHandler[T],
+	fn handler.DeadLetter[T],
 ) *Builder[T] {
 	b.deadLetter = fn
 	return b
@@ -326,7 +331,7 @@ func (b *Builder[T]) WithDeadLetterHandler(
 // fn during a read is contained and never breaks the read. When not set, or
 // set to nil, snapshot errors of both kinds are dropped.
 func (b *Builder[T]) WithSnapshotErrorHandler(
-	fn func(context.Context, models.Event[T], error),
+	fn func(context.Context, event.Event[T], error),
 ) *Builder[T] {
 	b.snapshotErrHandler = fn
 	return b
@@ -337,7 +342,7 @@ func (b *Builder[T]) WithSnapshotErrorHandler(
 // is the component that takes each committed event and runs the subscribers'
 // handlers in order per aggregate, retrying and parking an aggregate when the
 // attempts run out. The library ships only the in-memory implementation; the
-// contract a replacement must keep is models.Dispatcher, and the in-memory
+// contract a replacement must keep is dispatcher.Dispatcher, and the in-memory
 // implementation is checked against it by the library's own tests. The factory
 // is called once per Build, with the configuration the instance was built with:
 // the bus, the durable subscribers, the handlers, and the retry and attempt
@@ -346,12 +351,12 @@ func (b *Builder[T]) WithSnapshotErrorHandler(
 // Shutdown interrupts and then closes. A factory error fails Build, and what
 // was built so far is shut down. A nil factory is ignored.
 //
-// The dispatcher must keep the guarantees documented on models.Dispatcher. The
+// The dispatcher must keep the guarantees documented on dispatcher.Dispatcher. The
 // delivery log, the aggregate lock and recovery stay with asynx: Build reads
 // the log and hands the pending deliveries to the dispatcher as
-// models.DispatchRedelivery requests.
+// dispatch.KindRedelivery requests.
 func (b *Builder[T]) WithDispatcher(
-	factory models.DispatcherFactory[T],
+	factory dispatcher.Factory[T],
 ) *Builder[T] {
 	b.dispatcherFactory = factory
 	return b

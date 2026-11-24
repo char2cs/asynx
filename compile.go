@@ -4,7 +4,8 @@ import (
 	"fmt"
 	"github.com/char2cs/asynx/internal/bus"
 	procmodels "github.com/char2cs/asynx/internal/processor/models"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/subscription"
 	"regexp"
 )
 
@@ -52,12 +53,12 @@ func compileSyncProjection[T any](
 ) (procmodels.SyncProjection[T], error) {
 	if def.pattern == "" {
 		return procmodels.SyncProjection[T]{},
-			models.ErrEmptyPattern
+			failure.ErrEmptyPattern
 	}
 
 	if def.fn == nil {
 		return procmodels.SyncProjection[T]{},
-			models.ErrNilHandler
+			failure.ErrNilHandler
 	}
 
 	match, err := matcher(def.pattern)
@@ -70,7 +71,7 @@ func compileSyncProjection[T any](
 		nil
 }
 
-func (b *Builder[T]) compileDurable() ([]models.DurableSub[T], func(string) bool, error) {
+func (b *Builder[T]) compileDurable() ([]subscription.Durable[T], func(string) bool, error) {
 	if len(b.subscribers) == 0 {
 		return nil,
 			nil,
@@ -89,7 +90,7 @@ func (b *Builder[T]) compileDurable() ([]models.DurableSub[T], func(string) bool
 		nil
 }
 
-func (b *Builder[T]) compileSubscribers() ([]models.DurableSub[T], error) {
+func (b *Builder[T]) compileSubscribers() ([]subscription.Durable[T], error) {
 	return compileAll(
 		b.subscribers,
 		compileSubscriber[T],
@@ -99,30 +100,30 @@ func (b *Builder[T]) compileSubscribers() ([]models.DurableSub[T], error) {
 func compileSubscriber[T any](
 	index int,
 	def subscriberDef[T],
-) (models.DurableSub[T], error) {
+) (subscription.Durable[T], error) {
 	if def.pattern == "" {
-		return models.DurableSub[T]{},
-			models.ErrEmptyPattern
+		return subscription.Durable[T]{},
+			failure.ErrEmptyPattern
 	}
 
 	if def.handler == nil {
-		return models.DurableSub[T]{},
-			models.ErrNilHandler
+		return subscription.Durable[T]{},
+			failure.ErrNilHandler
 	}
 
-	cfg := &models.SubscriptionConfig[T]{}
+	cfg := &subscription.Config[T]{}
 	for _, opt := range def.opts {
 		opt(cfg)
 	}
 
 	if cfg.Fallback != nil {
-		return models.DurableSub[T]{},
-			models.ErrFallbackUnsupported
+		return subscription.Durable[T]{},
+			failure.ErrFallbackUnsupported
 	}
 
 	m, err := matcher(def.pattern)
 	if err != nil {
-		return models.DurableSub[T]{},
+		return subscription.Durable[T]{},
 			err
 	}
 
@@ -131,7 +132,7 @@ func compileSubscriber[T any](
 		def.pattern,
 		index+1,
 	)
-	return models.DurableSub[T]{Name: name, Match: m, Handler: def.handler, Timeout: cfg.Timeout},
+	return subscription.Durable[T]{Name: name, Match: m, Handler: def.handler, Timeout: cfg.Timeout},
 		nil
 }
 

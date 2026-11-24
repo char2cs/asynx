@@ -4,7 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 type forgottenOrder struct {
@@ -42,7 +43,7 @@ func TestForgetCommand_Validate_NilCurrent_ReturnsErrValidation(
 	err := cmd.Validate(nil)
 	if !errors.Is(
 		err,
-		models.ErrValidation,
+		failure.ErrValidation,
 	) {
 		t.Fatalf(
 			"expected ErrValidation, got %v",
@@ -86,4 +87,4 @@ func TestForgetCommand_EmitEvent_NilLast_ReturnsZeroValue(
 	}
 }
 
-var _ models.Command[forgottenOrder] = (*ForgetCommand[forgottenOrder])(nil)
+var _ command.Command[forgottenOrder] = (*ForgetCommand[forgottenOrder])(nil)

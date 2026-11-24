@@ -774,7 +774,7 @@ Asynx works on multiple nodes. The developer is responsible for two things:
 
 ### Known Limitations
 
-**GDPR / right to be forgotten.** `Asynx.Forget(ctx, aggregateID)` provides native hard deletion: it writes a tombstone event, notifies registered `ForgetHandler`s, then calls `Delete` on both the event store and the snapshot store to erase the aggregate. See [forget.md](./forget.md). This reaches only storage your `Store`/`SnapshotStore` implementations directly control — replicas, backups, and WAL archives that already copied the data before `Forget` ran are outside Asynx's reach. For infrastructure where those copies can't be reliably purged, layer crypto-shredding underneath `Delete`: encrypt each aggregate's events with a per-aggregate key and destroy the key to render any surviving copy permanently unreadable. Key management and encryption are outside Asynx's scope and must be handled at the infrastructure layer.
+**GDPR / right to be forgotten.** `Asynx.Forget(ctx, aggregateID)` provides native hard deletion: it writes a tombstone event, notifies registered `handler.Forget`s, then calls `Delete` on both the event store and the snapshot store to erase the aggregate. See [forget.md](./forget.md). This reaches only storage your `Store`/`SnapshotStore` implementations directly control — replicas, backups, and WAL archives that already copied the data before `Forget` ran are outside Asynx's reach. For infrastructure where those copies can't be reliably purged, layer crypto-shredding underneath `Delete`: encrypt each aggregate's events with a per-aggregate key and destroy the key to render any surviving copy permanently unreadable. Key management and encryption are outside Asynx's scope and must be handled at the infrastructure layer.
 
 ---
 

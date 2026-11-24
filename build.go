@@ -9,20 +9,22 @@ import (
 	"github.com/char2cs/asynx/internal/firsterror"
 	"github.com/char2cs/asynx/internal/processor"
 	procmodels "github.com/char2cs/asynx/internal/processor/models"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/pubsub"
+	"github.com/char2cs/asynx/models/subscription"
 	"maps"
 	"time"
 )
 
 // Build assembles the instance from the configuration and returns it, ready to
 // use. WithEventStore and WithSnapshotStore are required (it returns
-// models.ErrMissingEventStore or models.ErrMissingSnapshotStore without them);
+// failure.ErrMissingEventStore or failure.ErrMissingSnapshotStore without them);
 // all other options have defaults.
 //
 // Build validates the durable subscribers and synchronous projections: an empty
-// pattern (models.ErrEmptyPattern), a nil handler (models.ErrNilHandler), a
+// pattern (failure.ErrEmptyPattern), a nil handler (failure.ErrNilHandler), a
 // pattern that is not a valid regular expression, or WithFallback on a durable
-// subscriber (models.ErrFallbackUnsupported) fails it. When the instance has
+// subscriber (failure.ErrFallbackUnsupported) fails it. When the instance has
 // durable subscribers Build also queues the deliveries a crash left
 // unacknowledged for redelivery, in per-aggregate order, and returns without
 // waiting for the handlers.
@@ -76,7 +78,7 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 
 func (b *Builder[T]) newProcessor(
 	es eventstore.EventStore[T],
-	activeBus models.Bus[T],
+	activeBus pubsub.Bus[T],
 ) (processor.Processor[T], error) {
 	procOpts, err := b.processorOpts()
 	if err != nil {
@@ -103,11 +105,11 @@ func (b *Builder[T]) newProcessor(
 
 func (b *Builder[T]) requireStores() error {
 	if b.eventStore == nil {
-		return models.ErrMissingEventStore
+		return failure.ErrMissingEventStore
 	}
 
 	if b.snapshotStore == nil {
-		return models.ErrMissingSnapshotStore
+		return failure.ErrMissingSnapshotStore
 	}
 
 	return nil
@@ -124,7 +126,7 @@ func (b *Builder[T]) newEventStore() eventstore.EventStore[T] {
 	)
 }
 
-func (b *Builder[T]) activeBus() models.Bus[T] {
+func (b *Builder[T]) activeBus() pubsub.Bus[T] {
 	if b.bus != nil {
 		return b.bus
 	}
@@ -204,7 +206,7 @@ func (b *Builder[T]) handlerOpts() (opts []procmodels.Opt[T]) {
 }
 
 func (b *Builder[T]) durableOpts(
-	durableSubs []models.DurableSub[T],
+	durableSubs []subscription.Durable[T],
 	durableMatch func(string) bool,
 ) []procmodels.Opt[T] {
 	if durableMatch == nil {
@@ -308,7 +310,7 @@ func shutdownProcessor[T any](
 }
 
 func closeAbandonedBus[T any](
-	activeBus models.Bus[T],
+	activeBus pubsub.Bus[T],
 ) error {
 	ctx, cancel := context.WithTimeout(
 		context.Background(),

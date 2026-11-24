@@ -1,7 +1,7 @@
 package api
 
 import (
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
 )
 
 // Inspector is the read-only view of durable delivery. Both methods are safe to
@@ -15,5 +15,5 @@ type Inspector interface {
 	// the error that parked it and the versions left undelivered.
 	Inspect(
 		aggregateID string,
-	) asynxmd.DeliveryStatus
+	) dispatch.Status
 }

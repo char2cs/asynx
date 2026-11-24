@@ -2,20 +2,22 @@ package storetest
 
 import (
 	"errors"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/char2cs/asynx/store/storetest/internal/write"
 	"testing"
 )
 
 func receiptsDuplicates(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	f := newFixture(
 		t,
 		s,
 	)
-	want := models.Receipt{Accepted: true, EventID: "e1", Version: 1}
+	want := event.Receipt{Accepted: true, EventID: "e1", Version: 1}
 	f.commit(write.Receipt(
 		"cmd-1",
 		want,
@@ -27,11 +29,11 @@ func receiptsDuplicates(
 
 	err := f.try(write.Receipt(
 		"cmd-1",
-		models.Receipt{Rejection: "nope"},
+		event.Receipt{Rejection: "nope"},
 	))
 	if !errors.Is(
 		err,
-		models.ErrDuplicateReceipt,
+		failure.ErrDuplicateReceipt,
 	) {
 		t.Fatalf(
 			"duplicate PutReceipt err = %v, want ErrDuplicateReceipt",
@@ -44,7 +46,7 @@ func receiptsDuplicates(
 
 func deliveriesOrderAndAck(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	a1 := deliveryOf(
 		"a",
@@ -82,7 +84,7 @@ func deliveriesOrderAndAck(
 
 func dropDeliveries(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	a1 := deliveryOf(
 		"a",
@@ -108,7 +110,7 @@ func dropDeliveries(
 
 func ackUnknown(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	const unknownVersion = 7
 	newFixture(
@@ -122,7 +124,7 @@ func ackUnknown(
 
 func dropThenEnqueue(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	a1 := deliveryOf(
 		"a",
@@ -153,7 +155,7 @@ func dropThenEnqueue(
 
 func reEnqueueAfterAckOrDrop(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	a1 := deliveryOf(
 		"a",
@@ -178,7 +180,7 @@ func reEnqueueAfterAckOrDrop(
 
 func ackAfterDrop(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	a1 := deliveryOf(
 		"a",
@@ -201,7 +203,7 @@ func ackAfterDrop(
 
 func pendingLimit(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	const (
 		queued = 5
@@ -233,8 +235,8 @@ func pendingLimit(
 	}
 }
 
-func deliveryScenarios() map[string]scenario[models.Store] {
-	return map[string]scenario[models.Store]{
+func deliveryScenarios() map[string]scenario[storage.Store] {
+	return map[string]scenario[storage.Store]{
 		"ReceiptsAreStoredAndDuplicatesRejected":  receiptsDuplicates,
 		"DeliveriesKeepEnqueueOrderAndAckRemoves": deliveriesOrderAndAck,
 		"DropDeliveriesOnlyAffectsThatAggregate":  dropDeliveries,

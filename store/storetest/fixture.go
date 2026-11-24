@@ -3,7 +3,9 @@ package storetest
 import (
 	"context"
 	"errors"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/char2cs/asynx/store/storetest/internal/write"
 	"slices"
 	"testing"
@@ -11,12 +13,12 @@ import (
 
 type fixture struct {
 	t testing.TB
-	s models.Store
+	s storage.Store
 }
 
 func newFixture(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) fixture {
 	return fixture{t: t, s: s}
 }
@@ -67,7 +69,7 @@ func (f fixture) blobs(
 
 func (f fixture) pending(
 	limit int,
-) []models.Delivery {
+) []event.Delivery {
 	f.t.Helper()
 	pending, err := f.s.PendingDeliveries(
 		context.Background(),
@@ -86,7 +88,7 @@ func (f fixture) pending(
 
 func (f fixture) receipt(
 	commandID string,
-) (r models.Receipt, found bool) {
+) (r event.Receipt, found bool) {
 	f.t.Helper()
 	r, found, err := f.s.GetReceipt(
 		context.Background(),
@@ -187,7 +189,7 @@ func (f fixture) wantBlobsInRange(
 }
 
 func (f fixture) wantPending(
-	want ...models.Delivery,
+	want ...event.Delivery,
 ) {
 	f.t.Helper()
 	got := f.pending(len(want) + 1)
@@ -205,7 +207,7 @@ func (f fixture) wantPending(
 
 func (f fixture) wantReceipt(
 	commandID string,
-	want models.Receipt,
+	want event.Receipt,
 ) {
 	f.t.Helper()
 	got, found := f.receipt(commandID)
@@ -338,7 +340,7 @@ func versionConflict(
 ) bool {
 	return errors.Is(
 		err,
-		models.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	)
 }
 

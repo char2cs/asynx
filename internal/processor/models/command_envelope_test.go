@@ -9,7 +9,9 @@ import (
 
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 type countingExecutor struct {
@@ -22,14 +24,14 @@ type countingExecutor struct {
 // and how often an envelope ran its command.
 func (c *countingExecutor) ExecuteAsync(
 	_ context.Context,
-	_ asynxmd.Command[mocks.Order],
-) (asynxmd.Event[mocks.Order], func(context.Context) error, error) {
+	_ command.Command[mocks.Order],
+) (event.Event[mocks.Order], func(context.Context) error, error) {
 	c.calls.Add(1)
 	if c.panic {
 		panic("boom")
 	}
 
-	return asynxmd.Event[mocks.Order]{},
+	return event.Event[mocks.Order]{},
 		noWait,
 		nil
 }
@@ -132,7 +134,7 @@ func TestCommandEnvelope_ExecuteSkipsACommandWhoseContextEnded(
 	result := <-envelope.ResultChan
 	if !errors.Is(
 		result.Err,
-		asynxmd.ErrContextCancelled,
+		failure.ErrContextCancelled,
 	) {
 		t.Fatalf(
 			"result = %v, want ErrContextCancelled",
@@ -217,7 +219,7 @@ func TestCommandEnvelope_RejectAnswersTheSenderWithoutRunningTheCommand(
 	envelope := newEnvelope()
 	executor := &countingExecutor{}
 
-	envelope.Reject(asynxmd.ErrQueueFull)
+	envelope.Reject(failure.ErrQueueFull)
 
 	result := awaitResult(
 		t,
@@ -225,7 +227,7 @@ func TestCommandEnvelope_RejectAnswersTheSenderWithoutRunningTheCommand(
 	)
 	if !errors.Is(
 		result.Err,
-		asynxmd.ErrQueueFull,
+		failure.ErrQueueFull,
 	) {
 		t.Fatalf(
 			"result err = %v, want ErrQueueFull",

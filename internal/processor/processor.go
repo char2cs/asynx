@@ -5,7 +5,7 @@ import (
 	"github.com/char2cs/asynx/internal/processor/internal/api"
 	"github.com/char2cs/asynx/internal/processor/internal/core"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/pubsub"
 )
 
 // Processor is the command side of asynx: it routes each command to a
@@ -27,7 +27,7 @@ type Processor[T any] interface {
 // fails New and nothing is left running.
 func New[T any](
 	es eventstore.EventStore[T],
-	bus asynxmd.Bus[T],
+	bus pubsub.Bus[T],
 	opts ...models.Opt[T],
 ) (Processor[T], error) {
 	p, err := core.New(

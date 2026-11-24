@@ -3,7 +3,7 @@ package store
 import (
 	"context"
 	"errors"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -174,7 +174,7 @@ func TestAppend_DuplicateVersion_ReturnsErrPipelineFailed(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) {
 		t.Errorf(
 			"err = %v, want ErrPipelineFailed",

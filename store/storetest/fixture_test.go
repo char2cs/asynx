@@ -1,7 +1,7 @@
 package storetest
 
 import (
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
 	"github.com/char2cs/asynx/store"
 	"github.com/char2cs/asynx/store/storetest/internal/write"
 	"testing"
@@ -26,7 +26,7 @@ func TestFixture_CommitThenReadsBackWhatWasWritten(
 		)),
 		write.Receipt(
 			"cmd",
-			models.Receipt{Accepted: true},
+			event.Receipt{Accepted: true},
 		),
 	)
 
@@ -41,7 +41,7 @@ func TestFixture_CommitThenReadsBackWhatWasWritten(
 	))
 	f.wantReceipt(
 		"cmd",
-		models.Receipt{Accepted: true},
+		event.Receipt{Accepted: true},
 	)
 	f.wantNoReceipt("other")
 }

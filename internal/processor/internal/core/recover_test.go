@@ -8,7 +8,11 @@ import (
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/mockstores"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/models/subscription"
 	"github.com/char2cs/asynx/store"
 	"slices"
 	"strings"
@@ -545,7 +549,7 @@ func TestProcessor_Recover_AfterShutdownFails(
 		10,
 	); !errors.Is(
 		err,
-		asynxmd.ErrDispatcherClosed,
+		failure.ErrDispatcherClosed,
 	) {
 		t.Fatalf(
 			"Recover on a closed dispatcher = %v, want ErrDispatcherClosed",
@@ -680,7 +684,7 @@ func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(
 	es := eventstore.New[order](
 		s,
 		store.NewSnapshots(),
-		map[int]asynxmd.Upcaster{1: failing.upcast},
+		map[int]event.Upcaster{1: failing.upcast},
 		2,
 		nil,
 	)
@@ -742,7 +746,7 @@ func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(
 	if delivered != nil ||
 		!errors.Is(
 			behind,
-			asynxmd.ErrDeliveryParked,
+			failure.ErrDeliveryParked,
 		) {
 		t.Fatalf(
 			"retries = %v, %v; want nil for c-1 (delivered and acknowledged) and ErrDeliveryParked for c-3",
@@ -764,7 +768,7 @@ func TestProcessor_Recover_DeliversWhatPrecedesAnUnreadableEvent(
 		1,
 		nil,
 	)
-	for _, cmd := range []asynxmd.Command[order]{mocks.CreateOrderCmd{ID: "a", Total: 1}, updateCmd(
+	for _, cmd := range []command.Command[order]{mocks.CreateOrderCmd{ID: "a", Total: 1}, updateCmd(
 		"a",
 		2,
 	)} {
@@ -858,14 +862,14 @@ func TestProcessor_Recover_DeliversWhatPrecedesAnUnreadableEvent(
 }
 
 type report struct {
-	event asynxmd.Event[order]
+	event event.Event[order]
 	err   error
 }
 
 func okSubs() models.Opt[order] {
 	handle := func(
 		context.Context,
-		asynxmd.Event[order],
+		event.Event[order],
 	) error {
 		return nil
 	}
@@ -873,9 +877,9 @@ func okSubs() models.Opt[order] {
 }
 
 func durableSubs(
-	handle func(context.Context, asynxmd.Event[order]) error,
+	handle func(context.Context, event.Event[order]) error,
 ) models.Opt[order] {
-	return models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
+	return models.WithDurableSubscribers([]subscription.Durable[order]{{
 		Match:   always,
 		Handler: handle,
 	}})
@@ -886,7 +890,7 @@ func countingSubs(
 ) models.Opt[order] {
 	handle := func(
 		context.Context,
-		asynxmd.Event[order],
+		event.Event[order],
 	) error {
 		n.Add(1)
 		return nil
@@ -899,7 +903,7 @@ func storingSubs(
 ) models.Opt[order] {
 	handle := func(
 		_ context.Context,
-		e asynxmd.Event[order],
+		e event.Event[order],
 	) error {
 		delivered.Store(
 			e.AggregateID,
@@ -916,7 +920,7 @@ func versionSubs(
 ) models.Opt[order] {
 	handle := func(
 		_ context.Context,
-		e asynxmd.Event[order],
+		e event.Event[order],
 	) error {
 		mu.Lock()
 		defer mu.Unlock()
@@ -934,7 +938,7 @@ func reporting(
 ) models.Opt[order] {
 	handle := func(
 		_ context.Context,
-		e asynxmd.Event[order],
+		e event.Event[order],
 		err error,
 	) {
 		reported <- report{e, err}
@@ -948,7 +952,7 @@ func reportingAggregate(
 ) models.Opt[order] {
 	handle := func(
 		_ context.Context,
-		e asynxmd.Event[order],
+		e event.Event[order],
 		err error,
 	) {
 		forwardIfAggregate(
@@ -963,7 +967,7 @@ func reportingAggregate(
 
 func forwardIfAggregate(
 	id string,
-	e asynxmd.Event[order],
+	e event.Event[order],
 	err error,
 	reported chan error,
 ) {
@@ -977,7 +981,7 @@ func reportingErrors(
 ) models.Opt[order] {
 	handle := func(
 		_ context.Context,
-		_ asynxmd.Event[order],
+		_ event.Event[order],
 		err error,
 	) {
 		reported <- err
@@ -990,7 +994,7 @@ func panickingReporter(
 ) models.Opt[order] {
 	handle := func(
 		context.Context,
-		asynxmd.Event[order],
+		event.Event[order],
 		error,
 	) {
 		called.Add(1)
@@ -1004,7 +1008,7 @@ func signalingReporter(
 ) models.Opt[order] {
 	handle := func(
 		context.Context,
-		asynxmd.Event[order],
+		event.Event[order],
 		error,
 	) {
 		reported <- struct{}{}
@@ -1014,10 +1018,10 @@ func signalingReporter(
 
 func countingHandler(
 	n *atomic.Int32,
-) func(context.Context, asynxmd.Event[order]) {
+) func(context.Context, event.Event[order]) {
 	return func(
 		context.Context,
-		asynxmd.Event[order],
+		event.Event[order],
 	) {
 		n.Add(1)
 	}
@@ -1025,10 +1029,10 @@ func countingHandler(
 
 func blockingHandler(
 	release chan struct{},
-) func(context.Context, asynxmd.Event[order]) {
+) func(context.Context, event.Event[order]) {
 	return func(
 		context.Context,
-		asynxmd.Event[order],
+		event.Event[order],
 	) {
 		<-release
 	}
@@ -1044,9 +1048,9 @@ func enqueuingVersions(
 	ctx context.Context,
 	aggregateID string,
 	versions ...int64,
-) func(asynxmd.Tx) error {
+) func(storage.Tx) error {
 	return func(
-		tx asynxmd.Tx,
+		tx storage.Tx,
 	) error {
 		return enqueueVersions(
 			ctx,
@@ -1059,7 +1063,7 @@ func enqueuingVersions(
 
 func enqueueVersions(
 	ctx context.Context,
-	tx asynxmd.Tx,
+	tx storage.Tx,
 	aggregateID string,
 	versions ...int64,
 ) error {
@@ -1097,7 +1101,7 @@ func mustWriteUpdate(
 func mustWrite(
 	t *testing.T,
 	es eventstore.EventStore[order],
-	cmd asynxmd.Command[order],
+	cmd command.Command[order],
 ) {
 	t.Helper()
 	if _, err := es.Write(

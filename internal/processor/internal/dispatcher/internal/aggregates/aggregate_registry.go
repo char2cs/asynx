@@ -6,7 +6,8 @@ import (
 	"sync"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates/contracts"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 type aggregateRegistry[J Item] struct {
@@ -29,7 +30,7 @@ func (r *aggregateRegistry[J]) Enqueue(
 		admission,
 	)
 	if admission.Parked {
-		job.Complete(asynxmd.ErrDeliveryParked)
+		job.Complete(failure.ErrDeliveryParked)
 	}
 }
 
@@ -40,7 +41,7 @@ func (r *aggregateRegistry[J]) queueUnderLock(
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		*admission = contracts.Admission{Err: asynxmd.ErrDispatcherClosed}
+		*admission = contracts.Admission{Err: failure.ErrDispatcherClosed}
 		return
 	}
 
@@ -129,7 +130,7 @@ func (r *aggregateRegistry[J]) Park(
 	)
 	rec := r.records[aggregateID]
 	for _, v := range undelivered {
-		rec.undelivered[v] = asynxmd.ErrDeliveryParked
+		rec.undelivered[v] = failure.ErrDeliveryParked
 	}
 }
 
@@ -175,7 +176,7 @@ func (r *aggregateRegistry[J]) SettleIfParked(
 		return false
 	}
 
-	job.MarkUnrun(asynxmd.ErrDeliveryParked)
+	job.MarkUnrun(failure.ErrDeliveryParked)
 	return true
 }
 
@@ -244,16 +245,16 @@ func (r *aggregateRegistry[J]) Parks() map[string]uint64 {
 // read under one hold of the mutex (see Registry.Inspect).
 func (r *aggregateRegistry[J]) Inspect(
 	aggregateID string,
-) asynxmd.DeliveryStatus {
+) dispatch.Status {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec, ok := r.records[aggregateID]
 	if !ok ||
 		!rec.parked {
-		return asynxmd.DeliveryStatus{}
+		return dispatch.Status{}
 	}
 
-	return asynxmd.DeliveryStatus{
+	return dispatch.Status{
 		Parked:      true,
 		Generation:  rec.generation,
 		Cause:       rec.cause,
@@ -347,7 +348,7 @@ func (r *aggregateRegistry[J]) dropAcked(
 			rec,
 			job,
 		)
-		job.Complete(asynxmd.ErrDeliveryParked)
+		job.Complete(failure.ErrDeliveryParked)
 	}
 }
 
@@ -370,8 +371,8 @@ func (r *aggregateRegistry[J]) markParkedUnrun(
 	rec *record[J],
 	job J,
 ) {
-	job.MarkUnrun(asynxmd.ErrDeliveryParked)
-	rec.undelivered[job.Version()] = asynxmd.ErrDeliveryParked
+	job.MarkUnrun(failure.ErrDeliveryParked)
+	rec.undelivered[job.Version()] = failure.ErrDeliveryParked
 }
 
 func (r *aggregateRegistry[J]) discardIfEmpty(

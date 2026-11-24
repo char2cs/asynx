@@ -6,7 +6,9 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
 )
 
 type fakeOrder struct{}
@@ -15,7 +17,7 @@ func TestDispatcher_EnqueueRecordsTheRequestAndSettlesTheTicket(
 	t *testing.T,
 ) {
 	d := NewDispatcher[fakeOrder]()
-	request := models.DispatchRequest[fakeOrder]{Event: models.Event[fakeOrder]{AggregateID: "a", Version: 1}}
+	request := dispatch.Request[fakeOrder]{Event: event.Event[fakeOrder]{AggregateID: "a", Version: 1}}
 
 	ticket, err := d.Enqueue(
 		context.Background(),
@@ -57,7 +59,7 @@ func TestDispatcher_FailEnqueueRefusesAndRecordsNothing(
 
 	if _, err := d.Enqueue(
 		context.Background(),
-		models.DispatchRequest[fakeOrder]{},
+		dispatch.Request[fakeOrder]{},
 	); !errors.Is(
 		err,
 		sentinel,
@@ -78,7 +80,7 @@ func TestDispatcher_FailEnqueueRefusesAndRecordsNothing(
 	d.FailEnqueue(nil)
 	if _, err := d.Enqueue(
 		context.Background(),
-		models.DispatchRequest[fakeOrder]{},
+		dispatch.Request[fakeOrder]{},
 	); err != nil {
 		t.Errorf(
 			"Enqueue after restoring = %v",
@@ -92,9 +94,9 @@ func TestDispatcher_FactoryKeepsTheConfigAndReturnsTheFake(
 ) {
 	d := NewDispatcher[fakeOrder]()
 
-	got, err := d.Factory()(models.DispatcherConfig[fakeOrder]{MaxAttempts: 7})
+	got, err := d.Factory()(dispatcher.Config[fakeOrder]{MaxAttempts: 7})
 	if err != nil ||
-		got != models.Dispatcher[fakeOrder](d) {
+		got != dispatcher.Dispatcher[fakeOrder](d) {
 		t.Fatalf(
 			"Factory = (%v, %v), want the fake",
 			got,

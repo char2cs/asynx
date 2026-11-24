@@ -2,7 +2,8 @@ package asynx
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	"github.com/char2cs/asynx/models/event"
 )
 
 // CommandSender is how state changes: it runs commands against aggregates and
@@ -11,35 +12,35 @@ import (
 // Commands for one aggregate run strictly one at a time, so there is no
 // lost-update window, and an aggregate's events reach handlers in version
 // order. A command that is refused because the aggregate's queue is full
-// returns models.ErrQueueFull, and one sent after Shutdown began returns
-// models.ErrShuttingDown; neither is run.
+// returns failure.ErrQueueFull, and one sent after Shutdown began returns
+// failure.ErrShuttingDown; neither is run.
 type CommandSender[T any] interface {
 	// Send validates and persists the command, then returns the resulting Event[T]
 	// once it is durably written. Projection handlers are fired asynchronously —
 	// when Send returns, handlers may not have run yet. A command whose
-	// Validate fails returns that error (conventionally models.ErrValidation)
+	// Validate fails returns that error (conventionally failure.ErrValidation)
 	// and writes nothing, as does a store failure. If ctx ends before the
-	// command ran, Send returns models.ErrContextCancelled; if it ends after the
+	// command ran, Send returns failure.ErrContextCancelled; if it ends after the
 	// command started, the command still commits and Send still returns
-	// models.ErrContextCancelled.
+	// failure.ErrContextCancelled.
 	// Use SendWait when the caller needs projections to be up to date before proceeding.
 	Send(
 		ctx context.Context,
-		cmd models.Command[T],
-	) (models.Event[T], error)
+		cmd command.Command[T],
+	) (event.Event[T], error)
 
 	// SendWait behaves like Send but additionally blocks until all matching
 	// projection handlers have completed. When SendWait returns without error,
 	// the event is persisted and every projection subscribed to it has finished.
 	// Use Send when projection consistency is not required at the call site.
-	// The retry of an idempotent command (see IdempotentCommand) waits too, for
+	// The retry of an idempotent command (see command.Idempotent) waits too, for
 	// the handlers of the event its first attempt produced, if they are still
 	// running, or reports ErrDeliveryParked if the event is still pending behind
 	// a parked aggregate.
 	SendWait(
 		ctx context.Context,
-		cmd models.Command[T],
-	) (models.Event[T], error)
+		cmd command.Command[T],
+	) (event.Event[T], error)
 
 	// Forget writes a tombstone event for the aggregate, delivers it to all
 	// ForgetHandlers and to every durable subscriber (each must succeed), then

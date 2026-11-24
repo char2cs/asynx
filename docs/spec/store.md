@@ -4,7 +4,7 @@
 
 ## Overview
 
-The `models` package defines two independent persistence contracts: `Store` — the append-only **event** stream contract — and `SnapshotStore` — a single upserted cache cell per aggregate. This document covers `Store`. See [SnapshotStore](#snapshotstore) below for the other.
+The `models/storage` package defines two independent persistence contracts: `storage.Store` — the append-only **event** stream contract — and `storage.SnapshotStore` — a single upserted cache cell per aggregate. This document covers `Store`. See [SnapshotStore](#snapshotstore) below for the other.
 
 `Store` accepts four operations: append a blob to a stream, read all entries from a version, read a bounded range, and delete every entry for an aggregate.
 
@@ -519,7 +519,7 @@ The two tables are not interchangeable, and the difference is load-bearing: `eve
 
 ## SnapshotStore
 
-`models.SnapshotStore` is a **separate interface**, not a second `Store` instance. It persists exactly one snapshot per aggregate — the most recent — as a single upserted row, cell, or key.
+`storage.SnapshotStore` is a **separate interface**, not a second `Store` instance. It persists exactly one snapshot per aggregate — the most recent — as a single upserted row, cell, or key.
 
 ```go
 type SnapshotStore interface {
@@ -592,13 +592,13 @@ func (s *SQLSnapshotStore) Delete(ctx context.Context, aggregateID string) error
 }
 ```
 
-`WithSnapshotStore` is required on the builder — `Build()` returns `models.ErrMissingSnapshotStore` if it is nil. It cannot default to the event store: `models.Store` is not a `models.SnapshotStore`, and a `Store` implementation would need an entirely different upsert-shaped table to satisfy it anyway. See the [in-memory reference implementation](https://github.com/char2cs/asynx/blob/develop/store/snapshot_memory.go) (`store.NewSnapshots()`) for a minimal, non-durable example.
+`WithSnapshotStore` is required on the builder — `Build()` returns `failure.ErrMissingSnapshotStore` if it is nil. It cannot default to the event store: `storage.Store` is not a `storage.SnapshotStore`, and a `Store` implementation would need an entirely different upsert-shaped table to satisfy it anyway. See the [in-memory reference implementation](https://github.com/char2cs/asynx/blob/develop/store/snapshot_memory.go) (`store.NewSnapshots()`) for a minimal, non-durable example.
 
 ---
 
 ## Migrating from v0.7.x
 
-Before v0.8.0, snapshots were written to a `models.Store` as an append-only
+Before v0.8.0, snapshots were written to a `storage.Store` as an append-only
 stream: one row per snapshot, `PRIMARY KEY (aggregate_id, version)`. Reading
 the current state loaded *every* snapshot ever written for the aggregate and
 discarded all but the newest, so both reads and writes were O(number of
@@ -607,7 +607,7 @@ snapshots) and the table grew without bound.
 Snapshots are a derived cache — every one can be rebuilt by replaying events.
 So there is no data to migrate:
 
-1. Implement `models.SnapshotStore` against a table keyed by `aggregate_id`
+1. Implement `storage.SnapshotStore` against a table keyed by `aggregate_id`
    alone (schema above).
 2. Drop the old snapshot table, or leave it orphaned and drop it later.
 3. Pass the new store to `WithSnapshotStore`. It is now required — `Build()`
@@ -638,7 +638,7 @@ extra cold replay in between. One that snapshots rarely (or never sets
 `ShouldSnapshot() == true`) will keep paying the cold-replay cost on every
 `Get` until it does. Correctness is unaffected either way — only read cost.
 
-`Count` is also removed from `models.Store` in this release — it was dead
+`Count` is also removed from `storage.Store` in this release — it was dead
 API, unused since optimistic concurrency replaced the version-counting write
 path. Delete your implementation's `Count` method; no data migration is
 needed, since it was read-only and never persisted anything.

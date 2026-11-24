@@ -3,7 +3,8 @@ package models
 import (
 	"context"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 // SyncProjection is a read-model update that runs inside the transaction that
@@ -14,5 +15,5 @@ type SyncProjection[T any] struct {
 	// Match reports whether the projection applies to an event name.
 	Match func(eventName string) bool
 	// Fn writes the projection's own state through tx.Native().
-	Fn func(ctx context.Context, tx asynxmd.Tx, evt asynxmd.Event[T]) error
+	Fn func(ctx context.Context, tx storage.Tx, evt event.Event[T]) error
 }

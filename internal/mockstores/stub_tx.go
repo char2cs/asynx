@@ -2,7 +2,7 @@ package mockstores
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
 )
 
 type stubTx struct {
@@ -48,7 +48,7 @@ func (stubTx) DropDeliveries(
 func (stubTx) PutReceipt(
 	context.Context,
 	string,
-	models.Receipt,
+	event.Receipt,
 ) error {
 	return nil
 }

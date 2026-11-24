@@ -6,7 +6,9 @@ import (
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher"
-	asynxmd "github.com/char2cs/asynx/models"
+	dispatchermodel "github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
 	"github.com/char2cs/asynx/store"
 	"sync/atomic"
 	"testing"
@@ -21,7 +23,7 @@ func (f *handlerFlag) markDone() {
 }
 
 type waitedResult struct {
-	evt asynxmd.Event[order]
+	evt event.Event[order]
 	err error
 }
 
@@ -59,7 +61,7 @@ func TestExecute_WaitHandlersTrue_HandlersDoneBeforeReturn(
 	callbackBus := &recordingBus[order]{
 		onPublishSync: handler.markDone,
 	}
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: callbackBus})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: callbackBus})
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(
@@ -98,7 +100,7 @@ func TestExecute_WaitHandlersFalse_DispatchCalled(
 		nil,
 	)
 	trackBus := &recordingBus[order]{}
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: trackBus})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: trackBus})
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(
@@ -192,7 +194,7 @@ func TestExecute_WaitingForHandlersGivesUpWithTheCommittedEvent(
 	r := <-caller.got
 	if !errors.Is(
 		r.err,
-		asynxmd.ErrContextCancelled,
+		failure.ErrContextCancelled,
 	) ||
 		r.evt.Version != 1 {
 		t.Fatalf(
@@ -224,7 +226,7 @@ func TestExecute_WaitingOnAParkedAggregateReportsNoHandlerRan(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) ||
 		evt.Version != 1 {
 		t.Fatalf(

@@ -7,14 +7,15 @@ import (
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/delivery"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/reporter"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/pubsub"
 )
 
 // New creates a Pool whose runs begin their jobs in registry, publish them
 // through bus (nil publishes nothing), run their durable delivery through
 // deliverer and report errors through reports.
 func New[T any](
-	bus asynxmd.Bus[T],
+	bus pubsub.Bus[T],
 	registry aggregates.Registry[jobs.Job[T]],
 	deliverer delivery.Deliverer[T],
 	reports reporter.Reporter[T],
@@ -28,7 +29,7 @@ func New[T any](
 }
 
 type aggregatePool[T any] struct {
-	bus       asynxmd.Bus[T]
+	bus       pubsub.Bus[T]
 	registry  aggregates.Registry[jobs.Job[T]]
 	deliverer delivery.Deliverer[T]
 	reports   reporter.Reporter[T]
@@ -121,7 +122,7 @@ func (p *aggregatePool[T]) deliver(
 		halt,
 		job,
 	) {
-		return asynxmd.ErrDeliveryParked
+		return failure.ErrDeliveryParked
 	}
 
 	p.publishLive(

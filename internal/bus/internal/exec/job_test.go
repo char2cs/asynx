@@ -7,7 +7,7 @@ import (
 
 	"github.com/char2cs/asynx/internal/bus/internal/exec"
 	"github.com/char2cs/asynx/internal/bus/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
 )
 
 func sendsLabel(
@@ -16,7 +16,7 @@ func sendsLabel(
 ) eventHandler {
 	return func(
 		_ context.Context,
-		_ asynxmd.Event[string],
+		_ event.Event[string],
 	) {
 		marker <- label
 	}
@@ -26,7 +26,7 @@ func TestMakeJob_AllFieldsMapped(
 	t *testing.T,
 ) {
 	timeout := 100 * time.Millisecond
-	event := asynxmd.Event[string]{EventName: "OrderPlaced", AggregateID: "agg-1"}
+	evt := event.Event[string]{EventName: "OrderPlaced", AggregateID: "agg-1"}
 
 	marker := make(
 		chan string,
@@ -49,7 +49,7 @@ func TestMakeJob_AllFieldsMapped(
 
 	job := exec.MakeJob(
 		sub,
-		event,
+		evt,
 		nil,
 		nil,
 	)
@@ -80,7 +80,7 @@ func TestMakeJob_AllFieldsMapped(
 
 	job.Handler(
 		context.Background(),
-		event,
+		evt,
 	)
 	if got := <-marker; got != "handler" {
 		t.Errorf(
@@ -91,7 +91,7 @@ func TestMakeJob_AllFieldsMapped(
 
 	job.FallbackHandler(
 		context.Background(),
-		event,
+		evt,
 	)
 	if got := <-marker; got != "fallback" {
 		t.Errorf(
@@ -107,14 +107,14 @@ func TestMakeJob_NilFallbackPreserved(
 	sub := &models.Subscription[string]{
 		Handler: func(
 			_ context.Context,
-			_ asynxmd.Event[string],
+			_ event.Event[string],
 		) {
 		},
 		FallbackHandler: nil,
 	}
 	job := exec.MakeJob(
 		sub,
-		asynxmd.Event[string]{EventName: "e"},
+		event.Event[string]{EventName: "e"},
 		nil,
 		nil,
 	)
@@ -129,26 +129,26 @@ func TestMakeJob_CallbacksPopulated(
 	sub := &models.Subscription[string]{
 		Handler: func(
 			_ context.Context,
-			_ asynxmd.Event[string],
+			_ event.Event[string],
 		) {
 		},
 	}
 	onPanic := func(
 		_ context.Context,
-		_ asynxmd.Event[string],
+		_ event.Event[string],
 		_ any,
 	) {
 	}
 	onTimeout := func(
 		_ context.Context,
-		_ asynxmd.Event[string],
+		_ event.Event[string],
 		_ time.Duration,
 	) {
 	}
 
 	job := exec.MakeJob(
 		sub,
-		asynxmd.Event[string]{},
+		event.Event[string]{},
 		onPanic,
 		onTimeout,
 	)
@@ -167,13 +167,13 @@ func TestMakeJob_NilCallbacksPreserved(
 	sub := &models.Subscription[string]{
 		Handler: func(
 			_ context.Context,
-			_ asynxmd.Event[string],
+			_ event.Event[string],
 		) {
 		},
 	}
 	job := exec.MakeJob(
 		sub,
-		asynxmd.Event[string]{},
+		event.Event[string]{},
 		nil,
 		nil,
 	)

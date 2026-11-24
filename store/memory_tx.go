@@ -3,7 +3,8 @@ package store
 import (
 	"context"
 	"fmt"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
 	"slices"
 )
 
@@ -52,7 +53,7 @@ func (t *memoryTx) Native() any { return nil }
 
 // Append stores data at (streamID, version) and keeps the stream sorted by
 // version, so versions may arrive in any order. A version already stored
-// returns an error wrapping models.ErrPipelineFailed; an error scheduled with
+// returns an error wrapping failure.ErrPipelineFailed; an error scheduled with
 // SetError for streamID is returned instead, once, with nothing stored. The
 // write is undone if the transaction rolls back.
 func (t *memoryTx) Append(
@@ -99,7 +100,7 @@ func (t *memoryTx) insert(
 	if found {
 		return fmt.Errorf(
 			"%w: version conflict (%s, v%d)",
-			models.ErrPipelineFailed,
+			failure.ErrPipelineFailed,
 			streamID,
 			version,
 		)
@@ -171,11 +172,11 @@ func (t *memoryTx) DropDeliveries(
 
 // PutReceipt stores the receipt for commandID. A receipt that already exists,
 // from this or an earlier transaction, returns an error wrapping
-// models.ErrDuplicateReceipt and is left unchanged.
+// failure.ErrDuplicateReceipt and is left unchanged.
 func (t *memoryTx) PutReceipt(
 	ctx context.Context,
 	commandID string,
-	r models.Receipt,
+	r event.Receipt,
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -188,7 +189,7 @@ func (t *memoryTx) PutReceipt(
 	if _, exists := s.receipts[commandID]; exists {
 		return fmt.Errorf(
 			"%w: %s",
-			models.ErrDuplicateReceipt,
+			failure.ErrDuplicateReceipt,
 			commandID,
 		)
 	}
@@ -222,7 +223,7 @@ func (t *memoryTx) EnqueueDelivery(
 	old := s.deliveries
 	s.deliveries = append(
 		slices.Clone(old),
-		models.Delivery{AggregateID: aggregateID, Version: version},
+		event.Delivery{AggregateID: aggregateID, Version: version},
 	)
 	t.onRollback(func() { s.deliveries = old })
 	return nil

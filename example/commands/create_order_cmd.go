@@ -2,7 +2,7 @@ package commands
 
 import (
 	"github.com/char2cs/asynx/example/domain"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 // CreateOrderCmd creates a new order. It is the command that starts an order's
@@ -25,21 +25,21 @@ func (c CreateOrderCmd) EventName() string { return "OrderCreated" }
 // ShouldSnapshot reports whether a snapshot of the order is written after the command commits.
 func (c CreateOrderCmd) ShouldSnapshot() bool { return false }
 
-// Validate returns models.ErrValidation when Total or Items is not positive or
+// Validate returns failure.ErrValidation when Total or Items is not positive or
 // when the order already exists, and nil otherwise.
 func (c CreateOrderCmd) Validate(
 	current *domain.Order,
 ) error {
 	if c.Total <= 0 {
-		return models.ErrValidation
+		return failure.ErrValidation
 	}
 
 	if c.Items <= 0 {
-		return models.ErrValidation
+		return failure.ErrValidation
 	}
 
 	if current != nil {
-		return models.ErrValidation
+		return failure.ErrValidation
 	}
 
 	return nil

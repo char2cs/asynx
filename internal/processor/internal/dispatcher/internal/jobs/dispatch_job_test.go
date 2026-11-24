@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 func TestJob_MarkSettledClosesSettledOnce(
@@ -45,7 +45,7 @@ func TestJob_MarkUnrunRecordsReason(
 	)
 	ticket := job.Ticket()
 
-	job.MarkUnrun(asynxmd.ErrDeliveryParked)
+	job.MarkUnrun(failure.ErrDeliveryParked)
 
 	if !closed(ticket.Settled) {
 		t.Fatal("not settled after MarkUnrun")
@@ -53,7 +53,7 @@ func TestJob_MarkUnrunRecordsReason(
 
 	if !errors.Is(
 		ticket.Unrun(),
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"unrun = %v",
@@ -72,7 +72,7 @@ func TestJob_SettleHappensOnce(
 	ticket := job.Ticket()
 
 	job.MarkSettled()
-	job.MarkUnrun(asynxmd.ErrDeliveryParked)
+	job.MarkUnrun(failure.ErrDeliveryParked)
 
 	if ticket.Unrun() != nil {
 		t.Fatalf(
@@ -91,13 +91,13 @@ func TestJob_MarkUnrunFirstWins(
 	)
 	ticket := job.Ticket()
 
-	job.MarkUnrun(asynxmd.ErrDeliveryParked)
+	job.MarkUnrun(failure.ErrDeliveryParked)
 	job.MarkSettled()
 	job.MarkUnrun(errors.New("later"))
 
 	if !errors.Is(
 		ticket.Unrun(),
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"unrun = %v",

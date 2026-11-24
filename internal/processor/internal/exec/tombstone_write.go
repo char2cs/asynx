@@ -4,12 +4,13 @@ import (
 	"context"
 	"fmt"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 type tombstoneWrite[T any] struct {
 	executor *CommandExecutor[T]
-	ticket   asynxmd.Ticket
+	ticket   dispatch.Ticket
 }
 
 func (w *tombstoneWrite[T]) commit(
@@ -24,7 +25,7 @@ func (w *tombstoneWrite[T]) commit(
 	if err != nil {
 		return fmt.Errorf(
 			"%w: %w",
-			asynxmd.ErrContextCancelled,
+			failure.ErrContextCancelled,
 			err,
 		)
 	}
@@ -43,7 +44,7 @@ func (w *tombstoneWrite[T]) commit(
 	)
 	if err != nil {
 		e.clearForgetting(aggregateID)
-		w.ticket = asynxmd.Ticket{}
+		w.ticket = dispatch.Ticket{}
 	}
 
 	return err

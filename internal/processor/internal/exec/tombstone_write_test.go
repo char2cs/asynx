@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 func TestTombstoneWrite_CommitRaisesTheFenceAndKeepsTheTicket(
@@ -64,7 +64,7 @@ func TestTombstoneWrite_CommitRefusesAnAggregateAlreadyBeingForgotten(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrForgetInProgress,
+		failure.ErrForgetInProgress,
 	) {
 		t.Fatalf(
 			"commit = %v, want ErrForgetInProgress",
@@ -85,7 +85,7 @@ func TestTombstoneWrite_CommitFailureLowersTheFenceAndKeepsNoTicket(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrValidation,
+		failure.ErrValidation,
 	) {
 		t.Fatalf(
 			"commit = %v, want ErrValidation for an aggregate that does not exist",
@@ -116,7 +116,7 @@ func TestTombstoneWrite_CommitHonoursTheContext(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrContextCancelled,
+		failure.ErrContextCancelled,
 	) {
 		t.Fatalf(
 			"commit = %v, want ErrContextCancelled",

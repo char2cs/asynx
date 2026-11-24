@@ -3,7 +3,8 @@ package exec
 import (
 	"context"
 	"fmt"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/handler"
 	"os"
 	"sync"
 	"time"
@@ -211,24 +212,24 @@ func runFallback[T any](
 // caller's goroutine and a panic propagates to the caller.
 func WithTimeout[T any](
 	ctx context.Context,
-	handler asynxmd.ProjectionHandler[T],
-	event asynxmd.Event[T],
+	callback handler.Projection[T],
+	evt event.Event[T],
 	timeout time.Duration,
 	onPanic func(any),
 	onTimeout func(),
 ) {
 	if timeout == 0 {
-		handler(
+		callback(
 			ctx,
-			event,
+			evt,
 		)
 		return
 	}
 
 	runWithDeadline(
 		ctx,
-		handler,
-		event,
+		callback,
+		evt,
 		timeout,
 		onPanic,
 		onTimeout,
@@ -238,8 +239,8 @@ func WithTimeout[T any](
 
 func runWithDeadline[T any](
 	ctx context.Context,
-	handler asynxmd.ProjectionHandler[T],
-	event asynxmd.Event[T],
+	callback handler.Projection[T],
+	evt event.Event[T],
 	timeout time.Duration,
 	onPanic func(any),
 	onTimeout func(),
@@ -248,8 +249,8 @@ func runWithDeadline[T any](
 	if timeout == 0 {
 		return callRecovering(
 			ctx,
-			handler,
-			event,
+			callback,
+			evt,
 			onPanic,
 		)
 	}
@@ -260,8 +261,8 @@ func runWithDeadline[T any](
 	)
 	go runRecovering(
 		ctx,
-		handler,
-		event,
+		callback,
+		evt,
 		onPanic,
 		done,
 	)
@@ -298,32 +299,32 @@ func awaitOutcome(
 
 func runRecovering[T any](
 	ctx context.Context,
-	handler asynxmd.ProjectionHandler[T],
-	event asynxmd.Event[T],
+	callback handler.Projection[T],
+	evt event.Event[T],
 	onPanic func(any),
 	done chan<- outcome,
 ) {
 	done <- callRecovering(
 		ctx,
-		handler,
-		event,
+		callback,
+		evt,
 		onPanic,
 	)
 }
 
 func callRecovering[T any](
 	ctx context.Context,
-	handler asynxmd.ProjectionHandler[T],
-	event asynxmd.Event[T],
+	callback handler.Projection[T],
+	evt event.Event[T],
 	onPanic func(any),
 ) (result outcome) {
 	defer reportRecoveredPanic(
 		onPanic,
 		&result,
 	)
-	handler(
+	callback(
 		ctx,
-		event,
+		evt,
 	)
 
 	return completed
@@ -382,14 +383,14 @@ func OnHandlerPanic[T any](
 // to stderr and returns. Handler calls it from the goroutine waiting on the
 // handler, at the moment the deadline passes.
 func OnHandlerTimeout[T any](
-	event asynxmd.Event[T],
+	evt event.Event[T],
 	timeout time.Duration,
 ) {
 	fmt.Fprintf(
 		os.Stderr,
 		"asynx: projection handler timed out after %v for event %q\n",
 		timeout,
-		event.EventName,
+		evt.EventName,
 	)
 }
 

@@ -2,20 +2,21 @@ package mockstores
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 )
 
-// Store is a no-op implementation of models.Store. All operations succeed
+// Store is a no-op implementation of storage.Store. All operations succeed
 // without storing or returning any data. Useful when a Store is required but
 // its behavior is irrelevant to the test.
 type Store struct{}
 
-func (s *Store) tx() models.Tx { return stubTx{appendFn: s.Append, deleteFn: s.Delete} }
+func (s *Store) tx() storage.Tx { return stubTx{appendFn: s.Append, deleteFn: s.Delete} }
 
 // Atomically runs fn against a transaction that discards every write.
 func (s *Store) Atomically(
 	_ context.Context,
-	fn func(models.Tx) error,
+	fn func(storage.Tx) error,
 ) error {
 	return fn(s.tx())
 }
@@ -24,8 +25,8 @@ func (s *Store) Atomically(
 func (s *Store) GetReceipt(
 	context.Context,
 	string,
-) (models.Receipt, bool, error) {
-	return models.Receipt{},
+) (event.Receipt, bool, error) {
+	return event.Receipt{},
 		false,
 		nil
 }
@@ -34,7 +35,7 @@ func (s *Store) GetReceipt(
 func (s *Store) PendingDeliveries(
 	context.Context,
 	int,
-) ([]models.Delivery, error) {
+) ([]event.Delivery, error) {
 	return nil,
 		nil
 }

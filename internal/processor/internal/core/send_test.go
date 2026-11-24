@@ -8,7 +8,8 @@ import (
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
 	"github.com/char2cs/asynx/store"
 	"testing"
 	"time"
@@ -47,7 +48,7 @@ func TestProcessor_ContextCancelledBeforeQueue(
 		ctx,
 		cmd,
 	)
-	if err != asynxmd.ErrContextCancelled {
+	if err != failure.ErrContextCancelled {
 		t.Fatalf(
 			"expected ErrContextCancelled, got %v",
 			err,
@@ -96,7 +97,7 @@ func TestProcessor_ContextCancelledWhileWaiting(
 
 	err := <-done
 	if err != nil &&
-		err != asynxmd.ErrContextCancelled {
+		err != failure.ErrContextCancelled {
 		t.Logf(
 			"Send returned: %v (acceptable if completed quickly)",
 			err,
@@ -170,7 +171,7 @@ func TestProcessor_SendContextCancelledDuringWait(
 		cmd,
 	)
 	if err != nil &&
-		err != asynxmd.ErrContextCancelled {
+		err != failure.ErrContextCancelled {
 		t.Logf(
 			"Send returned: %v",
 			err,
@@ -204,7 +205,7 @@ func requireCancelled(
 	err error,
 ) {
 	t.Helper()
-	if err != asynxmd.ErrContextCancelled {
+	if err != failure.ErrContextCancelled {
 		t.Errorf(
 			"expected ErrContextCancelled, got %v",
 			err,
@@ -248,7 +249,7 @@ func TestProcessor_ContextCancelledEarlyCheck(
 		ctx,
 		cmd,
 	)
-	if err != asynxmd.ErrContextCancelled {
+	if err != failure.ErrContextCancelled {
 		t.Fatalf(
 			"expected ErrContextCancelled, got %v",
 			err,
@@ -299,7 +300,7 @@ func TestProcessor_AllSendBranches(
 		ctx2,
 		cmd2,
 	)
-	if err != asynxmd.ErrContextCancelled {
+	if err != failure.ErrContextCancelled {
 		t.Fatalf(
 			"cancelled early should return ErrContextCancelled, got %v",
 			err,
@@ -311,7 +312,7 @@ func TestProcessor_AllSendBranches(
 		ctx,
 		cmd3,
 	)
-	if err != asynxmd.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Fatalf(
 			"validation error should propagate, got %v",
 			err,
@@ -417,7 +418,7 @@ func TestProcessor_SendWait_ValidationError(
 		ctx,
 		cmd,
 	)
-	if err != asynxmd.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Fatalf(
 			"expected ErrValidation, got %v",
 			err,
@@ -439,7 +440,7 @@ func TestProcessor_SendWait_ContextCancelled(
 		ctx,
 		cmd,
 	)
-	if err != asynxmd.ErrContextCancelled {
+	if err != failure.ErrContextCancelled {
 		t.Fatalf(
 			"expected ErrContextCancelled, got %v",
 			err,
@@ -569,7 +570,7 @@ func TestProcessor_Forget_ErasesAndNotifiesHandlers(
 		"o1",
 	); !errors.Is(
 		err,
-		asynxmd.ErrValidation,
+		failure.ErrValidation,
 	) {
 		t.Errorf(
 			"second Forget err = %v, want ErrValidation",
@@ -594,7 +595,7 @@ func TestProcessor_SendWait_GivesUpWaitingButReturnsTheCommittedEvent(
 
 	ctx, cancel := context.WithCancel(context.Background())
 	type result struct {
-		evt asynxmd.Event[order]
+		evt event.Event[order]
 		err error
 	}
 	got := make(
@@ -616,7 +617,7 @@ func TestProcessor_SendWait_GivesUpWaitingButReturnsTheCommittedEvent(
 	r := <-got
 	if !errors.Is(
 		r.err,
-		asynxmd.ErrContextCancelled,
+		failure.ErrContextCancelled,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrContextCancelled",
@@ -679,7 +680,7 @@ type sendsWaitAgain struct {
 
 func (s *sendsWaitAgain) sendWait(
 	ctx context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) {
 	_, err := s.processor.SendWait(
 		ctx,
@@ -698,7 +699,7 @@ func requireSendWaitFromHandler(
 	t.Helper()
 	if !errors.Is(
 		err,
-		asynxmd.ErrSendWaitFromHandler,
+		failure.ErrSendWaitFromHandler,
 	) {
 		t.Fatalf(
 			"SendWait from the handler = %v, want ErrSendWaitFromHandler",
@@ -849,7 +850,7 @@ func BenchmarkSend_WithBusFanout(
 			"OrderCreated",
 			func(
 				ctx context.Context,
-				e asynxmd.Event[order],
+				e event.Event[order],
 			) {
 			},
 		)
@@ -931,7 +932,7 @@ func TestProcessor_Send_ACommandCancelledBeforeItsTurnNeverRuns(
 	cancel()
 	if err := <-victim; !errors.Is(
 		err,
-		asynxmd.ErrContextCancelled,
+		failure.ErrContextCancelled,
 	) {
 		t.Fatalf(
 			"Send = %v, want ErrContextCancelled",

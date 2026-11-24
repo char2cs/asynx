@@ -6,7 +6,10 @@ import (
 	"fmt"
 
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 func (e *CommandExecutor[T]) isForgetting(
@@ -27,7 +30,7 @@ func (e *CommandExecutor[T]) refuseIfForgetting(
 
 	return fmt.Errorf(
 		"%w: %s",
-		asynxmd.ErrForgetInProgress,
+		failure.ErrForgetInProgress,
 		id,
 	)
 }
@@ -135,7 +138,7 @@ func (e *CommandExecutor[T]) refuseFromHandler(
 
 	return fmt.Errorf(
 		"%w: %s",
-		asynxmd.ErrForgetFromHandler,
+		failure.ErrForgetFromHandler,
 		aggregateID,
 	)
 }
@@ -169,7 +172,7 @@ func (e *CommandExecutor[T]) erase(
 	if err != nil {
 		return fmt.Errorf(
 			"%w: %w",
-			asynxmd.ErrForgetFailed,
+			failure.ErrForgetFailed,
 			err,
 		)
 	}
@@ -182,7 +185,7 @@ func (e *CommandExecutor[T]) erase(
 	); err != nil {
 		return fmt.Errorf(
 			"%w: %w",
-			asynxmd.ErrForgetFailed,
+			failure.ErrForgetFailed,
 			err,
 		)
 	}
@@ -214,9 +217,9 @@ func (e *CommandExecutor[T]) eraseStored(
 func droppingAggregate(
 	ctx context.Context,
 	aggregateID string,
-) func(asynxmd.Tx) error {
+) func(storage.Tx) error {
 	return func(
-		tx asynxmd.Tx,
+		tx storage.Tx,
 	) error {
 		return dropAggregate(
 			ctx,
@@ -228,7 +231,7 @@ func droppingAggregate(
 
 func dropAggregate(
 	ctx context.Context,
-	tx asynxmd.Tx,
+	tx storage.Tx,
 	aggregateID string,
 ) error {
 	if err := tx.DeleteStream(
@@ -246,7 +249,7 @@ func dropAggregate(
 
 func (e *CommandExecutor[T]) awaitTombstone(
 	ctx context.Context,
-	t asynxmd.Ticket,
+	t dispatch.Ticket,
 ) error {
 	if t.Final == nil {
 		return nil
@@ -264,7 +267,7 @@ func (e *CommandExecutor[T]) awaitTombstone(
 	if err != nil {
 		return fmt.Errorf(
 			"%w: tombstone delivery: %w",
-			asynxmd.ErrForgetFailed,
+			failure.ErrForgetFailed,
 			err,
 		)
 	}
@@ -274,7 +277,7 @@ func (e *CommandExecutor[T]) awaitTombstone(
 
 func (e *CommandExecutor[T]) waitFinal(
 	ctx context.Context,
-	t asynxmd.Ticket,
+	t dispatch.Ticket,
 ) error {
 	select {
 	case <-t.Final:
@@ -282,7 +285,7 @@ func (e *CommandExecutor[T]) waitFinal(
 	case <-ctx.Done():
 		return fmt.Errorf(
 			"%w: waiting for handlers: %w",
-			asynxmd.ErrForgetFailed,
+			failure.ErrForgetFailed,
 			ctx.Err(),
 		)
 	case <-e.dispatcher.Interrupted():
@@ -291,7 +294,7 @@ func (e *CommandExecutor[T]) waitFinal(
 }
 
 func interruptedWait(
-	t asynxmd.Ticket,
+	t dispatch.Ticket,
 ) error {
 	select {
 	case <-t.Final:
@@ -299,8 +302,8 @@ func interruptedWait(
 	default:
 		return fmt.Errorf(
 			"%w: waiting for handlers: %w",
-			asynxmd.ErrForgetFailed,
-			asynxmd.ErrShuttingDown,
+			failure.ErrForgetFailed,
+			failure.ErrShuttingDown,
 		)
 	}
 }
@@ -314,7 +317,7 @@ func tombstoneWriteError(
 
 	return fmt.Errorf(
 		"%w: %w",
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 		err,
 	)
 }
@@ -324,33 +327,33 @@ func isPlainValidation(
 ) bool {
 	if !errors.Is(
 		err,
-		asynxmd.ErrValidation,
+		failure.ErrValidation,
 	) {
 		return false
 	}
 
 	return !errors.Is(
 		err,
-		asynxmd.ErrSyncProjection,
+		failure.ErrSyncProjection,
 	)
 }
 
 func (e *CommandExecutor[T]) commitTombstone(
 	ctx context.Context,
 	aggregateID string,
-) (asynxmd.Ticket, error) {
+) (dispatch.Ticket, error) {
 	tombstone, err := e.es.WriteTx(
 		ctx,
 		NewForgetCommand[T](aggregateID),
 		e.tombstoneHook(),
 	)
 	if err != nil {
-		return asynxmd.Ticket{},
+		return dispatch.Ticket{},
 			tombstoneWriteError(err)
 	}
 
 	if e.dispatcher == nil {
-		return asynxmd.Ticket{},
+		return dispatch.Ticket{},
 			nil
 	}
 
@@ -363,17 +366,17 @@ func (e *CommandExecutor[T]) commitTombstone(
 
 func (e *CommandExecutor[T]) enqueueTombstone(
 	ctx context.Context,
-	tombstone asynxmd.Event[T],
-) (asynxmd.Ticket, error) {
+	tombstone event.Event[T],
+) (dispatch.Ticket, error) {
 	ticket, err := e.dispatcher.Enqueue(
 		ctx,
-		asynxmd.DispatchRequest[T]{
+		dispatch.Request[T]{
 			Event: tombstone,
 			Ack: ackingTombstone(
 				e.es.Store(),
 				tombstone,
 			),
-			Kind: asynxmd.DispatchTombstone,
+			Kind: dispatch.KindTombstone,
 		},
 	)
 	if err != nil {
@@ -381,7 +384,7 @@ func (e *CommandExecutor[T]) enqueueTombstone(
 			tombstone.AggregateID,
 			err,
 		)
-		return asynxmd.Ticket{},
+		return dispatch.Ticket{},
 			pipelineFailed(err)
 	}
 
@@ -390,8 +393,8 @@ func (e *CommandExecutor[T]) enqueueTombstone(
 }
 
 func ackingTombstone[T any](
-	store asynxmd.Store,
-	tombstone asynxmd.Event[T],
+	store storage.Store,
+	tombstone event.Event[T],
 ) func(context.Context) error {
 	return func(
 		ctx context.Context,
@@ -407,8 +410,8 @@ func ackingTombstone[T any](
 func (e *CommandExecutor[T]) tombstoneHook() esmodels.TxHook[T] {
 	return func(
 		ctx context.Context,
-		tx asynxmd.Tx,
-		evt asynxmd.Event[T],
+		tx storage.Tx,
+		evt event.Event[T],
 	) error {
 		return e.tombstoneSteps(
 			ctx,
@@ -420,8 +423,8 @@ func (e *CommandExecutor[T]) tombstoneHook() esmodels.TxHook[T] {
 
 func (e *CommandExecutor[T]) tombstoneSteps(
 	ctx context.Context,
-	tx asynxmd.Tx,
-	evt asynxmd.Event[T],
+	tx storage.Tx,
+	evt event.Event[T],
 ) error {
 	if err := e.supersedeDeliveriesIfLogged(
 		ctx,
@@ -440,8 +443,8 @@ func (e *CommandExecutor[T]) tombstoneSteps(
 
 func (e *CommandExecutor[T]) supersedeDeliveriesIfLogged(
 	ctx context.Context,
-	tx asynxmd.Tx,
-	tombstone asynxmd.Event[T],
+	tx storage.Tx,
+	tombstone event.Event[T],
 ) error {
 	hasDeliveryLog := e.durableMatch != nil && e.dispatcher != nil
 	if !hasDeliveryLog {
@@ -457,8 +460,8 @@ func (e *CommandExecutor[T]) supersedeDeliveriesIfLogged(
 
 func supersedeDeliveries[T any](
 	ctx context.Context,
-	tx asynxmd.Tx,
-	tombstone asynxmd.Event[T],
+	tx storage.Tx,
+	tombstone event.Event[T],
 ) error {
 	if err := tx.DropDeliveries(
 		ctx,

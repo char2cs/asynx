@@ -7,7 +7,11 @@ import (
 	"github.com/char2cs/asynx/internal/eventstore/internal/replayer"
 	"github.com/char2cs/asynx/internal/eventstore/internal/writer"
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 // EventStore is the implementation behind the eventstore.EventStore interface:
@@ -32,9 +36,9 @@ type EventStore[T any] struct {
 // onCorruption is called when a snapshot cannot be deserialized; pass nil to
 // silently fall back to the cold replay path.
 func New[T any](
-	eventStore asynxmd.Store,
-	snapshotStore asynxmd.SnapshotStore,
-	upcasters map[int]asynxmd.Upcaster,
+	eventStore storage.Store,
+	snapshotStore storage.SnapshotStore,
+	upcasters map[int]event.Upcaster,
 	schemaVersion int,
 	onCorruption func(error),
 ) *EventStore[T] {
@@ -92,7 +96,7 @@ func (es *EventStore[T]) GuardAutoSnapshots(
 // default, drops the failure. Call it once, while wiring, before the store
 // is used from several goroutines.
 func (es *EventStore[T]) ObserveAutoSnapshotErrors(
-	fn func(context.Context, asynxmd.Event[T], error),
+	fn func(context.Context, event.Event[T], error),
 ) {
 	es.reader.SetSnapshotErrorHandler(fn)
 }
@@ -146,15 +150,15 @@ func (es *EventStore[T]) Preload(
 // and retry.
 func (es *EventStore[T]) Write(
 	ctx context.Context,
-	cmd asynxmd.Command[T],
-) (asynxmd.Event[T], error) {
+	cmd command.Command[T],
+) (event.Event[T], error) {
 	evt, err := es.WriteTx(
 		ctx,
 		cmd,
 		nil,
 	)
 	if err != nil {
-		return asynxmd.Event[T]{},
+		return event.Event[T]{},
 			err
 	}
 
@@ -168,7 +172,7 @@ func (es *EventStore[T]) Write(
 		evt,
 	)
 	if err != nil {
-		return asynxmd.Event[T]{},
+		return event.Event[T]{},
 			err
 	}
 
@@ -181,21 +185,21 @@ func (es *EventStore[T]) Write(
 // never writes a snapshot.
 func (es *EventStore[T]) WriteTx(
 	ctx context.Context,
-	cmd asynxmd.Command[T],
+	cmd command.Command[T],
 	hook esmodels.TxHook[T],
-) (asynxmd.Event[T], error) {
+) (event.Event[T], error) {
 	currentPtr, loadedVersion, err := es.loadCurrent(
 		ctx,
 		cmd.AggregateID(),
 	)
 	if err != nil {
-		return asynxmd.Event[T]{},
+		return event.Event[T]{},
 			err
 	}
 
 	err = cmd.Validate(currentPtr)
 	if err != nil {
-		return asynxmd.Event[T]{},
+		return event.Event[T]{},
 			err
 	}
 
@@ -209,7 +213,7 @@ func (es *EventStore[T]) WriteTx(
 		newState,
 	)
 	if err != nil {
-		return asynxmd.Event[T]{},
+		return event.Event[T]{},
 			err
 	}
 
@@ -225,7 +229,7 @@ func (es *EventStore[T]) loadCurrent(
 		ctx,
 		aggregateID,
 	)
-	if err == asynxmd.ErrNotFound {
+	if err == failure.ErrNotFound {
 		return nil,
 			version,
 			nil
@@ -254,12 +258,12 @@ func valueOrZero[T any](
 
 func (es *EventStore[T]) appendAtomically(
 	ctx context.Context,
-	cmd asynxmd.Command[T],
+	cmd command.Command[T],
 	hook esmodels.TxHook[T],
 	loadedVersion int64,
 	previousState T,
 	newState T,
-) (asynxmd.Event[T], error) {
+) (event.Event[T], error) {
 	pending := &pendingAppend[T]{
 		store:         es,
 		cmd:           cmd,
@@ -273,7 +277,7 @@ func (es *EventStore[T]) appendAtomically(
 		pending.inTransaction(ctx),
 	)
 	if err != nil {
-		return asynxmd.Event[T]{},
+		return event.Event[T]{},
 			err
 	}
 
@@ -283,13 +287,13 @@ func (es *EventStore[T]) appendAtomically(
 
 func (es *EventStore[T]) appendWithHook(
 	ctx context.Context,
-	tx asynxmd.Tx,
-	cmd asynxmd.Command[T],
+	tx storage.Tx,
+	cmd command.Command[T],
 	hook esmodels.TxHook[T],
 	loadedVersion int64,
 	previousState T,
 	newState T,
-) (asynxmd.Event[T], error) {
+) (event.Event[T], error) {
 	evt, err := es.writer.AppendTx(
 		ctx,
 		tx,
@@ -324,7 +328,7 @@ func (es *EventStore[T]) appendWithHook(
 // through the snapshot error handler, Write returns it).
 func (es *EventStore[T]) Snapshot(
 	ctx context.Context,
-	evt asynxmd.Event[T],
+	evt event.Event[T],
 ) error {
 	return es.writer.Snapshot(
 		ctx,
@@ -335,7 +339,7 @@ func (es *EventStore[T]) Snapshot(
 // Store returns the backing event store, the same instance appends run on. The
 // command executor uses it to enlist its own writes in the transaction of an
 // append and to read and acknowledge deliveries.
-func (es *EventStore[T]) Store() asynxmd.Store {
+func (es *EventStore[T]) Store() storage.Store {
 	return es.writer.EventStore()
 }
 
@@ -364,7 +368,7 @@ func (es *EventStore[T]) Replay(
 	aggregateID string,
 	fromVersion int64,
 	toVersion int64,
-	fn asynxmd.ProjectionHandler[T],
+	fn handler.Projection[T],
 ) error {
 	return es.replayer.Replay(
 		ctx,

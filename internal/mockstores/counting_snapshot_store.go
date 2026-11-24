@@ -2,14 +2,14 @@ package mockstores
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/storage"
 )
 
-// CountingSnapshotStore wraps a models.SnapshotStore and records how often Get
+// CountingSnapshotStore wraps a storage.SnapshotStore and records how often Get
 // was called and how many bytes it returned. Use it to assert that a snapshot
 // read does not scale with the number of snapshots ever written.
 type CountingSnapshotStore struct {
-	Inner    models.SnapshotStore
+	Inner    storage.SnapshotStore
 	GetCalls int
 	GetBytes int
 }

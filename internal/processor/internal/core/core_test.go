@@ -8,7 +8,14 @@ import (
 	"github.com/char2cs/asynx/internal/mockbuses"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/pubsub"
+	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/models/subscription"
 	"github.com/char2cs/asynx/store"
 	"strings"
 	"sync"
@@ -59,7 +66,7 @@ func TestProcessor_ValidationError(
 		ctx,
 		cmd,
 	)
-	if err != asynxmd.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Fatalf(
 			"expected ErrValidation, got %v",
 			err,
@@ -86,7 +93,7 @@ func TestProcessor_ValidationNoWrite(
 		ctx,
 		cmd2,
 	)
-	if err != asynxmd.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Fatalf(
 			"expected ErrValidation, got %v",
 			err,
@@ -236,7 +243,7 @@ func TestProcessor_EventPublishedToRealBus(
 	ctx := context.Background()
 
 	forwarded := &eventForwarder{events: make(
-		chan asynxmd.Event[order],
+		chan event.Event[order],
 		1,
 	)}
 	channelBus.Subscribe(
@@ -257,10 +264,10 @@ func TestProcessor_EventPublishedToRealBus(
 	}
 
 	select {
-	case event := <-forwarded.events:
+	case evt := <-forwarded.events:
 		expectEventName(
 			t,
-			event.EventName,
+			evt.EventName,
 		)
 	case <-time.After(1 * time.Second):
 		t.Fatalf("event not published within timeout")
@@ -481,12 +488,12 @@ func TestWithPublishErrorHandler_IsInvokedOnPublishError(
 }
 
 type eventForwarder struct {
-	events chan asynxmd.Event[order]
+	events chan event.Event[order]
 }
 
 func (f *eventForwarder) forward(
 	_ context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) {
 	f.events <- e
 }
@@ -497,7 +504,7 @@ type contextForwarder struct {
 
 func (f *contextForwarder) forward(
 	ctx context.Context,
-	_ asynxmd.Event[order],
+	_ event.Event[order],
 ) {
 	f.contexts <- ctx
 }
@@ -509,7 +516,7 @@ type publishErrorFlag struct {
 
 func (f *publishErrorFlag) report(
 	context.Context,
-	asynxmd.Event[mocks.Order],
+	event.Event[mocks.Order],
 	error,
 ) {
 	f.mu.Lock()
@@ -542,7 +549,7 @@ func newHandlerGate(
 
 func (g *handlerGate) block(
 	context.Context,
-	asynxmd.Event[order],
+	event.Event[order],
 ) {
 	close(g.entered)
 	<-g.release
@@ -550,7 +557,7 @@ func (g *handlerGate) block(
 
 func (g *handlerGate) holdIfSlow(
 	_ context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) {
 	if e.AggregateID == "slow" {
 		g.entered <- struct{}{}
@@ -564,15 +571,15 @@ type callCounter struct {
 
 func (c *callCounter) onEvent(
 	context.Context,
-	asynxmd.Event[order],
+	event.Event[order],
 ) {
 	c.calls.Add(1)
 }
 
 func (c *callCounter) onProjection(
 	context.Context,
-	asynxmd.Tx,
-	asynxmd.Event[order],
+	storage.Tx,
+	event.Event[order],
 ) error {
 	c.calls.Add(1)
 	return nil
@@ -580,7 +587,7 @@ func (c *callCounter) onProjection(
 
 func (c *callCounter) onSnapshotError(
 	context.Context,
-	asynxmd.Event[order],
+	event.Event[order],
 	error,
 ) {
 	c.calls.Add(1)
@@ -588,7 +595,7 @@ func (c *callCounter) onSnapshotError(
 
 func (c *callCounter) onDeliveryError(
 	context.Context,
-	asynxmd.Event[order],
+	event.Event[order],
 	error,
 	int,
 ) {
@@ -597,7 +604,7 @@ func (c *callCounter) onDeliveryError(
 
 func (c *callCounter) onDeliveryPanic(
 	context.Context,
-	asynxmd.Event[order],
+	event.Event[order],
 	any,
 ) {
 	c.calls.Add(1)
@@ -611,7 +618,7 @@ type blockingTestBus[T any] struct {
 // PublishSync.
 func (b *blockingTestBus[T]) Publish(
 	_ context.Context,
-	_ asynxmd.Event[T],
+	_ event.Event[T],
 ) error {
 	return nil
 }
@@ -621,7 +628,7 @@ func (b *blockingTestBus[T]) Publish(
 // is stuck.
 func (b *blockingTestBus[T]) PublishSync(
 	_ context.Context,
-	_ asynxmd.Event[T],
+	_ event.Event[T],
 ) error {
 	<-b.unblockCh
 	return nil
@@ -631,8 +638,8 @@ func (b *blockingTestBus[T]) PublishSync(
 // subscribers.
 func (b *blockingTestBus[T]) Subscribe(
 	_ string,
-	_ asynxmd.ProjectionHandler[T],
-	_ ...asynxmd.SubscriptionOpt[T],
+	_ handler.Projection[T],
+	_ ...subscription.Opt[T],
 ) (string, error) {
 	return "",
 		nil
@@ -659,7 +666,7 @@ type fixture struct {
 	p    *Processor[order]
 	s    store.Memory
 	snap store.SnapshotMemory
-	b    asynxmd.Bus[order]
+	b    pubsub.Bus[order]
 }
 
 func newFixture(
@@ -700,7 +707,7 @@ type healthGatedDelivery struct {
 
 func (g healthGatedDelivery) deliver(
 	context.Context,
-	asynxmd.Event[order],
+	event.Event[order],
 ) error {
 	if g.healthy.Load() {
 		return nil
@@ -720,7 +727,7 @@ func parkingOpts(
 	extra ...models.Opt[order],
 ) []models.Opt[order] {
 	gated := healthGatedDelivery{healthy: healthy}
-	subs := []asynxmd.DurableSub[order]{{
+	subs := []subscription.Durable[order]{{
 		Match:   always,
 		Handler: gated.deliver,
 	}}
@@ -797,7 +804,7 @@ type flakyDelivery struct {
 
 func (d *flakyDelivery) deliver(
 	context.Context,
-	asynxmd.Event[order],
+	event.Event[order],
 ) error {
 	switch d.attempts.Add(1) {
 	case 1:
@@ -820,7 +827,7 @@ func TestProcessor_DurableDeliveryOptions_RetryReportAndPanicHandling(
 		t,
 		s,
 		models.WithDurableDelivery[order](updatedEvent),
-		models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
+		models.WithDurableSubscribers([]subscription.Durable[order]{{
 			Match:   always,
 			Handler: flaky.deliver,
 		}}),
@@ -889,7 +896,7 @@ type deadLetterRecorder struct {
 
 func (r *deadLetterRecorder) record(
 	_ context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 	_ error,
 ) error {
 	r.versions <- e.Version
@@ -1041,7 +1048,7 @@ type crossInstanceWait struct {
 
 func (w *crossInstanceWait) wait(
 	ctx context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) {
 	_, err := w.other.SendWait(
 		ctx,
@@ -1082,7 +1089,7 @@ func awaitOtherInstance(
 func mustNew[T any](
 	tb testing.TB,
 	es eventstore.EventStore[T],
-	bus asynxmd.Bus[T],
+	bus pubsub.Bus[T],
 	opts ...models.Opt[T],
 ) *Processor[T] {
 	tb.Helper()
@@ -1131,10 +1138,10 @@ func TestNew_AFactoryReplacesTheDefaultDispatcher(
 	}
 
 	requests := fake.Requests()
-	wrongRequests := len(requests) != 1 || requests[0].Kind != asynxmd.DispatchEvent || requests[0].Event.AggregateID != "a"
+	wrongRequests := len(requests) != 1 || requests[0].Kind != dispatch.KindEvent || requests[0].Event.AggregateID != "a"
 	if wrongRequests {
 		t.Errorf(
-			"requests = %+v, want the one DispatchEvent of a",
+			"requests = %+v, want the one dispatch.KindEvent of a",
 			requests,
 		)
 	}
@@ -1145,22 +1152,22 @@ type failingFactory struct {
 }
 
 func (f failingFactory) build(
-	asynxmd.DispatcherConfig[order],
-) (asynxmd.Dispatcher[order], error) {
+	dispatcher.Config[order],
+) (dispatcher.Dispatcher[order], error) {
 	return nil,
 		f.err
 }
 
 func noDispatcherFactory(
-	asynxmd.DispatcherConfig[order],
-) (asynxmd.Dispatcher[order], error) {
+	dispatcher.Config[order],
+) (dispatcher.Dispatcher[order], error) {
 	return nil,
 		nil
 }
 
 func typedNilDispatcherFactory(
-	asynxmd.DispatcherConfig[order],
-) (asynxmd.Dispatcher[order], error) {
+	dispatcher.Config[order],
+) (dispatcher.Dispatcher[order], error) {
 	return (*mockbuses.Dispatcher[order])(nil),
 		nil
 }
@@ -1314,7 +1321,7 @@ func (tt factoryCase) check(
 
 func ignoresPublishError(
 	context.Context,
-	asynxmd.Event[order],
+	event.Event[order],
 	error,
 ) {
 }
@@ -1538,7 +1545,7 @@ func TestProcessor_IntegrationCancelDuringBurst(
 		ctx,
 		cmd,
 	)
-	if err != asynxmd.ErrContextCancelled {
+	if err != failure.ErrContextCancelled {
 		t.Fatalf(
 			"expected ErrContextCancelled, got %v",
 			err,
@@ -1582,7 +1589,7 @@ func sendValidOrInvalid(
 			Total: total,
 		},
 	)
-	if err == asynxmd.ErrValidation {
+	if err == failure.ErrValidation {
 		atomic.AddInt32(
 			invalidCount,
 			1,
@@ -1764,7 +1771,7 @@ func TestProcessor_IntegrationEventPublishingReliability(
 
 	ctx := context.Background()
 	eventsChan := make(
-		chan asynxmd.Event[order],
+		chan event.Event[order],
 		100,
 	)
 
@@ -1813,12 +1820,12 @@ func TestProcessor_IntegrationEventPublishingReliability(
 
 type eventBuffer struct {
 	t      *testing.T
-	events chan asynxmd.Event[order]
+	events chan event.Event[order]
 }
 
 func (b *eventBuffer) bufferOrDrop(
 	_ context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) {
 	select {
 	case b.events <- e:
@@ -1828,7 +1835,7 @@ func (b *eventBuffer) bufferOrDrop(
 }
 
 func countUntil(
-	eventsChan chan asynxmd.Event[order],
+	eventsChan chan event.Event[order],
 	timeout <-chan time.Time,
 ) int {
 	received := 0
@@ -1846,7 +1853,7 @@ func countUntil(
 }
 
 func pollEvent(
-	eventsChan chan asynxmd.Event[order],
+	eventsChan chan event.Event[order],
 	timeout <-chan time.Time,
 ) (got int, more bool) {
 	select {

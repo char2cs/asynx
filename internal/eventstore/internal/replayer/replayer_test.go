@@ -12,19 +12,20 @@ import (
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/mockstores"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/char2cs/asynx/store"
 )
 
 type order = mocks.Order
 
 type eventCollector struct {
-	events []asynxmd.Event[order]
+	events []event.Event[order]
 }
 
 func (c *eventCollector) collect(
 	_ context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) {
 	c.events = append(
 		c.events,
@@ -83,8 +84,8 @@ func (u upcastStepRecorder) upcast(
 var storageErr = errors.New("storage failure")
 
 func newTestReplayer(
-	es asynxmd.Store,
-	upcasters map[int]asynxmd.Upcaster,
+	es storage.Store,
+	upcasters map[int]event.Upcaster,
 	schemaVersion int,
 ) *Replayer[order] {
 	return New[order](
@@ -268,7 +269,7 @@ func TestHydrate_EmptyPatches_NoOp(
 func TestHydrate_WithUpcasting_WritesAutoSnapshot(
 	t *testing.T,
 ) {
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		1: keepPayloadUpcaster,
 	}
 	r := newTestReplayer(
@@ -338,7 +339,7 @@ func TestHydrate_NoAutoSnapshot_WhenNoUpcasting(
 func TestHydrate_MarshalSeedError(
 	t *testing.T,
 ) {
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		1: keepPayloadUpcaster,
 	}
 	r := New[mocks.ErrMarshal](
@@ -367,7 +368,7 @@ func TestHydrate_UnmarshalResultError(
 ) {
 	r := New[mocks.BadUnmarshal](
 		store.New(),
-		make(map[int]asynxmd.Upcaster),
+		make(map[int]event.Upcaster),
 		1,
 		mocks.BadUnmarshal{},
 	)
@@ -390,7 +391,7 @@ func TestHydrate_UpcasterError_PropagatesFast(
 	t *testing.T,
 ) {
 	upcastErr := errors.New("upcaster broken")
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		1: failingUpcaster{err: upcastErr}.upcast,
 	}
 	r := newTestReplayer(
@@ -434,7 +435,7 @@ func expectPanicPropagated() {
 func TestHydrate_UpcasterPanic_Propagates(
 	t *testing.T,
 ) {
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		1: panickingUpcaster,
 	}
 	r := newTestReplayer(
@@ -745,7 +746,7 @@ func TestReplay_StorageError(
 		0,
 		func(
 			ctx context.Context,
-			e asynxmd.Event[order],
+			e event.Event[order],
 		) {
 		},
 	)
@@ -797,7 +798,7 @@ func TestReplay_CorruptEventBlob(
 		0,
 		func(
 			ctx context.Context,
-			e asynxmd.Event[order],
+			e event.Event[order],
 		) {
 		},
 	)
@@ -810,7 +811,7 @@ func TestReplay_NoAutoSnapshot(
 	t *testing.T,
 ) {
 	es := store.New()
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		1: keepPayloadUpcaster,
 	}
 	r := newTestReplayer(
@@ -840,7 +841,7 @@ func TestReplay_NoAutoSnapshot(
 		0,
 		func(
 			ctx context.Context,
-			e asynxmd.Event[order],
+			e event.Event[order],
 		) {
 		},
 	)
@@ -856,7 +857,7 @@ func TestUpcast_ChainApplied(
 	t *testing.T,
 ) {
 	var calls []int
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		1: upcastStepRecorder{calls: &calls, step: 1}.upcast,
 
 		2: upcastStepRecorder{calls: &calls, step: 2}.upcast,
@@ -899,7 +900,7 @@ func TestUpcast_ChainApplied(
 func TestUpcast_MissingUpcasterSkipped(
 	t *testing.T,
 ) {
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		2: keepPayloadUpcaster,
 	}
 	r := newTestReplayer(
@@ -932,7 +933,7 @@ func TestUpcast_ErrorWrapped(
 	t *testing.T,
 ) {
 	inner := errors.New("inner")
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		1: failingUpcaster{err: inner}.upcast,
 	}
 	r := newTestReplayer(
@@ -1117,7 +1118,7 @@ func TestReplay_UpcasterError(
 	t *testing.T,
 ) {
 	upcastErr := errors.New("upcaster broken")
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		1: failingUpcaster{err: upcastErr}.upcast,
 	}
 	es := store.New()
@@ -1194,7 +1195,7 @@ func TestReplay_PatchApplyError(
 		0,
 		func(
 			ctx context.Context,
-			e asynxmd.Event[order],
+			e event.Event[order],
 		) {
 		},
 	)
@@ -1224,7 +1225,7 @@ func TestReplay_MarshalStateZeroValueError(
 
 	r := New[mocks.ErrMarshal](
 		es,
-		make(map[int]asynxmd.Upcaster),
+		make(map[int]event.Upcaster),
 		1,
 		mocks.ErrMarshal{},
 	)
@@ -1236,7 +1237,7 @@ func TestReplay_MarshalStateZeroValueError(
 		0,
 		func(
 			ctx context.Context,
-			e asynxmd.Event[mocks.ErrMarshal],
+			e event.Event[mocks.ErrMarshal],
 		) {
 		},
 	)
@@ -1266,7 +1267,7 @@ func TestReplay_UnmarshalCurrentError(
 
 	r := New[mocks.BadUnmarshal](
 		es,
-		make(map[int]asynxmd.Upcaster),
+		make(map[int]event.Upcaster),
 		1,
 		mocks.BadUnmarshal{},
 	)
@@ -1278,7 +1279,7 @@ func TestReplay_UnmarshalCurrentError(
 		0,
 		func(
 			ctx context.Context,
-			e asynxmd.Event[mocks.BadUnmarshal],
+			e event.Event[mocks.BadUnmarshal],
 		) {
 		},
 	)
@@ -1495,7 +1496,7 @@ func mustReplay(
 
 	noopHandler := func(
 		_ context.Context,
-		_ asynxmd.Event[order],
+		_ event.Event[order],
 	) {
 	}
 	err := r.Replay(

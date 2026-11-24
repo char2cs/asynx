@@ -7,7 +7,10 @@ import (
 	"testing"
 	"time"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/subscription"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
 )
@@ -23,7 +26,7 @@ func TestRetryLoop_SettlesTheJobAfterTheFirstAttempt(
 		),
 		job: &job,
 	}
-	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
+	f := newFixture(dispatcher.Config[int]{DurableSubs: []subscription.Durable[int]{{
 		Match:   matchAnyEvent,
 		Handler: recorder.recordSettlement,
 	}}})
@@ -54,7 +57,7 @@ func TestRetryLoop_RetriesOnlyTheFailedSubscribers(
 ) {
 	var good countingHandler
 	var flaky failsTwiceThenSucceeds
-	f := newFixture(asynxmd.DispatcherConfig[int]{MaxAttempts: 5, DurableSubs: []asynxmd.DurableSub[int]{
+	f := newFixture(dispatcher.Config[int]{MaxAttempts: 5, DurableSubs: []subscription.Durable[int]{
 		{Match: matchAnyEvent, Handler: good.countRun},
 		{Match: matchAnyEvent, Handler: flaky.failTwiceThenSucceed},
 	}})
@@ -89,7 +92,7 @@ func TestRetryLoop_StopsAtTheAttemptCap(
 	t *testing.T,
 ) {
 	down := countingHandler{err: errors.New("down")}
-	f := newFixture(asynxmd.DispatcherConfig[int]{MaxAttempts: 4, DurableSubs: []asynxmd.DurableSub[int]{{
+	f := newFixture(dispatcher.Config[int]{MaxAttempts: 4, DurableSubs: []subscription.Durable[int]{{
 		Match:   matchAnyEvent,
 		Handler: down.countRun,
 	}}})
@@ -105,7 +108,7 @@ func TestRetryLoop_StopsAtTheAttemptCap(
 		job,
 	); !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"Deliver = %v, want ErrDeliveryParked",
@@ -124,7 +127,7 @@ func TestRetryLoop_StopsAtTheAttemptCap(
 func TestRetryLoop_DoublesTheBackoffUpToTheMaximum(
 	t *testing.T,
 ) {
-	f := newFixture(asynxmd.DispatcherConfig[int]{RetryInitial: time.Millisecond, RetryMax: 3 * time.Millisecond})
+	f := newFixture(dispatcher.Config[int]{RetryInitial: time.Millisecond, RetryMax: 3 * time.Millisecond})
 	job, halt := f.begin(
 		t,
 		acked("test.event"),
@@ -133,7 +136,7 @@ func TestRetryLoop_DoublesTheBackoffUpToTheMaximum(
 		deliverer: f.deliverer.(*durableDeliverer[int]),
 		halt:      halt,
 		job:       job,
-		pending:   []asynxmd.DurableSub[int]{failing(errors.New("down"))},
+		pending:   []subscription.Durable[int]{failing(errors.New("down"))},
 		attempt:   1,
 		backoff:   time.Millisecond,
 	}
@@ -176,7 +179,7 @@ func assertBackoff(
 func TestRetryLoop_AParkedJobIsNotRetriedWhenItsBackoffEnds(
 	t *testing.T,
 ) {
-	f := newFixture(asynxmd.DispatcherConfig[int]{})
+	f := newFixture(dispatcher.Config[int]{})
 	job, _ := f.begin(
 		t,
 		acked("test.event"),
@@ -211,7 +214,7 @@ func requireParkedWait(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"wait on a parked job = %v, want ErrDeliveryParked: its backoff ended after the park and it would run its handlers again",
@@ -228,7 +231,7 @@ type recordsSettlementAtSecondRun struct {
 
 func (r *recordsSettlementAtSecondRun) recordSettlement(
 	context.Context,
-	asynxmd.Event[int],
+	event.Event[int],
 ) error {
 	if r.runs.Add(1) == 1 {
 		return errors.New("not yet")
@@ -244,7 +247,7 @@ type failsTwiceThenSucceeds struct {
 
 func (f *failsTwiceThenSucceeds) failTwiceThenSucceed(
 	context.Context,
-	asynxmd.Event[int],
+	event.Event[int],
 ) error {
 	if f.runs.Add(1) < 3 {
 		return errors.New("flaky")

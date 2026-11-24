@@ -2,7 +2,7 @@ package write_test
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
 	"github.com/char2cs/asynx/store"
 	"github.com/char2cs/asynx/store/storetest/internal/write"
 	"slices"
@@ -34,7 +34,7 @@ func TestDeliveries_EnqueueVersionsOneUpwardInOrder(
 		s,
 		count+1,
 	)
-	want := []models.Delivery{
+	want := []event.Delivery{
 		{AggregateID: "a", Version: 1},
 		{AggregateID: "a", Version: 2},
 		{AggregateID: "a", Version: 3},
@@ -55,9 +55,9 @@ func TestEraseDeliveries_DropsOnlyThatAggregatesEntries(
 	t *testing.T,
 ) {
 	s := store.New()
-	b1 := models.Delivery{AggregateID: "b", Version: 1}
+	b1 := event.Delivery{AggregateID: "b", Version: 1}
 	seed := write.Transaction(
-		write.Delivery(models.Delivery{AggregateID: "a", Version: 1}),
+		write.Delivery(event.Delivery{AggregateID: "a", Version: 1}),
 		write.Delivery(b1),
 		write.EraseDeliveries("a"),
 	)
@@ -80,7 +80,7 @@ func TestEraseDeliveries_DropsOnlyThatAggregatesEntries(
 	)
 	if !slices.Equal(
 		got,
-		[]models.Delivery{b1},
+		[]event.Delivery{b1},
 	) {
 		t.Fatalf(
 			"pending = %v, want only b's entry",

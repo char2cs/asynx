@@ -3,7 +3,8 @@ package write_test
 import (
 	"context"
 	"errors"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/char2cs/asynx/store"
 	"github.com/char2cs/asynx/store/storetest/internal/write"
 	"testing"
@@ -13,7 +14,7 @@ var errAbort = errors.New("abort")
 
 func readStream(
 	t *testing.T,
-	s models.Store,
+	s storage.Store,
 	streamID string,
 ) [][]byte {
 	t.Helper()
@@ -35,9 +36,9 @@ func readStream(
 
 func pendingOf(
 	t *testing.T,
-	s models.Store,
+	s storage.Store,
 	limit int,
-) []models.Delivery {
+) []event.Delivery {
 	t.Helper()
 	pending, err := s.PendingDeliveries(
 		context.Background(),

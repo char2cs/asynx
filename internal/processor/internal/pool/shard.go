@@ -4,7 +4,7 @@ import (
 	"sync"
 
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 // Shard is one command queue of the pool. A single dispatcher goroutine reads
@@ -135,7 +135,7 @@ func (s *Shard[T]) failEnvelope(
 		return
 	}
 
-	envelope.Reject(asynxmd.ErrShuttingDown)
+	envelope.Reject(failure.ErrShuttingDown)
 }
 
 func (s *Shard[T]) workerLoop(
@@ -166,7 +166,7 @@ func (s *Shard[T]) serve(
 
 	if len(mailbox) >= s.mailboxLimit {
 		s.mailboxMu.Unlock()
-		job.Envelope.Reject(asynxmd.ErrQueueFull)
+		job.Envelope.Reject(failure.ErrQueueFull)
 		return
 	}
 

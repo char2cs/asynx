@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 // Send runs cmd on the shard that owns its aggregate and returns its event once
@@ -24,8 +26,8 @@ import (
 // returns ErrContextCancelled.
 func (p *Processor[T]) Send(
 	ctx context.Context,
-	cmd asynxmd.Command[T],
-) (asynxmd.Event[T], error) {
+	cmd command.Command[T],
+) (event.Event[T], error) {
 	p.lifeMu.Lock()
 	refused := p.isShuttingDown()
 	if !refused {
@@ -34,15 +36,15 @@ func (p *Processor[T]) Send(
 
 	p.lifeMu.Unlock()
 	if refused {
-		return asynxmd.Event[T]{},
-			asynxmd.ErrShuttingDown
+		return event.Event[T]{},
+			failure.ErrShuttingDown
 	}
 
 	defer p.sends.Done()
 
 	if ctx.Err() != nil {
-		return asynxmd.Event[T]{},
-			asynxmd.ErrContextCancelled
+		return event.Event[T]{},
+			failure.ErrContextCancelled
 	}
 
 	commands, envelope := p.enqueueTarget(cmd)
@@ -62,8 +64,8 @@ func (p *Processor[T]) Send(
 // ctx ends while waiting, the committed event with ErrContextCancelled.
 func (p *Processor[T]) SendWait(
 	ctx context.Context,
-	cmd asynxmd.Command[T],
-) (asynxmd.Event[T], error) {
+	cmd command.Command[T],
+) (event.Event[T], error) {
 	p.lifeMu.Lock()
 	refused := p.isShuttingDown()
 	if !refused {
@@ -72,8 +74,8 @@ func (p *Processor[T]) SendWait(
 
 	p.lifeMu.Unlock()
 	if refused {
-		return asynxmd.Event[T]{},
-			asynxmd.ErrShuttingDown
+		return event.Event[T]{},
+			failure.ErrShuttingDown
 	}
 
 	defer p.sends.Done()
@@ -82,7 +84,7 @@ func (p *Processor[T]) SendWait(
 		ctx,
 		cmd,
 	); err != nil {
-		return asynxmd.Event[T]{},
+		return event.Event[T]{},
 			err
 	}
 
@@ -97,25 +99,25 @@ func (p *Processor[T]) SendWait(
 
 func (p *Processor[T]) refuseSendWait(
 	ctx context.Context,
-	cmd asynxmd.Command[T],
+	cmd command.Command[T],
 ) error {
 	if p.dispatcher != nil &&
 		p.dispatcher.InHandler(
 			ctx,
 			cmd.AggregateID(),
 		) {
-		return asynxmd.ErrSendWaitFromHandler
+		return failure.ErrSendWaitFromHandler
 	}
 
 	if ctx.Err() != nil {
-		return asynxmd.ErrContextCancelled
+		return failure.ErrContextCancelled
 	}
 
 	return nil
 }
 
 func (p *Processor[T]) enqueueTarget(
-	cmd asynxmd.Command[T],
+	cmd command.Command[T],
 ) (chan<- *models.CommandEnvelope[T], *models.CommandEnvelope[T]) {
 	shardIndex := p.router.Route(
 		cmd.AggregateID(),
@@ -133,15 +135,15 @@ func (p *Processor[T]) sendAndWait(
 	ctx context.Context,
 	commands chan<- *models.CommandEnvelope[T],
 	envelope *models.CommandEnvelope[T],
-) (asynxmd.Event[T], error) {
+) (event.Event[T], error) {
 	select {
 	case commands <- envelope:
 	case <-ctx.Done():
-		return asynxmd.Event[T]{},
-			asynxmd.ErrContextCancelled
+		return event.Event[T]{},
+			failure.ErrContextCancelled
 	default:
-		return asynxmd.Event[T]{},
-			asynxmd.ErrQueueFull
+		return event.Event[T]{},
+			failure.ErrQueueFull
 	}
 
 	if p.onSendPending != nil {
@@ -165,15 +167,15 @@ func (p *Processor[T]) sendAndWait(
 		)
 	case <-ctx.Done():
 		envelope.Abandon()
-		return asynxmd.Event[T]{},
-			asynxmd.ErrContextCancelled
+		return event.Event[T]{},
+			failure.ErrContextCancelled
 	}
 }
 
 func awaitResult[T any](
 	ctx context.Context,
 	envelope *models.CommandEnvelope[T],
-) (asynxmd.Event[T], error) {
+) (event.Event[T], error) {
 	select {
 	case result := <-envelope.ResultChan:
 		return awaitHandlers(
@@ -181,15 +183,15 @@ func awaitResult[T any](
 			result,
 		)
 	case <-ctx.Done():
-		return asynxmd.Event[T]{},
-			asynxmd.ErrContextCancelled
+		return event.Event[T]{},
+			failure.ErrContextCancelled
 	}
 }
 
 func awaitHandlers[T any](
 	ctx context.Context,
 	result models.CommandResult[T],
-) (asynxmd.Event[T], error) {
+) (event.Event[T], error) {
 	if result.Err != nil ||
 		result.Wait == nil {
 		return result.Event,
@@ -199,10 +201,10 @@ func awaitHandlers[T any](
 	err := result.Wait(ctx)
 	if errors.Is(
 		err,
-		asynxmd.ErrContextCancelled,
+		failure.ErrContextCancelled,
 	) {
 		return result.Event,
-			asynxmd.ErrContextCancelled
+			failure.ErrContextCancelled
 	}
 
 	return result.Event,
@@ -238,13 +240,13 @@ func (p *Processor[T]) Forget(
 
 	p.lifeMu.Unlock()
 	if refused {
-		return asynxmd.ErrShuttingDown
+		return failure.ErrShuttingDown
 	}
 
 	defer p.forgets.Done()
 
 	if ctx.Err() != nil {
-		return asynxmd.ErrContextCancelled
+		return failure.ErrContextCancelled
 	}
 
 	return p.executor.Forget(

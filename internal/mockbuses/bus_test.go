@@ -2,7 +2,7 @@ package mockbuses
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
 	"testing"
 )
 
@@ -13,7 +13,7 @@ func TestBus_SucceedsSilently(
 	ctx := context.Background()
 	if err := b.Publish(
 		ctx,
-		models.Event[fakeOrder]{},
+		event.Event[fakeOrder]{},
 	); err != nil {
 		t.Fatalf(
 			"Publish = %v, want nil",
@@ -23,7 +23,7 @@ func TestBus_SucceedsSilently(
 
 	if err := b.PublishSync(
 		ctx,
-		models.Event[fakeOrder]{},
+		event.Event[fakeOrder]{},
 	); err != nil {
 		t.Fatalf(
 			"PublishSync = %v, want nil",

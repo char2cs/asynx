@@ -3,7 +3,8 @@ package api
 import (
 	"context"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	"github.com/char2cs/asynx/models/event"
 )
 
 // Sender is the write side of the processor: commands in, committed events out.
@@ -16,16 +17,16 @@ type Sender[T any] interface {
 	// shard has no room and ErrContextCancelled when ctx ends first.
 	Send(
 		ctx context.Context,
-		cmd asynxmd.Command[T],
-	) (asynxmd.Event[T], error)
+		cmd command.Command[T],
+	) (event.Event[T], error)
 	// SendWait is Send that also waits for the event's handlers to run once,
 	// returning ErrSendWaitFromHandler when called from a handler of the same
 	// aggregate. When ctx ends while waiting it returns the committed event
 	// with ErrContextCancelled.
 	SendWait(
 		ctx context.Context,
-		cmd asynxmd.Command[T],
-	) (asynxmd.Event[T], error)
+		cmd command.Command[T],
+	) (event.Event[T], error)
 	// Forget delivers a tombstone for the aggregate and then erases its
 	// stream, snapshot and delivery entries. A later command for it is
 	// rejected with ErrForgetInProgress while the erase runs.

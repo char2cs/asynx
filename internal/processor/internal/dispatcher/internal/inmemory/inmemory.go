@@ -4,7 +4,8 @@ import (
 	"context"
 	"sync"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/dispatcher"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates/contracts"
@@ -15,9 +16,9 @@ import (
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/workers"
 )
 
-var _ asynxmd.Dispatcher[int] = (*dispatcher[int])(nil)
+var _ dispatcher.Dispatcher[int] = (*inMemoryDispatcher[int])(nil)
 
-type dispatcher[T any] struct {
+type inMemoryDispatcher[T any] struct {
 	registry aggregates.Registry[jobs.Job[T]]
 	tracker  tracker.Tracker[T]
 	workers  workers.Pool[T]
@@ -41,15 +42,15 @@ type dispatcher[T any] struct {
 // handlers), delivery (the durable attempt loop) and workers (the delivery of
 // one job). The dispatcher owns the lifecycle: Close, Interrupt and WaitIdle.
 func New[T any](
-	cfg asynxmd.DispatcherConfig[T],
-) asynxmd.Dispatcher[T] {
+	cfg dispatcher.Config[T],
+) dispatcher.Dispatcher[T] {
 	return newDispatcher(cfg)
 }
 
 func newDispatcher[T any](
-	cfg asynxmd.DispatcherConfig[T],
-) *dispatcher[T] {
-	d := &dispatcher[T]{
+	cfg dispatcher.Config[T],
+) *inMemoryDispatcher[T] {
+	d := &inMemoryDispatcher[T]{
 		quit:    make(chan struct{}),
 		cancels: newCancels(),
 		tracker: tracker.New[T](),
@@ -75,7 +76,7 @@ func newDispatcher[T any](
 	return d
 }
 
-func (d *dispatcher[T]) admit(
+func (d *inMemoryDispatcher[T]) admit(
 	job jobs.Job[T],
 ) {
 	d.running.Add(1)
@@ -94,10 +95,10 @@ func (d *dispatcher[T]) admit(
 // completed with models.ErrDeliveryParked (see models.Dispatcher). ctx
 // contributes only its values: the event is delivered under a context that
 // outlives ctx and is cancelled when the delivery completes or Close gives up.
-func (d *dispatcher[T]) Enqueue(
+func (d *inMemoryDispatcher[T]) Enqueue(
 	ctx context.Context,
-	request asynxmd.DispatchRequest[T],
-) (asynxmd.Ticket, error) {
+	request dispatch.Request[T],
+) (dispatch.Ticket, error) {
 	jobCtx, release := d.jobContext(
 		ctx,
 		request,
@@ -113,7 +114,7 @@ func (d *dispatcher[T]) Enqueue(
 	)
 	if admission.Err != nil {
 		release()
-		return asynxmd.Ticket{},
+		return dispatch.Ticket{},
 			admission.Err
 	}
 
@@ -130,7 +131,7 @@ func (d *dispatcher[T]) Enqueue(
 		nil
 }
 
-func (d *dispatcher[T]) run(
+func (d *inMemoryDispatcher[T]) run(
 	ctx context.Context,
 	job jobs.Job[T],
 	turn <-chan struct{},
@@ -145,9 +146,9 @@ func (d *dispatcher[T]) run(
 	)
 }
 
-func (d *dispatcher[T]) jobContext(
+func (d *inMemoryDispatcher[T]) jobContext(
 	ctx context.Context,
-	request asynxmd.DispatchRequest[T],
+	request dispatch.Request[T],
 ) (context.Context, context.CancelFunc) {
 	marked := context.WithValue(
 		context.WithoutCancel(ctx),
@@ -168,10 +169,10 @@ func (d *dispatcher[T]) jobContext(
 // delivery is queued, running or retrying, and false for an event that was
 // never queued or whose delivery is over. It is safe for concurrent use and
 // does not wait.
-func (d *dispatcher[T]) TicketFor(
+func (d *inMemoryDispatcher[T]) TicketFor(
 	aggregateID string,
 	version int64,
-) (asynxmd.Ticket, bool) {
+) (dispatch.Ticket, bool) {
 	return d.tracker.For(
 		aggregateID,
 		version,
@@ -181,7 +182,7 @@ func (d *dispatcher[T]) TicketFor(
 // Unrun reports why no handler ran for the event at (aggregateID, version):
 // models.ErrDeliveryParked while the aggregate is parked and the park left the
 // event undelivered, nil otherwise. The answer lasts until the park lifts.
-func (d *dispatcher[T]) Unrun(
+func (d *inMemoryDispatcher[T]) Unrun(
 	aggregateID string,
 	version int64,
 ) error {
@@ -197,7 +198,7 @@ func (d *dispatcher[T]) Unrun(
 // aggregate that is already parked it only merges the versions and keeps the
 // first non-nil cause. asynx calls it when recovery finds an aggregate whose
 // log cannot be delivered.
-func (d *dispatcher[T]) Park(
+func (d *inMemoryDispatcher[T]) Park(
 	aggregateID string,
 	cause error,
 	undelivered ...int64,
@@ -212,7 +213,7 @@ func (d *dispatcher[T]) Park(
 // Supersede abandons the aggregate's queued and retrying durable deliveries
 // ahead of an erase and leaves the aggregate running, unparked and with no
 // record of undelivered versions. It is asynx's Forget that calls it.
-func (d *dispatcher[T]) Supersede(
+func (d *inMemoryDispatcher[T]) Supersede(
 	aggregateID string,
 ) {
 	d.registry.Supersede(aggregateID)
@@ -221,7 +222,7 @@ func (d *dispatcher[T]) Supersede(
 // Parks returns a copy of the parked aggregates with the generation of each
 // park, which ResumeUndelivered takes to lift exactly that park. A park that
 // is lifted and imposed again has a new generation.
-func (d *dispatcher[T]) Parks() map[string]uint64 {
+func (d *inMemoryDispatcher[T]) Parks() map[string]uint64 {
 	return d.registry.Parks()
 }
 
@@ -230,7 +231,7 @@ func (d *dispatcher[T]) Parks() map[string]uint64 {
 // redelivers. It reports false and does nothing for a park that is gone, or
 // that has been lifted and imposed again since the caller listed it: what a
 // caller read about a park is stale once the park changes generation.
-func (d *dispatcher[T]) ResumeUndelivered(
+func (d *inMemoryDispatcher[T]) ResumeUndelivered(
 	aggregateID string,
 	generation uint64,
 ) (bool, []int64) {
@@ -247,9 +248,9 @@ func (d *dispatcher[T]) ResumeUndelivered(
 // Inspect reports whether the aggregate is parked, the park's generation, its
 // cause and the versions it left undelivered, read under one hold of the
 // registry's mutex. An aggregate that is not parked has the zero status.
-func (d *dispatcher[T]) Inspect(
+func (d *inMemoryDispatcher[T]) Inspect(
 	aggregateID string,
-) asynxmd.DeliveryStatus {
+) dispatch.Status {
 	return d.registry.Inspect(aggregateID)
 }
 
@@ -257,7 +258,7 @@ func (d *dispatcher[T]) Inspect(
 // aggregateID: the context every handler receives carries a mark that no other
 // dispatcher, and no other aggregate, shares. asynx uses it to refuse a
 // SendWait or a Forget that would wait on the handler it is called from.
-func (d *dispatcher[T]) InHandler(
+func (d *inMemoryDispatcher[T]) InHandler(
 	ctx context.Context,
 	aggregateID string,
 ) bool {
@@ -269,13 +270,13 @@ func (d *dispatcher[T]) InHandler(
 // aggregate of a request that carries an Ack, and closes the channel Interrupted
 // returns. It leaves the dispatcher open: an event without durable retries is
 // still delivered normally afterwards. Calling it again changes nothing.
-func (d *dispatcher[T]) Interrupt() {
+func (d *inMemoryDispatcher[T]) Interrupt() {
 	d.quitOnce.Do(func() { close(d.quit) })
 }
 
 // Interrupted returns the channel that Interrupt, and therefore Close, closes.
 // It never closes otherwise.
-func (d *dispatcher[T]) Interrupted() <-chan struct{} {
+func (d *inMemoryDispatcher[T]) Interrupted() <-chan struct{} {
 	return d.quit
 }
 
@@ -286,7 +287,7 @@ func (d *dispatcher[T]) Interrupted() <-chan struct{} {
 // delivery still running, but cannot stop a handler or a bus that ignores its
 // context, and gives up waiting. Closing again is harmless, and may be retried
 // with a longer ctx.
-func (d *dispatcher[T]) Close(
+func (d *inMemoryDispatcher[T]) Close(
 	ctx context.Context,
 ) error {
 	d.registry.Close()
@@ -302,7 +303,7 @@ func (d *dispatcher[T]) Close(
 	}
 }
 
-func (d *dispatcher[T]) awaitRuns(
+func (d *inMemoryDispatcher[T]) awaitRuns(
 	done chan<- struct{},
 ) {
 	d.running.Wait()
@@ -312,6 +313,6 @@ func (d *dispatcher[T]) awaitRuns(
 // WaitIdle blocks until every event tracked when it was called has completed.
 // It refuses nothing: events enqueued while it waits are not waited for, and
 // commands keep enqueueing.
-func (d *dispatcher[T]) WaitIdle() {
+func (d *inMemoryDispatcher[T]) WaitIdle() {
 	d.tracker.Idle()
 }

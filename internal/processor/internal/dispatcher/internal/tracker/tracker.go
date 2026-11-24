@@ -1,7 +1,7 @@
 package tracker
 
 import (
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
 )
@@ -22,7 +22,7 @@ type Tracker[T any] interface {
 	For(
 		aggregateID string,
 		version int64,
-	) (asynxmd.Ticket, bool)
+	) (dispatch.Ticket, bool)
 
 	// Idle blocks until every job tracked when it was called has completed.
 	// Jobs tracked while it waits are not waited for.

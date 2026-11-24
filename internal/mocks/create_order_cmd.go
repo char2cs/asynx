@@ -1,7 +1,7 @@
 package mocks
 
 import (
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 // CreateOrderCmd is the test command that creates an Order with the given ID
@@ -32,7 +32,7 @@ func (c CreateOrderCmd) Validate(
 	current *Order,
 ) error {
 	if c.Total <= 0 {
-		return models.ErrValidation
+		return failure.ErrValidation
 	}
 
 	return nil

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 func TestRun_Success(
@@ -30,7 +30,7 @@ func TestRun_WithCancelledContext(
 	err := run(ctx)
 	if !errors.Is(
 		err,
-		models.ErrContextCancelled,
+		failure.ErrContextCancelled,
 	) {
 		t.Fatalf(
 			"run(cancelled ctx) = %v, want it to report models.ErrContextCancelled",

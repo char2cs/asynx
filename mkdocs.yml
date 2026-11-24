@@ -31,6 +31,8 @@ nav:
     - Overview: spec/overview.md
     - Write-Path Guarantees: spec/guarantees.md
     - Dispatcher: spec/dispatcher.md
+  - Migration:
+    - Models package split: migration-models-split.md
 
 plugins:
   - search

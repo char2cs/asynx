@@ -17,7 +17,10 @@ import (
 	"github.com/char2cs/asynx/internal/processor/internal/exec"
 	"github.com/char2cs/asynx/internal/processor/internal/pool"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	dispatchermodel "github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
 	"github.com/char2cs/asynx/store"
 )
 
@@ -33,7 +36,7 @@ func TestShard_SingleCommandSuccess(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -79,7 +82,7 @@ func TestShard_ValidationErrorDecrementVersionSingleWorker(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -119,7 +122,7 @@ func TestShard_ValidationErrorDecrementVersionSingleWorker(
 	)
 	shard.CommandChan() <- envelope3
 	result3 := <-envelope3.ResultChan
-	if result3.Err != asynxmd.ErrValidation {
+	if result3.Err != failure.ErrValidation {
 		t.Fatalf(
 			"expected ErrValidation, got %v",
 			result3.Err,
@@ -153,7 +156,7 @@ func TestShard_ContextCancelledDuringExecution(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -198,7 +201,7 @@ func TestShard_MultipleWorkersNoCorrection(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -230,7 +233,7 @@ func TestShard_MultipleWorkersNoCorrection(
 	)
 	shard.CommandChan() <- envelope2
 	result2 := <-envelope2.ResultChan
-	if result2.Err != asynxmd.ErrValidation {
+	if result2.Err != failure.ErrValidation {
 		t.Fatalf(
 			"expected ErrValidation, got %v",
 			result2.Err,
@@ -264,7 +267,7 @@ func TestShard_ResultCarriesEvent(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -320,7 +323,7 @@ func TestShard_ResultUsesCommandResult(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -400,7 +403,7 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -450,7 +453,7 @@ type releaseWaiter struct {
 
 func (w *releaseWaiter) wait(
 	context.Context,
-	asynxmd.Event[order],
+	event.Event[order],
 ) {
 	<-w.release
 }
@@ -461,7 +464,7 @@ type envelopeSender struct {
 }
 
 func (s *envelopeSender) send(
-	cmd asynxmd.Command[order],
+	cmd command.Command[order],
 ) *models.CommandEnvelope[order] {
 	env := newEnvelope(
 		s.executor,
@@ -504,7 +507,7 @@ func checkFirstResult(
 	defer cancel()
 	if err := res.Wait(short); !errors.Is(
 		err,
-		asynxmd.ErrContextCancelled,
+		failure.ErrContextCancelled,
 	) {
 		t.Fatalf(
 			"Wait returned %v while the handler is still blocked",
@@ -895,7 +898,7 @@ func requireQueueFull(
 	t.Helper()
 	if !errors.Is(
 		err,
-		asynxmd.ErrQueueFull,
+		failure.ErrQueueFull,
 	) {
 		t.Fatalf(
 			"overflow = %v, want ErrQueueFull",
@@ -937,7 +940,7 @@ func TestShard_SkipsACommandWhoseContextEnded(
 
 	if res := <-env.ResultChan; !errors.Is(
 		res.Err,
-		asynxmd.ErrContextCancelled,
+		failure.ErrContextCancelled,
 	) {
 		t.Fatalf(
 			"result = %v, want ErrContextCancelled",
@@ -1018,7 +1021,7 @@ func BenchmarkShard_SingleWorker(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: bu})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: bu})
 	defer d.Close(context.Background())
 	executor := exec.New(
 		es,
@@ -1087,7 +1090,7 @@ func benchWorkers(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: bu})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: bu})
 	defer d.Close(context.Background())
 	executor := exec.New(
 		es,
@@ -1122,7 +1125,7 @@ func benchWorkers(
 func newEnvelope(
 	executor models.Executor[order],
 	ctx context.Context,
-	cmd asynxmd.Command[order],
+	cmd command.Command[order],
 ) *models.CommandEnvelope[order] {
 	envelope := models.NewCommandEnvelope(cmd)
 	go takeTurn(
@@ -1136,7 +1139,7 @@ func newEnvelope(
 func newWaitingEnvelope(
 	executor models.Executor[order],
 	ctx context.Context,
-	cmd asynxmd.Command[order],
+	cmd command.Command[order],
 ) *models.CommandEnvelope[order] {
 	envelope := models.NewCommandEnvelope(cmd)
 	envelope.WaitHandlers = true
@@ -1176,8 +1179,8 @@ type recordingExecutor struct {
 // one aggregate ran serially and in the order they were sent.
 func (r *recordingExecutor) ExecuteAsync(
 	_ context.Context,
-	cmd asynxmd.Command[order],
-) (asynxmd.Event[order], func(context.Context) error, error) {
+	cmd command.Command[order],
+) (event.Event[order], func(context.Context) error, error) {
 	if r.inFlight.Add(1) > 1 {
 		r.overlap.Store(true)
 	}
@@ -1199,7 +1202,7 @@ func (r *recordingExecutor) ExecuteAsync(
 		r.order,
 		update.NewState.Total,
 	)
-	return asynxmd.Event[order]{},
+	return event.Event[order]{},
 		nil,
 		nil
 }

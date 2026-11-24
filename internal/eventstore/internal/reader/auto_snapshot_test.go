@@ -10,7 +10,8 @@ import (
 	"testing"
 
 	"github.com/char2cs/asynx/internal/eventstore/internal/replayer"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/char2cs/asynx/store"
 )
 
@@ -45,7 +46,7 @@ func (f *failingSnapshots) Delete(
 }
 
 type afterReadStore struct {
-	asynxmd.Store
+	storage.Store
 	hook func()
 	once bool
 }
@@ -80,10 +81,10 @@ func keepPayloadUpcaster(
 }
 
 func upcastingReader(
-	es asynxmd.Store,
-	ss asynxmd.SnapshotStore,
+	es storage.Store,
+	ss storage.SnapshotStore,
 ) *Reader[order] {
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		1: keepPayloadUpcaster,
 	}
 	return New[order](
@@ -276,7 +277,7 @@ func TestGet_AutoSnapshot_NotWrittenWhenTheStreamCannotBeReChecked(
 	}
 }
 
-type readRangeFailsStore struct{ asynxmd.Store }
+type readRangeFailsStore struct{ storage.Store }
 
 // ReadRange always fails with the shared storage error.
 func (readRangeFailsStore) ReadRange(
@@ -291,7 +292,7 @@ func (readRangeFailsStore) ReadRange(
 
 func assertNoSnapshot(
 	t *testing.T,
-	ss asynxmd.SnapshotStore,
+	ss storage.SnapshotStore,
 ) {
 	t.Helper()
 
@@ -501,22 +502,22 @@ func seedUpcastableOrder(
 }
 
 type snapshotFailure struct {
-	event asynxmd.Event[order]
+	event event.Event[order]
 	err   error
 }
 
 func recordSnapshotFailures(
 	failures *[]snapshotFailure,
-) func(context.Context, asynxmd.Event[order], error) {
+) func(context.Context, event.Event[order], error) {
 	return func(
 		_ context.Context,
-		event asynxmd.Event[order],
+		evt event.Event[order],
 		err error,
 	) {
 		*failures = append(
 			*failures,
 			snapshotFailure{
-				event: event,
+				event: evt,
 				err:   err,
 			},
 		)
@@ -748,7 +749,7 @@ func TestGet_AutoSnapshotFailure_HandlerPanicDoesNotBreakTheRead(
 
 func panicOnSnapshotFailure(
 	context.Context,
-	asynxmd.Event[order],
+	event.Event[order],
 	error,
 ) {
 	panic("handler blew up")
@@ -773,7 +774,7 @@ func TestGet_AutoSnapshotFailure_HandlerPanicIsWrittenToStderr(
 		ss,
 		replayer.New[order](
 			mem,
-			map[int]asynxmd.Upcaster{1: keepPayloadUpcaster},
+			map[int]event.Upcaster{1: keepPayloadUpcaster},
 			2,
 			order{},
 		),

@@ -5,19 +5,23 @@ import (
 	"errors"
 	"fmt"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 func (e *CommandExecutor[T]) writeFailed(
 	ctx context.Context,
 	commandID string,
 	err error,
-) (event asynxmd.Event[T], handled bool, _ error) {
+) (evt event.Event[T], handled bool, _ error) {
 	if errors.Is(
 		err,
-		asynxmd.ErrSyncProjection,
+		failure.ErrSyncProjection,
 	) {
-		return event,
+		return evt,
 			false,
 			pipelineFailed(err)
 	}
@@ -25,7 +29,7 @@ func (e *CommandExecutor[T]) writeFailed(
 	if commandID != "" &&
 		errors.Is(
 			err,
-			asynxmd.ErrDuplicateReceipt,
+			failure.ErrDuplicateReceipt,
 		) {
 		return e.answerDuplicate(
 			ctx,
@@ -36,7 +40,7 @@ func (e *CommandExecutor[T]) writeFailed(
 
 	if errors.Is(
 		err,
-		asynxmd.ErrValidation,
+		failure.ErrValidation,
 	) {
 		return e.validationFailed(
 			ctx,
@@ -45,7 +49,7 @@ func (e *CommandExecutor[T]) writeFailed(
 		)
 	}
 
-	return event,
+	return evt,
 		false,
 		pipelineFailed(err)
 }
@@ -55,7 +59,7 @@ func pipelineFailed(
 ) error {
 	return fmt.Errorf(
 		"%w: %w",
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 		err,
 	)
 }
@@ -64,18 +68,18 @@ func (e *CommandExecutor[T]) answerDuplicate(
 	ctx context.Context,
 	commandID string,
 	duplicate error,
-) (event asynxmd.Event[T], handled bool, err error) {
-	event, handled, err = e.answerFromReceipt(
+) (evt event.Event[T], handled bool, err error) {
+	evt, handled, err = e.answerFromReceipt(
 		ctx,
 		commandID,
 	)
 	if handled {
-		return event,
+		return evt,
 			true,
 			err
 	}
 
-	return event,
+	return evt,
 		false,
 		pipelineFailed(duplicate)
 }
@@ -84,9 +88,9 @@ func (e *CommandExecutor[T]) validationFailed(
 	ctx context.Context,
 	commandID string,
 	rejection error,
-) (event asynxmd.Event[T], handled bool, err error) {
+) (evt event.Event[T], handled bool, err error) {
 	if commandID == "" {
-		return event,
+		return evt,
 			false,
 			rejection
 	}
@@ -97,14 +101,14 @@ func (e *CommandExecutor[T]) validationFailed(
 		rejection,
 	)
 	if recErr == nil {
-		return event,
+		return evt,
 			false,
 			rejection
 	}
 
 	if errors.Is(
 		recErr,
-		asynxmd.ErrDuplicateReceipt,
+		failure.ErrDuplicateReceipt,
 	) {
 		return e.answerLostRace(
 			ctx,
@@ -113,7 +117,7 @@ func (e *CommandExecutor[T]) validationFailed(
 		)
 	}
 
-	return event,
+	return evt,
 		false,
 		recordingFailed(recErr)
 }
@@ -123,7 +127,7 @@ func recordingFailed(
 ) error {
 	return fmt.Errorf(
 		"%w: recording rejection: %w",
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 		recErr,
 	)
 }
@@ -132,18 +136,18 @@ func (e *CommandExecutor[T]) answerLostRace(
 	ctx context.Context,
 	commandID string,
 	recErr error,
-) (event asynxmd.Event[T], handled bool, err error) {
-	event, handled, err = e.answerFromReceipt(
+) (evt event.Event[T], handled bool, err error) {
+	evt, handled, err = e.answerFromReceipt(
 		ctx,
 		commandID,
 	)
 	if handled {
-		return event,
+		return evt,
 			true,
 			err
 	}
 
-	return event,
+	return evt,
 		false,
 		recordingFailed(recErr)
 }
@@ -167,14 +171,14 @@ func recordingRejection(
 	ctx context.Context,
 	commandID string,
 	cause error,
-) func(asynxmd.Tx) error {
+) func(storage.Tx) error {
 	return func(
-		tx asynxmd.Tx,
+		tx storage.Tx,
 	) error {
 		return tx.PutReceipt(
 			ctx,
 			commandID,
-			asynxmd.Receipt{Rejection: cause.Error()},
+			event.Receipt{Rejection: cause.Error()},
 		)
 	}
 }
@@ -182,38 +186,38 @@ func recordingRejection(
 func (e *CommandExecutor[T]) answerFromReceipt(
 	ctx context.Context,
 	commandID string,
-) (event asynxmd.Event[T], handled bool, err error) {
+) (evt event.Event[T], handled bool, err error) {
 	receipt, found, err := e.es.Store().GetReceipt(
 		ctx,
 		commandID,
 	)
 	if err != nil {
-		return event,
+		return evt,
 			true,
 			pipelineFailed(err)
 	}
 
 	if !found {
-		return event,
+		return evt,
 			false,
 			nil
 	}
 
 	if !receipt.Accepted {
-		return event,
+		return evt,
 			true,
 			fmt.Errorf(
 				"%w: %s",
-				asynxmd.ErrValidation,
+				failure.ErrValidation,
 				receipt.Rejection,
 			)
 	}
 
-	event, err = e.replayReceipt(
+	evt, err = e.replayReceipt(
 		ctx,
 		receipt,
 	)
-	return event,
+	return evt,
 		true,
 		receiptReadFailed(
 			commandID,
@@ -231,17 +235,17 @@ func receiptReadFailed(
 
 	return fmt.Errorf(
 		"%w: reading the event of command %s: %w",
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 		commandID,
 		err,
 	)
 }
 
 func pickReceiptEvent[T any](
-	current asynxmd.Event[T],
-	evt asynxmd.Event[T],
-	receipt asynxmd.Receipt,
-) asynxmd.Event[T] {
+	current event.Event[T],
+	evt event.Event[T],
+	receipt event.Receipt,
+) event.Event[T] {
 	if evt.Version == receipt.Version &&
 		evt.ID == receipt.EventID {
 		return evt
@@ -252,9 +256,9 @@ func pickReceiptEvent[T any](
 
 func (e *CommandExecutor[T]) replayReceipt(
 	ctx context.Context,
-	receipt asynxmd.Receipt,
-) (event asynxmd.Event[T], err error) {
-	event = asynxmd.Event[T]{
+	receipt event.Receipt,
+) (evt event.Event[T], err error) {
+	evt = event.Event[T]{
 		ID:          receipt.EventID,
 		AggregateID: receipt.AggregateID,
 		Version:     receipt.Version,
@@ -265,24 +269,24 @@ func (e *CommandExecutor[T]) replayReceipt(
 		receipt.Version,
 		receipt.Version,
 		capturingReceiptEvent(
-			&event,
+			&evt,
 			receipt,
 		),
 	)
-	return event,
+	return evt,
 		err
 }
 
 func capturingReceiptEvent[T any](
-	event *asynxmd.Event[T],
-	receipt asynxmd.Receipt,
-) asynxmd.ProjectionHandler[T] {
+	captured *event.Event[T],
+	receipt event.Receipt,
+) handler.Projection[T] {
 	return func(
 		_ context.Context,
-		evt asynxmd.Event[T],
+		evt event.Event[T],
 	) {
-		*event = pickReceiptEvent(
-			*event,
+		*captured = pickReceiptEvent(
+			*captured,
 			evt,
 			receipt,
 		)
@@ -290,9 +294,9 @@ func capturingReceiptEvent[T any](
 }
 
 func idempotencyKey[T any](
-	cmd asynxmd.Command[T],
+	cmd command.Command[T],
 ) string {
-	if ic, ok := cmd.(asynxmd.IdempotentCommand); ok {
+	if ic, ok := cmd.(command.Idempotent); ok {
 		return ic.CommandID()
 	}
 

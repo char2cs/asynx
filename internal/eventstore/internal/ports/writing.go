@@ -4,7 +4,8 @@ import (
 	"context"
 
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	"github.com/char2cs/asynx/models/event"
 )
 
 // Writing is the write side of an event store: it appends one event per command
@@ -24,21 +25,21 @@ type Writing[T any] interface {
 	// non-fatal.
 	Write(
 		ctx context.Context,
-		cmd asynxmd.Command[T],
-	) (asynxmd.Event[T], error)
+		cmd command.Command[T],
+	) (event.Event[T], error)
 	// WriteTx is Write without the snapshot, with hook run inside the append's
 	// transaction right after the event is appended. When hook returns an
 	// error the transaction rolls back and no event is stored. hook may be nil.
 	WriteTx(
 		ctx context.Context,
-		cmd asynxmd.Command[T],
+		cmd command.Command[T],
 		hook esmodels.TxHook[T],
-	) (asynxmd.Event[T], error)
+	) (event.Event[T], error)
 	// Snapshot stores the state evt produced as the aggregate's snapshot,
 	// replacing any earlier one. It is idempotent and safe to retry; a failure
 	// loses nothing because snapshots can always be rebuilt from events.
 	Snapshot(
 		ctx context.Context,
-		evt asynxmd.Event[T],
+		evt event.Event[T],
 	) error
 }

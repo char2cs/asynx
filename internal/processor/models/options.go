@@ -4,13 +4,16 @@ import (
 	"context"
 	"time"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/subscription"
 )
 
 // WithDurableSubscribers registers the durable subscribers the dispatcher runs,
 // with retry, for durable deliveries.
 func WithDurableSubscribers[T any](
-	subs []asynxmd.DurableSub[T],
+	subs []subscription.Durable[T],
 ) Opt[T] {
 	return func(
 		cfg *Config[T],
@@ -25,7 +28,7 @@ func WithDurableSubscribers[T any](
 // failed attempts are retried silently up to the attempt cap and then parked
 // or dead-lettered.
 func WithDeliveryErrorHandler[T any](
-	fn asynxmd.DeliveryErrorHandler[T],
+	fn handler.DeliveryError[T],
 ) Opt[T] {
 	return func(
 		cfg *Config[T],
@@ -38,7 +41,7 @@ func WithDeliveryErrorHandler[T any](
 // The panic is recovered either way and counts as a failed attempt; fn only
 // observes it, from the dispatcher's delivery goroutine.
 func WithDeliveryPanicHandler[T any](
-	fn asynxmd.PanicHandler[T],
+	fn handler.Panic[T],
 ) Opt[T] {
 	return func(
 		cfg *Config[T],
@@ -70,7 +73,7 @@ func WithDeliveryMaxAttempts[T any](
 // delivery is acknowledged and the aggregate continues; without a handler the
 // aggregate is parked until Resume.
 func WithDeadLetterHandler[T any](
-	fn asynxmd.DeadLetterHandler[T],
+	fn handler.DeadLetter[T],
 ) Opt[T] {
 	return func(
 		cfg *Config[T],
@@ -147,7 +150,7 @@ func WithDurableDelivery[T any](
 // A failed snapshot never fails the command, which is already committed;
 // without fn the error is dropped and the aggregate is rebuilt from its stream.
 func WithSnapshotErrorHandler[T any](
-	fn func(context.Context, asynxmd.Event[T], error),
+	fn func(context.Context, event.Event[T], error),
 ) Opt[T] {
 	return func(
 		cfg *Config[T],
@@ -211,7 +214,7 @@ func WithWorkersPerShard[T any](
 // Inspect. A panic in fn is recovered and discarded, so a faulty hook can
 // neither crash a delivery goroutine nor abort a recovery.
 func WithPublishErrorHandler[T any](
-	fn asynxmd.PublishErrorHandler[T],
+	fn handler.PublishError[T],
 ) Opt[T] {
 	return func(
 		cfg *Config[T],
@@ -225,7 +228,7 @@ func WithPublishErrorHandler[T any](
 // A nil factory is ignored, leaving the in-memory default. When set, the
 // factory runs even without a bus.
 func WithDispatcherFactory[T any](
-	f asynxmd.DispatcherFactory[T],
+	f dispatcher.Factory[T],
 ) Opt[T] {
 	if f == nil {
 		return ignored[T]

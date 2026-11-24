@@ -7,7 +7,7 @@ import (
 	"os"
 
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
 )
 
 func (r *Reader[T]) sealUpcastLockHeld(
@@ -139,7 +139,7 @@ func (r *Reader[T]) reportSnapshotError(
 	defer writeSnapshotHandlerPanicToStderr()
 	r.onSnapshotError(
 		ctx,
-		asynxmd.Event[T]{
+		event.Event[T]{
 			ID:            loaded.lastEventID,
 			AggregateID:   aggregateID,
 			Version:       loaded.version,

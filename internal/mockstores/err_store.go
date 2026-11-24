@@ -2,18 +2,19 @@ package mockstores
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 // ErrStore is a Store implementation that returns Err for every operation.
 type ErrStore struct{ Err error }
 
-func (e *ErrStore) tx() models.Tx { return stubTx{appendFn: e.Append, deleteFn: e.Delete} }
+func (e *ErrStore) tx() storage.Tx { return stubTx{appendFn: e.Append, deleteFn: e.Delete} }
 
 // Atomically runs fn against a transaction whose writes return Err.
 func (e *ErrStore) Atomically(
 	_ context.Context,
-	fn func(models.Tx) error,
+	fn func(storage.Tx) error,
 ) error {
 	return fn(e.tx())
 }
@@ -23,8 +24,8 @@ func (e *ErrStore) Atomically(
 func (e *ErrStore) GetReceipt(
 	context.Context,
 	string,
-) (models.Receipt, bool, error) {
-	return models.Receipt{},
+) (event.Receipt, bool, error) {
+	return event.Receipt{},
 		false,
 		e.Err
 }
@@ -34,7 +35,7 @@ func (e *ErrStore) GetReceipt(
 func (e *ErrStore) PendingDeliveries(
 	context.Context,
 	int,
-) ([]models.Delivery, error) {
+) ([]event.Delivery, error) {
 	return nil,
 		e.Err
 }

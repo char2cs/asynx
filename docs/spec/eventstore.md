@@ -783,7 +783,7 @@ After upcasting, snapshot is written. Next access loads snapshot directly (warm 
 // Build instance with eventstore config:
 instance, _ := asynx.New[Order]().
     WithEventStore(postgresStore).
-    WithSnapshotStore(redisSnapshotStore).  // Required: models.SnapshotStore, not a Store
+    WithSnapshotStore(redisSnapshotStore).  // Required: storage.SnapshotStore, not a Store
     WithSchemaVersion(2).
     WithUpcaster(1, func(name string, raw []byte) []byte {
         // Fix schema v1 → v2: rename "/status" to "/state"

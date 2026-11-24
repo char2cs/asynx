@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/char2cs/asynx/example/domain"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
 	"slices"
 	"sync"
 )
@@ -19,24 +19,24 @@ type OrderNotifier struct {
 	outbox []string
 }
 
-// Handle is a models.ProjectionHandler for order events. It appends one
+// Handle is a handler.Projection for order events. It appends one
 // notification to the outbox for OrderCreated, OrderConfirmed and OrderShipped,
 // naming the order, and ignores any other event. It cannot fail and ctx is not
 // used.
 func (n *OrderNotifier) Handle(
 	ctx context.Context,
-	event models.Event[domain.Order],
+	evt event.Event[domain.Order],
 ) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	switch event.EventName {
+	switch evt.EventName {
 	case "OrderCreated":
 		n.outbox = append(
 			n.outbox,
 			fmt.Sprintf(
 				"📧 Confirmation email sent for order %s",
-				event.Aggregate.ID,
+				evt.Aggregate.ID,
 			),
 		)
 	case "OrderConfirmed":
@@ -44,7 +44,7 @@ func (n *OrderNotifier) Handle(
 			n.outbox,
 			fmt.Sprintf(
 				"🎉 Order %s confirmed! Warehouse notified.",
-				event.Aggregate.ID,
+				evt.Aggregate.ID,
 			),
 		)
 	case "OrderShipped":
@@ -52,7 +52,7 @@ func (n *OrderNotifier) Handle(
 			n.outbox,
 			fmt.Sprintf(
 				"📦 Order %s shipped! Customer notified.",
-				event.Aggregate.ID,
+				evt.Aggregate.ID,
 			),
 		)
 	}

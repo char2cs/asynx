@@ -8,25 +8,25 @@ import (
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/eventstore/options"
 	"github.com/char2cs/asynx/internal/mocks"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
 	"github.com/char2cs/asynx/store"
 )
 
 var errSnapshotPut = errors.New("snapshot put failed")
 
 type snapshotFailureLog struct {
-	events []asynxmd.Event[mocks.Order]
+	events []event.Event[mocks.Order]
 	errs   []error
 }
 
 func (l *snapshotFailureLog) record(
 	_ context.Context,
-	event asynxmd.Event[mocks.Order],
+	evt event.Event[mocks.Order],
 	err error,
 ) {
 	l.events = append(
 		l.events,
-		event,
+		evt,
 	)
 	l.errs = append(
 		l.errs,
@@ -36,7 +36,7 @@ func (l *snapshotFailureLog) record(
 
 func panicOnSnapshotFailure(
 	context.Context,
-	asynxmd.Event[mocks.Order],
+	event.Event[mocks.Order],
 	error,
 ) {
 	panic("handler blew up")
@@ -53,7 +53,7 @@ func keepPayloadUpcaster(
 
 func upcastedStore(
 	t *testing.T,
-	handler func(context.Context, asynxmd.Event[mocks.Order], error),
+	handler func(context.Context, event.Event[mocks.Order], error),
 ) eventstore.EventStore[mocks.Order] {
 	t.Helper()
 
@@ -87,7 +87,7 @@ func upcastedStore(
 	return eventstore.New[mocks.Order](
 		events,
 		snapshots,
-		map[int]asynxmd.Upcaster{1: keepPayloadUpcaster},
+		map[int]event.Upcaster{1: keepPayloadUpcaster},
 		2,
 		nil,
 		options.WithSnapshotErrorHandler(handler),

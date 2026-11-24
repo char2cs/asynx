@@ -7,14 +7,15 @@ import (
 	"github.com/char2cs/asynx"
 	"github.com/char2cs/asynx/internal/mockbuses"
 	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
 	"github.com/char2cs/asynx/store"
 	"sync"
 	"testing"
 	"time"
 )
 
-type eventStream = <-chan models.Event[mocks.Order]
+type eventStream = <-chan event.Event[mocks.Order]
 
 func listenOrFatal(
 	t *testing.T,
@@ -66,7 +67,7 @@ func recv(
 	t *testing.T,
 	ch eventStream,
 	timeoutMsg string,
-) models.Event[mocks.Order] {
+) event.Event[mocks.Order] {
 	t.Helper()
 
 	select {
@@ -76,7 +77,7 @@ func recv(
 		t.Fatal(timeoutMsg)
 	}
 
-	return models.Event[mocks.Order]{}
+	return event.Event[mocks.Order]{}
 }
 
 func recvOpen(
@@ -281,7 +282,7 @@ func TestListen_EmptyPattern(
 		"",
 		1,
 	)
-	if err != models.ErrEmptyPattern {
+	if err != failure.ErrEmptyPattern {
 		t.Fatalf(
 			"expected ErrEmptyPattern, got %v",
 			err,

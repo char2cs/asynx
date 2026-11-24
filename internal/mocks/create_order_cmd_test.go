@@ -1,7 +1,7 @@
 package mocks
 
 import (
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
 	"testing"
 )
 
@@ -42,7 +42,7 @@ func TestCreateOrderCmd_Validate_FailsWhenTotalZero(
 	t *testing.T,
 ) {
 	err := CreateOrderCmd{ID: "x", Total: 0}.Validate(nil)
-	if err != asynxmd.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Errorf(
 			"Validate(Total=0) = %v, want ErrValidation",
 			err,
@@ -54,7 +54,7 @@ func TestCreateOrderCmd_Validate_FailsWhenTotalNegative(
 	t *testing.T,
 ) {
 	err := CreateOrderCmd{ID: "x", Total: -1}.Validate(nil)
-	if err != asynxmd.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Errorf(
 			"Validate(Total=-1) = %v, want ErrValidation",
 			err,

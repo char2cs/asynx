@@ -6,7 +6,11 @@ import (
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/processor/internal/keyedlock"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
 	"sync"
 )
 
@@ -41,7 +45,7 @@ func WithDurableDelivery[T any](
 // never fails it. When nil, snapshot errors are dropped by design: the
 // aggregate is simply rebuilt from its stream next time.
 func WithSnapshotErrorHandler[T any](
-	fn func(context.Context, asynxmd.Event[T], error),
+	fn func(context.Context, event.Event[T], error),
 ) Opt[T] {
 	return func(
 		e *CommandExecutor[T],
@@ -55,7 +59,7 @@ func WithSnapshotErrorHandler[T any](
 // is nil), applying opts in order.
 func New[T any](
 	es eventstore.EventStore[T],
-	d asynxmd.Dispatcher[T],
+	d dispatcher.Dispatcher[T],
 	opts ...Opt[T],
 ) *CommandExecutor[T] {
 	e := &CommandExecutor[T]{es: es, dispatcher: d, forgetting: make(map[string]struct{})}
@@ -77,13 +81,13 @@ func New[T any](
 // command's turn comes.
 func (e *CommandExecutor[T]) Execute(
 	ctx context.Context,
-	cmd asynxmd.Command[T],
-) (asynxmd.Event[T], error) {
-	event, _, err := e.ExecuteAsync(
+	cmd command.Command[T],
+) (event.Event[T], error) {
+	evt, _, err := e.ExecuteAsync(
 		ctx,
 		cmd,
 	)
-	return event,
+	return evt,
 		err
 }
 
@@ -92,23 +96,23 @@ func (e *CommandExecutor[T]) Execute(
 // returned with an error wrapping ErrContextCancelled.
 func (e *CommandExecutor[T]) ExecuteWait(
 	ctx context.Context,
-	cmd asynxmd.Command[T],
-) (asynxmd.Event[T], error) {
-	event, wait, err := e.ExecuteAsync(
+	cmd command.Command[T],
+) (event.Event[T], error) {
+	evt, wait, err := e.ExecuteAsync(
 		ctx,
 		cmd,
 	)
 	if err != nil {
-		return event,
+		return evt,
 			err
 	}
 
 	if wait != nil {
-		return event,
+		return evt,
 			wait(ctx)
 	}
 
-	return event,
+	return evt,
 		nil
 }
 
@@ -118,18 +122,18 @@ func (e *CommandExecutor[T]) ExecuteWait(
 // answered from a receipt) lets the caller, not a worker, do the waiting.
 func (e *CommandExecutor[T]) ExecuteAsync(
 	ctx context.Context,
-	cmd asynxmd.Command[T],
-) (asynxmd.Event[T], func(context.Context) error, error) {
+	cmd command.Command[T],
+) (event.Event[T], func(context.Context) error, error) {
 	err := e.locks.Lock(
 		ctx,
 		cmd.AggregateID(),
 	)
 	if err != nil {
-		return asynxmd.Event[T]{},
+		return event.Event[T]{},
 			nil,
 			fmt.Errorf(
 				"%w: %w",
-				asynxmd.ErrContextCancelled,
+				failure.ErrContextCancelled,
 				err,
 			)
 	}
@@ -137,11 +141,11 @@ func (e *CommandExecutor[T]) ExecuteAsync(
 	defer e.locks.Unlock(cmd.AggregateID())
 
 	if e.isForgetting(cmd.AggregateID()) {
-		return asynxmd.Event[T]{},
+		return event.Event[T]{},
 			nil,
 			fmt.Errorf(
 				"%w: %s",
-				asynxmd.ErrForgetInProgress,
+				failure.ErrForgetInProgress,
 				cmd.AggregateID(),
 			)
 	}
@@ -170,7 +174,7 @@ func (e *CommandExecutor[T]) WithLock(
 	if err != nil {
 		return fmt.Errorf(
 			"%w: %w",
-			asynxmd.ErrContextCancelled,
+			failure.ErrContextCancelled,
 			err,
 		)
 	}
@@ -199,23 +203,23 @@ func (e *CommandExecutor[T]) WithLockIfFree(
 
 func (e *CommandExecutor[T]) run(
 	ctx context.Context,
-	cmd asynxmd.Command[T],
-) (asynxmd.Event[T], func(context.Context) error, error) {
+	cmd command.Command[T],
+) (event.Event[T], func(context.Context) error, error) {
 	commandID := idempotencyKey(cmd)
-	event, handled, err := e.answerRetry(
+	evt, handled, err := e.answerRetry(
 		ctx,
 		commandID,
 	)
 	if handled {
-		return event,
+		return evt,
 			e.waitForAnswered(
-				event,
+				evt,
 				err,
 			),
 			err
 	}
 
-	event, err = e.es.WriteTx(
+	evt, err = e.es.WriteTx(
 		ctx,
 		cmd,
 		e.txHook(commandID),
@@ -231,50 +235,50 @@ func (e *CommandExecutor[T]) run(
 	return e.publish(
 		ctx,
 		cmd,
-		event,
+		evt,
 	)
 }
 
 func (e *CommandExecutor[T]) publish(
 	ctx context.Context,
-	cmd asynxmd.Command[T],
-	event asynxmd.Event[T],
-) (asynxmd.Event[T], func(context.Context) error, error) {
+	cmd command.Command[T],
+	evt event.Event[T],
+) (event.Event[T], func(context.Context) error, error) {
 	e.snapshotIfDue(
 		ctx,
 		cmd,
-		event,
+		evt,
 	)
 
 	wait, err := e.enqueue(
 		ctx,
-		event,
+		evt,
 	)
 	if err != nil {
 		e.parkIfDurable(
-			event,
+			evt,
 			err,
 		)
-		return event,
+		return evt,
 			nil,
 			pipelineFailed(err)
 	}
 
-	return event,
+	return evt,
 		wait,
 		nil
 }
 
 func (e *CommandExecutor[T]) parkIfDurable(
-	event asynxmd.Event[T],
+	evt event.Event[T],
 	cause error,
 ) {
-	if !e.isDurable(event.EventName) {
+	if !e.isDurable(evt.EventName) {
 		return
 	}
 
 	e.dispatcher.Park(
-		event.AggregateID,
+		evt.AggregateID,
 		cause,
 	)
 }
@@ -282,9 +286,9 @@ func (e *CommandExecutor[T]) parkIfDurable(
 func (e *CommandExecutor[T]) answerRetry(
 	ctx context.Context,
 	commandID string,
-) (asynxmd.Event[T], bool, error) {
+) (event.Event[T], bool, error) {
 	if commandID == "" {
-		return asynxmd.Event[T]{},
+		return event.Event[T]{},
 			false,
 			nil
 	}
@@ -299,30 +303,30 @@ func (e *CommandExecutor[T]) failedWrite(
 	ctx context.Context,
 	commandID string,
 	cause error,
-) (asynxmd.Event[T], func(context.Context) error, error) {
-	event, handled, err := e.writeFailed(
+) (event.Event[T], func(context.Context) error, error) {
+	evt, handled, err := e.writeFailed(
 		ctx,
 		commandID,
 		cause,
 	)
 	if handled {
-		return event,
+		return evt,
 			e.waitForAnswered(
-				event,
+				evt,
 				err,
 			),
 			err
 	}
 
-	return asynxmd.Event[T]{},
+	return event.Event[T]{},
 		nil,
 		err
 }
 
 func (e *CommandExecutor[T]) snapshotIfDue(
 	ctx context.Context,
-	cmd asynxmd.Command[T],
-	event asynxmd.Event[T],
+	cmd command.Command[T],
+	evt event.Event[T],
 ) {
 	if !cmd.ShouldSnapshot() {
 		return
@@ -330,13 +334,13 @@ func (e *CommandExecutor[T]) snapshotIfDue(
 
 	err := e.es.Snapshot(
 		ctx,
-		event,
+		evt,
 	)
 	if err != nil &&
 		e.onSnapshotError != nil {
 		e.onSnapshotError(
 			ctx,
-			event,
+			evt,
 			err,
 		)
 	}
@@ -344,7 +348,7 @@ func (e *CommandExecutor[T]) snapshotIfDue(
 
 func (e *CommandExecutor[T]) enqueue(
 	ctx context.Context,
-	event asynxmd.Event[T],
+	evt event.Event[T],
 ) (func(context.Context) error, error) {
 	if e.dispatcher == nil {
 		return nil,
@@ -353,10 +357,10 @@ func (e *CommandExecutor[T]) enqueue(
 
 	t, err := e.dispatcher.Enqueue(
 		ctx,
-		asynxmd.DispatchRequest[T]{
-			Event: event,
-			Ack:   e.ackFor(event),
-			Kind:  asynxmd.DispatchEvent,
+		dispatch.Request[T]{
+			Event: evt,
+			Ack:   e.ackFor(evt),
+			Kind:  dispatch.KindEvent,
 		},
 	)
 	if err != nil {
@@ -366,7 +370,7 @@ func (e *CommandExecutor[T]) enqueue(
 
 	return waitOn(
 			t,
-			event,
+			evt,
 		),
 		nil
 }
@@ -378,9 +382,9 @@ func (e *CommandExecutor[T]) isDurable(
 }
 
 func (e *CommandExecutor[T]) ackFor(
-	event asynxmd.Event[T],
+	evt event.Event[T],
 ) func(context.Context) error {
-	if !e.isDurable(event.EventName) {
+	if !e.isDurable(evt.EventName) {
 		return nil
 	}
 
@@ -389,8 +393,8 @@ func (e *CommandExecutor[T]) ackFor(
 	) error {
 		return e.es.Store().AckDelivery(
 			ctx,
-			event.AggregateID,
-			event.Version,
+			evt.AggregateID,
+			evt.Version,
 		)
 	}
 }
@@ -403,11 +407,11 @@ func (e *CommandExecutor[T]) ackFor(
 // the executor is safe for concurrent use. Build it with New.
 type CommandExecutor[T any] struct {
 	es              eventstore.EventStore[T]
-	dispatcher      asynxmd.Dispatcher[T]
+	dispatcher      dispatcher.Dispatcher[T]
 	locks           keyedlock.KeyedLock
 	forgetMu        sync.Mutex
 	forgetting      map[string]struct{}
 	syncs           []models.SyncProjection[T]
 	durableMatch    func(eventName string) bool
-	onSnapshotError func(context.Context, asynxmd.Event[T], error)
+	onSnapshotError func(context.Context, event.Event[T], error)
 }

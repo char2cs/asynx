@@ -10,7 +10,8 @@ import (
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/mockstores"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/char2cs/asynx/store"
 )
 
@@ -19,8 +20,8 @@ type order = mocks.Order
 var storageErr = errors.New("storage failure")
 
 func newTestWriter(
-	es asynxmd.Store,
-	ss asynxmd.SnapshotStore,
+	es storage.Store,
+	ss storage.SnapshotStore,
 ) *Writer[order] {
 	return New[order](
 		es,
@@ -36,14 +37,14 @@ type eventAppend[T any] struct {
 	expectedVersion int64
 	previousState   T
 	newState        T
-	evt             asynxmd.Event[T]
+	evt             event.Event[T]
 }
 
 func (a *eventAppend[T]) inTransaction(
 	ctx context.Context,
-) func(asynxmd.Tx) error {
+) func(storage.Tx) error {
 	return func(
-		tx asynxmd.Tx,
+		tx storage.Tx,
 	) error {
 		return a.appendIn(
 			ctx,
@@ -54,7 +55,7 @@ func (a *eventAppend[T]) inTransaction(
 
 func (a *eventAppend[T]) appendIn(
 	ctx context.Context,
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	evt, err := a.writer.AppendTx(
 		ctx,
@@ -77,7 +78,7 @@ func appendEvent[T any](
 	expectedVersion int64,
 	previousState T,
 	newState T,
-) (asynxmd.Event[T], error) {
+) (event.Event[T], error) {
 	pending := &eventAppend[T]{
 		writer:          w,
 		aggregateID:     aggregateID,
@@ -91,7 +92,7 @@ func appendEvent[T any](
 		pending.inTransaction(ctx),
 	)
 	if err != nil {
-		return asynxmd.Event[T]{},
+		return event.Event[T]{},
 			err
 	}
 
@@ -107,7 +108,7 @@ func appendSnapshotted[T any](
 	expectedVersion int64,
 	previousState T,
 	newState T,
-) (asynxmd.Event[T], error) {
+) (event.Event[T], error) {
 	evt, err := appendEvent(
 		ctx,
 		w,
@@ -118,7 +119,7 @@ func appendSnapshotted[T any](
 		newState,
 	)
 	if err != nil {
-		return asynxmd.Event[T]{},
+		return event.Event[T]{},
 			err
 	}
 
@@ -127,7 +128,7 @@ func appendSnapshotted[T any](
 		evt,
 	)
 	if err != nil {
-		return asynxmd.Event[T]{},
+		return event.Event[T]{},
 			err
 	}
 

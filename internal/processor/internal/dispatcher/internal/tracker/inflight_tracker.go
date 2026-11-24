@@ -3,7 +3,7 @@ package tracker
 import (
 	"sync"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/contracts"
 )
@@ -38,12 +38,12 @@ func (t *inflightTracker[T]) Track(
 func (t *inflightTracker[T]) For(
 	aggregateID string,
 	version int64,
-) (asynxmd.Ticket, bool) {
+) (dispatch.Ticket, bool) {
 	t.mu.Lock()
 	job, ok := t.tickets[ticketKey{aggregateID, version}]
 	t.mu.Unlock()
 	if !ok {
-		return asynxmd.Ticket{},
+		return dispatch.Ticket{},
 			false
 	}
 

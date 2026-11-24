@@ -1,7 +1,7 @@
 package storetest
 
 import (
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/char2cs/asynx/store"
 	"testing"
 )
@@ -17,7 +17,7 @@ func TestMemorySnapshotStoreConforms(
 
 func memorySnapshots(
 	*testing.T,
-) models.SnapshotStore {
+) storage.SnapshotStore {
 	return store.NewSnapshots()
 }
 
@@ -26,7 +26,7 @@ func TestSnapshotSuite_FlagsStoresThatDoNotKeepWhatTheyAccepted(
 ) {
 	failed := failures(
 		snapshotScenarios(),
-		models.SnapshotStore(forgetfulSnapshots{SnapshotStore: store.NewSnapshots()}),
+		storage.SnapshotStore(forgetfulSnapshots{SnapshotStore: store.NewSnapshots()}),
 	)
 	if !failed["PutThenGetReturnsTheBytes"] ||
 		!failed["PutReplacesTheSnapshot"] {
@@ -42,7 +42,7 @@ func TestSnapshotSuite_FlagsStoresThatFail(
 ) {
 	failed := failures(
 		snapshotScenarios(),
-		models.SnapshotStore(failingSnapshots{SnapshotStore: store.NewSnapshots()}),
+		storage.SnapshotStore(failingSnapshots{SnapshotStore: store.NewSnapshots()}),
 	)
 
 	if got, total := countFailed(failed), len(failed); got < total/2 {

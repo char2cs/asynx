@@ -2,7 +2,7 @@ package mockstores
 
 import (
 	"context"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/storage"
 	"testing"
 )
 
@@ -109,5 +109,5 @@ func TestCountingSnapshotStore_Reset(
 func TestCountingSnapshotStore_ImplementsSnapshotStore(
 	t *testing.T,
 ) {
-	var _ asynxmd.SnapshotStore = &CountingSnapshotStore{}
+	var _ storage.SnapshotStore = &CountingSnapshotStore{}
 }

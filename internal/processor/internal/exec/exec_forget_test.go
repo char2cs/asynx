@@ -17,7 +17,13 @@ import (
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	dispatchermodel "github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/models/subscription"
 	"github.com/char2cs/asynx/store"
 )
 
@@ -147,7 +153,7 @@ func TestForget_UnknownAggregateIsValidationError(
 		"ghost",
 	); !errors.Is(
 		err,
-		asynxmd.ErrValidation,
+		failure.ErrValidation,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrValidation",
@@ -165,7 +171,7 @@ type tombstoneObserver struct {
 
 func (o *tombstoneObserver) observe(
 	_ context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) {
 	o.total = e.Aggregate.Total
 	o.streamAtHandler = streamLen(
@@ -178,11 +184,11 @@ func (o *tombstoneObserver) observe(
 type deleteFailStore struct{ store.Memory }
 
 type deleteFailRun func(
-	asynxmd.Tx,
+	storage.Tx,
 ) error
 
 func (r deleteFailRun) inFailingTx(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	return r(deleteFailTx{tx})
 }
@@ -191,7 +197,7 @@ func (r deleteFailRun) inFailingTx(
 // store that cannot erase a stream.
 func (s deleteFailStore) Atomically(
 	ctx context.Context,
-	fn func(asynxmd.Tx) error,
+	fn func(storage.Tx) error,
 ) error {
 	return s.Memory.Atomically(
 		ctx,
@@ -199,7 +205,7 @@ func (s deleteFailStore) Atomically(
 	)
 }
 
-type deleteFailTx struct{ asynxmd.Tx }
+type deleteFailTx struct{ storage.Tx }
 
 // DeleteStream always fails with "disk gone".
 func (deleteFailTx) DeleteStream(
@@ -231,7 +237,7 @@ func TestForget_DeleteFailureReturnsErrForgetFailed(
 		"agg",
 	); !errors.Is(
 		err,
-		asynxmd.ErrForgetFailed,
+		failure.ErrForgetFailed,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrForgetFailed",
@@ -263,7 +269,7 @@ func TestForget_ErasePhaseFailureParksTheAggregate(
 		"agg",
 	); !errors.Is(
 		err,
-		asynxmd.ErrForgetFailed,
+		failure.ErrForgetFailed,
 	) {
 		t.Fatalf(
 			"err = %v",
@@ -297,7 +303,7 @@ func TestForget_LockWaitHonoursContext(
 		"agg",
 	); !errors.Is(
 		err,
-		asynxmd.ErrContextCancelled,
+		failure.ErrContextCancelled,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrContextCancelled",
@@ -331,7 +337,7 @@ func forgetOrUpdate(
 	if err != nil &&
 		!errors.Is(
 			err,
-			asynxmd.ErrForgetInProgress,
+			failure.ErrForgetInProgress,
 		) {
 		t.Errorf(
 			"Execute: %v",
@@ -473,8 +479,8 @@ func matchNothing(
 
 func failNever(
 	context.Context,
-	asynxmd.Tx,
-	asynxmd.Event[order],
+	storage.Tx,
+	event.Event[order],
 ) error {
 	return errors.New("never")
 }
@@ -526,8 +532,8 @@ type projectedEventNames struct {
 
 func (p *projectedEventNames) record(
 	_ context.Context,
-	_ asynxmd.Tx,
-	e asynxmd.Event[order],
+	_ storage.Tx,
+	e event.Event[order],
 ) error {
 	p.names = append(
 		p.names,
@@ -542,8 +548,8 @@ type switchableReadModel struct {
 
 func (m *switchableReadModel) project(
 	context.Context,
-	asynxmd.Tx,
-	asynxmd.Event[order],
+	storage.Tx,
+	event.Event[order],
 ) error {
 	if m.down {
 		return errors.New("read model down")
@@ -578,11 +584,11 @@ func TestForget_SyncProjectionFailureAbortsBeforeErasing(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) ||
 		!errors.Is(
 			err,
-			asynxmd.ErrSyncProjection,
+			failure.ErrSyncProjection,
 		) {
 		t.Fatalf(
 			"err = %v, want ErrPipelineFailed + ErrSyncProjection",
@@ -671,7 +677,7 @@ func TestForget_AfterDispatcherClosedFailsPipeline(
 		"agg",
 	); !errors.Is(
 		err,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrPipelineFailed",
@@ -721,7 +727,7 @@ func TestForget_WithoutDurableDeliveryWritesNoMarkerEntry(
 		"agg",
 	); !errors.Is(
 		err,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) {
 		t.Fatalf(
 			"err = %v",
@@ -803,7 +809,7 @@ func hammerOnce(
 	if after &&
 		errors.Is(
 			err,
-			asynxmd.ErrForgetInProgress,
+			failure.ErrForgetInProgress,
 		) {
 		return err
 	}
@@ -865,7 +871,7 @@ func runRefusalRound(
 	}
 }
 
-type snapshotDeleteFailStore struct{ asynxmd.SnapshotStore }
+type snapshotDeleteFailStore struct{ storage.SnapshotStore }
 
 // Delete always fails with "snap gone", simulating a snapshot store that
 // cannot delete a snapshot.
@@ -907,7 +913,7 @@ func TestForget_SnapshotDeleteFailureReturnsErrForgetFailed(
 		"agg",
 	); !errors.Is(
 		err,
-		asynxmd.ErrForgetFailed,
+		failure.ErrForgetFailed,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrForgetFailed",
@@ -939,7 +945,7 @@ func newFirstVersionReaction(
 
 func (r *firstVersionReaction) react(
 	ctx context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) {
 	if e.Version != 1 {
 		return
@@ -1073,7 +1079,7 @@ func TestForget_DoesNotDeadlockWithAReactionToItsOwnAggregate(
 
 	if err := <-reaction.outcome; !errors.Is(
 		err,
-		asynxmd.ErrForgetInProgress,
+		failure.ErrForgetInProgress,
 	) {
 		t.Fatalf(
 			"the reaction's Execute = %v, want ErrForgetInProgress",
@@ -1124,7 +1130,7 @@ func TestForget_SnapshotIsDeletedBeforeTheStream(
 		"agg",
 	); !errors.Is(
 		err,
-		asynxmd.ErrForgetFailed,
+		failure.ErrForgetFailed,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrForgetFailed",
@@ -1195,7 +1201,7 @@ func TestWithLock_HonoursContext(
 		(&mustNotRun{t: t}).fail,
 	); !errors.Is(
 		err,
-		asynxmd.ErrContextCancelled,
+		failure.ErrContextCancelled,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrContextCancelled",
@@ -1237,7 +1243,7 @@ func TestForget_SecondConcurrentForgetIsRefusedWhileOneRuns(
 		"agg",
 	); !errors.Is(
 		err,
-		asynxmd.ErrForgetInProgress,
+		failure.ErrForgetInProgress,
 	) {
 		t.Fatalf(
 			"second Forget err = %v, want ErrForgetInProgress",
@@ -1253,7 +1259,7 @@ func TestForget_SecondConcurrentForgetIsRefusedWhileOneRuns(
 		),
 	); !errors.Is(
 		err,
-		asynxmd.ErrForgetInProgress,
+		failure.ErrForgetInProgress,
 	) {
 		t.Fatalf(
 			"Execute err = %v, want ErrForgetInProgress",
@@ -1300,7 +1306,7 @@ func TestForget_AbortsWhenTheCallerGivesUpWaitingForHandlers(
 	cancel()
 	if err := <-got; !errors.Is(
 		err,
-		asynxmd.ErrForgetFailed,
+		failure.ErrForgetFailed,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrForgetFailed",
@@ -1326,7 +1332,7 @@ func TestForget_AbortsWhenTheCallerGivesUpWaitingForHandlers(
 		),
 	); errors.Is(
 		err,
-		asynxmd.ErrForgetInProgress,
+		failure.ErrForgetInProgress,
 	) {
 		t.Fatal("aggregate still fenced after Forget aborted")
 	}
@@ -1353,7 +1359,7 @@ func TestForget_FailsWhenTheDispatcherIsClosed(
 		"agg",
 	); !errors.Is(
 		err,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrPipelineFailed",
@@ -1369,7 +1375,7 @@ func TestForget_FailsWhenTheDispatcherIsClosed(
 		),
 	); errors.Is(
 		err,
-		asynxmd.ErrForgetInProgress,
+		failure.ErrForgetInProgress,
 	) {
 		t.Fatal("aggregate left fenced by a Forget that failed to enqueue")
 	}
@@ -1379,8 +1385,8 @@ func TestForget_FailsWhenTheDispatcherIsClosed(
 
 func durableEnv(
 	t *testing.T,
-	handler asynxmd.DurableHandler[order],
-	edits ...func(*asynxmd.DispatcherConfig[order]),
+	callback handler.Durable[order],
+	edits ...func(*dispatchermodel.Config[order]),
 ) *CommandExecutor[order] {
 	t.Helper()
 	es := eventstore.New[order](
@@ -1390,11 +1396,11 @@ func durableEnv(
 		1,
 		nil,
 	)
-	cfg := asynxmd.DispatcherConfig[order]{
+	cfg := dispatchermodel.Config[order]{
 		Bus: bus.New[order](),
-		DurableSubs: []asynxmd.DurableSub[order]{{
+		DurableSubs: []subscription.Durable[order]{{
 			Match:   forgetAlways,
-			Handler: handler,
+			Handler: callback,
 		}},
 		RetryInitial: time.Millisecond,
 		RetryMax:     2 * time.Millisecond,
@@ -1415,9 +1421,9 @@ func durableEnv(
 
 func refuseTombstone(
 	_ context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) error {
-	if e.EventName == asynxmd.ForgetEventName {
+	if e.EventName == event.ForgetEventName {
 		return errors.New("cannot drop state")
 	}
 
@@ -1447,11 +1453,11 @@ func TestForget_DoesNotEraseWhenADurableSubscriberCannotTakeTheTombstone(
 		"agg",
 	); !errors.Is(
 		err,
-		asynxmd.ErrForgetFailed,
+		failure.ErrForgetFailed,
 	) ||
 		!errors.Is(
 			err,
-			asynxmd.ErrDeliveryParked,
+			failure.ErrDeliveryParked,
 		) {
 		t.Fatalf(
 			"err = %v, want ErrForgetFailed wrapping ErrDeliveryParked",
@@ -1497,9 +1503,9 @@ type forgetsItsOwnAggregate struct {
 
 func (h *forgetsItsOwnAggregate) handle(
 	ctx context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) error {
-	if e.EventName != asynxmd.ForgetEventName {
+	if e.EventName != event.ForgetEventName {
 		h.got <- h.executor.Forget(
 			ctx,
 			e.AggregateID,
@@ -1533,7 +1539,7 @@ func TestForget_FromAHandlerOfTheSameAggregateFailsFast(
 
 	if err := <-reaction.got; !errors.Is(
 		err,
-		asynxmd.ErrForgetFromHandler,
+		failure.ErrForgetFromHandler,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrForgetFromHandler",
@@ -1553,9 +1559,9 @@ type forgetsAnotherAggregate struct {
 
 func (h *forgetsAnotherAggregate) handle(
 	ctx context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) error {
-	if e.EventName != asynxmd.ForgetEventName &&
+	if e.EventName != event.ForgetEventName &&
 		e.AggregateID == "a" {
 		h.got <- h.executor.Forget(
 			ctx,
@@ -1613,9 +1619,9 @@ type failsUnlessTombstone struct {
 
 func (h *failsUnlessTombstone) handle(
 	_ context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) error {
-	if e.EventName == asynxmd.ForgetEventName {
+	if e.EventName == event.ForgetEventName {
 		return nil
 	}
 
@@ -1624,7 +1630,7 @@ func (h *failsUnlessTombstone) handle(
 }
 
 func slowRetries(
-	cfg *asynxmd.DispatcherConfig[order],
+	cfg *dispatchermodel.Config[order],
 ) {
 	cfg.RetryInitial, cfg.RetryMax, cfg.MaxAttempts = time.Hour, time.Hour, 100
 }
@@ -1675,7 +1681,7 @@ type deliveryFailStore struct {
 // configured by drop and enqueue.
 func (s deliveryFailStore) Atomically(
 	ctx context.Context,
-	fn func(asynxmd.Tx) error,
+	fn func(storage.Tx) error,
 ) error {
 	failing := deliveryFailRun{
 		run:     fn,
@@ -1689,12 +1695,12 @@ func (s deliveryFailStore) Atomically(
 }
 
 type deliveryFailRun struct {
-	run           func(asynxmd.Tx) error
+	run           func(storage.Tx) error
 	drop, enqueue bool
 }
 
 func (r deliveryFailRun) inFailingTx(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	return r.run(deliveryFailTx{
 		Tx:      tx,
@@ -1704,7 +1710,7 @@ func (r deliveryFailRun) inFailingTx(
 }
 
 type deliveryFailTx struct {
-	asynxmd.Tx
+	storage.Tx
 	drop, enqueue bool
 }
 
@@ -1813,7 +1819,7 @@ func requireTombstoneRollsBack(
 		"agg",
 	); !errors.Is(
 		err,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrPipelineFailed",
@@ -1844,9 +1850,9 @@ type blocksUnlessTombstone struct {
 
 func (h *blocksUnlessTombstone) handle(
 	_ context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) error {
-	if e.EventName != asynxmd.ForgetEventName {
+	if e.EventName != event.ForgetEventName {
 		h.entered <- struct{}{}
 		<-h.release
 	}
@@ -1913,11 +1919,11 @@ func TestForget_GivesUpWhenShutdownBegins(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrForgetFailed,
+		failure.ErrForgetFailed,
 	) ||
 		!errors.Is(
 			err,
-			asynxmd.ErrShuttingDown,
+			failure.ErrShuttingDown,
 		) {
 		t.Fatalf(
 			"err = %v, want ErrForgetFailed wrapping ErrShuttingDown",
@@ -1948,7 +1954,7 @@ func TestAwaitTombstone_PrefersADeliveryThatFinished(
 	finished := make(chan struct{})
 	close(finished)
 
-	ticket := asynxmd.Ticket{Final: finished, Err: func() error { return nil }}
+	ticket := dispatch.Ticket{Final: finished, Err: func() error { return nil }}
 	for range 50 {
 		requireTombstoneAwaited(
 			t,
@@ -1961,7 +1967,7 @@ func TestAwaitTombstone_PrefersADeliveryThatFinished(
 func requireTombstoneAwaited(
 	t *testing.T,
 	ex *CommandExecutor[order],
-	ticket asynxmd.Ticket,
+	ticket dispatch.Ticket,
 ) {
 	t.Helper()
 	err := ex.awaitTombstone(
@@ -2043,7 +2049,7 @@ func TestForget_ErasePhaseFailureParksWithTheForgetError(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrForgetFailed,
+		failure.ErrForgetFailed,
 	) {
 		t.Fatalf(
 			"Forget = %v, want ErrForgetFailed",
@@ -2067,9 +2073,9 @@ type holdsTombstone struct {
 
 func (h *holdsTombstone) handle(
 	_ context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) error {
-	if e.EventName == asynxmd.ForgetEventName {
+	if e.EventName == event.ForgetEventName {
 		<-h.release
 	}
 

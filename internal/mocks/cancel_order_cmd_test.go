@@ -1,7 +1,7 @@
 package mocks
 
 import (
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
 	"testing"
 )
 
@@ -42,7 +42,7 @@ func TestCancelOrderCmd_Validate_FailsWhenCurrentNil(
 	t *testing.T,
 ) {
 	err := CancelOrderCmd{}.Validate(nil)
-	if err != asynxmd.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Errorf(
 			"Validate(nil) = %v, want ErrValidation",
 			err,
@@ -55,7 +55,7 @@ func TestCancelOrderCmd_Validate_FailsWhenAlreadyCancelled(
 ) {
 	current := &Order{Status: "Cancelled"}
 	err := CancelOrderCmd{}.Validate(current)
-	if err != asynxmd.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Errorf(
 			"Validate(Cancelled) = %v, want ErrValidation",
 			err,

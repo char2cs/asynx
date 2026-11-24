@@ -1,5 +1,5 @@
 package inmemory
 
 type inHandlerKey[T any] struct {
-	d *dispatcher[T]
+	d *inMemoryDispatcher[T]
 }

@@ -10,7 +10,14 @@ import (
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	dispatchermodel "github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/pubsub"
+	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/models/subscription"
 	"github.com/char2cs/asynx/store"
 	"maps"
 	"runtime"
@@ -162,7 +169,7 @@ func TestExecute_ValidationFailure(
 		ctx,
 		cmd,
 	)
-	if err != asynxmd.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Fatalf(
 			"expected ErrValidation, got %v",
 			err,
@@ -173,7 +180,7 @@ func TestExecute_ValidationFailure(
 		ctx,
 		"order1",
 	)
-	if err != asynxmd.ErrNotFound {
+	if err != failure.ErrNotFound {
 		t.Errorf("expected ErrNotFound, but aggregate was written")
 	}
 }
@@ -208,7 +215,7 @@ func TestExecute_ValidationFailureNoWrite(
 		ctx,
 		cmd2,
 	)
-	if err != asynxmd.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Fatalf(
 			"expected ErrValidation, got %v",
 			err,
@@ -219,7 +226,7 @@ func TestExecute_ValidationFailureNoWrite(
 		ctx,
 		"order2",
 	)
-	if err != asynxmd.ErrNotFound {
+	if err != failure.ErrNotFound {
 		t.Errorf("expected ErrNotFound, but aggregate was written")
 	}
 }
@@ -289,7 +296,7 @@ func TestExecute_WriteStorageError(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) {
 		t.Errorf(
 			"expected ErrPipelineFailed, got %v",
@@ -342,7 +349,7 @@ func TestExecute_DispatchCalledAsync(
 	)
 
 	trackBus := &recordingBus[order]{}
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: trackBus})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: trackBus})
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(
@@ -542,18 +549,18 @@ func TestPublishErrorHandler_CalledOnPublishError(
 	}
 
 	var mu sync.Mutex
-	var gotEvent asynxmd.Event[order]
+	var gotEvent event.Event[order]
 	var gotErr error
 	called := false
 
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: errBus, OnPublishError: func(
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: errBus, OnPublishError: func(
 		_ context.Context,
-		event asynxmd.Event[order],
+		evt event.Event[order],
 		err error,
 	) {
 		mu.Lock()
 		defer mu.Unlock()
-		gotEvent = event
+		gotEvent = evt
 		gotErr = err
 		called = true
 	}})
@@ -615,9 +622,9 @@ func TestPublishErrorHandler_NotCalledOnSuccess(
 	successBus := &recordingBus[order]{}
 
 	called := false
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: successBus, OnPublishError: func(
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: successBus, OnPublishError: func(
 		_ context.Context,
-		_ asynxmd.Event[order],
+		_ event.Event[order],
 		_ error,
 	) {
 		called = true
@@ -664,7 +671,7 @@ func TestPublishErrorHandler_NilHandlerDoesNotPanic(
 		publishSyncErr: errors.New("bus error"),
 	}
 
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: errBus})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: errBus})
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	executor := New(
@@ -698,7 +705,7 @@ type recordingBus[T any] struct {
 // Publish accepts the event and does nothing.
 func (b *recordingBus[T]) Publish(
 	_ context.Context,
-	_ asynxmd.Event[T],
+	_ event.Event[T],
 ) error {
 	return nil
 }
@@ -708,7 +715,7 @@ func (b *recordingBus[T]) Publish(
 // assert what the dispatcher delivered and with which context.
 func (b *recordingBus[T]) PublishSync(
 	ctx context.Context,
-	_ asynxmd.Event[T],
+	_ event.Event[T],
 ) error {
 	b.mu.Lock()
 	b.count++
@@ -725,8 +732,8 @@ func (b *recordingBus[T]) PublishSync(
 // Subscribe registers nothing and returns an empty id.
 func (b *recordingBus[T]) Subscribe(
 	_ string,
-	_ asynxmd.ProjectionHandler[T],
-	_ ...asynxmd.SubscriptionOpt[T],
+	_ handler.Projection[T],
+	_ ...subscription.Opt[T],
 ) (string, error) {
 	return "",
 		nil
@@ -752,7 +759,7 @@ func (b *recordingBus[T]) WaitForHandlers() {}
 func newEnv(
 	t *testing.T,
 	opts ...Opt[order],
-) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, asynxmd.Dispatcher[order], asynxmd.Bus[order]) {
+) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, dispatchermodel.Dispatcher[order], pubsub.Bus[order]) {
 	t.Helper()
 	return newEnvOn(
 		t,
@@ -765,7 +772,7 @@ func newEnvOn(
 	t *testing.T,
 	s store.Memory,
 	opts ...Opt[order],
-) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, asynxmd.Dispatcher[order], asynxmd.Bus[order]) {
+) (*CommandExecutor[order], store.Memory, store.SnapshotMemory, dispatchermodel.Dispatcher[order], pubsub.Bus[order]) {
 	t.Helper()
 	ss := store.NewSnapshots()
 	es := eventstore.New[order](
@@ -776,7 +783,7 @@ func newEnvOn(
 		nil,
 	)
 	b := bus.New[order]()
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	return New(
 			es,
@@ -790,7 +797,7 @@ func newEnvOn(
 }
 
 func parked(
-	d asynxmd.Dispatcher[order],
+	d dispatchermodel.Dispatcher[order],
 ) []string {
 	return slices.Sorted(maps.Keys(d.Parks()))
 }
@@ -933,7 +940,7 @@ func TestExecute_DifferentAggregatesRunInParallel(
 func mustExecute(
 	t *testing.T,
 	ex *CommandExecutor[order],
-	cmd asynxmd.Command[order],
+	cmd command.Command[order],
 ) {
 	t.Helper()
 	if _, err := ex.Execute(
@@ -1051,7 +1058,7 @@ func TestExecute_LockWaitHonoursContext(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrContextCancelled,
+		failure.ErrContextCancelled,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrContextCancelled",
@@ -1132,8 +1139,8 @@ func matchUpdated(
 func syncAll(
 	fn func(
 		context.Context,
-		asynxmd.Tx,
-		asynxmd.Event[order],
+		storage.Tx,
+		event.Event[order],
 	) error,
 ) Opt[order] {
 	return WithSyncProjections[order]([]models.SyncProjection[order]{{Match: func(
@@ -1229,7 +1236,7 @@ func TestExecute_ValidationErrorPassesThroughUnwrapped(
 		context.Background(),
 		mocks.CreateOrderCmd{ID: "x", Total: -1},
 	)
-	if err != asynxmd.ErrValidation {
+	if err != failure.ErrValidation {
 		t.Fatalf(
 			"err = %v, want ErrValidation",
 			err,
@@ -1422,7 +1429,7 @@ func TestExecute_AfterDispatcherClosedFailsPipelineButKeepsTheCommit(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrPipelineFailed",
@@ -1498,7 +1505,7 @@ func TestExecute_EnqueueFailureAfterCommitParksTheAggregate(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) ||
 		evt.Version != 1 {
 		t.Fatalf(
@@ -1828,7 +1835,7 @@ func newHandlerGate() *handlerGate {
 
 func (g *handlerGate) hold(
 	context.Context,
-	asynxmd.Event[order],
+	event.Event[order],
 ) {
 	close(g.entered)
 	<-g.release
@@ -1854,7 +1861,7 @@ func newReusableGate(
 
 func (g *reusableGate) hold(
 	context.Context,
-	asynxmd.Event[order],
+	event.Event[order],
 ) {
 	g.entered <- struct{}{}
 	<-g.release
@@ -1862,7 +1869,7 @@ func (g *reusableGate) hold(
 
 func (g *reusableGate) holdFirstVersion(
 	ctx context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) {
 	if e.Version != 1 {
 		return
@@ -1876,8 +1883,8 @@ func (g *reusableGate) holdFirstVersion(
 
 func (g *reusableGate) holdProjection(
 	_ context.Context,
-	_ asynxmd.Tx,
-	_ asynxmd.Event[order],
+	_ storage.Tx,
+	_ event.Event[order],
 ) error {
 	g.entered <- struct{}{}
 	<-g.release
@@ -1886,7 +1893,7 @@ func (g *reusableGate) holdProjection(
 
 func (g *reusableGate) waitForRelease(
 	context.Context,
-	asynxmd.Event[order],
+	event.Event[order],
 ) {
 	<-g.release
 }
@@ -1905,14 +1912,14 @@ type eventCounter struct {
 
 func (c *eventCounter) onEvent(
 	context.Context,
-	asynxmd.Event[order],
+	event.Event[order],
 ) {
 	c.calls.Add(1)
 }
 
 func (c *eventCounter) onSnapshotError(
 	context.Context,
-	asynxmd.Event[order],
+	event.Event[order],
 	error,
 ) {
 	c.calls.Add(1)
@@ -1925,7 +1932,7 @@ type versionRecorder struct {
 
 func (r *versionRecorder) record(
 	_ context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) {
 	time.Sleep(200 * time.Microsecond)
 	r.mu.Lock()
@@ -1973,7 +1980,7 @@ type ownAggregateReaction struct {
 
 func (r *ownAggregateReaction) react(
 	ctx context.Context,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) {
 	if e.Version != 1 {
 		return
@@ -2020,9 +2027,9 @@ func enqueuingDelivery(
 	ctx context.Context,
 	aggregateID string,
 	version int64,
-) func(asynxmd.Tx) error {
+) func(storage.Tx) error {
 	return func(
-		tx asynxmd.Tx,
+		tx storage.Tx,
 	) error {
 		return tx.EnqueueDelivery(
 			ctx,

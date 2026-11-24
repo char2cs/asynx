@@ -2,7 +2,8 @@ package storetest
 
 import (
 	"errors"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 	"maps"
 	"testing"
 )
@@ -13,11 +14,11 @@ import (
 // same one if it is emptied first.
 type Factory func(
 	t *testing.T,
-) models.Store
+) storage.Store
 
 var errBoom = errors.New("storetest: boom")
 
-// Run executes the full conformance suite for models.Store implementations
+// Run executes the full conformance suite for storage.Store implementations
 // against stores built by newStore. A store that passes it keeps the
 // guarantees asynx builds on: events are written atomically with their
 // receipts and deliveries, a (stream, version) pair is stored once, reads
@@ -25,7 +26,7 @@ var errBoom = errors.New("storetest: boom")
 // Call it from a test in the package that provides the store:
 //
 //	func TestConformance(t *testing.T) {
-//		storetest.Run(t, func(t *testing.T) models.Store { return newMyStore(t) })
+//		storetest.Run(t, func(t *testing.T) storage.Store { return newMyStore(t) })
 //	}
 //
 // Each scenario runs as a subtest named after the guarantee it checks, against
@@ -44,7 +45,7 @@ var errBoom = errors.New("storetest: boom")
 // accumulate.
 //
 // Transactions. DuplicateVersionConflictsAndRollsBack checks that a second
-// write of one (stream, version) fails with models.ErrPipelineFailed and takes
+// write of one (stream, version) fails with failure.ErrPipelineFailed and takes
 // the rest of its transaction with it. ErrorRollsBackEverything checks that an
 // error from the callback undoes appends, receipts and deliveries alike and is
 // returned to the caller. RollbackRestoresDroppedDeliveries checks that a
@@ -57,7 +58,7 @@ var errBoom = errors.New("storetest: boom")
 //
 // Receipts and deliveries. ReceiptsAreStoredAndDuplicatesRejected checks that
 // a receipt reads back as stored, that a second receipt for one command fails
-// with models.ErrDuplicateReceipt, and that an unknown command has none.
+// with failure.ErrDuplicateReceipt, and that an unknown command has none.
 // DeliveriesKeepEnqueueOrderAndAckRemoves, PendingDeliveriesHonoursLimit and
 // DropDeliveriesOnlyAffectsThatAggregate check the delivery log's ordering,
 // limit and scoping. AckOfUnknownDeliveryIsNotAnError and
@@ -70,7 +71,7 @@ var errBoom = errors.New("storetest: boom")
 //
 // Concurrency. ConcurrentAppendsOfOneVersionAdmitOne checks that of many
 // writers racing for one version exactly one commits and the rest fail with
-// models.ErrPipelineFailed. ConcurrentAppendsOfDistinctVersionsAllCommit
+// failure.ErrPipelineFailed. ConcurrentAppendsOfDistinctVersionsAllCommit
 // checks that writers that do not conflict all commit and nothing is lost.
 func Run(
 	t *testing.T,
@@ -84,9 +85,9 @@ func Run(
 	)
 }
 
-func storeScenarios() map[string]scenario[models.Store] {
-	scenarios := map[string]scenario[models.Store]{}
-	for _, group := range []map[string]scenario[models.Store]{
+func storeScenarios() map[string]scenario[storage.Store] {
+	scenarios := map[string]scenario[storage.Store]{}
+	for _, group := range []map[string]scenario[storage.Store]{
 		appendScenarios(),
 		transactionScenarios(),
 		deliveryScenarios(),
@@ -103,12 +104,12 @@ func storeScenarios() map[string]scenario[models.Store] {
 func deliveryOf(
 	aggregateID string,
 	version int64,
-) models.Delivery {
-	return models.Delivery{AggregateID: aggregateID, Version: version}
+) event.Delivery {
+	return event.Delivery{AggregateID: aggregateID, Version: version}
 }
 
 func successor(
-	d models.Delivery,
-) models.Delivery {
-	return models.Delivery{AggregateID: d.AggregateID, Version: d.Version + 1}
+	d event.Delivery,
+) event.Delivery {
+	return event.Delivery{AggregateID: d.AggregateID, Version: d.Version + 1}
 }

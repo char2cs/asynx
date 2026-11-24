@@ -6,10 +6,11 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/dispatcher"
 )
 
-// Dispatcher is a recording fake of models.Dispatcher. It records every
+// Dispatcher is a recording fake of dispatcher.Dispatcher. It records every
 // command it receives (the factory call, Enqueue, Unrun, Park, Supersede,
 // ResumeUndelivered, Interrupt, Close and WaitIdle) in order, and every request
 // it is handed, settles each ticket at once, and lets a test script an Enqueue
@@ -20,9 +21,9 @@ import (
 // concurrent use.
 type Dispatcher[T any] struct {
 	mu          sync.Mutex
-	config      models.DispatcherConfig[T]
+	config      dispatcher.Config[T]
 	calls       []string
-	requests    []models.DispatchRequest[T]
+	requests    []dispatch.Request[T]
 	parkCalls   []ParkCall
 	parks       map[string]uint64
 	causes      map[string]error
@@ -43,12 +44,12 @@ func NewDispatcher[T any]() *Dispatcher[T] {
 	}
 }
 
-// Factory returns a DispatcherFactory that hands out d and keeps the
+// Factory returns a dispatcher.Factory that hands out d and keeps the
 // configuration it was called with, which Config returns.
-func (d *Dispatcher[T]) Factory() models.DispatcherFactory[T] {
+func (d *Dispatcher[T]) Factory() dispatcher.Factory[T] {
 	return func(
-		config models.DispatcherConfig[T],
-	) (models.Dispatcher[T], error) {
+		config dispatcher.Config[T],
+	) (dispatcher.Dispatcher[T], error) {
 		d.configure(config)
 		return d,
 			nil
@@ -76,7 +77,7 @@ func (d *Dispatcher[T]) FailClose(
 }
 
 // Config returns the configuration the factory was called with.
-func (d *Dispatcher[T]) Config() models.DispatcherConfig[T] {
+func (d *Dispatcher[T]) Config() dispatcher.Config[T] {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.config
@@ -91,7 +92,7 @@ func (d *Dispatcher[T]) Calls() []string {
 }
 
 // Requests returns the requests Enqueue accepted, in order.
-func (d *Dispatcher[T]) Requests() []models.DispatchRequest[T] {
+func (d *Dispatcher[T]) Requests() []dispatch.Request[T] {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return slices.Clone(d.requests)
@@ -107,13 +108,13 @@ func (d *Dispatcher[T]) ParkCalls() []ParkCall {
 // Enqueue records the request and returns a ticket that is already settled, or the error set by FailEnqueue.
 func (d *Dispatcher[T]) Enqueue(
 	_ context.Context,
-	request models.DispatchRequest[T],
-) (models.Ticket, error) {
+	request dispatch.Request[T],
+) (dispatch.Ticket, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.recordLocked("Enqueue")
 	if d.enqueueErr != nil {
-		return models.Ticket{},
+		return dispatch.Ticket{},
 			d.enqueueErr
 	}
 
@@ -127,8 +128,8 @@ func (d *Dispatcher[T]) Enqueue(
 func (d *Dispatcher[T]) TicketFor(
 	_ string,
 	_ int64,
-) (models.Ticket, bool) {
-	return models.Ticket{},
+) (dispatch.Ticket, bool) {
+	return dispatch.Ticket{},
 		false
 }
 
@@ -171,15 +172,15 @@ func (d *Dispatcher[T]) Park(
 // versions, so Undelivered is always nil.
 func (d *Dispatcher[T]) Inspect(
 	aggregateID string,
-) models.DeliveryStatus {
+) dispatch.Status {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	generation, parked := d.parks[aggregateID]
 	if !parked {
-		return models.DeliveryStatus{}
+		return dispatch.Status{}
 	}
 
-	return models.DeliveryStatus{Parked: true, Generation: generation, Cause: d.causes[aggregateID]}
+	return dispatch.Status{Parked: true, Generation: generation, Cause: d.causes[aggregateID]}
 }
 
 // Supersede records the call and forgets the aggregate's park.
@@ -203,7 +204,7 @@ func (d *Dispatcher[T]) Parks() map[string]uint64 {
 // generation is the one Park imposed, reporting true. It reports false and
 // changes nothing for an unknown aggregate or a stale generation. The undelivered
 // versions are always nil: the fake keeps none. Lifting and reporting happen in
-// one call because models.Dispatcher defines this method that way, so the fake
+// one call because dispatcher.Dispatcher defines this method that way, so the fake
 // cannot split them.
 func (d *Dispatcher[T]) ResumeUndelivered(
 	aggregateID string,
@@ -275,7 +276,7 @@ func (d *Dispatcher[T]) recordLocked(
 }
 
 func (d *Dispatcher[T]) configure(
-	config models.DispatcherConfig[T],
+	config dispatcher.Config[T],
 ) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -284,7 +285,7 @@ func (d *Dispatcher[T]) configure(
 }
 
 func (d *Dispatcher[T]) addRequestLocked(
-	request models.DispatchRequest[T],
+	request dispatch.Request[T],
 ) {
 	d.requests = append(
 		d.requests,
@@ -305,10 +306,10 @@ func (d *Dispatcher[T]) liftLocked(
 	)
 }
 
-func settledTicket() models.Ticket {
+func settledTicket() dispatch.Ticket {
 	done := make(chan struct{})
 	close(done)
-	return models.Ticket{
+	return dispatch.Ticket{
 		Settled: done,
 		Final:   done,
 		Err:     func() error { return nil },

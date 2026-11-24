@@ -8,7 +8,7 @@ import (
 	"github.com/char2cs/asynx/internal/mockbuses"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
 	"github.com/char2cs/asynx/store"
 	"sync"
 	"sync/atomic"
@@ -35,7 +35,7 @@ func TestProcessor_ShuttingDown(
 		ctx,
 		cmd,
 	)
-	if err != asynxmd.ErrShuttingDown {
+	if err != failure.ErrShuttingDown {
 		t.Fatalf(
 			"expected ErrShuttingDown, got %v",
 			err,
@@ -132,7 +132,7 @@ func TestProcessor_AlreadyShuttingDown(
 	}
 
 	err2 := p.Shutdown(ctx)
-	if err2 != asynxmd.ErrAlreadyShuttingDown {
+	if err2 != failure.ErrAlreadyShuttingDown {
 		t.Fatalf(
 			"expected ErrAlreadyShuttingDown, got %v",
 			err2,
@@ -269,7 +269,7 @@ func TestProcessor_ShutdownClosesPool(
 		ctx,
 		cmd2,
 	)
-	if err != asynxmd.ErrShuttingDown {
+	if err != failure.ErrShuttingDown {
 		t.Fatalf(
 			"send after shutdown should return ErrShuttingDown, got %v",
 			err,
@@ -291,7 +291,7 @@ func TestProcessor_SendWait_AfterShutdown(
 		ctx,
 		cmd,
 	)
-	if err != asynxmd.ErrShuttingDown {
+	if err != failure.ErrShuttingDown {
 		t.Fatalf(
 			"expected ErrShuttingDown, got %v",
 			err,
@@ -314,7 +314,7 @@ func TestProcessor_Forget_RejectedWhenShuttingDownOrCancelled(
 		"o1",
 	); !errors.Is(
 		err,
-		asynxmd.ErrContextCancelled,
+		failure.ErrContextCancelled,
 	) {
 		t.Errorf(
 			"cancelled: err = %v, want ErrContextCancelled",
@@ -328,7 +328,7 @@ func TestProcessor_Forget_RejectedWhenShuttingDownOrCancelled(
 		"o1",
 	); !errors.Is(
 		err,
-		asynxmd.ErrShuttingDown,
+		failure.ErrShuttingDown,
 	) {
 		t.Errorf(
 			"shutting down: err = %v, want ErrShuttingDown",
@@ -565,7 +565,7 @@ func TestProcessor_Shutdown_CanBeRetriedAfterItsContextEnds(
 
 	if err := p.Shutdown(context.Background()); !errors.Is(
 		err,
-		asynxmd.ErrAlreadyShuttingDown,
+		failure.ErrAlreadyShuttingDown,
 	) {
 		t.Fatalf(
 			"Shutdown after completion = %v, want ErrAlreadyShuttingDown",

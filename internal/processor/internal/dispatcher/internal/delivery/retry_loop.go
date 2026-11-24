@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/subscription"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/contracts"
 )
@@ -16,7 +16,7 @@ type retryLoop[T any] struct {
 	aggregateID string
 	halt        <-chan struct{}
 	job         contracts.Job[T]
-	pending     []asynxmd.DurableSub[T]
+	pending     []subscription.Durable[T]
 	attempt     int
 	backoff     time.Duration
 	last        error

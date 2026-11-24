@@ -2,7 +2,7 @@ package write
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 // Blob returns an Op that appends data to streamID at version.
@@ -13,7 +13,7 @@ func Blob(
 ) Op {
 	return func(
 		ctx context.Context,
-		tx models.Tx,
+		tx storage.Tx,
 	) error {
 		return tx.Append(
 			ctx,
@@ -51,7 +51,7 @@ func EraseStream(
 ) Op {
 	return func(
 		ctx context.Context,
-		tx models.Tx,
+		tx storage.Tx,
 	) error {
 		return tx.DeleteStream(
 			ctx,

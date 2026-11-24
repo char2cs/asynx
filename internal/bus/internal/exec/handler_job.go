@@ -1,7 +1,8 @@
 package exec
 
 import (
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/handler"
 	"time"
 )
 
@@ -12,15 +13,15 @@ import (
 // by the one Handler call that runs it, and not reused or shared between
 // goroutines.
 type HandlerJob[T any] struct {
-	Handler         asynxmd.ProjectionHandler[T]
-	FallbackHandler asynxmd.ProjectionHandler[T]
+	Handler         handler.Projection[T]
+	FallbackHandler handler.Projection[T]
 	Timeout         time.Duration
-	Event           asynxmd.Event[T]
+	Event           event.Event[T]
 
 	// Optional per-job callback overrides. When nil, the package-level
 	// OnHandlerPanic / OnHandlerTimeout functions are used instead.
-	OnPanic   asynxmd.PanicHandler[T]
-	OnTimeout asynxmd.TimeoutHandler[T]
+	OnPanic   handler.Panic[T]
+	OnTimeout handler.Timeout[T]
 
 	// WaitAfterTimeout makes a timed-out handler still be waited for: the
 	// timeout is reported but Handler returns only once the handler has

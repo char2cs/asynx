@@ -7,7 +7,7 @@ import (
 
 	"github.com/char2cs/asynx/internal/bus/internal/routing"
 	"github.com/char2cs/asynx/internal/bus/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
 )
 
 func emptyIndex[T any]() *models.PublishIndex[T] {
@@ -23,7 +23,7 @@ func newSub(
 		Pattern: pattern,
 		Handler: func(
 			_ context.Context,
-			_ asynxmd.Event[string],
+			_ event.Event[string],
 		) {
 		},
 	}
@@ -282,7 +282,7 @@ func buildExactIndex(
 			),
 			Handler: func(
 				_ context.Context,
-				_ asynxmd.Event[string],
+				_ event.Event[string],
 			) {
 			},
 		}
@@ -311,7 +311,7 @@ func buildRegexIndex(
 			),
 			Handler: func(
 				_ context.Context,
-				_ asynxmd.Event[string],
+				_ event.Event[string],
 			) {
 			},
 		}

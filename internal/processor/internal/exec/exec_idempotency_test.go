@@ -10,7 +10,10 @@ import (
 
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/char2cs/asynx/store"
 )
 
@@ -20,7 +23,7 @@ type idemUpdate struct {
 }
 
 // CommandID returns the idempotency key the test put in Cmd, making the
-// update an IdempotentCommand.
+// update an command.Idempotent.
 func (c idemUpdate) CommandID() string { return c.Cmd }
 
 type idemCreate struct {
@@ -29,7 +32,7 @@ type idemCreate struct {
 }
 
 // CommandID returns the idempotency key the test put in Cmd, making the
-// create an IdempotentCommand.
+// create an command.Idempotent.
 func (c idemCreate) CommandID() string { return c.Cmd }
 
 func TestExecute_Idempotent_AcceptedRetryIsNoOpReturningOriginalEvent(
@@ -94,7 +97,7 @@ func TestExecute_Idempotent_RejectedRetryStaysRejected(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrValidation,
+		failure.ErrValidation,
 	) {
 		t.Fatalf(
 			"first err = %v, want ErrValidation",
@@ -109,7 +112,7 @@ func TestExecute_Idempotent_RejectedRetryStaysRejected(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrValidation,
+		failure.ErrValidation,
 	) {
 		t.Fatalf(
 			"retry err = %v, want ErrValidation (a rejection stays rejected)",
@@ -147,7 +150,7 @@ func TestExecute_Idempotent_StorageFailureLeavesNoReceiptSoRetryRuns(
 		cmd,
 	); !errors.Is(
 		err,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrPipelineFailed",
@@ -268,7 +271,7 @@ func TestExecute_Idempotent_SameIDOnAnotherAggregateAnswersFromReceipt(
 func requireExecuted(
 	t *testing.T,
 	ex *CommandExecutor[order],
-	cmd asynxmd.Command[order],
+	cmd command.Command[order],
 ) {
 	t.Helper()
 	if _, err := ex.Execute(
@@ -325,7 +328,7 @@ func TestExecute_Idempotent_ReceiptReadErrorFailsPipeline(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) ||
 		!strings.Contains(
 			err.Error(),
@@ -345,8 +348,8 @@ type getReceiptErrStore struct{ store.Memory }
 func (getReceiptErrStore) GetReceipt(
 	context.Context,
 	string,
-) (asynxmd.Receipt, bool, error) {
-	return asynxmd.Receipt{},
+) (event.Receipt, bool, error) {
+	return event.Receipt{},
 		false,
 		errors.New("receipt store down")
 }
@@ -357,7 +360,7 @@ type phantomDuplicateStore struct{ store.Memory }
 // ErrDuplicateReceipt, simulating a duplicate that GetReceipt cannot find.
 func (s phantomDuplicateStore) Atomically(
 	ctx context.Context,
-	fn func(asynxmd.Tx) error,
+	fn func(storage.Tx) error,
 ) error {
 	return s.Memory.Atomically(
 		ctx,
@@ -365,14 +368,14 @@ func (s phantomDuplicateStore) Atomically(
 	)
 }
 
-type phantomTx struct{ asynxmd.Tx }
+type phantomTx struct{ storage.Tx }
 
 type phantomRun func(
-	asynxmd.Tx,
+	storage.Tx,
 ) error
 
 func (r phantomRun) inPhantomTx(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	return r(phantomTx{tx})
 }
@@ -382,9 +385,9 @@ func (r phantomRun) inPhantomTx(
 func (phantomTx) PutReceipt(
 	context.Context,
 	string,
-	asynxmd.Receipt,
+	event.Receipt,
 ) error {
-	return asynxmd.ErrDuplicateReceipt
+	return failure.ErrDuplicateReceipt
 }
 
 func TestExecute_Idempotent_UnresolvableDuplicateReceiptFailsPipeline(
@@ -403,11 +406,11 @@ func TestExecute_Idempotent_UnresolvableDuplicateReceiptFailsPipeline(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) ||
 		!errors.Is(
 			err,
-			asynxmd.ErrDuplicateReceipt,
+			failure.ErrDuplicateReceipt,
 		) {
 		t.Fatalf(
 			"err = %v, want ErrPipelineFailed + ErrDuplicateReceipt",
@@ -472,15 +475,15 @@ type raceLostStore struct {
 func (s *raceLostStore) GetReceipt(
 	ctx context.Context,
 	id string,
-) (asynxmd.Receipt, bool, error) {
+) (event.Receipt, bool, error) {
 	s.reads++
 	if s.reads == 1 {
-		return asynxmd.Receipt{},
+		return event.Receipt{},
 			false,
 			nil
 	}
 
-	return asynxmd.Receipt{Accepted: true, AggregateID: "winner", EventID: "e-win", Version: 4},
+	return event.Receipt{Accepted: true, AggregateID: "winner", EventID: "e-win", Version: 4},
 		true,
 		nil
 }
@@ -489,7 +492,7 @@ func (s *raceLostStore) GetReceipt(
 // ErrDuplicateReceipt, completing the lost-race simulation.
 func (s *raceLostStore) Atomically(
 	ctx context.Context,
-	fn func(asynxmd.Tx) error,
+	fn func(storage.Tx) error,
 ) error {
 	return s.Memory.Atomically(
 		ctx,
@@ -534,7 +537,7 @@ type putReceiptFailStore struct{ store.Memory }
 // store that cannot record receipts.
 func (s putReceiptFailStore) Atomically(
 	ctx context.Context,
-	fn func(asynxmd.Tx) error,
+	fn func(storage.Tx) error,
 ) error {
 	return s.Memory.Atomically(
 		ctx,
@@ -542,14 +545,14 @@ func (s putReceiptFailStore) Atomically(
 	)
 }
 
-type failingReceiptTx struct{ asynxmd.Tx }
+type failingReceiptTx struct{ storage.Tx }
 
 type failingReceiptRun func(
-	asynxmd.Tx,
+	storage.Tx,
 ) error
 
 func (r failingReceiptRun) inFailingTx(
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	return r(failingReceiptTx{tx})
 }
@@ -558,7 +561,7 @@ func (r failingReceiptRun) inFailingTx(
 func (failingReceiptTx) PutReceipt(
 	context.Context,
 	string,
-	asynxmd.Receipt,
+	event.Receipt,
 ) error {
 	return errors.New("receipt table locked")
 }
@@ -578,11 +581,11 @@ func TestExecute_Idempotent_UnrecordableRejectionFailsThePipeline(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) ||
 		errors.Is(
 			err,
-			asynxmd.ErrValidation,
+			failure.ErrValidation,
 		) {
 		t.Fatalf(
 			"err = %v, want ErrPipelineFailed and not a (non-durable) rejection",
@@ -601,15 +604,15 @@ type rejectionRaceStore struct {
 func (s *rejectionRaceStore) GetReceipt(
 	context.Context,
 	string,
-) (asynxmd.Receipt, bool, error) {
+) (event.Receipt, bool, error) {
 	s.reads++
 	if s.reads == 1 {
-		return asynxmd.Receipt{},
+		return event.Receipt{},
 			false,
 			nil
 	}
 
-	return asynxmd.Receipt{Rejection: "decided elsewhere"},
+	return event.Receipt{Rejection: "decided elsewhere"},
 		true,
 		nil
 }
@@ -618,7 +621,7 @@ func (s *rejectionRaceStore) GetReceipt(
 // ErrDuplicateReceipt, completing the rejection-race simulation.
 func (s *rejectionRaceStore) Atomically(
 	ctx context.Context,
-	fn func(asynxmd.Tx) error,
+	fn func(storage.Tx) error,
 ) error {
 	return s.Memory.Atomically(
 		ctx,
@@ -641,7 +644,7 @@ func TestExecute_Idempotent_RejectionRaceAnswersFromTheExistingReceipt(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrValidation,
+		failure.ErrValidation,
 	) ||
 		!strings.Contains(
 			err.Error(),
@@ -767,7 +770,7 @@ func TestExecute_Idempotent_RetryFailsWhenTheOriginalEventCannotBeRead(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) {
 		t.Fatalf(
 			"retry = %+v, %v; want ErrPipelineFailed",
@@ -847,7 +850,7 @@ func TestExecute_Idempotent_RetryWaitsForTheOriginalEventsHandlers(
 	defer cancel()
 	if err := wait(short); !errors.Is(
 		err,
-		asynxmd.ErrContextCancelled,
+		failure.ErrContextCancelled,
 	) {
 		t.Fatalf(
 			"wait = %v while the handler runs, want ErrContextCancelled",
@@ -880,7 +883,7 @@ func TestExecute_Idempotent_RejectedRetryHasNothingToWaitOn(
 		bad,
 	); !errors.Is(
 		err,
-		asynxmd.ErrValidation,
+		failure.ErrValidation,
 	) {
 		t.Fatalf(
 			"first err = %v",
@@ -894,7 +897,7 @@ func TestExecute_Idempotent_RejectedRetryHasNothingToWaitOn(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrValidation,
+		failure.ErrValidation,
 	) ||
 		wait != nil {
 		t.Fatalf(
@@ -997,7 +1000,7 @@ func TestExecute_Idempotent_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWas
 
 	if err := wait(ctx); !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"wait = %v, want ErrDeliveryParked",
@@ -1014,7 +1017,7 @@ func TestExecute_Idempotent_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWas
 
 func acceptsEveryEvent(
 	context.Context,
-	asynxmd.Event[order],
+	event.Event[order],
 ) error {
 	return nil
 }
@@ -1022,7 +1025,7 @@ func acceptsEveryEvent(
 func awaitNothingToWaitOn(
 	t *testing.T,
 	ex *CommandExecutor[order],
-	cmd asynxmd.Command[order],
+	cmd command.Command[order],
 ) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -1043,7 +1046,7 @@ func awaitNothingToWaitOn(
 func retryFinished(
 	t *testing.T,
 	ex *CommandExecutor[order],
-	cmd asynxmd.Command[order],
+	cmd command.Command[order],
 ) bool {
 	t.Helper()
 	ctx := context.Background()

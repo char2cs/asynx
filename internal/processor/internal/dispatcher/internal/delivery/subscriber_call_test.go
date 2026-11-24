@@ -6,13 +6,16 @@ import (
 	"testing"
 	"time"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/subscription"
 )
 
 func TestSubscriberCall_ATimedOutHandlerIsReportedOnceAndStillWaitedFor(
 	t *testing.T,
 ) {
-	f := newFixture(asynxmd.DispatcherConfig[int]{})
+	f := newFixture(dispatcher.Config[int]{})
 	job, _ := f.begin(
 		t,
 		acked("test.event"),
@@ -21,7 +24,7 @@ func TestSubscriberCall_ATimedOutHandlerIsReportedOnceAndStillWaitedFor(
 	call := &subscriberCall[int]{
 		deliverer: f.deliverer.(*durableDeliverer[int]),
 		job:       job,
-		sub: asynxmd.DurableSub[int]{
+		sub: subscription.Durable[int]{
 			Name:    "slow",
 			Timeout: time.Millisecond,
 			Handler: slow.sleepThenSucceed,
@@ -36,7 +39,7 @@ func TestSubscriberCall_ATimedOutHandlerIsReportedOnceAndStillWaitedFor(
 		len(reports) != 1 ||
 		!errors.Is(
 			reports[0].err,
-			asynxmd.ErrHandlerTimeout,
+			failure.ErrHandlerTimeout,
 		) {
 		t.Fatalf(
 			"run = %v, reports = %+v; want the handler's nil result and one timeout report",
@@ -49,7 +52,7 @@ func TestSubscriberCall_ATimedOutHandlerIsReportedOnceAndStillWaitedFor(
 func TestSubscriberCall_APanicBecomesAnErrorAndIsReportedToThePanicHandler(
 	t *testing.T,
 ) {
-	f := newFixture(asynxmd.DispatcherConfig[int]{})
+	f := newFixture(dispatcher.Config[int]{})
 	job, _ := f.begin(
 		t,
 		acked("test.event"),
@@ -57,14 +60,14 @@ func TestSubscriberCall_APanicBecomesAnErrorAndIsReportedToThePanicHandler(
 	call := &subscriberCall[int]{
 		deliverer: f.deliverer.(*durableDeliverer[int]),
 		job:       job,
-		sub:       asynxmd.DurableSub[int]{Name: "panicking", Handler: panicWithBoom},
+		sub:       subscription.Durable[int]{Name: "panicking", Handler: panicWithBoom},
 		attempt:   1,
 	}
 
 	err := call.run(context.Background())
 	if !errors.Is(
 		err,
-		asynxmd.ErrHandlerPanic,
+		failure.ErrHandlerPanic,
 	) ||
 		len(f.reports.panics) != 1 ||
 		f.reports.panics[0] != "boom" {
@@ -82,7 +85,7 @@ type sleepingHandler struct {
 
 func (h sleepingHandler) sleepThenSucceed(
 	context.Context,
-	asynxmd.Event[int],
+	event.Event[int],
 ) error {
 	time.Sleep(h.pause)
 	return nil
@@ -90,7 +93,7 @@ func (h sleepingHandler) sleepThenSucceed(
 
 func panicWithBoom(
 	context.Context,
-	asynxmd.Event[int],
+	event.Event[int],
 ) error {
 	panic("boom")
 }

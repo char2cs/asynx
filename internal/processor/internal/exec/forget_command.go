@@ -3,10 +3,11 @@ package exec
 import (
 	"fmt"
 
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
 )
 
-// ForgetCommand implements models.Command[T] for the Forget operation.
+// ForgetCommand implements command.Command[T] for the Forget operation.
 // Validate captures the aggregate's last state so EmitEvent can embed it
 // in the tombstone event. EmitEvent is safe to call only after Validate has set last.
 type ForgetCommand[T any] struct {
@@ -27,7 +28,7 @@ func NewForgetCommand[T any](
 func (c *ForgetCommand[T]) AggregateID() string { return c.id }
 
 // EventName returns the name of the tombstone event.
-func (c *ForgetCommand[T]) EventName() string { return models.ForgetEventName }
+func (c *ForgetCommand[T]) EventName() string { return event.ForgetEventName }
 
 // ShouldSnapshot reports false: a tombstone is never snapshotted.
 func (c *ForgetCommand[T]) ShouldSnapshot() bool { return false }
@@ -40,7 +41,7 @@ func (c *ForgetCommand[T]) Validate(
 	if current == nil {
 		return fmt.Errorf(
 			"%w: aggregate %s not found",
-			models.ErrValidation,
+			failure.ErrValidation,
 			c.id,
 		)
 	}

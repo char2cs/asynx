@@ -2,7 +2,7 @@ package mockstores
 
 import (
 	"context"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/storage"
 	"testing"
 )
 
@@ -61,5 +61,5 @@ func TestSnapshotStore_Delete_ReturnsNil(
 func TestSnapshotStore_ImplementsSnapshotStore(
 	t *testing.T,
 ) {
-	var _ asynxmd.SnapshotStore = &SnapshotStore{}
+	var _ storage.SnapshotStore = &SnapshotStore{}
 }

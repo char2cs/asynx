@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/char2cs/asynx/internal/eventstore/internal/core"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
 )
 
 // Option configures an EventStore at construction; pass options to eventstore.New.
@@ -32,7 +32,7 @@ type Option[T any] func(
 // Aggregate (the state that was not cached); EventName, OccurredAt and
 // PreviousAggregate are zero.
 func WithSnapshotErrorHandler[T any](
-	fn func(context.Context, asynxmd.Event[T], error),
+	fn func(context.Context, event.Event[T], error),
 ) Option[T] {
 	return func(
 		es *core.EventStore[T],

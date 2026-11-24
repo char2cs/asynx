@@ -6,7 +6,11 @@ import (
 	"github.com/char2cs/asynx"
 	"github.com/char2cs/asynx/internal/mockbuses"
 	"github.com/char2cs/asynx/internal/mocks"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
 	"github.com/char2cs/asynx/store"
 	"runtime"
 	"sync"
@@ -72,7 +76,7 @@ type forgetTotal struct {
 
 func (f *forgetTotal) handle(
 	_ context.Context,
-	e models.Event[mocks.Order],
+	e event.Event[mocks.Order],
 ) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -126,7 +130,7 @@ func TestWithForgetHandler_IsCalledOnForget(
 
 	if gotTotal := got.get(); gotTotal != 77.0 {
 		t.Errorf(
-			"ForgetHandler got Total=%v, want 77.0",
+			"handler.Forget got Total=%v, want 77.0",
 			gotTotal,
 		)
 	}
@@ -198,7 +202,7 @@ type pendingErrStore struct{ store.Memory }
 func (pendingErrStore) PendingDeliveries(
 	context.Context,
 	int,
-) ([]models.Delivery, error) {
+) ([]event.Delivery, error) {
 	return nil,
 		errors.New("delivery log unreadable")
 }
@@ -266,7 +270,7 @@ func sendHot(
 	)
 	if errors.Is(
 		err,
-		models.ErrQueueFull,
+		failure.ErrQueueFull,
 	) {
 		refused <- struct{}{}
 	}
@@ -274,7 +278,7 @@ func sendHot(
 
 func noopDurable(
 	context.Context,
-	models.Event[mocks.Order],
+	event.Event[mocks.Order],
 ) error {
 	return nil
 }
@@ -282,7 +286,7 @@ func noopDurable(
 func sendAll(
 	t *testing.T,
 	inst asynx.Asynx[mocks.Order],
-	cmds ...models.Command[mocks.Order],
+	cmds ...command.Command[mocks.Order],
 ) {
 	t.Helper()
 	for _, cmd := range cmds {
@@ -297,7 +301,7 @@ func sendAll(
 func mustSend(
 	t *testing.T,
 	inst asynx.Asynx[mocks.Order],
-	cmd models.Command[mocks.Order],
+	cmd command.Command[mocks.Order],
 ) {
 	t.Helper()
 	_, err := inst.Send(
@@ -312,10 +316,10 @@ func mustSend(
 func assertRedelivery(
 	t *testing.T,
 	i int,
-	request models.DispatchRequest[mocks.Order],
+	request dispatch.Request[mocks.Order],
 ) {
 	t.Helper()
-	wrongRedelivery := request.Kind != models.DispatchRedelivery || request.Event.Version != int64(i+2) || request.Ack == nil
+	wrongRedelivery := request.Kind != dispatch.KindRedelivery || request.Event.Version != int64(i+2) || request.Ack == nil
 	if wrongRedelivery {
 		t.Errorf(
 			"request %d = %+v, want the redelivery of v%d with an Ack",
@@ -330,7 +334,7 @@ func assertFactoryConfig(
 	t *testing.T,
 	retry [2]time.Duration,
 	attempts int,
-	want models.DispatcherConfig[mocks.Order],
+	want dispatcher.Config[mocks.Order],
 ) {
 	t.Helper()
 	fake := mockbuses.NewDispatcher[mocks.Order]()

@@ -13,7 +13,9 @@ import (
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/mockstores"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/char2cs/asynx/store"
 	"github.com/wI2L/jsondiff"
 )
@@ -46,12 +48,12 @@ func (u failingUpcaster) upcast(
 }
 
 func newTestReader(
-	es asynxmd.Store,
-	ss asynxmd.SnapshotStore,
+	es storage.Store,
+	ss storage.SnapshotStore,
 ) *Reader[order] {
 	rep := replayer.New[order](
 		es,
-		make(map[int]asynxmd.Upcaster),
+		make(map[int]event.Upcaster),
 		1,
 		order{},
 	)
@@ -187,7 +189,7 @@ func TestGet_ColdPath_ErrNotFound_WhenNoEvents(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrNotFound,
+		failure.ErrNotFound,
 	) {
 		t.Errorf(
 			"err = %v, want ErrNotFound",
@@ -422,7 +424,7 @@ func TestGet_WarmPath_CorruptSnapshot_CallsOnCorruption(
 	var hook corruptionCapture
 	rep := replayer.New[order](
 		es,
-		make(map[int]asynxmd.Upcaster),
+		make(map[int]event.Upcaster),
 		1,
 		order{},
 	)
@@ -594,7 +596,7 @@ func TestGet_AutoSnapshotFail_ReturnsState(
 	es := store.New()
 	ss := store.NewSnapshots()
 	ctx := context.Background()
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		1: keepPayloadUpcaster,
 	}
 	rep := replayer.New[order](
@@ -656,7 +658,7 @@ func TestGet_AutoSnapshot_WrittenAfterUpcasting(
 	es := store.New()
 	ss := store.NewSnapshots()
 	ctx := context.Background()
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		1: keepPayloadUpcaster,
 	}
 	rep := replayer.New[order](
@@ -906,7 +908,7 @@ func TestGet_WarmPath_AutoSnapshotError_ReturnsStateNotError(
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"New"}]`),
 		),
 	)
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		1: keepPayloadUpcaster,
 	}
 	rep := replayer.New[order](
@@ -968,7 +970,7 @@ func TestGet_ColdPath_AutoSnapshotError_ReturnsStateNotError(
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"Pending"}]`),
 		),
 	)
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		1: keepPayloadUpcaster,
 	}
 	rep := replayer.New[order](
@@ -1032,7 +1034,7 @@ func TestGet_ColdPath_HydrateError_ReturnsError(
 	)
 
 	sentinel := errors.New("upcaster failed")
-	upcasters := map[int]asynxmd.Upcaster{
+	upcasters := map[int]event.Upcaster{
 		1: failingUpcaster{err: sentinel}.upcast,
 	}
 	rep := replayer.New[order](
@@ -1444,7 +1446,7 @@ func TestLoad_NewAggregate_ReturnsNotFoundAndZero(
 		context.Background(),
 		"ghost",
 	)
-	if err != asynxmd.ErrNotFound {
+	if err != failure.ErrNotFound {
 		t.Fatalf(
 			"err = %v, want ErrNotFound",
 			err,
@@ -1818,7 +1820,7 @@ func BenchmarkGet_WarmPath(
 
 func seedBenchSnapshot(
 	b *testing.B,
-	ss asynxmd.SnapshotStore,
+	ss storage.SnapshotStore,
 ) {
 	b.Helper()
 

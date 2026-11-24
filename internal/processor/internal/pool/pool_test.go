@@ -14,7 +14,11 @@ import (
 	"github.com/char2cs/asynx/internal/processor/internal/exec"
 	"github.com/char2cs/asynx/internal/processor/internal/pool"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	dispatchermodel "github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/subscription"
 	"github.com/char2cs/asynx/store"
 )
 
@@ -26,7 +30,7 @@ type blockingBus[T any] struct {
 // PublishSync.
 func (b *blockingBus[T]) Publish(
 	_ context.Context,
-	_ asynxmd.Event[T],
+	_ event.Event[T],
 ) error {
 	return nil
 }
@@ -35,7 +39,7 @@ func (b *blockingBus[T]) Publish(
 // so tests can observe the pool meanwhile.
 func (b *blockingBus[T]) PublishSync(
 	_ context.Context,
-	_ asynxmd.Event[T],
+	_ event.Event[T],
 ) error {
 	<-b.unblockCh
 	return nil
@@ -44,8 +48,8 @@ func (b *blockingBus[T]) PublishSync(
 // Subscribe registers nothing and returns an empty id.
 func (b *blockingBus[T]) Subscribe(
 	_ string,
-	_ asynxmd.ProjectionHandler[T],
-	_ ...asynxmd.SubscriptionOpt[T],
+	_ handler.Projection[T],
+	_ ...subscription.Opt[T],
 ) (string, error) {
 	return "",
 		nil
@@ -82,7 +86,7 @@ func TestPool_SingleCommandSuccess(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -147,7 +151,7 @@ func TestPool_SerialOrderingSameAggregate(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -215,7 +219,7 @@ func TestPool_ParallelDifferentAggregates(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -278,7 +282,7 @@ func TestPool_ValidationFailureNoWrite(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -304,7 +308,7 @@ func TestPool_ValidationFailureNoWrite(
 	shard.CommandChan() <- envelope
 
 	result := <-envelope.ResultChan
-	if result.Err != asynxmd.ErrValidation {
+	if result.Err != failure.ErrValidation {
 		t.Fatalf(
 			"expected ErrValidation, got %v",
 			result.Err,
@@ -315,7 +319,7 @@ func TestPool_ValidationFailureNoWrite(
 		ctx,
 		"order1",
 	)
-	if err != asynxmd.ErrNotFound {
+	if err != failure.ErrNotFound {
 		t.Errorf("expected ErrNotFound, but aggregate was written")
 	}
 }
@@ -332,7 +336,7 @@ func TestPool_DrainWaitsForInflight(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -430,7 +434,7 @@ func TestPool_QueueFullBlocksSender(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -517,7 +521,7 @@ func TestPool_MultipleWorkers(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -572,7 +576,7 @@ func TestPool_ValidationErrorDecrementVersionSingleWorker(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -624,7 +628,7 @@ func TestPool_ValidationErrorDecrementVersionSingleWorker(
 	)
 	shard.CommandChan() <- envelope3
 	result3 := <-envelope3.ResultChan
-	if result3.Err != asynxmd.ErrValidation {
+	if result3.Err != failure.ErrValidation {
 		t.Fatalf(
 			"expected ErrValidation for cancel non-existent, got %v",
 			result3.Err,
@@ -658,7 +662,7 @@ func TestPool_ContextCancelledDuringExecution(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -747,7 +751,7 @@ func TestPool_DispatcherMultipleCorrections(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: b})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -779,7 +783,7 @@ func TestPool_DispatcherMultipleCorrections(
 	)
 	shard.CommandChan() <- envelope2
 	result2 := <-envelope2.ResultChan
-	if result2.Err != asynxmd.ErrValidation {
+	if result2.Err != failure.ErrValidation {
 		t.Fatalf(
 			"expected ErrValidation, got %v",
 			result2.Err,
@@ -814,7 +818,7 @@ func TestPool_WaitWorkers_ContextCancelledAfterDispatch(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: bb})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: bb})
 	t.Cleanup(func() { d.Close(context.Background()) })
 	executor := exec.New(
 		es,
@@ -872,7 +876,7 @@ func BenchmarkPool_Send_SingleShard(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: bu})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: bu})
 	defer d.Close(context.Background())
 	executor := exec.New(
 		es,
@@ -944,7 +948,7 @@ func benchMultiShard(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: bu})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: bu})
 	defer d.Close(context.Background())
 	executor := exec.New(
 		es,
@@ -984,7 +988,7 @@ func BenchmarkPool_Send_Parallel(
 		1,
 		nil,
 	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: bu})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[order]{Bus: bu})
 	defer d.Close(context.Background())
 	executor := exec.New(
 		es,

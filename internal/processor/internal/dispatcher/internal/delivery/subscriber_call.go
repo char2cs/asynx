@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/subscription"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/contracts"
 )
@@ -13,7 +14,7 @@ import (
 type subscriberCall[T any] struct {
 	deliverer *durableDeliverer[T]
 	job       contracts.Job[T]
-	sub       asynxmd.DurableSub[T]
+	sub       subscription.Durable[T]
 	attempt   int
 }
 
@@ -79,7 +80,7 @@ func (c *subscriberCall[T]) recoverPanic(
 	)
 	*err = fmt.Errorf(
 		"%w: %v",
-		asynxmd.ErrHandlerPanic,
+		failure.ErrHandlerPanic,
 		recovered,
 	)
 }
@@ -87,11 +88,11 @@ func (c *subscriberCall[T]) recoverPanic(
 func (c *subscriberCall[T]) reportTimeout(
 	ctx context.Context,
 ) {
-	timedOut := &asynxmd.SubscriberError{
+	timedOut := &failure.SubscriberError{
 		Subscriber: c.sub.Name,
 		Err: fmt.Errorf(
 			"%w after %v",
-			asynxmd.ErrHandlerTimeout,
+			failure.ErrHandlerTimeout,
 			c.sub.Timeout,
 		),
 	}

@@ -7,7 +7,8 @@ import (
 
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
 	"github.com/char2cs/asynx/internal/ids"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/wI2L/jsondiff"
 )
 
@@ -17,8 +18,8 @@ import (
 //
 // Writer is stateless and safe for concurrent use.
 type Writer[T any] struct {
-	eventStore           asynxmd.Store
-	snapshotStore        asynxmd.SnapshotStore
+	eventStore           storage.Store
+	snapshotStore        storage.SnapshotStore
 	currentSchemaVersion int
 }
 
@@ -26,8 +27,8 @@ type Writer[T any] struct {
 // store it upserts into. schemaVersion is stamped on every event and snapshot it
 // writes, so readers know which upcasts they still need.
 func New[T any](
-	es asynxmd.Store,
-	ss asynxmd.SnapshotStore,
+	es storage.Store,
+	ss storage.SnapshotStore,
 	schemaVersion int,
 ) *Writer[T] {
 	return &Writer[T]{
@@ -50,19 +51,19 @@ func New[T any](
 // non-fatal.
 func (w *Writer[T]) AppendTx(
 	ctx context.Context,
-	tx asynxmd.Tx,
+	tx storage.Tx,
 	aggregateID string,
 	eventName string,
 	expectedVersion int64,
 	previousState T,
 	newState T,
-) (asynxmd.Event[T], error) {
+) (event.Event[T], error) {
 	patchJSON, err := diffJSON(
 		previousState,
 		newState,
 	)
 	if err != nil {
-		return asynxmd.Event[T]{},
+		return event.Event[T]{},
 			err
 	}
 
@@ -78,7 +79,7 @@ func (w *Writer[T]) AppendTx(
 		evt,
 	)
 	if err != nil {
-		return asynxmd.Event[T]{},
+		return event.Event[T]{},
 			err
 	}
 
@@ -111,8 +112,8 @@ func publicEvent[T any](
 	evt esmodels.InternalEvent,
 	previousState T,
 	newState T,
-) asynxmd.Event[T] {
-	return asynxmd.Event[T]{
+) event.Event[T] {
+	return event.Event[T]{
 		ID:                evt.ID,
 		AggregateID:       aggregateID,
 		EventName:         evt.EventName,
@@ -142,7 +143,7 @@ func diffJSON[T any](
 
 func appendInternal(
 	ctx context.Context,
-	tx asynxmd.Tx,
+	tx storage.Tx,
 	aggregateID string,
 	evt esmodels.InternalEvent,
 ) error {
@@ -165,7 +166,7 @@ func appendInternal(
 // retry. A failure is returned unchanged and leaves events untouched.
 func (w *Writer[T]) Snapshot(
 	ctx context.Context,
-	evt asynxmd.Event[T],
+	evt event.Event[T],
 ) error {
 	return w.writeSnapshot(
 		ctx,
@@ -177,13 +178,13 @@ func (w *Writer[T]) Snapshot(
 
 // EventStore returns the event store Writer appends to, so the caller can open
 // its own transaction on it (see AppendTx). The same instance every call.
-func (w *Writer[T]) EventStore() asynxmd.Store {
+func (w *Writer[T]) EventStore() storage.Store {
 	return w.eventStore
 }
 
 // SnapshotStore returns the snapshot store Writer upserts into, which callers
 // use to delete a snapshot. The same instance every call.
-func (w *Writer[T]) SnapshotStore() asynxmd.SnapshotStore {
+func (w *Writer[T]) SnapshotStore() storage.SnapshotStore {
 	return w.snapshotStore
 }
 

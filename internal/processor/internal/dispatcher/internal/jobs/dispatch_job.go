@@ -4,11 +4,12 @@ import (
 	"context"
 	"sync"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/event"
 )
 
 type dispatchJob[T any] struct {
-	event      asynxmd.Event[T]
+	event      event.Event[T]
 	cancel     context.CancelFunc
 	ack        func(context.Context) error
 	forget     bool
@@ -38,7 +39,7 @@ func (j *dispatchJob[T]) Version() int64 {
 
 // Event returns the event being delivered, which every handler of the job
 // receives unchanged.
-func (j *dispatchJob[T]) Event() asynxmd.Event[T] {
+func (j *dispatchJob[T]) Event() event.Event[T] {
 	return j.event
 }
 
@@ -83,8 +84,8 @@ func (j *dispatchJob[T]) Ack() func(context.Context) error {
 // Final closes when the delivery is over, and Err and Unrun report how it
 // ended once the matching channel is closed. Every call returns a ticket over
 // the same channels.
-func (j *dispatchJob[T]) Ticket() asynxmd.Ticket {
-	return asynxmd.Ticket{
+func (j *dispatchJob[T]) Ticket() dispatch.Ticket {
+	return dispatch.Ticket{
 		Settled: j.done,
 		Final:   j.final,
 		Err:     func() error { return j.err },

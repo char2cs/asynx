@@ -10,7 +10,8 @@ import (
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates/contracts"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 type fakeItem struct {
@@ -316,7 +317,7 @@ func assertDroppedAsParked(
 	unrun, completions, err := job.state()
 	if !errors.Is(
 		unrun,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"%d: unrun = %v, want ErrDeliveryParked",
@@ -328,7 +329,7 @@ func assertDroppedAsParked(
 	if completions != 1 ||
 		!errors.Is(
 			err,
-			asynxmd.ErrDeliveryParked,
+			failure.ErrDeliveryParked,
 		) {
 		t.Fatalf(
 			"%d: completed %d times with %v, want once with ErrDeliveryParked",
@@ -343,7 +344,7 @@ func assertDroppedAsParked(
 		job.version,
 	); !errors.Is(
 		got,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"Unrun(%d) = %v, want ErrDeliveryParked",
@@ -531,7 +532,7 @@ func TestEnqueue_RefusedAfterClose(
 	)
 	if !errors.Is(
 		refused.Err,
-		asynxmd.ErrDispatcherClosed,
+		failure.ErrDispatcherClosed,
 	) {
 		t.Fatalf(
 			"Enqueue after Close = %v, want ErrDispatcherClosed",
@@ -1239,10 +1240,10 @@ func TestSupersede_DropsQueuedDurableJobsAndLeavesNoPark(
 	unrun, completions, err := durable.state()
 	wrongSupersede := !errors.Is(
 		unrun,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) || completions != 1 || !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	)
 	if wrongSupersede {
 		t.Fatalf(
@@ -1481,7 +1482,7 @@ func TestSettleIfParked_RecordsAParkStillInForce(
 	unrun, completions, _ := job.state()
 	if !errors.Is(
 		unrun,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) ||
 		completions != 0 {
 		t.Fatalf(
@@ -1496,7 +1497,7 @@ func TestSettleIfParked_RecordsAParkStillInForce(
 			"a",
 			1,
 		),
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatal("a park in force did not record the version")
 	}
@@ -1544,7 +1545,7 @@ func TestSettleIfParked_AfterTheLiftSettlesWithoutARecord(
 
 	if unrun, _, _ := job.state(); !errors.Is(
 		unrun,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"unrun = %v, want ErrDeliveryParked",
@@ -1873,7 +1874,7 @@ func TestInspect_RacingParkAndLiftNeverReportsAnInconsistentStatus(
 	)
 
 	statuses := make(
-		[]asynxmd.DeliveryStatus,
+		[]dispatch.Status,
 		reads,
 	)
 	for i := range statuses {
@@ -1897,7 +1898,7 @@ func TestInspect_RacingParkAndLiftNeverReportsAnInconsistentStatus(
 }
 
 func consistent(
-	status asynxmd.DeliveryStatus,
+	status dispatch.Status,
 ) bool {
 	if status.Parked {
 		return status.Generation != 0
@@ -1963,7 +1964,7 @@ func completePopped(
 		halt,
 		job,
 	) {
-		job.Complete(asynxmd.ErrDeliveryParked)
+		job.Complete(failure.ErrDeliveryParked)
 		return
 	}
 
@@ -1986,10 +1987,10 @@ func assertSettledOnce(
 
 	if errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) != errors.Is(
 		unrun,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"%d: completed with %v but unrun = %v",
@@ -2019,7 +2020,7 @@ func TestInspect_UnknownAggregateIsTheZeroStatus(
 	)
 	if got := r.Inspect("ghost"); !reflect.DeepEqual(
 		got,
-		asynxmd.DeliveryStatus{},
+		dispatch.Status{},
 	) {
 		t.Fatalf(
 			"Inspect(ghost) = %+v, want the zero status",
@@ -2029,7 +2030,7 @@ func TestInspect_UnknownAggregateIsTheZeroStatus(
 
 	if got := r.Inspect("busy"); !reflect.DeepEqual(
 		got,
-		asynxmd.DeliveryStatus{},
+		dispatch.Status{},
 	) {
 		t.Fatalf(
 			"Inspect(busy) = %+v, want the zero status for a running aggregate",
@@ -2284,7 +2285,7 @@ func TestInspect_IsClearAfterTheParkLifts(
 	)
 	if got := r.Inspect("a"); !reflect.DeepEqual(
 		got,
-		asynxmd.DeliveryStatus{},
+		dispatch.Status{},
 	) {
 		t.Fatalf(
 			"Inspect after the lift = %+v, want the zero status",

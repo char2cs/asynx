@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/storage"
 	jsonpatch "github.com/evanphx/json-patch/v5"
 	"maps"
 	"slices"
@@ -22,8 +24,8 @@ import (
 // writes to a store, which is why snapshotting is Reader's job. Replayer is
 // immutable after New and safe for concurrent use.
 type Replayer[T any] struct {
-	eventStore           asynxmd.Store
-	upcasters            map[int]asynxmd.Upcaster
+	eventStore           storage.Store
+	upcasters            map[int]event.Upcaster
 	currentSchemaVersion int
 	stateZeroValue       T
 }
@@ -35,14 +37,14 @@ type Replayer[T any] struct {
 // construction; a nil map means no migrations, and a version without an entry
 // is stepped over without changing the event.
 func New[T any](
-	es asynxmd.Store,
-	upcasters map[int]asynxmd.Upcaster,
+	es storage.Store,
+	upcasters map[int]event.Upcaster,
 	schemaVersion int,
 	zeroValue T,
 ) *Replayer[T] {
 	cloned := maps.Clone(upcasters)
 	if cloned == nil {
-		cloned = make(map[int]asynxmd.Upcaster)
+		cloned = make(map[int]event.Upcaster)
 	}
 
 	return &Replayer[T]{
@@ -179,7 +181,7 @@ func (r *Replayer[T]) Replay(
 	aggregateID string,
 	fromVersion int64,
 	toVersion int64,
-	fn asynxmd.ProjectionHandler[T],
+	fn handler.Projection[T],
 ) error {
 	eventBlobs, frame, err := r.replayStart(
 		ctx,
@@ -254,7 +256,7 @@ func (r *Replayer[T]) replayOne(
 	version int64,
 	previous replayFrame[T],
 	window bounds,
-	fn asynxmd.ProjectionHandler[T],
+	fn handler.Projection[T],
 ) (replayFrame[T], error) {
 	next, err := r.advance(
 		ctx,
@@ -273,7 +275,7 @@ func (r *Replayer[T]) replayOne(
 
 	fn(
 		ctx,
-		asynxmd.Event[T]{
+		event.Event[T]{
 			ID:                next.Event.ID,
 			AggregateID:       aggregateID,
 			EventName:         next.Event.EventName,

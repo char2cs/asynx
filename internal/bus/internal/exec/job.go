@@ -2,7 +2,8 @@ package exec
 
 import (
 	"github.com/char2cs/asynx/internal/bus/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/handler"
 )
 
 // MakeJob builds the HandlerJob that delivers event to the handler registered
@@ -13,15 +14,15 @@ import (
 // WaitAfterTimeout) before handing it to Handler.
 func MakeJob[T any](
 	sub *models.Subscription[T],
-	event asynxmd.Event[T],
-	onPanic asynxmd.PanicHandler[T],
-	onTimeout asynxmd.TimeoutHandler[T],
+	evt event.Event[T],
+	onPanic handler.Panic[T],
+	onTimeout handler.Timeout[T],
 ) *HandlerJob[T] {
 	return &HandlerJob[T]{
 		Handler:         sub.Handler,
 		FallbackHandler: sub.FallbackHandler,
 		Timeout:         sub.Timeout,
-		Event:           event,
+		Event:           evt,
 		OnPanic:         onPanic,
 		OnTimeout:       onTimeout,
 	}

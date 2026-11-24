@@ -7,12 +7,13 @@ import (
 	"testing"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/event"
 )
 
 func newJob(
 	t *testing.T,
-	request asynxmd.DispatchRequest[string],
+	request dispatch.Request[string],
 ) (jobs.Job[string], *cancelCounter) {
 	t.Helper()
 	cancels := &cancelCounter{}
@@ -49,9 +50,9 @@ func closed(
 	}
 }
 
-func eventRequest() asynxmd.DispatchRequest[string] {
-	return asynxmd.DispatchRequest[string]{
-		Event: asynxmd.Event[string]{AggregateID: "agg", Version: 3, EventName: "Created"},
+func eventRequest() dispatch.Request[string] {
+	return dispatch.Request[string]{
+		Event: event.Event[string]{AggregateID: "agg", Version: 3, EventName: "Created"},
 	}
 }
 
@@ -82,19 +83,19 @@ func TestNew_ExposesTheEvent(
 func TestNew_KindsDecideRouting(
 	t *testing.T,
 ) {
-	forgetEvent := asynxmd.Event[string]{AggregateID: "agg", EventName: asynxmd.ForgetEventName}
+	forgetEvent := event.Event[string]{AggregateID: "agg", EventName: event.ForgetEventName}
 	tests := []struct {
 		name     string
-		request  asynxmd.DispatchRequest[string]
+		request  dispatch.Request[string]
 		durable  bool
 		forget   bool
 		skipLive bool
 	}{
 		{"live event", eventRequest(), false, false, false},
-		{"durable event", asynxmd.DispatchRequest[string]{Ack: acknowledgeAtOnce}, true, false, false},
-		{"tombstone", asynxmd.DispatchRequest[string]{Kind: asynxmd.DispatchTombstone}, true, true, false},
-		{"redelivery", asynxmd.DispatchRequest[string]{Ack: acknowledgeAtOnce, Kind: asynxmd.DispatchRedelivery}, true, false, true},
-		{"forget redelivery", asynxmd.DispatchRequest[string]{Event: forgetEvent, Kind: asynxmd.DispatchRedelivery}, true, true, true},
+		{"durable event", dispatch.Request[string]{Ack: acknowledgeAtOnce}, true, false, false},
+		{"tombstone", dispatch.Request[string]{Kind: dispatch.KindTombstone}, true, true, false},
+		{"redelivery", dispatch.Request[string]{Ack: acknowledgeAtOnce, Kind: dispatch.KindRedelivery}, true, false, true},
+		{"forget redelivery", dispatch.Request[string]{Event: forgetEvent, Kind: dispatch.KindRedelivery}, true, true, true},
 	}
 	for _, tt := range tests {
 		t.Run(
@@ -108,7 +109,7 @@ func TestNew_KindsDecideRouting(
 }
 
 func kindRoutingCase(
-	request asynxmd.DispatchRequest[string],
+	request dispatch.Request[string],
 	want [3]bool,
 ) func(*testing.T) {
 	return func(
@@ -139,7 +140,7 @@ func routingCase[R comparable](
 
 func assertKindRouting(
 	t *testing.T,
-	request asynxmd.DispatchRequest[string],
+	request dispatch.Request[string],
 	want [3]bool,
 ) {
 	t.Helper()
@@ -179,18 +180,18 @@ func TestEnqueue_TheKindSelectsWhoReceivesTheEvent(
 		skipLive bool
 	}
 	cases := []struct {
-		kind asynxmd.DispatchKind
+		kind dispatch.Kind
 		name string
 		want routing
 	}{
-		{asynxmd.DispatchEvent, "test.event", routing{}},
-		{asynxmd.DispatchEvent, asynxmd.ForgetEventName, routing{}},
-		{asynxmd.DispatchRedelivery, "test.event", routing{skipLive: true}},
-		{asynxmd.DispatchRedelivery, asynxmd.ForgetEventName, routing{skipLive: true, forget: true}},
-		{asynxmd.DispatchTombstone, asynxmd.ForgetEventName, routing{forget: true}},
+		{dispatch.KindEvent, "test.event", routing{}},
+		{dispatch.KindEvent, event.ForgetEventName, routing{}},
+		{dispatch.KindRedelivery, "test.event", routing{skipLive: true}},
+		{dispatch.KindRedelivery, event.ForgetEventName, routing{skipLive: true, forget: true}},
+		{dispatch.KindTombstone, event.ForgetEventName, routing{forget: true}},
 	}
 	for _, c := range cases {
-		request := asynxmd.DispatchRequest[string]{Event: asynxmd.Event[string]{EventName: c.name}, Kind: c.kind}
+		request := dispatch.Request[string]{Event: event.Event[string]{EventName: c.name}, Kind: c.kind}
 		job, _ := newJob(
 			t,
 			request,

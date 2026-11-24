@@ -3,7 +3,7 @@ package mockbuses
 import (
 	"context"
 	"errors"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
 	"testing"
 )
 
@@ -14,7 +14,7 @@ func TestErrBus_ReturnsItsErrorForPublish(
 	b := &ErrBus[fakeOrder]{Err: sentinel}
 	if err := b.Publish(
 		context.Background(),
-		models.Event[fakeOrder]{},
+		event.Event[fakeOrder]{},
 	); !errors.Is(
 		err,
 		sentinel,
@@ -28,7 +28,7 @@ func TestErrBus_ReturnsItsErrorForPublish(
 
 	if err := b.PublishSync(
 		context.Background(),
-		models.Event[fakeOrder]{},
+		event.Event[fakeOrder]{},
 	); !errors.Is(
 		err,
 		sentinel,

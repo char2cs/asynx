@@ -2,7 +2,7 @@ package commands
 
 import (
 	"github.com/char2cs/asynx/example/domain"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 // ConfirmOrderCmd confirms a pending order. It is valid only for an existing
@@ -21,16 +21,16 @@ func (c ConfirmOrderCmd) EventName() string { return "OrderConfirmed" }
 // ShouldSnapshot reports whether a snapshot of the order is written after the command commits.
 func (c ConfirmOrderCmd) ShouldSnapshot() bool { return false }
 
-// Validate returns models.ErrValidation when the order is not in the state the command requires, and nil otherwise.
+// Validate returns failure.ErrValidation when the order is not in the state the command requires, and nil otherwise.
 func (c ConfirmOrderCmd) Validate(
 	current *domain.Order,
 ) error {
 	if current == nil {
-		return models.ErrValidation
+		return failure.ErrValidation
 	}
 
 	if current.Status != domain.OrderPending {
-		return models.ErrValidation
+		return failure.ErrValidation
 	}
 
 	return nil

@@ -9,7 +9,7 @@ import (
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatcher"
 	"github.com/char2cs/asynx/store"
 )
 
@@ -67,8 +67,8 @@ type failingFactory struct {
 }
 
 func (f failingFactory) build(
-	asynxmd.DispatcherConfig[mocks.Order],
-) (asynxmd.Dispatcher[mocks.Order], error) {
+	dispatcher.Config[mocks.Order],
+) (dispatcher.Dispatcher[mocks.Order], error) {
 	return nil,
 		f.err
 }

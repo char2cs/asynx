@@ -2,7 +2,7 @@ package write_test
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
 	"github.com/char2cs/asynx/store"
 	"github.com/char2cs/asynx/store/storetest/internal/write"
 	"testing"
@@ -12,7 +12,7 @@ func TestReceipt_StoresTheReceiptUnderTheCommandID(
 	t *testing.T,
 ) {
 	s := store.New()
-	want := models.Receipt{Accepted: true, EventID: "e1", Version: 1}
+	want := event.Receipt{Accepted: true, EventID: "e1", Version: 1}
 
 	err := s.Atomically(
 		context.Background(),

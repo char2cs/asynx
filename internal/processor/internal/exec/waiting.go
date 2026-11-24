@@ -3,11 +3,13 @@ package exec
 import (
 	"context"
 	"fmt"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 func (e *CommandExecutor[T]) waitForAnswered(
-	event asynxmd.Event[T],
+	evt event.Event[T],
 	answer error,
 ) func(context.Context) error {
 	if answer != nil ||
@@ -16,28 +18,28 @@ func (e *CommandExecutor[T]) waitForAnswered(
 	}
 
 	t, underway := e.dispatcher.TicketFor(
-		event.AggregateID,
-		event.Version,
+		evt.AggregateID,
+		evt.Version,
 	)
 	if underway {
 		return waitOn(
 			t,
-			event,
+			evt,
 		)
 	}
 
 	return unrunWait(
 		e.dispatcher.Unrun(
-			event.AggregateID,
-			event.Version,
+			evt.AggregateID,
+			evt.Version,
 		),
-		event,
+		evt,
 	)
 }
 
 func unrunWait[T any](
 	unrun error,
-	event asynxmd.Event[T],
+	evt event.Event[T],
 ) func(context.Context) error {
 	if unrun == nil {
 		return nil
@@ -49,15 +51,15 @@ func unrunWait[T any](
 		return fmt.Errorf(
 			"%w: event %s v%d is pending, no handler ran",
 			unrun,
-			event.AggregateID,
-			event.Version,
+			evt.AggregateID,
+			evt.Version,
 		)
 	}
 }
 
 func waitOn[T any](
-	t asynxmd.Ticket,
-	event asynxmd.Event[T],
+	t dispatch.Ticket,
+	evt event.Event[T],
 ) func(context.Context) error {
 	return func(
 		ctx context.Context,
@@ -65,34 +67,34 @@ func waitOn[T any](
 		return awaitTicket(
 			ctx,
 			t,
-			event,
+			evt,
 		)
 	}
 }
 
 func awaitTicket[T any](
 	ctx context.Context,
-	t asynxmd.Ticket,
-	event asynxmd.Event[T],
+	t dispatch.Ticket,
+	evt event.Event[T],
 ) error {
 	select {
 	case <-t.Settled:
 		return settledOutcome(
 			t,
-			event,
+			evt,
 		)
 	case <-ctx.Done():
 		return fmt.Errorf(
 			"%w: waiting for handlers: %w",
-			asynxmd.ErrContextCancelled,
+			failure.ErrContextCancelled,
 			ctx.Err(),
 		)
 	}
 }
 
 func settledOutcome[T any](
-	t asynxmd.Ticket,
-	event asynxmd.Event[T],
+	t dispatch.Ticket,
+	evt event.Event[T],
 ) error {
 	err := t.Unrun()
 	if err == nil {
@@ -102,7 +104,7 @@ func settledOutcome[T any](
 	return fmt.Errorf(
 		"%w: event %s v%d is pending, no handler ran",
 		err,
-		event.AggregateID,
-		event.Version,
+		evt.AggregateID,
+		evt.Version,
 	)
 }

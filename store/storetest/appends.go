@@ -1,7 +1,7 @@
 package storetest
 
 import (
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/char2cs/asynx/store/storetest/internal/race"
 	"github.com/char2cs/asynx/store/storetest/internal/write"
 	"testing"
@@ -14,7 +14,7 @@ const (
 
 func appendCommitsAndReads(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	f := newFixture(
 		t,
@@ -37,7 +37,7 @@ func appendCommitsAndReads(
 
 func readRangeLimits(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	const windowSize = 2
 	f := newFixture(
@@ -63,7 +63,7 @@ func readRangeLimits(
 
 func deleteStream(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	f := newFixture(
 		t,
@@ -104,7 +104,7 @@ func deleteStream(
 
 func readsOfUnknown(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	const anyCount = 5
 	f := newFixture(
@@ -124,7 +124,7 @@ func readsOfUnknown(
 
 func committedVisible(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	f := newFixture(
 		t,
@@ -151,7 +151,7 @@ func committedVisible(
 
 func outOfOrderAppends(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	f := newFixture(
 		t,
@@ -188,7 +188,7 @@ func outOfOrderAppends(
 
 func concurrentSameVersion(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	const writers = 16
 	f := newFixture(
@@ -214,7 +214,7 @@ func concurrentSameVersion(
 
 func concurrentDistinctVersions(
 	t testing.TB,
-	s models.Store,
+	s storage.Store,
 ) {
 	const writers = 20
 	f := newFixture(
@@ -234,8 +234,8 @@ func concurrentDistinctVersions(
 	f.wantPendingCount(writers)
 }
 
-func appendScenarios() map[string]scenario[models.Store] {
-	return map[string]scenario[models.Store]{
+func appendScenarios() map[string]scenario[storage.Store] {
+	return map[string]scenario[storage.Store]{
 		"AppendCommitsAndReadFromReturnsInOrder":       appendCommitsAndReads,
 		"ReadRangeLimitsCount":                         readRangeLimits,
 		"DeleteStreamIsIdempotentAndScoped":            deleteStream,

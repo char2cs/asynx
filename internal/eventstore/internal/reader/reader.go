@@ -7,7 +7,9 @@ import (
 
 	"github.com/char2cs/asynx/internal/eventstore/internal/replayer"
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 // Reader loads the current aggregate state from storage using the optimal path:
@@ -27,14 +29,14 @@ import (
 // Reader holds no per-call state and is safe for concurrent use, with one
 // exception: SetSnapshotGuard must be called before the reader is shared.
 type Reader[T any] struct {
-	eventStore           asynxmd.Store
-	snapshotStore        asynxmd.SnapshotStore
+	eventStore           storage.Store
+	snapshotStore        storage.SnapshotStore
 	replayer             *replayer.Replayer[T]
 	stateZeroValue       T
 	onCorruption         func(error)
 	currentSchemaVersion int
 	guard                esmodels.SnapshotGuard
-	onSnapshotError      func(context.Context, asynxmd.Event[T], error)
+	onSnapshotError      func(context.Context, event.Event[T], error)
 }
 
 // SetSnapshotErrorHandler installs the callback that observes a failed
@@ -50,7 +52,7 @@ type Reader[T any] struct {
 // callback like a failed write. A nil callback, the default, drops the failure. Call it before the
 // reader is used from more than one goroutine.
 func (r *Reader[T]) SetSnapshotErrorHandler(
-	fn func(context.Context, asynxmd.Event[T], error),
+	fn func(context.Context, event.Event[T], error),
 ) {
 	r.onSnapshotError = fn
 }
@@ -76,8 +78,8 @@ func (r *Reader[T]) SetSnapshotGuard(
 // onCorruption is called with the decoding error when a snapshot cannot be
 // deserialized; pass nil to fall back to the cold path silently.
 func New[T any](
-	es asynxmd.Store,
-	ss asynxmd.SnapshotStore,
+	es storage.Store,
+	ss storage.SnapshotStore,
 	rep *replayer.Replayer[T],
 	schemaVersion int,
 	zeroValue T,
@@ -270,7 +272,7 @@ func (r *Reader[T]) coldPath(
 
 	if len(events) == 0 {
 		return loadedState[T]{},
-			asynxmd.ErrNotFound
+			failure.ErrNotFound
 	}
 
 	return r.hydrate(
@@ -368,7 +370,7 @@ func (r *Reader[T]) Preload(
 	if err != nil &&
 		!errors.Is(
 			err,
-			asynxmd.ErrNotFound,
+			failure.ErrNotFound,
 		) {
 		return err
 	}

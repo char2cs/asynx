@@ -4,7 +4,8 @@ import (
 	"context"
 	"errors"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/subscription"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/contracts"
 )
@@ -13,13 +14,13 @@ type attemptRound[T any] struct {
 	deliverer *durableDeliverer[T]
 	job       contracts.Job[T]
 	attempt   int
-	failed    []asynxmd.DurableSub[T]
+	failed    []subscription.Durable[T]
 	errs      []error
 }
 
 func (r *attemptRound[T]) run(
 	ctx context.Context,
-	pending []asynxmd.DurableSub[T],
+	pending []subscription.Durable[T],
 ) {
 	for _, sub := range pending {
 		r.deliverTo(
@@ -31,7 +32,7 @@ func (r *attemptRound[T]) run(
 
 func (r *attemptRound[T]) deliverTo(
 	ctx context.Context,
-	sub asynxmd.DurableSub[T],
+	sub subscription.Durable[T],
 ) {
 	call := &subscriberCall[T]{
 		deliverer: r.deliverer,
@@ -44,11 +45,11 @@ func (r *attemptRound[T]) deliverTo(
 		return
 	}
 
-	failure := &asynxmd.SubscriberError{Subscriber: sub.Name, Err: err}
+	failed := &failure.SubscriberError{Subscriber: sub.Name, Err: err}
 	r.deliverer.reports.DeliveryError(
 		ctx,
 		r.job,
-		failure,
+		failed,
 		r.attempt,
 	)
 	r.failed = append(
@@ -57,7 +58,7 @@ func (r *attemptRound[T]) deliverTo(
 	)
 	r.errs = append(
 		r.errs,
-		failure,
+		failed,
 	)
 }
 

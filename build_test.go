@@ -8,7 +8,12 @@ import (
 	"github.com/char2cs/asynx/internal/mockbuses"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/mockstores"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/storage"
+	"github.com/char2cs/asynx/models/subscription"
 	"github.com/char2cs/asynx/store"
 	"runtime"
 	"slices"
@@ -23,7 +28,7 @@ func TestBuildRequiresEventStore(
 	t *testing.T,
 ) {
 	_, err := asynx.New[mocks.Order]().Build()
-	if err != models.ErrMissingEventStore {
+	if err != failure.ErrMissingEventStore {
 		t.Errorf(
 			"expected ErrMissingEventStore, got %v",
 			err,
@@ -170,7 +175,7 @@ func TestBuild_NilForgetHandler_ReturnsError(
 		WithForgetHandler(nil).
 		Build()
 	if err == nil {
-		t.Fatal("expected error for nil ForgetHandler, got nil")
+		t.Fatal("expected error for nil handler.Forget, got nil")
 	}
 }
 
@@ -182,7 +187,7 @@ func TestBuilder_MissingSnapshotStoreIsAnError(
 		Build()
 	if !errors.Is(
 		err,
-		models.ErrMissingSnapshotStore,
+		failure.ErrMissingSnapshotStore,
 	) {
 		t.Errorf(
 			"err = %v, want ErrMissingSnapshotStore",
@@ -217,7 +222,7 @@ type floodLog struct {
 
 func (l *floodLog) handle(
 	_ context.Context,
-	e models.Event[mocks.Order],
+	e event.Event[mocks.Order],
 ) {
 	time.Sleep(100 * time.Microsecond)
 	l.mu.Lock()
@@ -337,7 +342,7 @@ type versionLog struct {
 
 func (l *versionLog) handle(
 	_ context.Context,
-	e models.Event[mocks.Order],
+	e event.Event[mocks.Order],
 ) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -358,10 +363,10 @@ func (l *versionLog) snapshot() []int64 {
 
 func blockUntil(
 	release <-chan struct{},
-) func(context.Context, models.Event[mocks.Order]) error {
+) func(context.Context, event.Event[mocks.Order]) error {
 	return func(
 		context.Context,
-		models.Event[mocks.Order],
+		event.Event[mocks.Order],
 	) error {
 		<-release
 		return nil
@@ -453,10 +458,10 @@ func sendUpdate(
 
 func countingSubscriber(
 	calls *atomic.Int32,
-) func(context.Context, models.Event[mocks.Order]) error {
+) func(context.Context, event.Event[mocks.Order]) error {
 	return func(
 		context.Context,
-		models.Event[mocks.Order],
+		event.Event[mocks.Order],
 	) error {
 		calls.Add(1)
 		return nil
@@ -464,7 +469,7 @@ func countingSubscriber(
 }
 
 func enqueueGhost(
-	tx models.Tx,
+	tx storage.Tx,
 ) error {
 	return tx.EnqueueDelivery(
 		context.Background(),
@@ -610,8 +615,8 @@ func TestGuarantee_NoDurableSubscribersWritesNoDeliveries(
 
 func failingSyncProjection(
 	context.Context,
-	models.Tx,
-	models.Event[mocks.Order],
+	storage.Tx,
+	event.Event[mocks.Order],
 ) error {
 	return errors.New("read model write failed")
 }
@@ -643,11 +648,11 @@ func TestGuarantee_SyncProjectionFailureRollsEverythingBack(
 	)
 	if !errors.Is(
 		err,
-		models.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) ||
 		!errors.Is(
 			err,
-			models.ErrSyncProjection,
+			failure.ErrSyncProjection,
 		) {
 		t.Fatalf(
 			"err = %v, want ErrPipelineFailed + ErrSyncProjection",
@@ -735,7 +740,7 @@ func TestGuarantee_IdempotentCommands(
 		idemCreate{CreateOrderCmd: mocks.CreateOrderCmd{ID: "bad", Total: -1}, Cmd: "c2"},
 	); !errors.Is(
 		err,
-		models.ErrValidation,
+		failure.ErrValidation,
 	) {
 		t.Fatalf(
 			"err = %v, want ErrValidation",
@@ -748,7 +753,7 @@ func TestGuarantee_IdempotentCommands(
 		idemCreate{CreateOrderCmd: mocks.CreateOrderCmd{ID: "bad", Total: 5}, Cmd: "c2"},
 	); !errors.Is(
 		err,
-		models.ErrValidation,
+		failure.ErrValidation,
 	) {
 		t.Fatalf(
 			"retry err = %v, want the rejection to stick",
@@ -1054,7 +1059,7 @@ func (g goroutineBudget) withinLimit() bool {
 	return runtime.NumGoroutine() <= g.limit
 }
 
-type deliveryBacklog struct{ s models.Store }
+type deliveryBacklog struct{ s storage.Store }
 
 func (d deliveryBacklog) drained() bool {
 	pending, _ := d.s.PendingDeliveries(
@@ -1071,7 +1076,7 @@ type retryLog struct {
 
 func (l *retryLog) handleFlaky(
 	ctx context.Context,
-	e models.Event[mocks.Order],
+	e event.Event[mocks.Order],
 ) error {
 	if e.Version == 1 &&
 		l.failures.Add(1) <= 2 {
@@ -1141,10 +1146,10 @@ func TestGuarantee_DurableSubscriberFailureRetriesAndKeepsOrder(
 func failingCounter(
 	attempts *atomic.Int32,
 	msg string,
-) func(context.Context, models.Event[mocks.Order]) error {
+) func(context.Context, event.Event[mocks.Order]) error {
 	return func(
 		context.Context,
-		models.Event[mocks.Order],
+		event.Event[mocks.Order],
 	) error {
 		attempts.Add(1)
 		return errors.New(msg)
@@ -1310,7 +1315,7 @@ type panicOnce struct {
 
 func (p *panicOnce) handle(
 	context.Context,
-	models.Event[mocks.Order],
+	event.Event[mocks.Order],
 ) error {
 	if p.attempts.Add(1) == 1 {
 		panic("boom")
@@ -1336,7 +1341,7 @@ func TestGuarantee_DurablePanicIsAFailureNotADelivery(
 			WithSubscriber(
 				"OrderUpdated",
 				flaky.handle,
-				models.WithHandlerTimeout[mocks.Order](time.Second),
+				subscription.WithHandlerTimeout[mocks.Order](time.Second),
 			),
 	)
 
@@ -1573,10 +1578,10 @@ func TestBuild_UsesTheSuppliedDispatcher(
 	}
 
 	request := requests[0]
-	wrongRequest := request.Kind != models.DispatchEvent || request.Event.AggregateID != "a" || request.Event.Version != 1
+	wrongRequest := request.Kind != dispatch.KindEvent || request.Event.AggregateID != "a" || request.Event.Version != 1
 	if wrongRequest {
 		t.Errorf(
-			"request = %+v, want the DispatchEvent of a v1",
+			"request = %+v, want the dispatch.KindEvent of a v1",
 			request,
 		)
 	}
@@ -1701,7 +1706,7 @@ func TestForget_SupersedesThenEnqueuesATombstone(
 
 	requests := fake.Requests()
 	tombstone := requests[len(requests)-1]
-	wrongTombstone := tombstone.Kind != models.DispatchTombstone || tombstone.Event.AggregateID != "a" || tombstone.Ack == nil
+	wrongTombstone := tombstone.Kind != dispatch.KindTombstone || tombstone.Event.AggregateID != "a" || tombstone.Ack == nil
 	if wrongTombstone {
 		t.Errorf(
 			"last request = %+v, want a tombstone of a with an Ack",
@@ -1715,8 +1720,8 @@ func TestBuild_ADispatcherFactoryErrorFailsBuild(
 ) {
 	sentinel := errors.New("no dispatcher today")
 	factory := func(
-		models.DispatcherConfig[mocks.Order],
-	) (models.Dispatcher[mocks.Order], error) {
+		dispatcher.Config[mocks.Order],
+	) (dispatcher.Dispatcher[mocks.Order], error) {
 		return nil,
 			sentinel
 	}
@@ -1809,7 +1814,7 @@ func TestSend_AnEnqueueFailureAfterCommitParksThroughTheSuppliedDispatcher(
 	)
 	if !errors.Is(
 		err,
-		models.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) ||
 		!errors.Is(
 			err,
@@ -1844,7 +1849,7 @@ type defaultsCase struct {
 	name     string
 	retry    [2]time.Duration
 	attempts int
-	want     models.DispatcherConfig[mocks.Order]
+	want     dispatcher.Config[mocks.Order]
 }
 
 func (c defaultsCase) run(
@@ -1861,7 +1866,7 @@ func (c defaultsCase) run(
 func TestBuild_DefaultsAreAppliedBeforeTheFactoryRuns(
 	t *testing.T,
 ) {
-	defaults := models.DispatcherConfig[mocks.Order]{MaxAttempts: 20, RetryInitial: 100 * time.Millisecond, RetryMax: 30 * time.Second}
+	defaults := dispatcher.Config[mocks.Order]{MaxAttempts: 20, RetryInitial: 100 * time.Millisecond, RetryMax: 30 * time.Second}
 	tests := []defaultsCase{
 		{
 			name:     "non-positive builder values are ignored",
@@ -1877,7 +1882,7 @@ func TestBuild_DefaultsAreAppliedBeforeTheFactoryRuns(
 			name:     "positive builder values are carried",
 			retry:    [2]time.Duration{5 * time.Millisecond, 50 * time.Millisecond},
 			attempts: 3,
-			want:     models.DispatcherConfig[mocks.Order]{MaxAttempts: 3, RetryInitial: 5 * time.Millisecond, RetryMax: 50 * time.Millisecond},
+			want:     dispatcher.Config[mocks.Order]{MaxAttempts: 3, RetryInitial: 5 * time.Millisecond, RetryMax: 50 * time.Millisecond},
 		},
 	}
 	for _, tt := range tests {
@@ -1892,8 +1897,8 @@ func TestBuild_ATypedNilDispatcherFailsBuild(
 	t *testing.T,
 ) {
 	factory := func(
-		models.DispatcherConfig[mocks.Order],
-	) (d models.Dispatcher[mocks.Order], err error) {
+		dispatcher.Config[mocks.Order],
+	) (d dispatcher.Dispatcher[mocks.Order], err error) {
 		d = (*mockbuses.Dispatcher[mocks.Order])(nil)
 		return d,
 			nil
@@ -1924,7 +1929,7 @@ func (c *callTally) total() int32 {
 
 func (c *callTally) countError(
 	context.Context,
-	models.Event[mocks.Order],
+	event.Event[mocks.Order],
 	error,
 ) {
 	c.n.Add(1)
@@ -1932,7 +1937,7 @@ func (c *callTally) countError(
 
 func (c *callTally) countDeliveryError(
 	context.Context,
-	models.Event[mocks.Order],
+	event.Event[mocks.Order],
 	error,
 	int,
 ) {
@@ -1941,7 +1946,7 @@ func (c *callTally) countDeliveryError(
 
 func (c *callTally) countPanic(
 	context.Context,
-	models.Event[mocks.Order],
+	event.Event[mocks.Order],
 	any,
 ) {
 	c.n.Add(1)
@@ -1955,13 +1960,13 @@ func (c *callTally) countCorruption(
 
 func (c *callTally) countEvent(
 	context.Context,
-	models.Event[mocks.Order],
+	event.Event[mocks.Order],
 ) {
 	c.n.Add(1)
 }
 
 func (c *callTally) countOption(
-	*models.SubscriptionConfig[mocks.Order],
+	*subscription.Config[mocks.Order],
 ) {
 	c.n.Add(1)
 }

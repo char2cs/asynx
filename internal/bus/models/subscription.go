@@ -3,7 +3,7 @@ package models
 import (
 	"time"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/handler"
 )
 
 // Subscription is one registered handler together with its routing pattern, the
@@ -12,7 +12,7 @@ import (
 // every in-flight delivery, so it must not be mutated after registration.
 type Subscription[T any] struct {
 	Pattern         string
-	Handler         asynxmd.ProjectionHandler[T]
-	FallbackHandler asynxmd.ProjectionHandler[T]
+	Handler         handler.Projection[T]
+	FallbackHandler handler.Projection[T]
 	Timeout         time.Duration
 }

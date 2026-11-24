@@ -3,7 +3,8 @@ package store
 import (
 	"cmp"
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 	"slices"
 	"sync"
 )
@@ -13,8 +14,8 @@ type memoryStore struct {
 
 	mu         sync.RWMutex
 	streams    map[string][]entry
-	receipts   map[string]models.Receipt
-	deliveries []models.Delivery
+	receipts   map[string]event.Receipt
+	deliveries []event.Delivery
 	errOn      map[string]error
 }
 
@@ -24,7 +25,7 @@ type memoryStore struct {
 func New() Memory {
 	return &memoryStore{
 		streams:  make(map[string][]entry),
-		receipts: make(map[string]models.Receipt),
+		receipts: make(map[string]event.Receipt),
 		errOn:    make(map[string]error),
 	}
 }
@@ -45,7 +46,7 @@ func (s *memoryStore) SetError(
 
 // Append writes one blob in its own transaction, so it commits or fails on its
 // own: a duplicate (streamID, version) returns an error wrapping
-// models.ErrPipelineFailed and a scheduled SetError error is returned as is.
+// failure.ErrPipelineFailed and a scheduled SetError error is returned as is.
 // It is meant for seeding streams in tests without writing a transaction.
 func (s *memoryStore) Append(
 	ctx context.Context,
@@ -110,7 +111,7 @@ func (s *memoryStore) Delete(
 // fn.
 func (s *memoryStore) Atomically(
 	ctx context.Context,
-	fn func(tx models.Tx) error,
+	fn func(tx storage.Tx) error,
 ) error {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -206,9 +207,9 @@ func (s *memoryStore) ReadRange(
 func (s *memoryStore) GetReceipt(
 	ctx context.Context,
 	commandID string,
-) (models.Receipt, bool, error) {
+) (event.Receipt, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return models.Receipt{},
+		return event.Receipt{},
 			false,
 			err
 	}
@@ -228,7 +229,7 @@ func (s *memoryStore) GetReceipt(
 func (s *memoryStore) PendingDeliveries(
 	ctx context.Context,
 	limit int,
-) ([]models.Delivery, error) {
+) ([]event.Delivery, error) {
 	if err := ctx.Err(); err != nil {
 		return nil,
 			err
@@ -267,7 +268,7 @@ func (s *memoryStore) AckDelivery(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	target := models.Delivery{AggregateID: aggregateID, Version: version}
+	target := event.Delivery{AggregateID: aggregateID, Version: version}
 	if i := slices.Index(
 		s.deliveries,
 		target,

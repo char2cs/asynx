@@ -10,7 +10,10 @@ import (
 	"github.com/char2cs/asynx/internal/processor/internal/pool"
 	"github.com/char2cs/asynx/internal/processor/internal/queue"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	dispatchermodel "github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/pubsub"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -34,10 +37,10 @@ type Processor[T any] struct {
 	pool          *pool.ShardPool[T]
 	router        *queue.Router
 	executor      *exec.CommandExecutor[T]
-	dispatcher    asynxmd.Dispatcher[T]
-	onPublishErr  asynxmd.PublishErrorHandler[T]
-	onPanic       asynxmd.PanicHandler[T]
-	bus           asynxmd.Bus[T]
+	dispatcher    dispatchermodel.Dispatcher[T]
+	onPublishErr  handler.PublishError[T]
+	onPanic       handler.Panic[T]
+	bus           pubsub.Bus[T]
 	shuttingDown  atomic.Bool
 	lifeMu        sync.Mutex
 	shutdown      shutdownState
@@ -62,7 +65,7 @@ var errNilDispatcher = errors.New("asynx: the dispatcher factory returned no dis
 // fails New and nothing is left running.
 func New[T any](
 	es eventstore.EventStore[T],
-	bus asynxmd.Bus[T],
+	bus pubsub.Bus[T],
 	opts ...models.Opt[T],
 ) (*Processor[T], error) {
 	cfg := configure(opts...)
@@ -96,8 +99,8 @@ func New[T any](
 
 func assemble[T any](
 	es eventstore.EventStore[T],
-	bus asynxmd.Bus[T],
-	d asynxmd.Dispatcher[T],
+	bus pubsub.Bus[T],
+	d dispatchermodel.Dispatcher[T],
 	router *queue.Router,
 	cfg *models.Config[T],
 ) *Processor[T] {
@@ -124,7 +127,7 @@ func assemble[T any](
 
 func newExecutor[T any](
 	es eventstore.EventStore[T],
-	d asynxmd.Dispatcher[T],
+	d dispatchermodel.Dispatcher[T],
 	cfg *models.Config[T],
 ) *exec.CommandExecutor[T] {
 	executor := exec.New(
@@ -140,8 +143,8 @@ func newExecutor[T any](
 
 func newDispatcher[T any](
 	cfg *models.Config[T],
-	bus asynxmd.Bus[T],
-) (asynxmd.Dispatcher[T], error) {
+	bus pubsub.Bus[T],
+) (dispatchermodel.Dispatcher[T], error) {
 	factory := cfg.DispatcherFactory
 	if factory == nil &&
 		bus == nil {
@@ -202,7 +205,7 @@ func configure[T any](
 		Shards:          defaultShards,
 		QueueDepth:      -1,
 		WorkersPerShard: defaultWorkers,
-		Dispatcher: asynxmd.DispatcherConfig[T]{
+		Dispatcher: dispatchermodel.Config[T]{
 			RetryInitial: defaultRetryInitial,
 			RetryMax:     defaultRetryMax,
 			MaxAttempts:  defaultMaxAttempts,
@@ -220,15 +223,15 @@ func configure[T any](
 }
 
 func defaultDispatcher[T any](
-	cfg asynxmd.DispatcherConfig[T],
-) (asynxmd.Dispatcher[T], error) {
+	cfg dispatchermodel.Config[T],
+) (dispatchermodel.Dispatcher[T], error) {
 	return dispatcher.Dispatcher(cfg),
 		nil
 }
 
 func (p *Processor[T]) reportPublishError(
 	ctx context.Context,
-	event asynxmd.Event[T],
+	evt event.Event[T],
 	err error,
 ) {
 	if p.onPublishErr == nil {
@@ -237,18 +240,18 @@ func (p *Processor[T]) reportPublishError(
 
 	defer p.forwardPanic(
 		ctx,
-		event,
+		evt,
 	)
 	p.onPublishErr(
 		ctx,
-		event,
+		evt,
 		err,
 	)
 }
 
 func (p *Processor[T]) forwardPanic(
 	ctx context.Context,
-	event asynxmd.Event[T],
+	evt event.Event[T],
 ) {
 	recovered := recover()
 	if recovered == nil ||
@@ -258,7 +261,7 @@ func (p *Processor[T]) forwardPanic(
 
 	p.onPanic(
 		ctx,
-		event,
+		evt,
 		recovered,
 	)
 }

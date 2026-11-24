@@ -6,19 +6,21 @@ import (
 
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	dispatchermodel "github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/event"
 )
 
 func TestDispatcher_EnqueueTracksTheTicketAndCloses(
 	t *testing.T,
 ) {
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[mocks.Order]{})
+	d := dispatcher.Dispatcher(dispatchermodel.Config[mocks.Order]{})
 	defer d.Close(context.Background())
 
 	ticket, err := d.Enqueue(
 		context.Background(),
-		asynxmd.DispatchRequest[mocks.Order]{
-			Event: asynxmd.Event[mocks.Order]{
+		dispatch.Request[mocks.Order]{
+			Event: event.Event[mocks.Order]{
 				AggregateID: "agg1",
 				Version:     1,
 			},

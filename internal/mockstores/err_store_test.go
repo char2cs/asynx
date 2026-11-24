@@ -3,7 +3,7 @@ package mockstores
 import (
 	"context"
 	"errors"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/storage"
 	"testing"
 )
 
@@ -74,5 +74,5 @@ func TestErrStore_ReadRange_ReturnsErr(
 func TestErrStore_ImplementsStore(
 	t *testing.T,
 ) {
-	var _ asynxmd.Store = &ErrStore{}
+	var _ storage.Store = &ErrStore{}
 }

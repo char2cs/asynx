@@ -6,13 +6,15 @@ import (
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
 	"github.com/char2cs/asynx/internal/firsterror"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 func (e *CommandExecutor[T]) runSyncProjections(
 	ctx context.Context,
-	tx asynxmd.Tx,
-	evt asynxmd.Event[T],
+	tx storage.Tx,
+	evt event.Event[T],
 ) error {
 	err := firsterror.Of(
 		e.syncs,
@@ -25,7 +27,7 @@ func (e *CommandExecutor[T]) runSyncProjections(
 	if err != nil {
 		return fmt.Errorf(
 			"%w: %w",
-			asynxmd.ErrSyncProjection,
+			failure.ErrSyncProjection,
 			err,
 		)
 	}
@@ -35,8 +37,8 @@ func (e *CommandExecutor[T]) runSyncProjections(
 
 func projecting[T any](
 	ctx context.Context,
-	tx asynxmd.Tx,
-	evt asynxmd.Event[T],
+	tx storage.Tx,
+	evt event.Event[T],
 ) func(models.SyncProjection[T]) error {
 	return func(
 		p models.SyncProjection[T],
@@ -52,9 +54,9 @@ func projecting[T any](
 
 func runProjection[T any](
 	ctx context.Context,
-	tx asynxmd.Tx,
+	tx storage.Tx,
 	p models.SyncProjection[T],
-	evt asynxmd.Event[T],
+	evt event.Event[T],
 ) error {
 	if !p.Match(evt.EventName) {
 		return nil
@@ -78,8 +80,8 @@ func (e *CommandExecutor[T]) txHook(
 
 	return func(
 		ctx context.Context,
-		tx asynxmd.Tx,
-		evt asynxmd.Event[T],
+		tx storage.Tx,
+		evt event.Event[T],
 	) error {
 		return e.commitHook(
 			ctx,
@@ -92,9 +94,9 @@ func (e *CommandExecutor[T]) txHook(
 
 func (e *CommandExecutor[T]) commitHook(
 	ctx context.Context,
-	tx asynxmd.Tx,
+	tx storage.Tx,
 	commandID string,
-	evt asynxmd.Event[T],
+	evt event.Event[T],
 ) error {
 	if err := e.runSyncProjections(
 		ctx,
@@ -126,15 +128,15 @@ func (e *CommandExecutor[T]) commitHook(
 
 func putAcceptedReceipt[T any](
 	ctx context.Context,
-	tx asynxmd.Tx,
+	tx storage.Tx,
 	commandID string,
-	evt asynxmd.Event[T],
+	evt event.Event[T],
 ) error {
 	if commandID == "" {
 		return nil
 	}
 
-	receipt := asynxmd.Receipt{
+	receipt := event.Receipt{
 		Accepted:    true,
 		AggregateID: evt.AggregateID,
 		EventID:     evt.ID,

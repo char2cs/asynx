@@ -3,7 +3,7 @@ package projections
 import (
 	"context"
 	"github.com/char2cs/asynx/example/domain"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
 	"sync"
 	"testing"
 )
@@ -13,7 +13,7 @@ func TestOrderNotifier_Handle_OrderCreated(
 ) {
 	notifier := &OrderNotifier{}
 	ctx := context.Background()
-	event := models.Event[domain.Order]{
+	evt := event.Event[domain.Order]{
 		EventName: "OrderCreated",
 		Aggregate: domain.Order{
 			ID:     "ORD-001",
@@ -26,7 +26,7 @@ func TestOrderNotifier_Handle_OrderCreated(
 
 	notifier.Handle(
 		ctx,
-		event,
+		evt,
 	)
 	outbox := notifier.GetOutbox()
 	if len(outbox) != 1 {
@@ -50,7 +50,7 @@ func TestOrderNotifier_Handle_OrderConfirmed(
 ) {
 	notifier := &OrderNotifier{}
 	ctx := context.Background()
-	event := models.Event[domain.Order]{
+	evt := event.Event[domain.Order]{
 		EventName: "OrderConfirmed",
 		Aggregate: domain.Order{
 			ID:     "ORD-002",
@@ -63,7 +63,7 @@ func TestOrderNotifier_Handle_OrderConfirmed(
 
 	notifier.Handle(
 		ctx,
-		event,
+		evt,
 	)
 	outbox := notifier.GetOutbox()
 	if len(outbox) != 1 {
@@ -87,7 +87,7 @@ func TestOrderNotifier_Handle_OrderShipped(
 ) {
 	notifier := &OrderNotifier{}
 	ctx := context.Background()
-	event := models.Event[domain.Order]{
+	evt := event.Event[domain.Order]{
 		EventName: "OrderShipped",
 		Aggregate: domain.Order{
 			ID:     "ORD-003",
@@ -100,7 +100,7 @@ func TestOrderNotifier_Handle_OrderShipped(
 
 	notifier.Handle(
 		ctx,
-		event,
+		evt,
 	)
 	outbox := notifier.GetOutbox()
 	if len(outbox) != 1 {
@@ -124,7 +124,7 @@ func TestOrderNotifier_Handle_UnknownEvent(
 ) {
 	notifier := &OrderNotifier{}
 	ctx := context.Background()
-	event := models.Event[domain.Order]{
+	evt := event.Event[domain.Order]{
 		EventName: "UnknownEvent",
 		Aggregate: domain.Order{
 			ID: "ORD-004",
@@ -133,7 +133,7 @@ func TestOrderNotifier_Handle_UnknownEvent(
 
 	notifier.Handle(
 		ctx,
-		event,
+		evt,
 	)
 	outbox := notifier.GetOutbox()
 	if len(outbox) != 0 {
@@ -150,15 +150,15 @@ func TestOrderNotifier_Handle_MultipleEvents(
 	notifier := &OrderNotifier{}
 	ctx := context.Background()
 
-	event1 := models.Event[domain.Order]{
+	event1 := event.Event[domain.Order]{
 		EventName: "OrderCreated",
 		Aggregate: domain.Order{ID: "ORD-001"},
 	}
-	event2 := models.Event[domain.Order]{
+	event2 := event.Event[domain.Order]{
 		EventName: "OrderConfirmed",
 		Aggregate: domain.Order{ID: "ORD-001"},
 	}
-	event3 := models.Event[domain.Order]{
+	event3 := event.Event[domain.Order]{
 		EventName: "OrderShipped",
 		Aggregate: domain.Order{ID: "ORD-001"},
 	}
@@ -193,7 +193,7 @@ func handleCreated(
 	defer wg.Done()
 	notifier.Handle(
 		ctx,
-		models.Event[domain.Order]{
+		event.Event[domain.Order]{
 			EventName: "OrderCreated",
 			Aggregate: domain.Order{
 				ID: "ORD-001",
@@ -248,7 +248,7 @@ func TestOrderNotifier_GetOutbox_ReturnsACopy(
 	notifier := &OrderNotifier{}
 	notifier.Handle(
 		context.Background(),
-		models.Event[domain.Order]{
+		event.Event[domain.Order]{
 			EventName: "OrderCreated",
 			Aggregate: domain.Order{ID: "ORD-001"},
 		},

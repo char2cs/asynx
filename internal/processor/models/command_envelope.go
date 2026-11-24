@@ -3,7 +3,8 @@ package models
 import (
 	"context"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 // CommandEnvelope carries one command through a shard queue and coordinates the
@@ -44,7 +45,7 @@ import (
 // the sender before the sender leaves. No goroutine outlives the command.
 type CommandEnvelope[T any] struct {
 	// Cmd is the command to run.
-	Cmd asynxmd.Command[T]
+	Cmd command.Command[T]
 	// ResultChan carries the single outcome of the envelope; see the type
 	// documentation for who writes it.
 	ResultChan chan CommandResult[T]
@@ -63,7 +64,7 @@ type CommandEnvelope[T any] struct {
 // WaitHandlers on the result before enqueueing it if the sender will wait for
 // the event's handlers.
 func NewCommandEnvelope[T any](
-	cmd asynxmd.Command[T],
+	cmd command.Command[T],
 ) *CommandEnvelope[T] {
 	return &CommandEnvelope[T]{
 		Cmd: cmd,
@@ -130,7 +131,7 @@ func (e *CommandEnvelope[T]) run(
 	executor Executor[T],
 ) CommandResult[T] {
 	if ctx.Err() != nil {
-		return CommandResult[T]{Err: asynxmd.ErrContextCancelled}
+		return CommandResult[T]{Err: failure.ErrContextCancelled}
 	}
 
 	event, wait, err := executor.ExecuteAsync(

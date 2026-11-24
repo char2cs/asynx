@@ -10,7 +10,7 @@ import (
 	"github.com/char2cs/asynx/example/commands"
 	"github.com/char2cs/asynx/example/domain"
 	"github.com/char2cs/asynx/example/projections"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
 	"github.com/char2cs/asynx/store"
 )
 
@@ -23,7 +23,7 @@ const (
 type phase struct {
 	verb    string
 	past    string
-	factory func(orderID string) models.Command[domain.Order]
+	factory func(orderID string) command.Command[domain.Order]
 }
 
 func build() (asynx.Asynx[domain.Order], error) {
@@ -190,7 +190,7 @@ func printOrders(
 
 func createCmd(
 	orderID string,
-) models.Command[domain.Order] {
+) command.Command[domain.Order] {
 	return commands.CreateOrderCmd{
 		ID:     orderID,
 		Total:  orderTotal,
@@ -201,13 +201,13 @@ func createCmd(
 
 func confirmCmd(
 	orderID string,
-) models.Command[domain.Order] {
+) command.Command[domain.Order] {
 	return commands.ConfirmOrderCmd{ID: orderID}
 }
 
 func shipCmd(
 	orderID string,
-) models.Command[domain.Order] {
+) command.Command[domain.Order] {
 	return commands.ShipOrderCmd{ID: orderID}
 }
 

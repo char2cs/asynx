@@ -3,13 +3,13 @@ package asynx
 import (
 	"testing"
 
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/subscription"
 )
 
 func TestEventName_MatchedByAsksTheSubscribersMatcher(
 	t *testing.T,
 ) {
-	sub := models.DurableSub[int]{
+	sub := subscription.Durable[int]{
 		Match: exactPattern("OrderCreated").matches,
 	}
 	if !eventName[int]("OrderCreated").matchedBy(sub) {

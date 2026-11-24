@@ -7,7 +7,8 @@ import (
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/reporter"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/event"
 )
 
 type ctxKey struct{}
@@ -21,8 +22,8 @@ func markedContext() context.Context {
 }
 
 func newJob() jobs.Job[string] {
-	request := asynxmd.DispatchRequest[string]{
-		Event: asynxmd.Event[string]{AggregateID: "agg", Version: 1},
+	request := dispatch.Request[string]{
+		Event: event.Event[string]{AggregateID: "agg", Version: 1},
 	}
 	return jobs.New(
 		request,
@@ -215,7 +216,7 @@ func TestReporter_RecoversErrorHandlerPanicsWithoutAPanicHandler(
 
 type recordedCalls struct {
 	ctx        context.Context
-	event      asynxmd.Event[string]
+	event      event.Event[string]
 	err        error
 	attempt    int
 	publishes  int
@@ -225,35 +226,35 @@ type recordedCalls struct {
 
 func (c *recordedCalls) recordPublishError(
 	ctx context.Context,
-	event asynxmd.Event[string],
+	evt event.Event[string],
 	err error,
 ) {
 	c.publishes++
 	c.ctx = ctx
-	c.event = event
+	c.event = evt
 	c.err = err
 }
 
 func (c *recordedCalls) recordDeliveryError(
 	ctx context.Context,
-	event asynxmd.Event[string],
+	evt event.Event[string],
 	err error,
 	attempt int,
 ) {
 	c.deliveries++
 	c.ctx = ctx
-	c.event = event
+	c.event = evt
 	c.err = err
 	c.attempt = attempt
 }
 
 func (c *recordedCalls) recordPanic(
 	ctx context.Context,
-	event asynxmd.Event[string],
+	evt event.Event[string],
 	recovered any,
 ) {
 	c.ctx = ctx
-	c.event = event
+	c.event = evt
 	c.panics = append(
 		c.panics,
 		recovered,
@@ -262,7 +263,7 @@ func (c *recordedCalls) recordPanic(
 
 func panicOnPublishError(
 	context.Context,
-	asynxmd.Event[string],
+	event.Event[string],
 	error,
 ) {
 	panic("publish")
@@ -270,7 +271,7 @@ func panicOnPublishError(
 
 func panicOnDeliveryError(
 	context.Context,
-	asynxmd.Event[string],
+	event.Event[string],
 	error,
 	int,
 ) {
@@ -279,7 +280,7 @@ func panicOnDeliveryError(
 
 func panicOnPanic(
 	context.Context,
-	asynxmd.Event[string],
+	event.Event[string],
 	any,
 ) {
 	panic("panic")

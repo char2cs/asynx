@@ -2,7 +2,7 @@ package dispatcher
 
 import (
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/inmemory"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatcher"
 )
 
 // Dispatcher creates the in-memory Dispatcher from cfg, whose values it takes
@@ -15,7 +15,7 @@ import (
 // each of which may be nil. It implements the whole contract documented on
 // models.Dispatcher, and the caller closes it with Close.
 func Dispatcher[T any](
-	cfg asynxmd.DispatcherConfig[T],
-) asynxmd.Dispatcher[T] {
+	cfg dispatcher.Config[T],
+) dispatcher.Dispatcher[T] {
 	return inmemory.New(cfg)
 }

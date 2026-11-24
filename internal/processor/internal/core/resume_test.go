@@ -8,7 +8,10 @@ import (
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatch"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/char2cs/asynx/store"
 	"reflect"
 	"slices"
@@ -238,7 +241,7 @@ type flakyPendingStore struct {
 func (s *flakyPendingStore) PendingDeliveries(
 	ctx context.Context,
 	limit int,
-) ([]asynxmd.Delivery, error) {
+) ([]event.Delivery, error) {
 	if s.fail.Load() {
 		return nil,
 			errors.New("log unreadable")
@@ -345,7 +348,7 @@ func TestProcessor_Paused_ListsParkedAggregatesAndSendWaitSaysSo(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) ||
 		evt.Version != 2 {
 		t.Fatalf(
@@ -598,7 +601,7 @@ type logCountingStore struct {
 func (s *logCountingStore) PendingDeliveries(
 	ctx context.Context,
 	limit int,
-) ([]asynxmd.Delivery, error) {
+) ([]event.Delivery, error) {
 	pending, err := s.Memory.PendingDeliveries(
 		ctx,
 		limit,
@@ -917,7 +920,7 @@ type staleLogStore struct {
 func (s *staleLogStore) PendingDeliveries(
 	ctx context.Context,
 	limit int,
-) ([]asynxmd.Delivery, error) {
+) ([]event.Delivery, error) {
 	pending, err := s.Memory.PendingDeliveries(
 		ctx,
 		limit,
@@ -1227,7 +1230,7 @@ type idemOrderUpdate struct {
 }
 
 // CommandID returns the idempotency key the test put in Cmd, making the
-// update an IdempotentCommand.
+// update an command.Idempotent.
 func (c idemOrderUpdate) CommandID() string { return c.Cmd }
 
 type failingReadsStore struct {
@@ -1285,7 +1288,7 @@ func parkWithTwoCommands(
 	)
 	if !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"c-2 behind the park = %v, want ErrDeliveryParked",
@@ -1299,7 +1302,7 @@ func parkedSignal(
 ) models.Opt[order] {
 	handle := func(
 		_ context.Context,
-		_ asynxmd.Event[order],
+		_ event.Event[order],
 		err error,
 		_ int,
 	) {
@@ -1317,7 +1320,7 @@ func signalIfParked(
 ) {
 	if !errors.Is(
 		err,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		return
 	}
@@ -1408,7 +1411,7 @@ func TestProcessor_Resume_AfterALogReadFailureRetriesStillReportTheParkedEvent(
 	if ranAndFailed != nil ||
 		!errors.Is(
 			neverTaken,
-			asynxmd.ErrDeliveryParked,
+			failure.ErrDeliveryParked,
 		) {
 		t.Fatalf(
 			"retries = %v, %v; want nil for c-1 (its handler ran) and ErrDeliveryParked for c-2",
@@ -1464,7 +1467,7 @@ func TestProcessor_Resume_AfterAReplayFailureRetriesKeepTheirAnswers(
 	if ranAndFailed != nil ||
 		!errors.Is(
 			neverTaken,
-			asynxmd.ErrDeliveryParked,
+			failure.ErrDeliveryParked,
 		) {
 		t.Fatalf(
 			"retries = %v, %v; want nil for c-1 (its handler ran) and ErrDeliveryParked for c-2",
@@ -1573,7 +1576,7 @@ func enqueuingUpTo(
 	ctx context.Context,
 	aggregateID string,
 	last int64,
-) func(asynxmd.Tx) error {
+) func(storage.Tx) error {
 	versions := make(
 		[]int64,
 		0,
@@ -1619,7 +1622,7 @@ func TestProcessor_Inspect_FailedResumeKeepsTheCauseAndUndelivered(
 	if !before.Parked ||
 		!errors.Is(
 			before.Cause,
-			asynxmd.ErrDeliveryParked,
+			failure.ErrDeliveryParked,
 		) {
 		t.Fatalf(
 			"Inspect before Resume = %+v, want parked by the give-up",
@@ -1660,7 +1663,7 @@ func TestProcessor_Inspect_FailedResumeKeepsTheCauseAndUndelivered(
 
 	if errors.Is(
 		got.Cause,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	) {
 		t.Fatalf(
 			"Cause = %v, still the lifted park's give-up error",
@@ -1722,7 +1725,7 @@ func TestProcessor_Inspect_FailedRecoverParksWithTheRedeliveryError(
 	got := p.Inspect("bad")
 	wrongPark := !got.Parked || got.Cause == nil || errors.Is(
 		got.Cause,
-		asynxmd.ErrDeliveryParked,
+		failure.ErrDeliveryParked,
 	)
 	if wrongPark {
 		t.Fatalf(
@@ -1744,7 +1747,7 @@ func TestProcessor_Inspect_WithoutDispatcherIsTheZeroStatus(
 
 	if got := p.Inspect("a"); !reflect.DeepEqual(
 		got,
-		asynxmd.DeliveryStatus{},
+		dispatch.Status{},
 	) {
 		t.Fatalf(
 			"Inspect = %+v, want the zero status",
@@ -1761,7 +1764,7 @@ func gatedVersionSubs(
 ) models.Opt[order] {
 	handle := func(
 		_ context.Context,
-		e asynxmd.Event[order],
+		e event.Event[order],
 	) error {
 		return deliverWhenHealthy(
 			healthy,
@@ -1779,7 +1782,7 @@ func deliverWhenHealthy(
 	release chan struct{},
 	mu *sync.Mutex,
 	delivered *[]int64,
-	e asynxmd.Event[order],
+	e event.Event[order],
 ) error {
 	if !healthy.Load() {
 		return errors.New("down")
@@ -1798,7 +1801,7 @@ func deliverWhenHealthy(
 func ignoringReporter() models.Opt[order] {
 	handle := func(
 		context.Context,
-		asynxmd.Event[order],
+		event.Event[order],
 		error,
 	) {
 	}

@@ -2,7 +2,7 @@ package core
 
 import (
 	"context"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
 	"sync"
 )
 
@@ -16,7 +16,7 @@ func (p *Processor[T]) Shutdown(
 	p.lifeMu.Lock()
 	if p.shutdownStarted() {
 		p.lifeMu.Unlock()
-		return asynxmd.ErrAlreadyShuttingDown
+		return failure.ErrAlreadyShuttingDown
 	}
 
 	p.markShuttingDown()

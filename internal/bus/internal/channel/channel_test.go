@@ -10,17 +10,21 @@ import (
 
 	"github.com/char2cs/asynx/internal/bus"
 	"github.com/char2cs/asynx/internal/bus/internal/channel"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/pubsub"
+	"github.com/char2cs/asynx/models/subscription"
 )
 
-func newBus[T any]() models.Bus[T] {
+func newBus[T any]() pubsub.Bus[T] {
 	return bus.New[T]()
 }
 
 func ev(
 	name string,
-) models.Event[string] {
-	return models.Event[string]{EventName: name}
+) event.Event[string] {
+	return event.Event[string]{EventName: name}
 }
 
 type ctxKey struct{}
@@ -38,7 +42,7 @@ func forwardCtxValue(
 }
 
 func unsubscribeJob(
-	b models.Bus[string],
+	b pubsub.Bus[string],
 	id string,
 ) func() {
 	return func() {
@@ -83,7 +87,7 @@ func spawn(
 
 func closeAndWait(
 	t *testing.T,
-	b models.Bus[string],
+	b pubsub.Bus[string],
 ) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(
@@ -101,7 +105,7 @@ func closeAndWait(
 
 type eventHandler = func(
 	context.Context,
-	models.Event[string],
+	event.Event[string],
 )
 
 func panicsWith(
@@ -109,7 +113,7 @@ func panicsWith(
 ) eventHandler {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		panic(value)
 	}
@@ -120,7 +124,7 @@ func countsCalls(
 ) eventHandler {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		calls.Add(1)
 	}
@@ -131,20 +135,20 @@ func signals(
 ) eventHandler {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		done <- struct{}{}
 	}
 }
 
 func sendsEvent(
-	received chan<- models.Event[string],
+	received chan<- event.Event[string],
 ) eventHandler {
 	return func(
 		_ context.Context,
-		event models.Event[string],
+		evt event.Event[string],
 	) {
-		received <- event
+		received <- evt
 	}
 }
 
@@ -153,7 +157,7 @@ func forwardsContextValue(
 ) eventHandler {
 	return func(
 		ctx context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		forwardCtxValue(
 			ctx,
@@ -167,7 +171,7 @@ func blocksUntilReleased(
 ) eventHandler {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		<-release
 	}
@@ -179,7 +183,7 @@ func announcesStartThenBlocks(
 ) eventHandler {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		close(started)
 		<-release
@@ -192,7 +196,7 @@ func blocksThenMarks(
 ) eventHandler {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		<-release
 		finished.Store(true)
@@ -206,7 +210,7 @@ func announcesStartBlocksThenMarks(
 ) eventHandler {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		close(started)
 		<-release
@@ -216,10 +220,10 @@ func announcesStartBlocksThenMarks(
 
 func forwardsPanicValue(
 	got chan<- any,
-) models.PanicHandler[string] {
+) handler.Panic[string] {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 		value any,
 	) {
 		got <- value
@@ -228,10 +232,10 @@ func forwardsPanicValue(
 
 func marksPanicSeen(
 	seen *atomic.Bool,
-) models.PanicHandler[string] {
+) handler.Panic[string] {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 		_ any,
 	) {
 		seen.Store(true)
@@ -241,10 +245,10 @@ func marksPanicSeen(
 func signalsThenPanicsWhenObservingPanic(
 	called chan<- struct{},
 	value any,
-) models.PanicHandler[string] {
+) handler.Panic[string] {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 		_ any,
 	) {
 		called <- struct{}{}
@@ -254,10 +258,10 @@ func signalsThenPanicsWhenObservingPanic(
 
 func signalsTimeout(
 	fired chan<- struct{},
-) models.TimeoutHandler[string] {
+) handler.Timeout[string] {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 		_ time.Duration,
 	) {
 		fired <- struct{}{}
@@ -267,10 +271,10 @@ func signalsTimeout(
 func closesOnFirstTimeout(
 	timeouts *atomic.Int32,
 	timedOut chan struct{},
-) models.TimeoutHandler[string] {
+) handler.Timeout[string] {
 	return func(
 		context.Context,
-		models.Event[string],
+		event.Event[string],
 		time.Duration,
 	) {
 		closeOnFirst(
@@ -283,10 +287,10 @@ func closesOnFirstTimeout(
 func countsAndReportsTimeout(
 	timeouts *atomic.Int32,
 	reported chan<- struct{},
-) models.TimeoutHandler[string] {
+) handler.Timeout[string] {
 	return func(
 		context.Context,
-		models.Event[string],
+		event.Event[string],
 		time.Duration,
 	) {
 		timeouts.Add(1)
@@ -295,7 +299,7 @@ func countsAndReportsTimeout(
 }
 
 type busClient struct {
-	bus   models.Bus[string]
+	bus   pubsub.Bus[string]
 	ready <-chan struct{}
 }
 
@@ -330,11 +334,11 @@ func (c busClient) publishOrderCreatedOnceReady() {
 
 func ignoresEvents(
 	_ context.Context,
-	_ models.Event[string],
+	_ event.Event[string],
 ) {
 }
 
-var _ models.Bus[string] = (*channel.Bus[string])(nil)
+var _ pubsub.Bus[string] = (*channel.Bus[string])(nil)
 
 func TestSubscribeEmptyPattern(
 	t *testing.T,
@@ -349,11 +353,11 @@ func TestSubscribeEmptyPattern(
 		"",
 		func(
 			_ context.Context,
-			_ models.Event[string],
+			_ event.Event[string],
 		) {
 		},
 	)
-	if err != models.ErrEmptyPattern {
+	if err != failure.ErrEmptyPattern {
 		t.Errorf(
 			"expected ErrEmptyPattern, got %v",
 			err,
@@ -374,7 +378,7 @@ func TestSubscribeNilHandler(
 		"test",
 		nil,
 	)
-	if err != models.ErrNilHandler {
+	if err != failure.ErrNilHandler {
 		t.Errorf(
 			"expected ErrNilHandler, got %v",
 			err,
@@ -393,7 +397,7 @@ func TestSubscribeReturnsUniqueIDs(
 
 	handler := func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 	}
 
@@ -445,11 +449,11 @@ func TestSubscribeOnClosedBus(
 		"test",
 		func(
 			_ context.Context,
-			_ models.Event[string],
+			_ event.Event[string],
 		) {
 		},
 	)
-	if err != models.ErrBusClosed {
+	if err != failure.ErrBusClosed {
 		t.Errorf(
 			"expected ErrBusClosed, got %v",
 			err,
@@ -471,7 +475,7 @@ func TestSubscribeWithFallback(
 	_, err := b.Subscribe(
 		"test",
 		subscribeFn,
-		models.WithFallback[string](withFallbackFn),
+		subscription.WithFallback[string](withFallbackFn),
 	)
 	if err != nil {
 		t.Fatalf(
@@ -511,7 +515,7 @@ func TestSubscribeWithHandlerTimeout(
 	_, err := b.Subscribe(
 		"test",
 		subscribeFn,
-		models.WithHandlerTimeout[string](30*time.Millisecond),
+		subscription.WithHandlerTimeout[string](30*time.Millisecond),
 	)
 	if err != nil {
 		t.Fatalf(
@@ -580,7 +584,7 @@ func TestUnsubscribeIdempotent(
 		"test",
 		func(
 			_ context.Context,
-			_ models.Event[string],
+			_ event.Event[string],
 		) {
 		},
 	)
@@ -617,7 +621,7 @@ func TestPublishOnClosedBus(
 		context.Background(),
 		ev("test"),
 	)
-	if err != models.ErrBusClosed {
+	if err != failure.ErrBusClosed {
 		t.Errorf(
 			"expected ErrBusClosed, got %v",
 			err,
@@ -638,7 +642,7 @@ func TestPublishNoMatchReturnsNil(
 		"other",
 		func(
 			_ context.Context,
-			_ models.Event[string],
+			_ event.Event[string],
 		) {
 		},
 	)
@@ -785,7 +789,7 @@ func TestPublishEventDataPropagated(
 	b := newBus[string]()
 
 	received := make(
-		chan models.Event[string],
+		chan event.Event[string],
 		1,
 	)
 	subscribeFn := sendsEvent(received)
@@ -794,7 +798,7 @@ func TestPublishEventDataPropagated(
 		subscribeFn,
 	)
 
-	want := models.Event[string]{EventName: "test", AggregateID: "agg-42"}
+	want := event.Event[string]{EventName: "test", AggregateID: "agg-42"}
 	b.Publish(
 		context.Background(),
 		want,
@@ -832,7 +836,7 @@ func TestPublish_CancelledContext(
 		"test",
 		func(
 			_ context.Context,
-			_ models.Event[string],
+			_ event.Event[string],
 		) {
 		},
 	)
@@ -865,7 +869,7 @@ func TestPublish_DeadlineExceeded(
 		"test",
 		func(
 			_ context.Context,
-			_ models.Event[string],
+			_ event.Event[string],
 		) {
 		},
 	)
@@ -946,7 +950,7 @@ func TestPublish_CtxPropagatedToFallback(
 	b.Subscribe(
 		"test",
 		subscribeFn,
-		models.WithFallback[string](withFallbackFn),
+		subscription.WithFallback[string](withFallbackFn),
 	)
 
 	ctx := context.WithValue(
@@ -1039,7 +1043,7 @@ func TestChannelBus_WithTimeoutHandler(
 	b.Subscribe(
 		"test",
 		subscribeFn,
-		models.WithHandlerTimeout[string](20*time.Millisecond),
+		subscription.WithHandlerTimeout[string](20*time.Millisecond),
 	)
 	b.Publish(
 		context.Background(),
@@ -1106,7 +1110,7 @@ func TestFallbackCalledOnPanic(
 	b.Subscribe(
 		"test",
 		subscribeFn,
-		models.WithFallback[string](withFallbackFn),
+		subscription.WithFallback[string](withFallbackFn),
 	)
 
 	b.Publish(
@@ -1131,7 +1135,7 @@ func TestFallbackReceivesOriginalEvent(
 	b := newBus[string]()
 
 	received := make(
-		chan models.Event[string],
+		chan event.Event[string],
 		1,
 	)
 	subscribeFn := panicsWith("oops")
@@ -1139,10 +1143,10 @@ func TestFallbackReceivesOriginalEvent(
 	b.Subscribe(
 		"test",
 		subscribeFn,
-		models.WithFallback[string](withFallbackFn),
+		subscription.WithFallback[string](withFallbackFn),
 	)
 
-	want := models.Event[string]{EventName: "test", AggregateID: "agg-1"}
+	want := event.Event[string]{EventName: "test", AggregateID: "agg-1"}
 	b.Publish(
 		context.Background(),
 		want,
@@ -1388,7 +1392,7 @@ func TestCloseBlocksNewPublish(
 	if err := b.Publish(
 		context.Background(),
 		ev("test"),
-	); err != models.ErrBusClosed {
+	); err != failure.ErrBusClosed {
 		t.Errorf(
 			"expected ErrBusClosed after Close, got %v",
 			err,
@@ -1406,10 +1410,10 @@ func TestCloseBlocksNewSubscribe(
 		"test",
 		func(
 			_ context.Context,
-			_ models.Event[string],
+			_ event.Event[string],
 		) {
 		},
-	); err != models.ErrBusClosed {
+	); err != failure.ErrBusClosed {
 		t.Errorf(
 			"expected ErrBusClosed after Close, got %v",
 			err,
@@ -1495,7 +1499,7 @@ func TestConcurrentUnsubscribeAndPublish(
 			"test",
 			func(
 				_ context.Context,
-				_ models.Event[string],
+				_ event.Event[string],
 			) {
 			},
 		)
@@ -1697,7 +1701,7 @@ func TestPublishSync_OnClosedBus(
 		context.Background(),
 		ev("test"),
 	)
-	if err != models.ErrBusClosed {
+	if err != failure.ErrBusClosed {
 		t.Errorf(
 			"expected ErrBusClosed, got %v",
 			err,
@@ -1718,7 +1722,7 @@ func TestPublishSync_CancelledContext(
 		"test",
 		func(
 			_ context.Context,
-			_ models.Event[string],
+			_ event.Event[string],
 		) {
 		},
 	)
@@ -1751,7 +1755,7 @@ func TestPublishSync_DeadlineExceeded(
 		"test",
 		func(
 			_ context.Context,
-			_ models.Event[string],
+			_ event.Event[string],
 		) {
 		},
 	)
@@ -1812,7 +1816,7 @@ func TestPublishSync_EventDataPropagated(
 	)
 
 	received := make(
-		chan models.Event[string],
+		chan event.Event[string],
 		1,
 	)
 	subscribeFn := sendsEvent(received)
@@ -1821,7 +1825,7 @@ func TestPublishSync_EventDataPropagated(
 		subscribeFn,
 	)
 
-	want := models.Event[string]{EventName: "test", AggregateID: "agg-sync-42"}
+	want := event.Event[string]{EventName: "test", AggregateID: "agg-sync-42"}
 	b.PublishSync(
 		context.Background(),
 		want,
@@ -1893,7 +1897,7 @@ func TestGetCompiledPattern_ConcurrentSamePattern(
 		pattern,
 		func(
 			_ context.Context,
-			_ models.Event[string],
+			_ event.Event[string],
 		) {
 		},
 	)
@@ -1976,7 +1980,7 @@ func TestPublishSync_WaitsForATimedOutHandler(
 	b.Subscribe(
 		"slow",
 		subscribeFn,
-		models.WithHandlerTimeout[string](20*time.Millisecond),
+		subscription.WithHandlerTimeout[string](20*time.Millisecond),
 	)
 
 	if err := b.PublishSync(
@@ -2016,7 +2020,7 @@ func TestPublish_StillAbandonsATimedOutHandler(
 	b.Subscribe(
 		"slow",
 		subscribeFn,
-		models.WithHandlerTimeout[string](20*time.Millisecond),
+		subscription.WithHandlerTimeout[string](20*time.Millisecond),
 	)
 
 	if err := b.Publish(
@@ -2078,13 +2082,13 @@ func TestChannelBus_APanicHandlerThatPanicsDoesNotCrashTheProcess(
 
 var noop = func(
 	_ context.Context,
-	_ models.Event[string],
+	_ event.Event[string],
 ) {
 }
 
 func newBenchBus(
 	b *testing.B,
-) models.Bus[string] {
+) pubsub.Bus[string] {
 	cb := bus.New[string]()
 	cleanupFn := func() { cb.Close(context.Background()) }
 	b.Cleanup(cleanupFn)
@@ -2093,7 +2097,7 @@ func newBenchBus(
 }
 
 func subscribeFormatted(
-	cb models.Bus[string],
+	cb pubsub.Bus[string],
 	count int,
 	format string,
 ) {
@@ -2109,7 +2113,7 @@ func subscribeFormatted(
 }
 
 func subscribeSame(
-	cb models.Bus[string],
+	cb pubsub.Bus[string],
 	count int,
 	pattern string,
 ) {
@@ -2123,10 +2127,10 @@ func subscribeSame(
 
 func publishLoop(
 	b *testing.B,
-	cb models.Bus[string],
+	cb pubsub.Bus[string],
 	eventName string,
 ) {
-	event := models.Event[string]{EventName: eventName}
+	evt := event.Event[string]{EventName: eventName}
 	ctx := context.Background()
 
 	b.ResetTimer()
@@ -2135,7 +2139,7 @@ func publishLoop(
 	for range b.N {
 		cb.Publish(
 			ctx,
-			event,
+			evt,
 		)
 	}
 
@@ -2254,13 +2258,13 @@ func BenchmarkPublish_Fanout(
 
 func publishWhileNext(
 	pb *testing.PB,
-	cb models.Bus[string],
-	event models.Event[string],
+	cb pubsub.Bus[string],
+	evt event.Event[string],
 ) {
 	for pb.Next() {
 		cb.Publish(
 			context.Background(),
-			event,
+			evt,
 		)
 	}
 }
@@ -2274,7 +2278,7 @@ func BenchmarkPublish_Parallel(
 		noop,
 	)
 
-	event := models.Event[string]{EventName: "OrderPlaced"}
+	evt := event.Event[string]{EventName: "OrderPlaced"}
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -2284,7 +2288,7 @@ func BenchmarkPublish_Parallel(
 		publishWhileNext(
 			pb,
 			cb,
-			event,
+			evt,
 		)
 	}
 	b.RunParallel(runParallelFn)
@@ -2426,10 +2430,10 @@ func BenchmarkPublish_Timeout(
 	cb.Subscribe(
 		"OrderPlaced",
 		noop,
-		models.WithHandlerTimeout[string](time.Second),
+		subscription.WithHandlerTimeout[string](time.Second),
 	)
 
-	event := models.Event[string]{EventName: "OrderPlaced"}
+	evt := event.Event[string]{EventName: "OrderPlaced"}
 	ctx := context.Background()
 
 	b.ResetTimer()
@@ -2438,7 +2442,7 @@ func BenchmarkPublish_Timeout(
 	for range b.N {
 		cb.Publish(
 			ctx,
-			event,
+			evt,
 		)
 	}
 

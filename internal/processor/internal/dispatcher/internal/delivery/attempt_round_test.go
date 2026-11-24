@@ -5,13 +5,14 @@ import (
 	"errors"
 	"testing"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/dispatcher"
+	"github.com/char2cs/asynx/models/subscription"
 )
 
 func TestAttemptRound_KeepsOnlyTheFailedSubscribersAndJoinsTheirErrors(
 	t *testing.T,
 ) {
-	f := newFixture(asynxmd.DispatcherConfig[int]{})
+	f := newFixture(dispatcher.Config[int]{})
 	job, _ := f.begin(
 		t,
 		acked("test.event"),
@@ -25,7 +26,7 @@ func TestAttemptRound_KeepsOnlyTheFailedSubscribersAndJoinsTheirErrors(
 
 	round.run(
 		context.Background(),
-		[]asynxmd.DurableSub[int]{
+		[]subscription.Durable[int]{
 			failing(nil),
 			failing(down),
 		},
@@ -56,7 +57,7 @@ func TestAttemptRound_KeepsOnlyTheFailedSubscribersAndJoinsTheirErrors(
 func TestAttemptRound_CauseIsNilWhenEverySubscriberSucceeds(
 	t *testing.T,
 ) {
-	f := newFixture(asynxmd.DispatcherConfig[int]{})
+	f := newFixture(dispatcher.Config[int]{})
 	job, _ := f.begin(
 		t,
 		acked("test.event"),
@@ -69,7 +70,7 @@ func TestAttemptRound_CauseIsNilWhenEverySubscriberSucceeds(
 
 	round.run(
 		context.Background(),
-		[]asynxmd.DurableSub[int]{failing(nil)},
+		[]subscription.Durable[int]{failing(nil)},
 	)
 
 	if len(round.failed) != 0 ||

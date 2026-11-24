@@ -1,7 +1,7 @@
 package mocks
 
 import (
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/failure"
 )
 
 // CancelOrderCmd is the test command that cancels the Order with the given ID.
@@ -32,7 +32,7 @@ func (c CancelOrderCmd) Validate(
 ) error {
 	if current == nil ||
 		current.Status == "Cancelled" {
-		return models.ErrValidation
+		return failure.ErrValidation
 	}
 
 	return nil

@@ -2,16 +2,17 @@ package write
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 // Delivery returns an Op that enqueues d in the delivery log.
 func Delivery(
-	d models.Delivery,
+	d event.Delivery,
 ) Op {
 	return func(
 		ctx context.Context,
-		tx models.Tx,
+		tx storage.Tx,
 	) error {
 		return tx.EnqueueDelivery(
 			ctx,
@@ -32,7 +33,7 @@ func Deliveries(
 		count,
 	)
 	for i := range count {
-		ops[i] = Delivery(models.Delivery{AggregateID: aggregateID, Version: int64(i + 1)})
+		ops[i] = Delivery(event.Delivery{AggregateID: aggregateID, Version: int64(i + 1)})
 	}
 
 	return ops
@@ -45,7 +46,7 @@ func EraseDeliveries(
 ) Op {
 	return func(
 		ctx context.Context,
-		tx models.Tx,
+		tx storage.Tx,
 	) error {
 		return tx.DropDeliveries(
 			ctx,

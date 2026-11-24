@@ -4,24 +4,26 @@ import (
 	"context"
 
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/command"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 type pendingAppend[T any] struct {
 	store         *EventStore[T]
-	cmd           asynxmd.Command[T]
+	cmd           command.Command[T]
 	hook          esmodels.TxHook[T]
 	loadedVersion int64
 	previousState T
 	newState      T
-	evt           asynxmd.Event[T]
+	evt           event.Event[T]
 }
 
 func (p *pendingAppend[T]) inTransaction(
 	ctx context.Context,
-) func(asynxmd.Tx) error {
+) func(storage.Tx) error {
 	return func(
-		tx asynxmd.Tx,
+		tx storage.Tx,
 	) error {
 		return p.appendIn(
 			ctx,
@@ -32,7 +34,7 @@ func (p *pendingAppend[T]) inTransaction(
 
 func (p *pendingAppend[T]) appendIn(
 	ctx context.Context,
-	tx asynxmd.Tx,
+	tx storage.Tx,
 ) error {
 	evt, err := p.store.appendWithHook(
 		ctx,

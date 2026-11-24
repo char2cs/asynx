@@ -4,19 +4,19 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/storage"
 	"github.com/char2cs/asynx/store/storetest/internal/race"
 	"github.com/char2cs/asynx/store/storetest/internal/write"
 	"slices"
 	"testing"
 )
 
-// RunSnapshots executes the conformance suite for models.SnapshotStore
+// RunSnapshots executes the conformance suite for storage.SnapshotStore
 // implementations built by newStore. Each scenario runs as a subtest against
 // its own empty store.
 //
 // The scenarios check that a snapshot store behaves as the single mutable cell
-// per aggregate that models.SnapshotStore describes. GetOfUnknownAggregateIsNotFoundNotAnError
+// per aggregate that storage.SnapshotStore describes. GetOfUnknownAggregateIsNotFoundNotAnError
 // checks that a missing snapshot is reported as not found, which callers
 // answer by replaying from version 1, and not as an error.
 // PutThenGetReturnsTheBytes checks that arbitrary bytes round-trip unchanged.
@@ -44,7 +44,7 @@ func RunSnapshots(
 
 func snapshotUnknown(
 	t testing.TB,
-	s models.SnapshotStore,
+	s storage.SnapshotStore,
 ) {
 	data, found, err := s.Get(
 		context.Background(),
@@ -64,7 +64,7 @@ func snapshotUnknown(
 
 func mustPut(
 	t testing.TB,
-	s models.SnapshotStore,
+	s storage.SnapshotStore,
 	aggregateID string,
 	version int64,
 	data string,
@@ -88,7 +88,7 @@ func mustPut(
 
 func mustDelete(
 	t testing.TB,
-	s models.SnapshotStore,
+	s storage.SnapshotStore,
 	aggregateID string,
 ) {
 	t.Helper()
@@ -107,7 +107,7 @@ func mustDelete(
 
 func mustGet(
 	t testing.TB,
-	s models.SnapshotStore,
+	s storage.SnapshotStore,
 	aggregateID string,
 ) (data []byte, found bool) {
 	t.Helper()
@@ -134,7 +134,7 @@ const (
 
 func snapshotRoundTrip(
 	t testing.TB,
-	s models.SnapshotStore,
+	s storage.SnapshotStore,
 ) {
 	ctx := context.Background()
 	want := []byte{0, 1, 2, 255, '{', '}'}
@@ -173,7 +173,7 @@ func snapshotRoundTrip(
 
 func snapshotReplaced(
 	t testing.TB,
-	s models.SnapshotStore,
+	s storage.SnapshotStore,
 ) {
 	for v, data := range []string{"one", "two", "three"} {
 		mustPut(
@@ -203,7 +203,7 @@ func snapshotReplaced(
 
 func snapshotsIndependent(
 	t testing.TB,
-	s models.SnapshotStore,
+	s storage.SnapshotStore,
 ) {
 	mustPut(
 		t,
@@ -242,7 +242,7 @@ func snapshotsIndependent(
 
 func snapshotDeleted(
 	t testing.TB,
-	s models.SnapshotStore,
+	s storage.SnapshotStore,
 ) {
 	mustPut(
 		t,
@@ -280,7 +280,7 @@ func snapshotDeleted(
 
 func snapshotPutAfterDelete(
 	t testing.TB,
-	s models.SnapshotStore,
+	s storage.SnapshotStore,
 ) {
 	mustPut(
 		t,
@@ -325,7 +325,7 @@ func writerPayload(
 
 func snapshotConcurrentPuts(
 	t testing.TB,
-	s models.SnapshotStore,
+	s storage.SnapshotStore,
 ) {
 	const writers = 16
 	results := race.All(
@@ -353,7 +353,7 @@ func snapshotConcurrentPuts(
 
 func wantOneWritersBytes(
 	t testing.TB,
-	s models.SnapshotStore,
+	s storage.SnapshotStore,
 	writers int,
 ) {
 	t.Helper()
@@ -404,7 +404,7 @@ func bytesEqualTo(
 
 func snapshotCancelled(
 	t testing.TB,
-	s models.SnapshotStore,
+	s storage.SnapshotStore,
 ) {
 	mustPut(
 		t,
@@ -441,7 +441,7 @@ func snapshotCancelled(
 
 func cancelledSnapshotOutcomes(
 	done context.Context,
-	s models.SnapshotStore,
+	s storage.SnapshotStore,
 ) map[string]error {
 	const newerVersion = 2
 	outcomes := map[string]error{
@@ -464,8 +464,8 @@ func cancelledSnapshotOutcomes(
 	return outcomes
 }
 
-func snapshotScenarios() map[string]scenario[models.SnapshotStore] {
-	return map[string]scenario[models.SnapshotStore]{
+func snapshotScenarios() map[string]scenario[storage.SnapshotStore] {
+	return map[string]scenario[storage.SnapshotStore]{
 		"GetOfUnknownAggregateIsNotFoundNotAnError": snapshotUnknown,
 		"PutThenGetReturnsTheBytes":                 snapshotRoundTrip,
 		"PutReplacesTheSnapshot":                    snapshotReplaced,

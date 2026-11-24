@@ -2,7 +2,8 @@ package mockstores
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/storage"
 )
 
 // CorruptBlobStore is a Store implementation that returns a single
@@ -10,12 +11,12 @@ import (
 // Used to trigger deserialize/unmarshal error paths in tests.
 type CorruptBlobStore struct{}
 
-func (c *CorruptBlobStore) tx() models.Tx { return stubTx{appendFn: c.Append, deleteFn: c.Delete} }
+func (c *CorruptBlobStore) tx() storage.Tx { return stubTx{appendFn: c.Append, deleteFn: c.Delete} }
 
 // Atomically runs fn against a transaction that discards every write.
 func (c *CorruptBlobStore) Atomically(
 	_ context.Context,
-	fn func(models.Tx) error,
+	fn func(storage.Tx) error,
 ) error {
 	return fn(c.tx())
 }
@@ -24,8 +25,8 @@ func (c *CorruptBlobStore) Atomically(
 func (c *CorruptBlobStore) GetReceipt(
 	context.Context,
 	string,
-) (models.Receipt, bool, error) {
-	return models.Receipt{},
+) (event.Receipt, bool, error) {
+	return event.Receipt{},
 		false,
 		nil
 }
@@ -34,7 +35,7 @@ func (c *CorruptBlobStore) GetReceipt(
 func (c *CorruptBlobStore) PendingDeliveries(
 	context.Context,
 	int,
-) ([]models.Delivery, error) {
+) ([]event.Delivery, error) {
 	return nil,
 		nil
 }

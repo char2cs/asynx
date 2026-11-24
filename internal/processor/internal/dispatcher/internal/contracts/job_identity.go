@@ -1,6 +1,8 @@
 package contracts
 
-import asynxmd "github.com/char2cs/asynx/models"
+import (
+	"github.com/char2cs/asynx/models/event"
+)
 
 // JobIdentity names a job and carries the event it delivers.
 type JobIdentity[T any] interface {
@@ -11,5 +13,5 @@ type JobIdentity[T any] interface {
 	Version() int64
 
 	// Event returns the event being delivered.
-	Event() asynxmd.Event[T]
+	Event() event.Event[T]
 }

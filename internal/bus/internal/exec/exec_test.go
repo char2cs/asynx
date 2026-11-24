@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/char2cs/asynx/internal/bus/internal/exec"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
 )
 
 func captureStderr(
@@ -84,13 +84,13 @@ func assertPanicValue(
 
 func ev(
 	name string,
-) models.Event[string] {
-	return models.Event[string]{EventName: name}
+) event.Event[string] {
+	return event.Event[string]{EventName: name}
 }
 
 func newJob(
 	handler,
-	fallback func(context.Context, models.Event[string]),
+	fallback func(context.Context, event.Event[string]),
 	timeout time.Duration,
 ) *exec.HandlerJob[string] {
 	return &exec.HandlerJob[string]{
@@ -103,18 +103,18 @@ func newJob(
 
 type eventHandler = func(
 	context.Context,
-	models.Event[string],
+	event.Event[string],
 )
 
 type panicObserver = func(
 	context.Context,
-	models.Event[string],
+	event.Event[string],
 	any,
 )
 
 type timeoutObserver = func(
 	context.Context,
-	models.Event[string],
+	event.Event[string],
 	time.Duration,
 )
 
@@ -123,7 +123,7 @@ func panicsWith(
 ) eventHandler {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		panic(value)
 	}
@@ -134,7 +134,7 @@ func signals(
 ) eventHandler {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		done <- struct{}{}
 	}
@@ -145,7 +145,7 @@ func sleepsFor(
 ) eventHandler {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		time.Sleep(d)
 	}
@@ -156,7 +156,7 @@ func blocksUntilReleased(
 ) eventHandler {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		<-release
 	}
@@ -168,7 +168,7 @@ func announcesStartThenBlocks(
 ) eventHandler {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		close(started)
 		<-release
@@ -181,7 +181,7 @@ func blocksUntilReleasedThenPanics(
 ) eventHandler {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		<-release
 		panic(value)
@@ -194,7 +194,7 @@ func countsCallsThenPanics(
 ) eventHandler {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		calls.Add(1)
 		panic(value)
@@ -206,7 +206,7 @@ func sendsContext(
 ) eventHandler {
 	return func(
 		got context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		received <- got
 	}
@@ -218,7 +218,7 @@ func sendsContextThenPanics(
 ) eventHandler {
 	return func(
 		got context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 		received <- got
 		panic(value)
@@ -230,7 +230,7 @@ func sendsContextOnPanic(
 ) panicObserver {
 	return func(
 		got context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 		_ any,
 	) {
 		received <- got
@@ -242,7 +242,7 @@ func forwardsPanicValue(
 ) panicObserver {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 		value any,
 	) {
 		got <- value
@@ -254,7 +254,7 @@ func countsPanics(
 ) panicObserver {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 		_ any,
 	) {
 		panics.Add(1)
@@ -266,7 +266,7 @@ func panicsWhenObservingPanic(
 ) panicObserver {
 	return func(
 		context.Context,
-		models.Event[string],
+		event.Event[string],
 		any,
 	) {
 		panic(value)
@@ -278,7 +278,7 @@ func signalsTimeout(
 ) timeoutObserver {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 		_ time.Duration,
 	) {
 		fired <- struct{}{}
@@ -290,7 +290,7 @@ func countsTimeouts(
 ) timeoutObserver {
 	return func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 		_ time.Duration,
 	) {
 		timeouts.Add(1)
@@ -302,7 +302,7 @@ func sendsContextOnTimeout(
 ) timeoutObserver {
 	return func(
 		got context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 		_ time.Duration,
 	) {
 		observed <- got
@@ -315,7 +315,7 @@ func releasesThenPanicsWhenObservingTimeout(
 ) timeoutObserver {
 	return func(
 		context.Context,
-		models.Event[string],
+		event.Event[string],
 		time.Duration,
 	) {
 		close(release)
@@ -364,12 +364,12 @@ func reportingPanic(
 }
 
 func reportingTimeout(
-	event models.Event[string],
+	evt event.Event[string],
 	timeout time.Duration,
 ) func() {
 	return func() {
 		exec.OnHandlerTimeout[string](
-			event,
+			evt,
 			timeout,
 		)
 	}
@@ -1050,10 +1050,10 @@ func noopJob() *exec.HandlerJob[string] {
 	return &exec.HandlerJob[string]{
 		Handler: func(
 			_ context.Context,
-			_ models.Event[string],
+			_ event.Event[string],
 		) {
 		},
-		Event: models.Event[string]{EventName: "test"},
+		Event: event.Event[string]{EventName: "test"},
 	}
 }
 
@@ -1100,7 +1100,7 @@ func BenchmarkHandler_PanicRecovery(
 	job := &exec.HandlerJob[string]{
 		Handler: panicsWith("bench"),
 
-		Event: models.Event[string]{EventName: "test"},
+		Event: event.Event[string]{EventName: "test"},
 	}
 
 	devNull, err := os.OpenFile(
@@ -1144,16 +1144,16 @@ func BenchmarkWithTimeout_ZeroTimeout(
 ) {
 	handler := func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 	}
-	event := models.Event[string]{EventName: "test"}
+	evt := event.Event[string]{EventName: "test"}
 	b.ReportAllocs()
 	for range b.N {
 		exec.WithTimeout(
 			context.Background(),
 			handler,
-			event,
+			evt,
 			0,
 			nil,
 			nil,
@@ -1166,17 +1166,17 @@ func BenchmarkWithTimeout_WithTimer(
 ) {
 	handler := func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 	}
-	event := models.Event[string]{EventName: "test"}
+	evt := event.Event[string]{EventName: "test"}
 	timeout := 5 * time.Second
 	b.ReportAllocs()
 	for range b.N {
 		exec.WithTimeout(
 			context.Background(),
 			handler,
-			event,
+			evt,
 			timeout,
 			nil,
 			nil,
@@ -1206,16 +1206,16 @@ func newFallbackProbe() *fallbackProbe {
 
 func (p *fallbackProbe) fallback(
 	ctx context.Context,
-	event models.Event[string],
+	evt event.Event[string],
 ) {
 	p.calls.Add(1)
-	p.events <- event.EventName
+	p.events <- evt.EventName
 	p.values <- ctx.Value(ctxKey{})
 }
 
 func (p *fallbackProbe) onPanic(
 	_ context.Context,
-	_ models.Event[string],
+	_ event.Event[string],
 	_ any,
 ) {
 	p.panics.Add(1)
@@ -1569,7 +1569,7 @@ func TestHandler_NoFallbackWhenThePrimarySucceeds(
 	probe := newFallbackProbe()
 	handle := func(
 		_ context.Context,
-		_ models.Event[string],
+		_ event.Event[string],
 	) {
 	}
 	for _, timeout := range []time.Duration{

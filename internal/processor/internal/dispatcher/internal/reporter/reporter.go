@@ -3,7 +3,7 @@ package reporter
 import (
 	"context"
 
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/handler"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
 )
@@ -47,9 +47,9 @@ type Reporter[T any] interface {
 
 // New creates a Reporter that calls the given handlers; any of them may be nil.
 func New[T any](
-	onPublishError asynxmd.PublishErrorHandler[T],
-	onDeliveryError asynxmd.DeliveryErrorHandler[T],
-	onPanic asynxmd.PanicHandler[T],
+	onPublishError handler.PublishError[T],
+	onDeliveryError handler.DeliveryError[T],
+	onPanic handler.Panic[T],
 ) Reporter[T] {
 	return &handlerReporter[T]{
 		onPublishError:  onPublishError,

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/internal/processor/models"
-	asynxmd "github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/failure"
+	"github.com/char2cs/asynx/models/storage"
 	"testing"
 )
 
@@ -36,11 +38,11 @@ func TestExecute_SyncProjectionErrorRollsBackAndDispatchesNothing(
 
 	if !errors.Is(
 		err,
-		asynxmd.ErrPipelineFailed,
+		failure.ErrPipelineFailed,
 	) ||
 		!errors.Is(
 			err,
-			asynxmd.ErrSyncProjection,
+			failure.ErrSyncProjection,
 		) ||
 		!errors.Is(
 			err,
@@ -77,8 +79,8 @@ type failingProjection struct {
 
 func (p *failingProjection) project(
 	context.Context,
-	asynxmd.Tx,
-	asynxmd.Event[order],
+	storage.Tx,
+	event.Event[order],
 ) error {
 	return p.err
 }
@@ -89,8 +91,8 @@ type seenProjection struct {
 
 func (p *seenProjection) record(
 	_ context.Context,
-	tx asynxmd.Tx,
-	e asynxmd.Event[order],
+	tx storage.Tx,
+	e event.Event[order],
 ) error {
 	if tx == nil {
 		return errors.New("nil tx")

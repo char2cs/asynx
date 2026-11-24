@@ -1,7 +1,8 @@
 package asynx
 
 import (
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/subscription"
 )
 
 // SubscriptionManager registers and removes the live handlers of an instance:
@@ -24,13 +25,13 @@ type SubscriptionManager[T any] interface {
 	// returns they may not have run; SendWait waits for them. A handler that
 	// panics is reported to the panic handler (see Builder.WithPanicHandler).
 	//
-	// It returns models.ErrEmptyPattern for an empty pattern,
-	// models.ErrNilHandler for a nil handler and models.ErrBusClosed once the
+	// It returns failure.ErrEmptyPattern for an empty pattern,
+	// failure.ErrNilHandler for a nil handler and failure.ErrBusClosed once the
 	// instance is shut down.
 	Subscribe(
 		pattern string,
-		handler models.ProjectionHandler[T],
-		opts ...models.SubscriptionOpt[T],
+		handler handler.Projection[T],
+		opts ...subscription.Opt[T],
 	) (string, error)
 
 	// Unsubscribe removes the subscription with the given ID, as returned by
@@ -48,6 +49,6 @@ type SubscriptionManager[T any] interface {
 	// Unsubscribe, or the error Subscribe would return. Handlers registered
 	// before Build with Builder.WithForgetHandler are equivalent.
 	OnForget(
-		fn models.ForgetHandler[T],
+		fn handler.Forget[T],
 	) (string, error)
 }

@@ -2,7 +2,9 @@ package mockbuses
 
 import (
 	"context"
-	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/models/event"
+	"github.com/char2cs/asynx/models/handler"
+	"github.com/char2cs/asynx/models/subscription"
 )
 
 // ErrBus is a Bus implementation that returns Err for Publish and PublishSync.
@@ -14,7 +16,7 @@ type ErrBus[T any] struct{ Err error }
 // delivered to any subscriber.
 func (b *ErrBus[T]) Publish(
 	_ context.Context,
-	_ models.Event[T],
+	_ event.Event[T],
 ) error {
 	return b.Err
 }
@@ -24,7 +26,7 @@ func (b *ErrBus[T]) Publish(
 // delivered to any subscriber.
 func (b *ErrBus[T]) PublishSync(
 	_ context.Context,
-	_ models.Event[T],
+	_ event.Event[T],
 ) error {
 	return b.Err
 }
@@ -32,8 +34,8 @@ func (b *ErrBus[T]) PublishSync(
 // Subscribe registers nothing and returns an empty ID.
 func (b *ErrBus[T]) Subscribe(
 	_ string,
-	_ models.ProjectionHandler[T],
-	_ ...models.SubscriptionOpt[T],
+	_ handler.Projection[T],
+	_ ...subscription.Opt[T],
 ) (string, error) {
 	return "",
 		nil
