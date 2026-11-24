@@ -1,89 +1,34 @@
 package storetest
 
 import (
-	"context"
 	"errors"
 	"github.com/char2cs/asynx/models"
-	"slices"
+	"github.com/char2cs/asynx/store/storetest/internal/write"
 	"testing"
 )
-
-func deliveryA1() models.Delivery {
-	return models.Delivery{AggregateID: "a", Version: 1}
-}
-
-func deliveryA2() models.Delivery {
-	return models.Delivery{AggregateID: "a", Version: versionTwo}
-}
-
-func deliveryB1() models.Delivery {
-	return models.Delivery{AggregateID: "b", Version: 1}
-}
-
-func wantReceiptStored(
-	t testing.TB,
-	s models.Store,
-	want models.Receipt,
-) {
-	got, found, err := s.GetReceipt(
-		context.Background(),
-		"cmd-1",
-	)
-	if err != nil ||
-		!found ||
-		got != want {
-		t.Fatalf(
-			"GetReceipt = %+v, %v, %v; want %+v",
-			got,
-			found,
-			err,
-			want,
-		)
-	}
-}
 
 func receiptsDuplicates(
 	t testing.TB,
 	s models.Store,
 ) {
-	want := models.Receipt{Accepted: true, EventID: "e1", Version: versionThree}
-	commit(
+	f := newFixture(
 		t,
 		s,
-		opReceipt(
-			"cmd-1",
-			want,
-		),
 	)
-	wantReceiptStored(
-		t,
-		s,
+	want := models.Receipt{Accepted: true, EventID: "e1", Version: 1}
+	f.commit(write.Receipt(
+		"cmd-1",
+		want,
+	))
+	f.wantReceipt(
+		"cmd-1",
 		want,
 	)
-	wantDuplicateRejected(
-		t,
-		s,
-	)
-	if receiptOrFatal(
-		t,
-		s,
-		"missing",
-	) {
-		t.Error("GetReceipt(missing) reported found")
-	}
-}
 
-func wantDuplicateRejected(
-	t testing.TB,
-	s models.Store,
-) {
-	err := s.Atomically(
-		context.Background(),
-		runOps(opReceipt(
-			"cmd-1",
-			models.Receipt{Rejection: "nope"},
-		)),
-	)
+	err := f.try(write.Receipt(
+		"cmd-1",
+		models.Receipt{Rejection: "nope"},
+	))
 	if !errors.Is(
 		err,
 		models.ErrDuplicateReceipt,
@@ -93,275 +38,197 @@ func wantDuplicateRejected(
 			err,
 		)
 	}
-}
 
-func wantPendingPrefix(
-	t testing.TB,
-	pending []models.Delivery,
-	want []models.Delivery,
-) {
-	if !slices.Equal(
-		pending,
-		want,
-	) {
-		t.Fatalf(
-			"pending = %v, want %v",
-			pending,
-			want,
-		)
-	}
+	f.wantNoReceipt("missing")
 }
 
 func deliveriesOrderAndAck(
 	t testing.TB,
 	s models.Store,
 ) {
-	ctx := context.Background()
-	want := []models.Delivery{deliveryA1(), deliveryB1(), deliveryA2()}
-	commit(
-		t,
-		s,
-		opEnqueue(want[0]),
-		opEnqueue(want[1]),
-		opEnqueue(want[2]),
+	a1 := deliveryOf(
+		"a",
+		1,
 	)
-	wantPendingPrefix(
-		t,
-		pendingOrFatal(
-			t,
-			s,
-			listLimit,
-		),
-		want,
-	)
-	if err := s.AckDelivery(
-		ctx,
+	b1 := deliveryOf(
 		"b",
 		1,
-	); err != nil {
-		t.Fatalf(
-			"AckDelivery: %v",
-			err,
-		)
-	}
-
-	wantAfterAck(
+	)
+	a2 := successor(a1)
+	f := newFixture(
 		t,
 		s,
 	)
-}
-
-func wantAfterAck(
-	t testing.TB,
-	s models.Store,
-) {
-	pending := pendingOrFatal(
-		t,
-		s,
-		listLimit,
+	f.commit(
+		write.Delivery(a1),
+		write.Delivery(b1),
+		write.Delivery(a2),
 	)
-	if !slices.Equal(
-		pending,
-		[]models.Delivery{deliveryA1(), deliveryA2()},
-	) {
-		t.Fatalf(
-			"pending after ack = %v, want [{a 1} {a 2}]",
-			pending,
-		)
-	}
+	f.wantPending(
+		a1,
+		b1,
+		a2,
+	)
+
+	f.ack(
+		b1.AggregateID,
+		b1.Version,
+	)
+	f.wantPending(
+		a1,
+		a2,
+	)
 }
 
 func dropDeliveries(
 	t testing.TB,
 	s models.Store,
 ) {
-	commit(
+	a1 := deliveryOf(
+		"a",
+		1,
+	)
+	b1 := deliveryOf(
+		"b",
+		1,
+	)
+	f := newFixture(
 		t,
 		s,
-		opEnqueue(deliveryA1()),
-		opEnqueue(deliveryB1()),
-		opEnqueue(deliveryA2()),
-		opDrop("a"),
 	)
-	pending := pendingOrFatal(
-		t,
-		s,
-		listLimit,
+	f.commit(
+		write.Delivery(a1),
+		write.Delivery(b1),
+		write.Delivery(successor(a1)),
+		write.EraseDeliveries("a"),
 	)
-	if !slices.Equal(
-		pending,
-		[]models.Delivery{deliveryB1()},
-	) {
-		t.Fatalf(
-			"pending = %v, want [{b 1}]",
-			pending,
-		)
-	}
+
+	f.wantPending(b1)
 }
 
 func ackUnknown(
 	t testing.TB,
 	s models.Store,
 ) {
-	if err := s.AckDelivery(
-		context.Background(),
+	const unknownVersion = 7
+	newFixture(
+		t,
+		s,
+	).ack(
 		"ghost",
-		ghostVersion,
-	); err != nil {
-		t.Fatalf(
-			"AckDelivery(unknown) = %v, want nil",
-			err,
-		)
-	}
-}
-
-func wantPending(
-	t testing.TB,
-	s models.Store,
-	want ...models.Delivery,
-) {
-	t.Helper()
-	pending, err := s.PendingDeliveries(
-		context.Background(),
-		wideLimit,
+		unknownVersion,
 	)
-	if err != nil ||
-		!slices.Equal(
-			pending,
-			want,
-		) {
-		t.Fatalf(
-			"pending = %v (err %v), want %v",
-			pending,
-			err,
-			want,
-		)
-	}
 }
 
 func dropThenEnqueue(
 	t testing.TB,
 	s models.Store,
 ) {
-	commit(
-		t,
-		s,
-		opEnqueue(deliveryA1()),
-		opEnqueue(deliveryB1()),
-	)
-	commit(
-		t,
-		s,
-		opDrop("a"),
-		opEnqueue(deliveryA2()),
-	)
-	wantPending(
-		t,
-		s,
-		deliveryB1(),
-		deliveryA2(),
-	)
-}
-
-func ackA1(
-	t testing.TB,
-	s models.Store,
-) {
-	if err := s.AckDelivery(
-		context.Background(),
+	a1 := deliveryOf(
 		"a",
 		1,
-	); err != nil {
-		t.Fatal(err)
-	}
+	)
+	b1 := deliveryOf(
+		"b",
+		1,
+	)
+	f := newFixture(
+		t,
+		s,
+	)
+	f.commit(
+		write.Delivery(a1),
+		write.Delivery(b1),
+	)
+	f.commit(
+		write.EraseDeliveries("a"),
+		write.Delivery(successor(a1)),
+	)
+
+	f.wantPending(
+		b1,
+		successor(a1),
+	)
 }
 
 func reEnqueueAfterAckOrDrop(
 	t testing.TB,
 	s models.Store,
 ) {
-	commit(
+	a1 := deliveryOf(
+		"a",
+		1,
+	)
+	f := newFixture(
 		t,
 		s,
-		opEnqueue(deliveryA1()),
 	)
-	ackA1(
-		t,
-		s,
+	f.commit(write.Delivery(a1))
+	f.ack(
+		a1.AggregateID,
+		a1.Version,
 	)
-	commit(
-		t,
-		s,
-		opEnqueue(deliveryA1()),
-	)
-	wantPending(
-		t,
-		s,
-		deliveryA1(),
-	)
-	commit(
-		t,
-		s,
-		opDrop("a"),
-	)
-	commit(
-		t,
-		s,
-		opEnqueue(deliveryA1()),
-	)
-	wantPending(
-		t,
-		s,
-		deliveryA1(),
-	)
+	f.commit(write.Delivery(a1))
+	f.wantPending(a1)
+
+	f.commit(write.EraseDeliveries("a"))
+	f.commit(write.Delivery(a1))
+	f.wantPending(a1)
 }
 
 func ackAfterDrop(
 	t testing.TB,
 	s models.Store,
 ) {
-	commit(
-		t,
-		s,
-		opEnqueue(deliveryA1()),
-		opDrop("a"),
-	)
-	if err := s.AckDelivery(
-		context.Background(),
+	a1 := deliveryOf(
 		"a",
 		1,
-	); err != nil {
-		t.Fatalf(
-			"AckDelivery after drop = %v, want nil",
-			err,
-		)
-	}
+	)
+	f := newFixture(
+		t,
+		s,
+	)
+	f.commit(
+		write.Delivery(a1),
+		write.EraseDeliveries("a"),
+	)
+
+	f.ack(
+		a1.AggregateID,
+		a1.Version,
+	)
 }
 
 func pendingLimit(
 	t testing.TB,
 	s models.Store,
 ) {
-	commit(
+	const (
+		queued = 5
+		limit  = 2
+	)
+	f := newFixture(
 		t,
 		s,
-		opEnqueue(deliveryA1()),
-		opEnqueue(deliveryA2()),
-		opEnqueue(models.Delivery{AggregateID: "a", Version: versionThree}),
-		opEnqueue(models.Delivery{AggregateID: "a", Version: versionFour}),
-		opEnqueue(models.Delivery{AggregateID: "a", Version: versionFive}),
 	)
-	pending := pendingOrFatal(
-		t,
-		s,
-		smallLimit,
+	f.commit(write.Deliveries(
+		"a",
+		queued,
+	)...)
+
+	got := f.pending(limit)
+
+	a1 := deliveryOf(
+		"a",
+		1,
 	)
-	if len(pending) != smallLimit ||
-		pending[0].Version != 1 ||
-		pending[1].Version != versionTwo {
+	if len(got) != limit ||
+		got[0] != a1 ||
+		got[1] != successor(a1) {
 		t.Fatalf(
-			"PendingDeliveries(2) = %v, want versions 1,2",
-			pending,
+			"PendingDeliveries(%d) = %v, want the first two enqueued",
+			limit,
+			got,
 		)
 	}
 }

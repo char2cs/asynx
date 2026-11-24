@@ -3,6 +3,7 @@ package channel
 import (
 	"context"
 	"regexp"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -13,7 +14,20 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-// Bus is the in-process channel-based event bus.
+// Bus is the in-process event bus: it routes each published event to every
+// handler whose subscription pattern matches the event name and runs each
+// handler on its own goroutine.
+//
+// Subscriptions are held in an immutable index swapped in atomically, so
+// Publish never takes a lock on the subscription path; Subscribe and
+// Unsubscribe serialise among themselves and build a new index each time.
+// Patterns without regexp metacharacters match by equality, the rest are
+// compiled lazily on first use and cached for the life of the bus (a pattern
+// that does not compile never matches and is remembered as such).
+//
+// Close stops new work and drains in-flight handlers; after it a bus rejects
+// Subscribe, Publish and PublishSync with ErrBusClosed. A Bus is safe for
+// concurrent use by any number of goroutines and must be built with New.
 type Bus[T any] struct {
 	subMu         sync.Mutex
 	subscriptions map[string]*models.Subscription[T]
@@ -23,22 +37,23 @@ type Bus[T any] struct {
 	closed     bool
 	inFlightWg sync.WaitGroup
 
-	patternMu        sync.RWMutex
-	compiledPatterns map[string]*regexp.Regexp
-	patternErrors    map[string]error
+	patternMu sync.RWMutex
+	patterns  map[string]*regexp.Regexp
 
 	onPanic   asynxmd.PanicHandler[T]
 	onTimeout asynxmd.TimeoutHandler[T]
 }
 
-// New returns an initialized Bus ready for use.
+// New returns a Bus with no subscriptions, ready for use. opts adjust the
+// callbacks invoked when a handler panics or times out; an option that leaves
+// one unset selects the package-level default reporter for it. The returned bus
+// owns no goroutines until something is published.
 func New[T any](
 	opts ...models.Opt[T],
 ) *Bus[T] {
 	b := &Bus[T]{
-		subscriptions:    make(map[string]*models.Subscription[T]),
-		compiledPatterns: make(map[string]*regexp.Regexp),
-		patternErrors:    make(map[string]error),
+		subscriptions: make(map[string]*models.Subscription[T]),
+		patterns:      make(map[string]*regexp.Regexp),
 	}
 	b.idx.Store(&models.PublishIndex[T]{
 		ExactSubs: make(map[string][]*models.Subscription[T]),
@@ -54,7 +69,16 @@ func New[T any](
 }
 
 // Subscribe registers handler for every event whose name matches pattern and
-// returns the subscription id.
+// returns the id to pass to Unsubscribe. A pattern without regexp
+// metacharacters matches the event name exactly; any other pattern is a regular
+// expression matched anywhere in the name (anchor it to match the whole name).
+// opts may set a per-handler timeout and a fallback handler.
+//
+// It returns ErrEmptyPattern for an empty pattern, ErrNilHandler for a nil
+// handler and ErrBusClosed once the bus is closed. A pattern that is not a
+// valid regular expression is accepted but never matches. A handler added
+// while an event is being published sees that event only if the publish had not
+// yet taken its snapshot of the subscriptions.
 func (b *Bus[T]) Subscribe(
 	pattern string,
 	handler asynxmd.ProjectionHandler[T],
@@ -83,11 +107,15 @@ func (b *Bus[T]) Subscribe(
 			asynxmd.ErrBusClosed
 	}
 
-	return b.register(
-			pattern,
-			handler,
-			cfg,
-		),
+	subID = ids.New()
+	b.register(
+		subID,
+		pattern,
+		handler,
+		cfg,
+	)
+
+	return subID,
 		nil
 }
 
@@ -99,11 +127,11 @@ func (b *Bus[T]) isClosed() bool {
 }
 
 func (b *Bus[T]) register(
+	subID string,
 	pattern string,
 	handler asynxmd.ProjectionHandler[T],
 	cfg *asynxmd.SubscriptionConfig[T],
-) string {
-	subID := ids.New()
+) {
 	sub := &models.Subscription[T]{
 		Pattern:         pattern,
 		Handler:         handler,
@@ -116,12 +144,13 @@ func (b *Bus[T]) register(
 		b.idx.Load(),
 		sub,
 	))
-
-	return subID
 }
 
-// Unsubscribe removes the subscription with the given id. An unknown id is a
-// no-op.
+// Unsubscribe removes the subscription with the given id, so events published
+// afterwards no longer reach its handler. Handlers already started for earlier
+// events keep running to completion. An unknown or already removed id is not an
+// error, which makes the call idempotent; the error result is always nil and
+// exists to satisfy the Bus contract.
 func (b *Bus[T]) Unsubscribe(
 	id string,
 ) error {
@@ -145,8 +174,16 @@ func (b *Bus[T]) Unsubscribe(
 	return nil
 }
 
-// Publish fires all matching handlers asynchronously and returns once they
-// are started.
+// Publish starts every handler whose subscription matches event.EventName, each
+// on its own goroutine, and returns without waiting for them. The context
+// reaches each handler as given, so cancelling it is the handler's signal to
+// stop; it does not abort handlers already started.
+//
+// It returns ctx.Err() when ctx is already done and ErrBusClosed once the bus is
+// closed; in both cases no handler is started. Publishing an event nothing
+// subscribes to succeeds. Handlers of one event run concurrently and their
+// order is unspecified. Handler panics and timeouts never reach the caller.
+// Close waits for the handlers Publish started.
 func (b *Bus[T]) Publish(
 	ctx context.Context,
 	event asynxmd.Event[T],
@@ -174,10 +211,17 @@ func (b *Bus[T]) Publish(
 	return nil
 }
 
-// PublishSync fires all matching handlers and blocks until every handler
-// goroutine triggered by this event has completed. Handler panics and timeouts
-// are still handled by PanicHandler/TimeoutHandler — they do not affect the
-// returned error.
+// PublishSync starts the matching handlers like Publish and blocks until every
+// one of them has finished, including a handler that exceeded its timeout:
+// the timeout is still reported, but the call keeps waiting for the handler. The
+// dispatcher relies on this so that the next event of an aggregate never starts
+// while the previous one is still being handled.
+//
+// Errors are those of Publish and are returned before anything is started.
+// Handler panics and timeouts go to the panic and timeout handlers and do not
+// affect the returned error. Calling PublishSync from inside a handler of the
+// same bus is allowed, but waiting for a handler that is itself waiting on the
+// caller deadlocks.
 func (b *Bus[T]) PublishSync(
 	ctx context.Context,
 	event asynxmd.Event[T],
@@ -212,37 +256,33 @@ func (b *Bus[T]) matching(
 	eventName string,
 ) []*models.Subscription[T] {
 	idx := b.idx.Load()
-	matched := append(
-		[]*models.Subscription[T](nil),
-		idx.ExactSubs[eventName]...,
-	)
+	exact := idx.ExactSubs[eventName]
 
-	for _, sub := range idx.RegexSubs {
-		matched = b.appendIfMatch(
-			matched,
+	return append(
+		slices.Clone(exact),
+		b.regexMatching(
+			idx.RegexSubs,
 			eventName,
-			sub,
+		)...,
+	)
+}
+
+func (b *Bus[T]) regexMatching(
+	subs []*models.Subscription[T],
+	eventName string,
+) []*models.Subscription[T] {
+	doesNotMatch := func(
+		sub *models.Subscription[T],
+	) bool {
+		return !b.matchesRegex(
+			eventName,
+			sub.Pattern,
 		)
 	}
 
-	return matched
-}
-
-func (b *Bus[T]) appendIfMatch(
-	matched []*models.Subscription[T],
-	eventName string,
-	sub *models.Subscription[T],
-) []*models.Subscription[T] {
-	if !b.matchesRegex(
-		eventName,
-		sub.Pattern,
-	) {
-		return matched
-	}
-
-	return append(
-		matched,
-		sub,
+	return slices.DeleteFunc(
+		slices.Clone(subs),
+		doesNotMatch,
 	)
 }
 
@@ -306,8 +346,11 @@ func (b *Bus[T]) launchSync(
 	}
 }
 
-// Close stops accepting new work and waits for in-flight handlers until ctx
-// is done.
+// Close marks the bus closed, so every later Subscribe, Publish and PublishSync
+// returns ErrBusClosed, and waits for the handlers already in flight. It
+// returns nil once they have all finished and ctx.Err() if ctx ends first; the
+// bus stays closed and the remaining handlers keep running in that case.
+// Calling Close again is safe and waits again.
 func (b *Bus[T]) Close(
 	ctx context.Context,
 ) error {
@@ -333,57 +376,64 @@ func (b *Bus[T]) matchesRegex(
 	eventName,
 	pattern string,
 ) bool {
-	compiled, err := b.getCompiledPattern(pattern)
-	if err != nil {
-		return false
-	}
-
-	return compiled.MatchString(eventName)
+	expr := b.patternFor(pattern)
+	return expr != nil &&
+		expr.MatchString(eventName)
 }
 
-func (b *Bus[T]) getCompiledPattern(
+func (b *Bus[T]) patternFor(
 	pattern string,
-) (*regexp.Regexp, error) {
+) *regexp.Regexp {
+	expr, known := b.cachedPattern(pattern)
+	if known {
+		return expr
+	}
+
+	expr = compileOrNever(pattern)
+	b.rememberPattern(
+		pattern,
+		expr,
+	)
+	return expr
+}
+
+func (b *Bus[T]) cachedPattern(
+	pattern string,
+) (expr *regexp.Regexp, known bool) {
 	b.patternMu.RLock()
+	defer b.patternMu.RUnlock()
 
-	if compiled, ok := b.compiledPatterns[pattern]; ok {
-		b.patternMu.RUnlock()
-		return compiled,
-			nil
-	}
+	expr, known = b.patterns[pattern]
+	return expr,
+		known
+}
 
-	if err, cached := b.patternErrors[pattern]; cached {
-		b.patternMu.RUnlock()
-		return nil,
-			err
-	}
-
-	b.patternMu.RUnlock()
-
-	compiled, err := regexp.Compile(pattern)
-	if err != nil {
-		b.patternMu.Lock()
-		b.patternErrors[pattern] = err
-		b.patternMu.Unlock()
-		return nil,
-			err
-	}
-
+func (b *Bus[T]) rememberPattern(
+	pattern string,
+	expr *regexp.Regexp,
+) {
 	b.patternMu.Lock()
 	defer b.patternMu.Unlock()
 
-	if existing, ok := b.compiledPatterns[pattern]; ok {
-		return existing,
-			nil
-	}
-
-	b.compiledPatterns[pattern] = compiled
-	return compiled,
-		nil
+	b.patterns[pattern] = expr
 }
 
-// WaitForHandlers blocks until all in-flight handler executions complete.
-// Only for use in tests; do not call in production code.
+func compileOrNever(
+	pattern string,
+) *regexp.Regexp {
+	expr, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil
+	}
+
+	return expr
+}
+
+// WaitForHandlers blocks until every handler started by Publish has finished,
+// without closing the bus or bounding the wait. Handlers started by PublishSync
+// are not counted: that call waits for its own. It exists so tests and
+// shutdown paths that cannot pass a context can drain the bus; code that can
+// should use Close with a deadline instead.
 func (b *Bus[T]) WaitForHandlers() {
 	b.inFlightWg.Wait()
 }

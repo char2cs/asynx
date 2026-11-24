@@ -34,7 +34,12 @@ type aggregatePool[T any] struct {
 	reports   reporter.Reporter[T]
 }
 
-// Run waits for turn, delivers job and hands the turn on through done.
+// Run delivers job as documented on Pool: it waits for turn, begins job in the
+// registry, runs the live publish, the durable delivery and the ack, and then
+// settles and completes the job. Whatever happens, even a panic, done is
+// closed through the registry's Finish, which lets the aggregate's next job
+// begin. It returns nothing: the outcome is the job's own, observed through its
+// ticket.
 func (p *aggregatePool[T]) Run(
 	ctx context.Context,
 	job jobs.Job[T],
@@ -66,7 +71,7 @@ func (p *aggregatePool[T]) handle(
 	job jobs.Job[T],
 ) {
 	var outcome error
-	defer finish(
+	defer completeJob(
 		job,
 		&outcome,
 	)
@@ -170,7 +175,7 @@ func (p *aggregatePool[T]) publishLive(
 		return
 	}
 
-	err := p.publish(
+	err := p.publishToBus(
 		ctx,
 		job,
 	)
@@ -185,7 +190,7 @@ func (p *aggregatePool[T]) publishLive(
 	)
 }
 
-func (p *aggregatePool[T]) publish(
+func (p *aggregatePool[T]) publishToBus(
 	ctx context.Context,
 	job jobs.Job[T],
 ) (err error) {
@@ -212,27 +217,21 @@ func (p *aggregatePool[T]) ack(
 		return nil
 	}
 
-	report := func(
-		ctx context.Context,
-	) {
-		p.reports.PublishError(
-			ctx,
-			job,
-			err,
-		)
-	}
-	p.deliverer.ParkThenReport(
-		ctx,
+	p.deliverer.Park(
 		aggregateID,
 		halt,
 		job,
 		err,
-		report,
+	)
+	p.reports.PublishError(
+		ctx,
+		job,
+		err,
 	)
 	return err
 }
 
-func finish[T any](
+func completeJob[T any](
 	job jobs.Job[T],
 	outcome *error,
 ) {

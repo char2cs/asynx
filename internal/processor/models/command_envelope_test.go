@@ -17,7 +17,9 @@ type countingExecutor struct {
 	panic bool
 }
 
-// ExecuteAsync is the test double implementation for the code under test.
+// ExecuteAsync counts the call, panics when panic is set, and otherwise
+// succeeds with an empty event and a no-op wait, so a test can assert whether
+// and how often an envelope ran its command.
 func (c *countingExecutor) ExecuteAsync(
 	_ context.Context,
 	_ asynxmd.Command[mocks.Order],
@@ -195,4 +197,49 @@ func noWait(
 	context.Context,
 ) error {
 	return nil
+}
+
+func TestCommandEnvelope_RejectAnswersTheSenderWithoutRunningTheCommand(
+	t *testing.T,
+) {
+	envelope := newEnvelope()
+	executor := &countingExecutor{}
+
+	envelope.Reject(asynxmd.ErrQueueFull)
+
+	result := awaitResult(
+		t,
+		envelope,
+	)
+	if !errors.Is(
+		result.Err,
+		asynxmd.ErrQueueFull,
+	) {
+		t.Fatalf(
+			"result err = %v, want ErrQueueFull",
+			result.Err,
+		)
+	}
+
+	if n := executor.calls.Load(); n != 0 {
+		t.Fatalf(
+			"executor calls = %d, want 0",
+			n,
+		)
+	}
+}
+
+func awaitResult(
+	t *testing.T,
+	envelope *models.CommandEnvelope[mocks.Order],
+) models.CommandResult[mocks.Order] {
+	t.Helper()
+	select {
+	case result := <-envelope.ResultChan:
+		return result
+	case <-time.After(5 * time.Second):
+		t.Fatal("the envelope was never answered")
+	}
+
+	return models.CommandResult[mocks.Order]{}
 }

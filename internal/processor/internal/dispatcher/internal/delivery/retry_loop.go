@@ -2,7 +2,6 @@ package delivery
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	asynxmd "github.com/char2cs/asynx/models"
@@ -12,8 +11,6 @@ import (
 
 const backoffFactor = 2
 
-var errRetrying = errors.New("delivery attempt failed, retrying")
-
 type retryLoop[T any] struct {
 	deliverer   *durableDeliverer[T]
 	aggregateID string
@@ -22,54 +19,30 @@ type retryLoop[T any] struct {
 	pending     []asynxmd.DurableSub[T]
 	attempt     int
 	backoff     time.Duration
+	last        error
+	stopped     error
 }
 
 func (l *retryLoop[T]) run(
 	ctx context.Context,
 ) error {
-	err := l.step(ctx)
-	for errors.Is(
-		err,
-		errRetrying,
-	) {
-		err = l.step(ctx)
+	l.attemptPending(ctx)
+	for l.retriable() {
+		l.backOffAndRetry(ctx)
 	}
 
-	return err
+	return l.conclude(ctx)
 }
 
-func (l *retryLoop[T]) step(
-	ctx context.Context,
-) error {
-	failed, last := l.deliverer.attempt(
-		ctx,
-		l.job,
-		l.pending,
-		l.attempt,
-	)
-	l.settleAfterFirst()
-	l.pending = failed
-	if len(failed) == 0 {
-		return nil
-	}
-
-	if l.attempt >= l.deliverer.maxAttempts {
-		return l.deliverer.giveUp(
-			ctx,
-			l.aggregateID,
-			l.halt,
-			l.job,
-			last,
-			l.attempt,
-		)
-	}
-
-	return l.retry(ctx)
+func (l *retryLoop[T]) retriable() bool {
+	return l.stopped == nil &&
+		len(l.pending) > 0 &&
+		l.attempt < l.deliverer.maxAttempts
 }
 
-func (l *retryLoop[T]) retry(
+func (l *retryLoop[T]) backOffAndRetry(
 	ctx context.Context,
-) error {
+) {
 	err := l.deliverer.wait(
 		ctx,
 		l.aggregateID,
@@ -78,15 +51,58 @@ func (l *retryLoop[T]) retry(
 		l.backoff,
 	)
 	if err != nil {
-		return err
+		l.stopped = err
+		return
 	}
 
+	l.advance()
+	l.attemptPending(ctx)
+}
+
+func (l *retryLoop[T]) conclude(
+	ctx context.Context,
+) error {
+	if l.stopped != nil {
+		return l.stopped
+	}
+
+	if len(l.pending) == 0 {
+		return nil
+	}
+
+	return l.deliverer.giveUp(
+		ctx,
+		l.aggregateID,
+		l.halt,
+		l.job,
+		l.last,
+		l.attempt,
+	)
+}
+
+func (l *retryLoop[T]) attemptPending(
+	ctx context.Context,
+) {
+	round := &attemptRound[T]{
+		deliverer: l.deliverer,
+		job:       l.job,
+		attempt:   l.attempt,
+	}
+	round.run(
+		ctx,
+		l.pending,
+	)
+	l.pending = round.failed
+	l.last = round.cause()
+	l.settleAfterFirst()
+}
+
+func (l *retryLoop[T]) advance() {
 	l.attempt++
 	l.backoff = min(
 		l.backoff*backoffFactor,
 		l.deliverer.retryMax,
 	)
-	return errRetrying
 }
 
 func (l *retryLoop[T]) settleAfterFirst() {

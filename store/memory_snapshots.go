@@ -11,7 +11,8 @@ type memorySnapshots struct {
 	errOn map[string]error
 }
 
-// NewSnapshots returns an empty in-memory snapshot store.
+// NewSnapshots returns an empty in-memory snapshot store, ready for concurrent
+// use. Each call returns an independent store; nothing outlives the process.
 func NewSnapshots() SnapshotMemory {
 	return &memorySnapshots{
 		snaps: make(map[string][]byte),
@@ -19,7 +20,10 @@ func NewSnapshots() SnapshotMemory {
 	}
 }
 
-// SetError schedules a one-shot error for the next Put on aggregateID.
+// SetError schedules a one-shot error for the next Put on aggregateID. That Put
+// returns the error unchanged and stores nothing, and the schedule is then
+// cleared. Scheduling again before it fired replaces the earlier error. Other
+// aggregates are not affected.
 func (s *memorySnapshots) SetError(
 	aggregateID string,
 	err error,
@@ -57,7 +61,9 @@ func (s *memorySnapshots) Put(
 	return nil
 }
 
-// Get returns the snapshot for aggregateID, if any.
+// Get returns the snapshot stored for aggregateID; found is false, with no
+// error, when none was stored or it was deleted. The returned slice is the
+// stored one, not a copy, so callers must not modify it.
 func (s *memorySnapshots) Get(
 	ctx context.Context,
 	aggregateID string,
@@ -83,7 +89,8 @@ func (s *memorySnapshots) Get(
 		nil
 }
 
-// Delete removes the snapshot for aggregateID.
+// Delete removes the snapshot for aggregateID. Deleting an aggregate with no
+// snapshot is not an error, and other aggregates' snapshots are untouched.
 func (s *memorySnapshots) Delete(
 	ctx context.Context,
 	aggregateID string,

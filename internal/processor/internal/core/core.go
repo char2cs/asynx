@@ -17,7 +17,18 @@ import (
 	"time"
 )
 
-// Processor routes commands to shards, runs the write pipeline and delivers events.
+// Processor is the implementation behind the package-level Processor interface.
+// It routes each command, by aggregate id, to one of a fixed number of shards;
+// a shard worker grants the command its turn per aggregate (see
+// models.CommandEnvelope) and the command runs through the executor's write
+// pipeline under the aggregate's lock; the committed event is then handed to the
+// dispatcher for delivery to subscribers and the bus.
+//
+// Life cycle: sends and forgets register in a wait group under lifeMu, so
+// Shutdown can flip to "shutting down", wait for those in flight, drain the
+// shards and close the dispatcher and bus, in that order. Nothing is stored
+// from a caller's context. A Processor is safe for concurrent use; build it
+// with New.
 type Processor[T any] struct {
 	es            eventstore.EventStore[T]
 	pool          *pool.ShardPool[T]

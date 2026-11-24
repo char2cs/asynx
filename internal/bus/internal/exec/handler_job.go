@@ -5,8 +5,12 @@ import (
 	"time"
 )
 
-// HandlerJob carries all the data needed to execute one subscription handler
-// for a single event.
+// HandlerJob carries everything Handler needs to execute one subscription's
+// handler for a single event: the handler and its optional fallback, the
+// timeout (zero means none), the event, and the observers that are told about
+// panics and timeouts. A job is built per event and delivery by MakeJob, owned
+// by the one Handler call that runs it, and not reused or shared between
+// goroutines.
 type HandlerJob[T any] struct {
 	Handler         asynxmd.ProjectionHandler[T]
 	FallbackHandler asynxmd.ProjectionHandler[T]

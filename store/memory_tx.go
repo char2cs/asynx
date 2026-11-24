@@ -22,6 +22,15 @@ func (t *memoryTx) rollbackUnless(
 	t.rollback()
 }
 
+func (t *memoryTx) onRollback(
+	undo func(),
+) {
+	t.undo = append(
+		t.undo,
+		undo,
+	)
+}
+
 func (t *memoryTx) rollback() {
 	t.s.mu.Lock()
 	defer t.s.mu.Unlock()
@@ -32,10 +41,15 @@ func (t *memoryTx) rollback() {
 	t.undo = nil
 }
 
-// Native returns nil: the in-memory store has no underlying handle.
+// Native returns nil: the in-memory store has no underlying transaction
+// handle, so synchronous projections have nothing to write through.
 func (t *memoryTx) Native() any { return nil }
 
-// Append stores data at (streamID, version), failing on a version conflict.
+// Append stores data at (streamID, version) and keeps the stream sorted by
+// version, so versions may arrive in any order. A version already stored
+// returns an error wrapping models.ErrPipelineFailed; an error scheduled with
+// SetError for streamID is returned instead, once, with nothing stored. The
+// write is undone if the transaction rolls back.
 func (t *memoryTx) Append(
 	ctx context.Context,
 	streamID string,
@@ -91,20 +105,18 @@ func (t *memoryTx) insert(
 		idx,
 		entry{version: version, data: data},
 	)
-	undo := func() {
-		s.removeEntry(
-			streamID,
-			version,
+	t.onRollback(func() {
+		s.streams[streamID] = slices.Delete(
+			s.streams[streamID],
+			idx,
+			idx+1,
 		)
-	}
-	t.undo = append(
-		t.undo,
-		undo,
-	)
+	})
 	return nil
 }
 
-// DeleteStream removes every record of streamID.
+// DeleteStream removes every record of streamID; an unknown stream is not an
+// error. A rollback restores the stream as it was.
 func (t *memoryTx) DeleteStream(
 	ctx context.Context,
 	streamID string,
@@ -123,17 +135,14 @@ func (t *memoryTx) DeleteStream(
 		streamID,
 	)
 	if existed {
-		undo := func() { s.streams[streamID] = old }
-		t.undo = append(
-			t.undo,
-			undo,
-		)
+		t.onRollback(func() { s.streams[streamID] = old })
 	}
 
 	return nil
 }
 
-// DropDeliveries removes every pending delivery of aggregateID.
+// DropDeliveries removes every pending delivery of aggregateID and keeps the
+// order of the others. A rollback restores the entries where they were.
 func (t *memoryTx) DropDeliveries(
 	ctx context.Context,
 	aggregateID string,
@@ -156,15 +165,13 @@ func (t *memoryTx) DropDeliveries(
 		slices.Clone(old),
 		ofAggregate,
 	)
-	undo := func() { s.deliveries = old }
-	t.undo = append(
-		t.undo,
-		undo,
-	)
+	t.onRollback(func() { s.deliveries = old })
 	return nil
 }
 
-// PutReceipt stores the receipt for commandID, failing on a duplicate.
+// PutReceipt stores the receipt for commandID. A receipt that already exists,
+// from this or an earlier transaction, returns an error wrapping
+// models.ErrDuplicateReceipt and is left unchanged.
 func (t *memoryTx) PutReceipt(
 	ctx context.Context,
 	commandID string,
@@ -187,20 +194,18 @@ func (t *memoryTx) PutReceipt(
 	}
 
 	s.receipts[commandID] = r
-	undo := func() {
+	t.onRollback(func() {
 		delete(
 			s.receipts,
 			commandID,
 		)
-	}
-	t.undo = append(
-		t.undo,
-		undo,
-	)
+	})
 	return nil
 }
 
-// EnqueueDelivery records that (aggregateID, version) awaits delivery.
+// EnqueueDelivery appends (aggregateID, version) to the delivery log, after
+// every entry already in it. The entry is removed if the transaction rolls
+// back.
 func (t *memoryTx) EnqueueDelivery(
 	ctx context.Context,
 	aggregateID string,
@@ -219,10 +224,6 @@ func (t *memoryTx) EnqueueDelivery(
 		slices.Clone(old),
 		models.Delivery{AggregateID: aggregateID, Version: version},
 	)
-	undo := func() { s.deliveries = old }
-	t.undo = append(
-		t.undo,
-		undo,
-	)
+	t.onRollback(func() { s.deliveries = old })
 	return nil
 }

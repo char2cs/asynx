@@ -62,6 +62,12 @@ package models
 // It does not own the delivery log (the Store does), the aggregate lock, or the
 // recovery orchestration: asynx reads the log itself and enqueues
 // DispatchRedelivery requests.
+//
+// The interface is the union of three groups: DispatcherDelivery (queueing
+// requests and looking at their deliveries), DispatcherParking (halting and
+// resuming an aggregate's durable delivery) and DispatcherLifecycle
+// (interrupting retries and shutting down). Every method is safe for
+// concurrent use.
 type Dispatcher[T any] interface {
 	DispatcherDelivery[T]
 	DispatcherParking

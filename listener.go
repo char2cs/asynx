@@ -2,15 +2,17 @@ package asynx
 
 import (
 	"context"
+	"fmt"
 	"github.com/char2cs/asynx/models"
 	"sync"
 	"sync/atomic"
 )
 
 type listener[T any] struct {
-	bus   models.Bus[T]
-	ch    chan models.Event[T]
-	count int
+	bus     models.Bus[T]
+	ch      chan models.Event[T]
+	count   int
+	onError func(error)
 
 	done       chan struct{}
 	subIDReady chan struct{}
@@ -26,6 +28,7 @@ type listener[T any] struct {
 func newListener[T any](
 	bus models.Bus[T],
 	count int,
+	onError func(error),
 ) *listener[T] {
 	capacity := count
 	if capacity <= 0 {
@@ -39,6 +42,7 @@ func newListener[T any](
 			capacity,
 		),
 		count:      count,
+		onError:    onError,
 		done:       make(chan struct{}),
 		subIDReady: make(chan struct{}),
 	}
@@ -107,9 +111,31 @@ func (l *listener[T]) deliver(
 
 func (l *listener[T]) unsubscribeWhenPublished() {
 	<-l.subIDReady
-	if err := l.bus.Unsubscribe(l.subID); err != nil {
+	l.report(l.removeSubscription())
+}
+
+func (l *listener[T]) removeSubscription() error {
+	err := l.bus.Unsubscribe(l.subID)
+	if err != nil {
+		return fmt.Errorf(
+			"asynx: unsubscribe listener subscription %s: %w",
+			l.subID,
+			err,
+		)
+	}
+
+	return nil
+}
+
+func (l *listener[T]) report(
+	err error,
+) {
+	if err == nil ||
+		l.onError == nil {
 		return
 	}
+
+	l.onError(err)
 }
 
 func (l *listener[T]) closeChLocked() {
@@ -130,20 +156,22 @@ func (l *listener[T]) publishSubscription(
 	close(l.subIDReady)
 }
 
-func (l *listener[T]) unsubscribe() {
+func (l *listener[T]) unsubscribe() error {
 	if !l.closed.CompareAndSwap(
 		false,
 		true,
 	) {
-		return
+		return nil
 	}
 
 	close(l.done)
 	defer l.closeBoundedChannel()
 
-	if err := l.bus.Unsubscribe(l.subID); err != nil {
-		return
-	}
+	return l.removeSubscription()
+}
+
+func (l *listener[T]) release() {
+	l.report(l.unsubscribe())
 }
 
 func (l *listener[T]) closeBoundedChannel() {

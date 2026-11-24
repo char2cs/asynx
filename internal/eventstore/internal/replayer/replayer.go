@@ -15,8 +15,12 @@ import (
 // Replayer applies patches sequentially to reconstruct aggregate state,
 // upcasting events to the current schema version as needed.
 //
-// Hydrate is the core method, called by Reader for both warm and cold paths.
-// Replay is the public read-only method for manual recovery and projections.
+// Hydrate is the core method, called by Reader for both warm and cold paths: it
+// folds events already in memory into a state and reports whether any needed an
+// upcast. Replay is the read-only method for manual recovery and projections:
+// it reads the stream itself and hands each event to a callback. Neither ever
+// writes to a store, which is why snapshotting is Reader's job. Replayer is
+// immutable after New and safe for concurrent use.
 type Replayer[T any] struct {
 	eventStore           asynxmd.Store
 	upcasters            map[int]asynxmd.Upcaster
@@ -24,9 +28,12 @@ type Replayer[T any] struct {
 	stateZeroValue       T
 }
 
-// New constructs a Replayer. upcasters maps SchemaVersion → migration func;
-// schemaVersion is the current (target) schema version. upcasters is cloned
-// so callers may safely mutate the original map after construction.
+// New constructs a Replayer. upcasters maps SchemaVersion to the migration that
+// lifts an event from that version to the next; schemaVersion is the current
+// (target) schema version; zeroValue is the state a replay starts from.
+// upcasters is cloned so callers may safely mutate the original map after
+// construction; a nil map means no migrations, and a version without an entry
+// is stepped over without changing the event.
 func New[T any](
 	es asynxmd.Store,
 	upcasters map[int]asynxmd.Upcaster,
@@ -53,7 +60,6 @@ func New[T any](
 // Hydrate is read-only: it never writes to any store.
 func (r *Replayer[T]) Hydrate(
 	ctx context.Context,
-	aggregateID string,
 	seedState T,
 	events []esmodels.InternalEvent,
 ) (HydrateResult[T], error) {

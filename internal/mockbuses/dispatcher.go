@@ -9,11 +9,15 @@ import (
 	"github.com/char2cs/asynx/models"
 )
 
-// Dispatcher is a recording fake of models.Dispatcher. It records every call
-// in order and every request it is handed, settles each ticket at once, and
-// lets a test script an Enqueue or Close failure. It delivers nothing. It keeps
-// the parks it is told of, with their first non-nil cause, for Parks and
-// Inspect.
+// Dispatcher is a recording fake of models.Dispatcher. It records every
+// command it receives (the factory call, Enqueue, Unrun, Park, Supersede,
+// ResumeUndelivered, Interrupt, Close and WaitIdle) in order, and every request
+// it is handed, settles each ticket at once, and lets a test script an Enqueue
+// or Close failure. It delivers nothing. It keeps the parks it is told of, with
+// their first non-nil cause, for Parks and Inspect. The read-only methods
+// (TicketFor, Inspect, Parks, InHandler) change nothing and are not recorded,
+// so Calls shows only what altered or drove the dispatcher. It is safe for
+// concurrent use.
 type Dispatcher[T any] struct {
 	mu          sync.Mutex
 	config      models.DispatcherConfig[T]
@@ -29,7 +33,8 @@ type Dispatcher[T any] struct {
 	interrupt   sync.Once
 }
 
-// NewDispatcher returns a fake that records and settles.
+// NewDispatcher returns a fake with no parks, no scripted failure and an open
+// Interrupted channel, ready to be handed to a Builder through Factory.
 func NewDispatcher[T any]() *Dispatcher[T] {
 	return &Dispatcher[T]{
 		parks:       make(map[string]uint64),
@@ -50,7 +55,9 @@ func (d *Dispatcher[T]) Factory() models.DispatcherFactory[T] {
 	}
 }
 
-// FailEnqueue makes every later Enqueue return err; nil restores success.
+// FailEnqueue makes every later Enqueue return err instead of accepting the
+// request; nil restores success. The failed Enqueue is still recorded in Calls
+// but its request is not kept in Requests.
 func (d *Dispatcher[T]) FailEnqueue(
 	err error,
 ) {
@@ -75,7 +82,8 @@ func (d *Dispatcher[T]) Config() models.DispatcherConfig[T] {
 	return d.config
 }
 
-// Calls returns the names of the methods called, in order.
+// Calls returns a copy of the names of the commands received, in order. The
+// read-only methods never appear in it.
 func (d *Dispatcher[T]) Calls() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -114,12 +122,12 @@ func (d *Dispatcher[T]) Enqueue(
 		nil
 }
 
-// TicketFor records the call and reports that no ticket is held.
+// TicketFor reports that no ticket is held: the fake settles every ticket at
+// Enqueue and keeps none.
 func (d *Dispatcher[T]) TicketFor(
 	_ string,
 	_ int64,
 ) (models.Ticket, bool) {
-	d.record("TicketFor")
 	return models.Ticket{},
 		false
 }
@@ -166,7 +174,6 @@ func (d *Dispatcher[T]) Inspect(
 ) models.DeliveryStatus {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.recordLocked("Inspect")
 	generation, parked := d.parks[aggregateID]
 	if !parked {
 		return models.DeliveryStatus{}
@@ -185,15 +192,19 @@ func (d *Dispatcher[T]) Supersede(
 	d.liftLocked(aggregateID)
 }
 
-// Parks records the call and returns the parked aggregates with their generations.
+// Parks returns a copy of the parked aggregates with their generations.
 func (d *Dispatcher[T]) Parks() map[string]uint64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.recordLocked("Parks")
 	return maps.Clone(d.parks)
 }
 
-// ResumeUndelivered records the call and lifts the park when the generation matches.
+// ResumeUndelivered records the call and lifts the aggregate's park when
+// generation is the one Park imposed, reporting true. It reports false and
+// changes nothing for an unknown aggregate or a stale generation. The undelivered
+// versions are always nil: the fake keeps none. Lifting and reporting happen in
+// one call because models.Dispatcher defines this method that way, so the fake
+// cannot split them.
 func (d *Dispatcher[T]) ResumeUndelivered(
 	aggregateID string,
 	generation uint64,

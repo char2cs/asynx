@@ -513,7 +513,8 @@ type blockingTestBus[T any] struct {
 	unblockCh chan struct{}
 }
 
-// Publish is the test double implementation for the code under test.
+// Publish accepts the event and does nothing; the bus is only here to block
+// PublishSync.
 func (b *blockingTestBus[T]) Publish(
 	_ context.Context,
 	_ asynxmd.Event[T],
@@ -521,7 +522,9 @@ func (b *blockingTestBus[T]) Publish(
 	return nil
 }
 
-// PublishSync is the test double implementation for the code under test.
+// PublishSync blocks until the test closes unblockCh, holding the dispatcher
+// inside a handler so tests can observe commands and shutdown while delivery
+// is stuck.
 func (b *blockingTestBus[T]) PublishSync(
 	_ context.Context,
 	_ asynxmd.Event[T],
@@ -530,7 +533,8 @@ func (b *blockingTestBus[T]) PublishSync(
 	return nil
 }
 
-// Subscribe is the test double implementation for the code under test.
+// Subscribe registers nothing and returns an empty id; the double has no
+// subscribers.
 func (b *blockingTestBus[T]) Subscribe(
 	_ string,
 	_ asynxmd.ProjectionHandler[T],
@@ -540,21 +544,21 @@ func (b *blockingTestBus[T]) Subscribe(
 		nil
 }
 
-// Unsubscribe is the test double implementation for the code under test.
+// Unsubscribe does nothing; the double has no subscribers.
 func (b *blockingTestBus[T]) Unsubscribe(
 	_ string,
 ) error {
 	return nil
 }
 
-// Close is the test double implementation for the code under test.
+// Close does nothing and succeeds, so Shutdown can complete.
 func (b *blockingTestBus[T]) Close(
 	_ context.Context,
 ) error {
 	return nil
 }
 
-// WaitForHandlers is the test double implementation for the code under test.
+// WaitForHandlers returns at once; nothing is tracked.
 func (b *blockingTestBus[T]) WaitForHandlers() {}
 
 type fixture struct {
@@ -870,7 +874,9 @@ type gatedCmd struct {
 	gate    <-chan struct{}
 }
 
-// Validate is the test double implementation for the code under test.
+// Validate announces on entered (without blocking if nobody listens), then
+// blocks until the gate is released, so a test can hold the command
+// mid-flight under the aggregate lock.
 func (c gatedCmd) Validate(
 	o *order,
 ) error {

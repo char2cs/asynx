@@ -20,7 +20,8 @@ type idemUpdate struct {
 	Cmd string
 }
 
-// CommandID is the test double implementation for the code under test.
+// CommandID returns the idempotency key the test put in Cmd, making the
+// update an IdempotentCommand.
 func (c idemUpdate) CommandID() string { return c.Cmd }
 
 type idemCreate struct {
@@ -28,7 +29,8 @@ type idemCreate struct {
 	Cmd string
 }
 
-// CommandID is the test double implementation for the code under test.
+// CommandID returns the idempotency key the test put in Cmd, making the
+// create an IdempotentCommand.
 func (c idemCreate) CommandID() string { return c.Cmd }
 
 func TestExecute_Idempotent_AcceptedRetryIsNoOpReturningOriginalEvent(
@@ -346,7 +348,8 @@ func TestExecute_Idempotent_ReceiptReadErrorFailsPipeline(
 
 type getReceiptErrStore struct{ store.Memory }
 
-// GetReceipt is the test double implementation for the code under test.
+// GetReceipt always fails with "receipt store down", simulating an unreadable
+// receipt table.
 func (getReceiptErrStore) GetReceipt(
 	context.Context,
 	string,
@@ -358,7 +361,8 @@ func (getReceiptErrStore) GetReceipt(
 
 type phantomDuplicateStore struct{ store.Memory }
 
-// Atomically is the test double implementation for the code under test.
+// Atomically runs fn in a transaction whose PutReceipt always reports
+// ErrDuplicateReceipt, simulating a duplicate that GetReceipt cannot find.
 func (s phantomDuplicateStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
@@ -376,7 +380,8 @@ func (s phantomDuplicateStore) Atomically(
 
 type phantomTx struct{ asynxmd.Tx }
 
-// PutReceipt is the test double implementation for the code under test.
+// PutReceipt always fails with ErrDuplicateReceipt, as if another writer had
+// recorded the command first.
 func (phantomTx) PutReceipt(
 	context.Context,
 	string,
@@ -464,7 +469,9 @@ type raceLostStore struct {
 	reads int
 }
 
-// GetReceipt is the test double implementation for the code under test.
+// GetReceipt finds no receipt on its first call and an accepted receipt for
+// another aggregate afterwards, simulating losing a race to a concurrent
+// writer of the same command id.
 func (s *raceLostStore) GetReceipt(
 	ctx context.Context,
 	id string,
@@ -481,7 +488,8 @@ func (s *raceLostStore) GetReceipt(
 		nil
 }
 
-// Atomically is the test double implementation for the code under test.
+// Atomically runs fn in a transaction whose PutReceipt reports
+// ErrDuplicateReceipt, completing the lost-race simulation.
 func (s *raceLostStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
@@ -530,7 +538,8 @@ func TestExecute_Idempotent_LosingTheReceiptRaceAnswersWithTheWinner(
 
 type putReceiptFailStore struct{ store.Memory }
 
-// Atomically is the test double implementation for the code under test.
+// Atomically runs fn in a transaction whose PutReceipt fails, simulating a
+// store that cannot record receipts.
 func (s putReceiptFailStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
@@ -548,7 +557,7 @@ func (s putReceiptFailStore) Atomically(
 
 type failingReceiptTx struct{ asynxmd.Tx }
 
-// PutReceipt is the test double implementation for the code under test.
+// PutReceipt always fails with "receipt table locked".
 func (failingReceiptTx) PutReceipt(
 	context.Context,
 	string,
@@ -590,7 +599,8 @@ type rejectionRaceStore struct {
 	reads int
 }
 
-// GetReceipt is the test double implementation for the code under test.
+// GetReceipt finds no receipt on its first call and a recorded rejection
+// afterwards, simulating another writer rejecting the same command id first.
 func (s *rejectionRaceStore) GetReceipt(
 	context.Context,
 	string,
@@ -607,7 +617,8 @@ func (s *rejectionRaceStore) GetReceipt(
 		nil
 }
 
-// Atomically is the test double implementation for the code under test.
+// Atomically runs fn in a transaction whose PutReceipt reports
+// ErrDuplicateReceipt, completing the rejection-race simulation.
 func (s *rejectionRaceStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
@@ -719,7 +730,8 @@ type readFailStore struct {
 	fail atomic.Bool
 }
 
-// ReadFrom is the test double implementation for the code under test.
+// ReadFrom fails with "stream unreadable" while fail is set and otherwise
+// reads normally.
 func (s *readFailStore) ReadFrom(
 	ctx context.Context,
 	streamID string,

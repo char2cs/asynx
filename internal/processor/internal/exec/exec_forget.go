@@ -18,17 +18,26 @@ func (e *CommandExecutor[T]) isForgetting(
 	return ok
 }
 
-func (e *CommandExecutor[T]) setForgetting(
+func (e *CommandExecutor[T]) refuseIfForgetting(
 	id string,
-) bool {
-	e.forgetMu.Lock()
-	defer e.forgetMu.Unlock()
-	if _, ok := e.forgetting[id]; ok {
-		return false
+) error {
+	if !e.isForgetting(id) {
+		return nil
 	}
 
+	return fmt.Errorf(
+		"%w: %s",
+		asynxmd.ErrForgetInProgress,
+		id,
+	)
+}
+
+func (e *CommandExecutor[T]) markForgetting(
+	id string,
+) {
+	e.forgetMu.Lock()
+	defer e.forgetMu.Unlock()
 	e.forgetting[id] = struct{}{}
-	return true
 }
 
 func (e *CommandExecutor[T]) clearForgetting(
@@ -42,7 +51,9 @@ func (e *CommandExecutor[T]) clearForgetting(
 	e.forgetMu.Unlock()
 }
 
-// Forget erases an aggregate.
+// Forget erases an aggregate and returns once it is gone. The check that no
+// other Forget is running and the mark that this one is running are two steps
+// under the aggregate's command lock, which is what makes them atomic.
 //
 // The tombstone is written (running synchronous projections) and enqueued under
 // the aggregate's lock, and the aggregate is marked as being forgotten until the
@@ -303,14 +314,12 @@ func (e *CommandExecutor[T]) writeTombstone(
 
 	defer unlock()
 
-	if !e.setForgetting(aggregateID) {
+	if err := e.refuseIfForgetting(aggregateID); err != nil {
 		return asynxmd.Ticket{},
-			fmt.Errorf(
-				"%w: %s",
-				asynxmd.ErrForgetInProgress,
-				aggregateID,
-			)
+			err
 	}
+
+	e.markForgetting(aggregateID)
 
 	ticket, err := e.commitTombstone(
 		ctx,

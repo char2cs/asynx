@@ -9,45 +9,40 @@ import (
 )
 
 type inflightTracker[T any] struct {
-	inflight sync.Map
-	tickets  sync.Map
+	mu       sync.Mutex
+	inflight map[contracts.Job[T]]struct{}
+	tickets  map[ticketKey]contracts.Job[T]
 }
 
-// Track registers job until it completes.
+// Track registers job until it completes, under its (aggregate, version) key,
+// and takes over the job's completion callback. When the job completes it
+// removes itself, and never a job that has replaced it under the same key.
 func (t *inflightTracker[T]) Track(
 	job contracts.Job[T],
 ) {
 	key := ticketKey{job.AggregateID(), job.Version()}
-	t.inflight.Store(
-		job,
-		struct{}{},
-	)
-	t.tickets.Store(
-		key,
-		job,
-	)
+	t.mu.Lock()
+	t.inflight[job] = struct{}{}
+	t.tickets[key] = job
+	t.mu.Unlock()
 	job.OnComplete(func() {
-		t.inflight.Delete(job)
-		t.tickets.CompareAndDelete(
+		t.forget(
 			key,
 			job,
 		)
 	})
 }
 
-// For returns the ticket of the job tracked for (aggregateID, version).
+// For returns the ticket of the job tracked for (aggregateID, version), and
+// false when there is none: it was never tracked or its delivery is over.
 func (t *inflightTracker[T]) For(
 	aggregateID string,
 	version int64,
 ) (asynxmd.Ticket, bool) {
-	found, ok := t.tickets.Load(ticketKey{aggregateID, version})
+	t.mu.Lock()
+	job, ok := t.tickets[ticketKey{aggregateID, version}]
+	t.mu.Unlock()
 	if !ok {
-		return asynxmd.Ticket{},
-			false
-	}
-
-	job, isJob := found.(contracts.Job[T])
-	if !isJob {
 		return asynxmd.Ticket{},
 			false
 	}
@@ -56,7 +51,8 @@ func (t *inflightTracker[T]) For(
 		true
 }
 
-// Idle blocks until every job tracked when it was called has completed.
+// Idle blocks until every job tracked when it was called has completed. Jobs
+// tracked while it waits are not waited for.
 func (t *inflightTracker[T]) Idle() {
 	for _, job := range t.tracked() {
 		<-job.Ticket().Final
@@ -64,30 +60,32 @@ func (t *inflightTracker[T]) Idle() {
 }
 
 func (t *inflightTracker[T]) tracked() (jobs []contracts.Job[T]) {
-	t.inflight.Range(func(
-		key any,
-		_ any,
-	) bool {
-		jobs = appendJob(
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for job := range t.inflight {
+		jobs = append(
 			jobs,
-			key,
+			job,
 		)
-		return true
-	})
+	}
+
 	return jobs
 }
 
-func appendJob[T any](
-	jobs []contracts.Job[T],
-	key any,
-) []contracts.Job[T] {
-	job, isJob := key.(contracts.Job[T])
-	if !isJob {
-		return jobs
-	}
-
-	return append(
-		jobs,
+func (t *inflightTracker[T]) forget(
+	key ticketKey,
+	job contracts.Job[T],
+) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(
+		t.inflight,
 		job,
 	)
+	if t.tickets[key] == job {
+		delete(
+			t.tickets,
+			key,
+		)
+	}
 }

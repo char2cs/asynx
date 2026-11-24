@@ -6,8 +6,17 @@ import (
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/contracts"
 )
 
-// Deliverer runs a job's durable delivery on behalf of the delivery goroutine of its aggregate's turn.
-// It is safe for concurrent use by the deliveries of different aggregates.
+// Deliverer runs a job's durable delivery on behalf of the delivery goroutine
+// of its aggregate's turn. It is safe for concurrent use by the deliveries of
+// different aggregates.
+//
+// A Deliverer has no lock of its own. It changes an aggregate's state only by
+// parking it, and only through the registry's ParkIfCurrent, so a park that
+// someone else imposed or lifted meanwhile is never undone. Every path that
+// parks and then tells someone (attempts exhausted, a failed ack, an
+// interrupt) parks first and reports afterwards: whoever is told may act on
+// the park at once, for instance by resuming the aggregate, and must find it
+// parked already.
 type Deliverer[T any] interface {
 	// Deliver hands job's event to every durable subscriber that receives it
 	// (all of them for a deletion marker, the matching ones otherwise) and
@@ -39,20 +48,21 @@ type Deliverer[T any] interface {
 		job contracts.Job[T],
 	) error
 
-	// ParkThenReport parks the aggregate of a job that carries an Ack, unless
-	// halt has been closed since the job was popped (someone else settled the
-	// aggregate's fate meanwhile), and only then calls report. The order is
-	// what callers depend on: whoever report tells may resume the aggregate at
-	// once, and must find it parked. Every give-up path goes through it, with
-	// the cause Inspect then reports: attempts exhausted (ErrDeliveryParked
-	// wrapping the last handler error and the attempt count), a failed ack
-	// (the ack error), an interrupt (ErrDispatcherClosed).
-	ParkThenReport(
-		ctx context.Context,
+	// Park parks the aggregate of a job that carries an Ack, with cause as the
+	// reason Inspect then reports, unless halt has been closed since the job
+	// was popped (someone else settled the aggregate's fate meanwhile). A job
+	// without an Ack never parks its aggregate. Every give-up path goes
+	// through it: attempts exhausted (ErrDeliveryParked wrapping the last
+	// handler error and the attempt count), a failed ack (the ack error) and
+	// an interrupt (ErrDispatcherClosed).
+	//
+	// A caller that then tells someone about the give-up, through a publish
+	// or delivery error handler, calls Park first and reports afterwards: the
+	// order is what keeps the aggregate parked by the time the recipient acts.
+	Park(
 		aggregateID string,
 		halt <-chan struct{},
 		job contracts.Job[T],
 		cause error,
-		report func(context.Context),
 	)
 }

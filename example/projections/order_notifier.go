@@ -5,16 +5,24 @@ import (
 	"fmt"
 	"github.com/char2cs/asynx/example/domain"
 	"github.com/char2cs/asynx/models"
+	"slices"
 	"sync"
 )
 
-// OrderNotifier maintains an outbox of notifications.
+// OrderNotifier is the example's notification projection: it turns each order
+// event into a human-readable message and keeps the messages in an outbox, in
+// the order the events were handled, standing in for the emails and warehouse
+// calls a real system would make. The zero value is ready to use and it is safe
+// for concurrent use.
 type OrderNotifier struct {
 	mu     sync.Mutex
 	outbox []string
 }
 
-// Handle records a notification for the event.
+// Handle is a models.ProjectionHandler for order events. It appends one
+// notification to the outbox for OrderCreated, OrderConfirmed and OrderShipped,
+// naming the order, and ignores any other event. It cannot fail and ctx is not
+// used.
 func (n *OrderNotifier) Handle(
 	ctx context.Context,
 	event models.Event[domain.Order],
@@ -50,9 +58,10 @@ func (n *OrderNotifier) Handle(
 	}
 }
 
-// GetOutbox returns a copy of the notifications recorded so far.
+// GetOutbox returns a copy of the notifications recorded so far, oldest first.
+// The copy is the caller's: later events do not change it.
 func (n *OrderNotifier) GetOutbox() []string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return n.outbox
+	return slices.Clone(n.outbox)
 }

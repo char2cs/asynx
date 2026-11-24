@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/char2cs/asynx"
@@ -61,7 +62,7 @@ func sendOne(
 	ax asynx.Asynx[domain.Order],
 	orderID string,
 	step phase,
-) {
+) error {
 	_, err := ax.Send(
 		ctx,
 		step.factory(orderID),
@@ -73,7 +74,12 @@ func sendOne(
 			orderID,
 			err,
 		)
-		return
+		return fmt.Errorf(
+			"%s order %s: %w",
+			step.verb,
+			orderID,
+			err,
+		)
 	}
 
 	fmt.Printf(
@@ -81,6 +87,8 @@ func sendOne(
 		orderID,
 		step.past,
 	)
+
+	return nil
 }
 
 func sendAll(
@@ -88,18 +96,23 @@ func sendAll(
 	ax asynx.Asynx[domain.Order],
 	orders []string,
 	step phase,
-) {
+) (err error) {
 	for _, orderID := range orders {
-		sendOne(
-			ctx,
-			ax,
-			orderID,
-			step,
+		err = errors.Join(
+			err,
+			sendOne(
+				ctx,
+				ax,
+				orderID,
+				step,
+			),
 		)
 	}
 
 	ax.WaitPublish()
 	fmt.Println()
+
+	return err
 }
 
 func printOrder(
@@ -117,16 +130,34 @@ func printOrder(
 			orderID,
 			err,
 		)
-		return nil
+		return fmt.Errorf(
+			"load order %s: %w",
+			orderID,
+			err,
+		)
 	}
 
+	return printJSON(
+		orderID,
+		order,
+	)
+}
+
+func printJSON(
+	orderID string,
+	order domain.Order,
+) error {
 	orderJSON, err := json.MarshalIndent(
 		order,
 		"",
 		"  ",
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf(
+			"encode order %s: %w",
+			orderID,
+			err,
+		)
 	}
 
 	fmt.Printf(
@@ -142,25 +173,19 @@ func printOrders(
 	ctx context.Context,
 	ax asynx.Asynx[domain.Order],
 	orders []string,
-) error {
-	if len(orders) == 0 {
-		return nil
+) (err error) {
+	for _, orderID := range orders {
+		err = errors.Join(
+			err,
+			printOrder(
+				ctx,
+				ax,
+				orderID,
+			),
+		)
 	}
 
-	err := printOrder(
-		ctx,
-		ax,
-		orders[0],
-	)
-	if err != nil {
-		return err
-	}
-
-	return printOrders(
-		ctx,
-		ax,
-		orders[1:],
-	)
+	return err
 }
 
 func createCmd(
@@ -190,20 +215,25 @@ func sendPhases(
 	ctx context.Context,
 	ax asynx.Asynx[domain.Order],
 	orders []string,
-) {
+) (err error) {
 	steps := []phase{
 		{verb: "create", past: "created", factory: createCmd},
 		{verb: "confirm", past: "confirmed", factory: confirmCmd},
 		{verb: "ship", past: "shipped", factory: shipCmd},
 	}
 	for _, step := range steps {
-		sendAll(
-			ctx,
-			ax,
-			orders,
-			step,
+		err = errors.Join(
+			err,
+			sendAll(
+				ctx,
+				ax,
+				orders,
+				step,
+			),
 		)
 	}
+
+	return err
 }
 
 func printOutbox(
@@ -281,7 +311,7 @@ func run(
 
 	orders := []string{"ORD-001", "ORD-002", "ORD-003"}
 
-	sendPhases(
+	sendErr := sendPhases(
 		ctx,
 		ax,
 		orders,
@@ -289,20 +319,21 @@ func run(
 
 	fmt.Println("Step 4: Verifying final state...")
 
-	err = printOrders(
+	printErr := printOrders(
 		ctx,
 		ax,
 		orders,
 	)
-	if err != nil {
-		return err
-	}
 
 	printOutbox(notifier)
 
-	return shutdown(
-		ctx,
-		ax,
+	return errors.Join(
+		sendErr,
+		printErr,
+		shutdown(
+			ctx,
+			ax,
+		),
 	)
 }
 

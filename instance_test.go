@@ -31,6 +31,25 @@ func waitPublish(
 	instance.(publishWaiter).WaitPublish()
 }
 
+type shutdownHook struct {
+	t        *testing.T
+	instance asynx.Asynx[mocks.Order]
+}
+
+func (h shutdownHook) run() {
+	err := h.instance.Shutdown(context.Background())
+	if err != nil &&
+		!errors.Is(
+			err,
+			models.ErrAlreadyShuttingDown,
+		) {
+		h.t.Errorf(
+			"Shutdown: %v",
+			err,
+		)
+	}
+}
+
 func newInstance(
 	t *testing.T,
 ) asynx.Asynx[mocks.Order] {
@@ -44,7 +63,8 @@ func newInstance(
 		t.Fatal(err)
 	}
 
-	t.Cleanup(func() { instance.Shutdown(context.Background()) })
+	t.Cleanup(shutdownHook{t: t, instance: instance}.run)
+
 	return instance
 }
 
@@ -550,7 +570,7 @@ func TestIntegration_FullCommandCycle(
 	}
 }
 
-func implSendUpdate(
+func sendOrderUpdate(
 	t *testing.T,
 	instance asynx.Asynx[mocks.Order],
 	orderID string,
@@ -589,7 +609,7 @@ func TestIntegration_SerialOrderingForSameAggregate(
 	)
 
 	for i := 0; i < 5; i++ {
-		implSendUpdate(
+		sendOrderUpdate(
 			t,
 			instance,
 			orderID,
@@ -618,7 +638,7 @@ func TestIntegration_SerialOrderingForSameAggregate(
 	}
 }
 
-func implSendCreate(
+func sendCreate(
 	instance asynx.Asynx[mocks.Order],
 	wg *sync.WaitGroup,
 	errChan chan<- error,
@@ -637,7 +657,7 @@ func implSendCreate(
 	errChan <- err
 }
 
-func implRequireNoErr(
+func requireNoErr(
 	t *testing.T,
 	err error,
 	what string,
@@ -653,7 +673,7 @@ func implRequireNoErr(
 	}
 }
 
-func implRequireExists(
+func requireExists(
 	t *testing.T,
 	instance asynx.Asynx[mocks.Order],
 	orderID string,
@@ -664,7 +684,7 @@ func implRequireExists(
 		context.Background(),
 		orderID,
 	)
-	implRequireNoErr(
+	requireNoErr(
 		t,
 		err,
 		"Exists",
@@ -692,7 +712,7 @@ func TestIntegration_ConcurrentCommandsDifferentAggregates(
 
 	for i := 0; i < numGoroutines; i++ {
 		wg.Add(1)
-		go implSendCreate(
+		go sendCreate(
 			instance,
 			&wg,
 			errChan,
@@ -704,7 +724,7 @@ func TestIntegration_ConcurrentCommandsDifferentAggregates(
 	close(errChan)
 
 	for err := range errChan {
-		implRequireNoErr(
+		requireNoErr(
 			t,
 			err,
 			"Send",
@@ -712,7 +732,7 @@ func TestIntegration_ConcurrentCommandsDifferentAggregates(
 	}
 
 	for i := 0; i < numGoroutines; i++ {
-		implRequireExists(
+		requireExists(
 			t,
 			instance,
 			fmt.Sprintf(
@@ -723,7 +743,7 @@ func TestIntegration_ConcurrentCommandsDifferentAggregates(
 	}
 }
 
-func implCounterHandler(
+func counterHandler(
 	counter *atomic.Int32,
 ) func(context.Context, models.Event[mocks.Order]) {
 	return func(
@@ -734,7 +754,7 @@ func implCounterHandler(
 	}
 }
 
-func implSubscribeCreated(
+func subscribeCreated(
 	t *testing.T,
 	instance asynx.Asynx[mocks.Order],
 	i int,
@@ -757,7 +777,7 @@ func implSubscribeCreated(
 	return id
 }
 
-func implUnsubscribeAll(
+func unsubscribeAll(
 	instance asynx.Asynx[mocks.Order],
 	ids []string,
 ) {
@@ -766,7 +786,7 @@ func implUnsubscribeAll(
 	}
 }
 
-func implRequireCalled(
+func requireCalled(
 	t *testing.T,
 	counter *atomic.Int32,
 	i int,
@@ -792,15 +812,15 @@ func TestIntegration_MultipleProjections(
 		4,
 	)
 	for i := range counters {
-		ids[i] = implSubscribeCreated(
+		ids[i] = subscribeCreated(
 			t,
 			instance,
 			i,
-			implCounterHandler(&counters[i]),
+			counterHandler(&counters[i]),
 		)
 	}
 
-	defer implUnsubscribeAll(
+	defer unsubscribeAll(
 		instance,
 		ids,
 	)
@@ -823,7 +843,7 @@ func TestIntegration_MultipleProjections(
 	)
 
 	for i := 0; i < len(counters); i++ {
-		implRequireCalled(
+		requireCalled(
 			t,
 			&counters[i],
 			i,
@@ -966,7 +986,7 @@ func TestSendWait_HandlersCompleteBeforeReturn(
 	var handlerDone atomic.Int32
 	instance.Subscribe(
 		"OrderCreated",
-		implCounterHandler(&handlerDone),
+		counterHandler(&handlerDone),
 	)
 
 	cmd := mocks.CreateOrderCmd{ID: "ew-handler", Total: 10.0}
@@ -995,7 +1015,7 @@ func TestSendWait_MultipleHandlersAllComplete(
 	for range 3 {
 		instance.Subscribe(
 			"OrderCreated",
-			implCounterHandler(&count),
+			counterHandler(&count),
 		)
 	}
 
@@ -1406,7 +1426,7 @@ func TestForget_DeleteFails_ReturnsErrForgetFailed(
 	}
 }
 
-func implForgetInto(
+func forgetInto(
 	ctx context.Context,
 	instance asynx.Asynx[mocks.Order],
 	wg *sync.WaitGroup,
@@ -1419,7 +1439,7 @@ func implForgetInto(
 	)
 }
 
-func implIsExpectedForgetErr(
+func isExpectedForgetErr(
 	err error,
 ) bool {
 	return errors.Is(
@@ -1436,14 +1456,14 @@ func implIsExpectedForgetErr(
 		)
 }
 
-func implCheckForgetErr(
+func checkForgetErr(
 	t *testing.T,
 	err error,
 ) {
 	t.Helper()
 
 	if err == nil ||
-		implIsExpectedForgetErr(err) {
+		isExpectedForgetErr(err) {
 		return
 	}
 
@@ -1475,7 +1495,7 @@ func TestForget_ConcurrentForget_SecondReturnsErrValidation(
 	)
 	for i := range 2 {
 		wg.Add(1)
-		go implForgetInto(
+		go forgetInto(
 			ctx,
 			instance,
 			&wg,
@@ -1486,7 +1506,7 @@ func TestForget_ConcurrentForget_SecondReturnsErrValidation(
 	wg.Wait()
 
 	for _, err := range errs {
-		implCheckForgetErr(
+		checkForgetErr(
 			t,
 			err,
 		)
@@ -1671,7 +1691,7 @@ func TestSubscribeWait_ContextCancel_ReturnsCanceled(
 	}
 }
 
-func implWaitInto(
+func waitInto(
 	ctx context.Context,
 	instance asynx.Asynx[mocks.Order],
 	wg *sync.WaitGroup,
@@ -1686,20 +1706,20 @@ func implWaitInto(
 	)
 }
 
-func implCancelCmd(
+func cancelCmd(
 	id string,
 ) models.Command[mocks.Order] {
 	return mocks.CancelOrderCmd{ID: id}
 }
 
-func implRequireNoErrs(
+func requireNoErrs(
 	t *testing.T,
 	errs []error,
 ) {
 	t.Helper()
 
 	for i, err := range errs {
-		implRequireNoErr(
+		requireNoErr(
 			t,
 			err,
 			fmt.Sprintf(
@@ -1732,7 +1752,7 @@ func TestSubscribeWait_ConcurrentDifferentPatterns(
 	)
 
 	wg.Add(2)
-	go implWaitInto(
+	go waitInto(
 		ctx,
 		instance,
 		&wg,
@@ -1740,7 +1760,7 @@ func TestSubscribeWait_ConcurrentDifferentPatterns(
 		&results[0],
 		&errs[0],
 	)
-	go implWaitInto(
+	go waitInto(
 		ctx,
 		instance,
 		&wg,
@@ -1752,13 +1772,13 @@ func TestSubscribeWait_ConcurrentDifferentPatterns(
 	stop := feedOrders(
 		instance,
 		"conc",
-		implCancelCmd,
+		cancelCmd,
 	)
 	defer stop()
 
 	wg.Wait()
 
-	implRequireNoErrs(
+	requireNoErrs(
 		t,
 		errs,
 	)
@@ -1817,7 +1837,7 @@ func TestSubscribeWait_AutoUnsubscribes(
 	}
 }
 
-func implSendRace(
+func sendRace(
 	instance asynx.Asynx[mocks.Order],
 	wg *sync.WaitGroup,
 	iter int,
@@ -1838,7 +1858,7 @@ func implSendRace(
 	)
 }
 
-func implNoRaceIteration(
+func noRaceIteration(
 	t *testing.T,
 	iter int,
 ) {
@@ -1850,7 +1870,7 @@ func implNoRaceIteration(
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
-		go implSendRace(
+		go sendRace(
 			instance,
 			&wg,
 			iter,
@@ -1870,14 +1890,14 @@ func TestWaitPublish_NoRaceWithConcurrentDispatch(
 	t *testing.T,
 ) {
 	for iter := 0; iter < 100; iter++ {
-		implNoRaceIteration(
+		noRaceIteration(
 			t,
 			iter,
 		)
 	}
 }
 
-func implDelayedUpdate(
+func delayedUpdate(
 	ctx context.Context,
 	instance asynx.Asynx[mocks.Order],
 	id string,
@@ -1894,34 +1914,34 @@ func implDelayedUpdate(
 	)
 }
 
-type implReaction struct {
+type reactingHandler struct {
 	instance asynx.Asynx[mocks.Order]
 	started  atomic.Int32
 	finished atomic.Int32
 }
 
-func (r *implReaction) handle(
+func (r *reactingHandler) handle(
 	ctx context.Context,
 	evt models.Event[mocks.Order],
 ) {
 	r.started.Store(1)
 	defer r.finished.Store(1)
 
-	go implDelayedUpdate(
+	go delayedUpdate(
 		ctx,
 		r.instance,
 		evt.AggregateID,
 	)
 }
 
-func implReactionIteration(
+func reactionIteration(
 	t *testing.T,
 	iter int,
 ) {
 	t.Helper()
 
 	instance := newInstance(t)
-	reaction := &implReaction{instance: instance}
+	reaction := &reactingHandler{instance: instance}
 
 	handlerID, err := instance.Subscribe(
 		"OrderCreated",
@@ -1975,7 +1995,7 @@ func TestWaitPublish_RaceWithAsyncReactionGoroutines(
 	t *testing.T,
 ) {
 	for iter := 0; iter < 100; iter++ {
-		implReactionIteration(
+		reactionIteration(
 			t,
 			iter,
 		)
@@ -2035,7 +2055,7 @@ func equalVersions(
 	)
 }
 
-func implSendUpd(
+func sendUpd(
 	t *testing.T,
 	inst asynx.Asynx[mocks.Order],
 	id string,
@@ -2055,7 +2075,7 @@ func implSendUpd(
 	}
 }
 
-func implShutdownOrFatal(
+func shutdownOrFatal(
 	t *testing.T,
 	inst asynx.Asynx[mocks.Order],
 	what string,
@@ -2078,7 +2098,7 @@ func implShutdownOrFatal(
 	}
 }
 
-func implRecordVersions(
+func recordVersions(
 	v *versions,
 ) func(context.Context, models.Event[mocks.Order]) error {
 	return func(
@@ -2090,12 +2110,12 @@ func implRecordVersions(
 	}
 }
 
-type implFailFirst struct {
+type failFirst struct {
 	seen      *versions
 	attempted chan<- struct{}
 }
 
-func (f implFailFirst) handle(
+func (f failFirst) handle(
 	_ context.Context,
 	e models.Event[mocks.Order],
 ) error {
@@ -2126,14 +2146,14 @@ func TestFailure_ShutdownDuringRetryKeepsVersionOrderAcrossRestart(
 		).
 		WithSubscriber(
 			"OrderUpdated",
-			implFailFirst{seen: &seen, attempted: attempted}.handle,
+			failFirst{seen: &seen, attempted: attempted}.handle,
 		).Build()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	for i := range 2 {
-		implSendUpd(
+		sendUpd(
 			t,
 			first,
 			"agg",
@@ -2147,7 +2167,7 @@ func TestFailure_ShutdownDuringRetryKeepsVersionOrderAcrossRestart(
 		"first attempt",
 	)
 
-	implShutdownOrFatal(
+	shutdownOrFatal(
 		t,
 		first,
 		"Shutdown with a retrying delivery",
@@ -2181,7 +2201,7 @@ func TestFailure_ShutdownDuringRetryKeepsVersionOrderAcrossRestart(
 		t,
 		eight(s).WithSubscriber(
 			"OrderUpdated",
-			implRecordVersions(&after),
+			recordVersions(&after),
 		),
 	)
 	waitPublish(
@@ -2199,11 +2219,11 @@ func TestFailure_ShutdownDuringRetryKeepsVersionOrderAcrossRestart(
 	}
 }
 
-type implPoisonBad struct {
+type poisonBad struct {
 	attempted chan<- struct{}
 }
 
-func (p implPoisonBad) handle(
+func (p poisonBad) handle(
 	_ context.Context,
 	e models.Event[mocks.Order],
 ) error {
@@ -2219,7 +2239,7 @@ func (p implPoisonBad) handle(
 	return nil
 }
 
-func implSendWaitInto(
+func sendWaitIntoChannel(
 	ctx context.Context,
 	inst asynx.Asynx[mocks.Order],
 	dst chan<- error,
@@ -2232,13 +2252,13 @@ func implSendWaitInto(
 	dst <- err
 }
 
-type implCommitWatch struct {
+type commitWatch struct {
 	t      *testing.T
 	waited <-chan error
 	s      store.Memory
 }
 
-func (w implCommitWatch) committed() bool {
+func (w commitWatch) committed() bool {
 	select {
 	case err := <-w.waited:
 		w.t.Fatalf(
@@ -2277,14 +2297,14 @@ func TestFailure_PoisonEventDoesNotBlockTheShardOrShutdown(
 		).
 		WithSubscriber(
 			"OrderUpdated",
-			implPoisonBad{attempted: attempted}.handle,
+			poisonBad{attempted: attempted}.handle,
 		).
 		Build()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	implSendUpd(
+	sendUpd(
 		t,
 		inst,
 		"bad",
@@ -2302,7 +2322,7 @@ func TestFailure_PoisonEventDoesNotBlockTheShardOrShutdown(
 		chan error,
 		1,
 	)
-	go implSendWaitInto(
+	go sendWaitIntoChannel(
 		wctx,
 		inst,
 		waited,
@@ -2314,7 +2334,7 @@ func TestFailure_PoisonEventDoesNotBlockTheShardOrShutdown(
 	eventually(
 		t,
 		"the second command to commit",
-		implCommitWatch{t: t, waited: waited, s: s}.committed,
+		commitWatch{t: t, waited: waited, s: s}.committed,
 	)
 	cancelWait()
 	if err := within(
@@ -2366,7 +2386,7 @@ func TestFailure_PoisonEventDoesNotBlockTheShardOrShutdown(
 		t.Fatal("poisoned aggregate survived Forget")
 	}
 
-	implSendUpd(
+	sendUpd(
 		t,
 		inst,
 		"bad2",
@@ -2378,26 +2398,26 @@ func TestFailure_PoisonEventDoesNotBlockTheShardOrShutdown(
 		attempted,
 		"second poison attempt",
 	)
-	implShutdownOrFatal(
+	shutdownOrFatal(
 		t,
 		inst,
 		"Shutdown with a poison delivery",
 	)
 }
 
-type implSwitchable struct {
+type switchable struct {
 	mu      sync.Mutex
 	healthy bool
 	seen    versions
 }
 
-func (h *implSwitchable) setHealthy() {
+func (h *switchable) setHealthy() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.healthy = true
 }
 
-func (h *implSwitchable) isDown(
+func (h *switchable) isDown(
 	id string,
 ) bool {
 	h.mu.Lock()
@@ -2406,7 +2426,7 @@ func (h *implSwitchable) isDown(
 	return !h.healthy && id == "bad"
 }
 
-func (h *implSwitchable) handle(
+func (h *switchable) handle(
 	_ context.Context,
 	e models.Event[mocks.Order],
 ) error {
@@ -2421,11 +2441,11 @@ func (h *implSwitchable) handle(
 	return nil
 }
 
-type implParkReporter struct {
+type parkReporter struct {
 	parked chan<- error
 }
 
-func (r implParkReporter) handle(
+func (r parkReporter) handle(
 	_ context.Context,
 	_ models.Event[mocks.Order],
 	err error,
@@ -2439,7 +2459,7 @@ func (r implParkReporter) handle(
 	}
 }
 
-func implNotAggregate(
+func notAggregate(
 	id string,
 ) func(models.Delivery) bool {
 	return func(
@@ -2449,13 +2469,13 @@ func implNotAggregate(
 	}
 }
 
-func implCountPending(
+func countPending(
 	pending []models.Delivery,
 	id string,
 ) int {
 	return len(slices.DeleteFunc(
 		slices.Clone(pending),
-		implNotAggregate(id),
+		notAggregate(id),
 	))
 }
 
@@ -2465,7 +2485,7 @@ func TestFailure_RetriesStopAndTheAggregateIsParkedUntilResumed(
 	s := store.New()
 	ctx := context.Background()
 
-	handler := &implSwitchable{}
+	handler := &switchable{}
 	parked := make(
 		chan error,
 		8,
@@ -2478,7 +2498,7 @@ func TestFailure_RetriesStopAndTheAggregateIsParkedUntilResumed(
 				2*time.Millisecond,
 			).
 			WithDeliveryMaxAttempts(3).
-			WithDeliveryErrorHandler(implParkReporter{parked: parked}.handle).
+			WithDeliveryErrorHandler(parkReporter{parked: parked}.handle).
 			WithSubscriber(
 				"OrderUpdated",
 				handler.handle,
@@ -2486,7 +2506,7 @@ func TestFailure_RetriesStopAndTheAggregateIsParkedUntilResumed(
 	)
 
 	for i := range 2 {
-		implSendUpd(
+		sendUpd(
 			t,
 			inst,
 			"bad",
@@ -2552,7 +2572,7 @@ func TestFailure_RetriesStopAndTheAggregateIsParkedUntilResumed(
 		ctx,
 		10,
 	)
-	nBad := implCountPending(
+	nBad := countPending(
 		pending,
 		"bad",
 	)
@@ -2597,11 +2617,11 @@ func TestFailure_RetriesStopAndTheAggregateIsParkedUntilResumed(
 	}
 }
 
-type implDeadSink struct {
+type deadSink struct {
 	dead chan<- int64
 }
 
-func (d implDeadSink) handle(
+func (d deadSink) handle(
 	_ context.Context,
 	e models.Event[mocks.Order],
 	_ error,
@@ -2610,11 +2630,11 @@ func (d implDeadSink) handle(
 	return nil
 }
 
-type implPoisonFirst struct {
+type poisonFirst struct {
 	seen *versions
 }
 
-func (p implPoisonFirst) handle(
+func (p poisonFirst) handle(
 	_ context.Context,
 	e models.Event[mocks.Order],
 ) error {
@@ -2642,14 +2662,14 @@ func TestFailure_DeadLetterSkipsThePoisonEvent(
 				2*time.Millisecond,
 			).
 			WithDeliveryMaxAttempts(2).
-			WithDeadLetterHandler(implDeadSink{dead: dead}.handle).
+			WithDeadLetterHandler(deadSink{dead: dead}.handle).
 			WithSubscriber(
 				"OrderUpdated",
-				implPoisonFirst{seen: &seen}.handle,
+				poisonFirst{seen: &seen}.handle,
 			),
 	)
 	for i := range 3 {
-		implSendUpd(
+		sendUpd(
 			t,
 			inst,
 			"agg",
@@ -2823,30 +2843,30 @@ func TestFailure_CommandsAreRejectedWhileForgetRuns(
 	}
 }
 
-type implKey struct {
+type versionKey struct {
 	id string
 	v  int64
 }
 
-func implKeyIs(
+func keyIs(
 	id string,
-) func(implKey, bool) bool {
+) func(versionKey, bool) bool {
 	return func(
-		k implKey,
+		k versionKey,
 		_ bool,
 	) bool {
 		return k.id == id
 	}
 }
 
-type implMarkerTracker struct {
+type markerTracker struct {
 	mu      sync.Mutex
-	seen    map[implKey]bool
+	seen    map[versionKey]bool
 	applied []int64
 	markers int
 }
 
-func (m *implMarkerTracker) handle(
+func (m *markerTracker) handle(
 	_ context.Context,
 	e models.Event[mocks.Order],
 ) error {
@@ -2856,13 +2876,13 @@ func (m *implMarkerTracker) handle(
 		m.markers++
 		maps.DeleteFunc(
 			m.seen,
-			implKeyIs(e.AggregateID),
+			keyIs(e.AggregateID),
 		)
 
 		return nil
 	}
 
-	k := implKey{e.AggregateID, e.Version}
+	k := versionKey{e.AggregateID, e.Version}
 	if m.seen[k] {
 		return nil
 	}
@@ -2875,7 +2895,7 @@ func (m *implMarkerTracker) handle(
 	return nil
 }
 
-func implSendWaitUpd(
+func sendWaitUpd(
 	t *testing.T,
 	inst asynx.Asynx[mocks.Order],
 	id string,
@@ -2899,7 +2919,7 @@ func TestFailure_DurableSubscribersReceiveTheDeletionMarker(
 	t *testing.T,
 ) {
 	ctx := context.Background()
-	tracker := &implMarkerTracker{seen: map[implKey]bool{}}
+	tracker := &markerTracker{seen: map[versionKey]bool{}}
 
 	inst := build(
 		t,
@@ -2910,7 +2930,7 @@ func TestFailure_DurableSubscribersReceiveTheDeletionMarker(
 			),
 	)
 
-	implSendWaitUpd(
+	sendWaitUpd(
 		t,
 		inst,
 		"agg",
@@ -2924,7 +2944,7 @@ func TestFailure_DurableSubscribersReceiveTheDeletionMarker(
 		t.Fatal(err)
 	}
 
-	implSendWaitUpd(
+	sendWaitUpd(
 		t,
 		inst,
 		"agg",
@@ -2956,18 +2976,18 @@ func TestFailure_DurableSubscribersReceiveTheDeletionMarker(
 	}
 }
 
-type implMarkerGate struct {
+type markerGate struct {
 	mu      sync.Mutex
 	healthy bool
 }
 
-func (g *implMarkerGate) setHealthy() {
+func (g *markerGate) setHealthy() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.healthy = true
 }
 
-func (g *implMarkerGate) handle(
+func (g *markerGate) handle(
 	_ context.Context,
 	e models.Event[mocks.Order],
 ) error {
@@ -2985,7 +3005,7 @@ func TestFailure_ForgetFailsWhenADurableSubscriberCannotTakeTheMarker(
 	t *testing.T,
 ) {
 	ctx := context.Background()
-	gate := &implMarkerGate{}
+	gate := &markerGate{}
 	inst := build(
 		t,
 		eight(store.New()).
@@ -2999,7 +3019,7 @@ func TestFailure_ForgetFailsWhenADurableSubscriberCannotTakeTheMarker(
 				gate.handle,
 			),
 	)
-	implSendWaitUpd(
+	sendWaitUpd(
 		t,
 		inst,
 		"agg",
@@ -3064,11 +3084,11 @@ func (failingLiveBus) PublishSync(
 	return errors.New("live bus down")
 }
 
-type implErrSink struct {
+type errSink struct {
 	reported chan<- error
 }
 
-func (s implErrSink) handle(
+func (s errSink) handle(
 	_ context.Context,
 	_ models.Event[mocks.Order],
 	err error,
@@ -3090,14 +3110,14 @@ func TestFailure_LiveBusErrorDoesNotSkipDurableDelivery(
 		t,
 		eight(s).
 			WithBus(failingLiveBus{bus.New[mocks.Order]()}).
-			WithPublishErrorHandler(implErrSink{reported: reported}.handle).
+			WithPublishErrorHandler(errSink{reported: reported}.handle).
 			WithSubscriber(
 				"OrderUpdated",
-				implRecordVersions(&seen),
+				recordVersions(&seen),
 			),
 	)
 	for i := range 3 {
-		implSendWaitUpd(
+		sendWaitUpd(
 			t,
 			inst,
 			"agg",
@@ -3136,13 +3156,13 @@ func TestFailure_LiveBusErrorDoesNotSkipDurableDelivery(
 	)
 }
 
-type implDeliveryLog struct {
+type deliveryLog struct {
 	mu        sync.Mutex
 	healthy   bool
 	delivered []string
 }
 
-func (l *implDeliveryLog) handle(
+func (l *deliveryLog) handle(
 	_ context.Context,
 	e models.Event[mocks.Order],
 ) error {
@@ -3163,13 +3183,13 @@ func (l *implDeliveryLog) handle(
 	return nil
 }
 
-func (l *implDeliveryLog) setHealthy() {
+func (l *deliveryLog) setHealthy() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.healthy = true
 }
 
-func (l *implDeliveryLog) list() []string {
+func (l *deliveryLog) list() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -3181,7 +3201,7 @@ func TestFailure_FailedForgetDoesNotLetLaterEventsOvertakeTheMarker(
 ) {
 	s := store.New()
 	ctx := context.Background()
-	log := &implDeliveryLog{}
+	log := &deliveryLog{}
 	inst := build(
 		t,
 		eight(s).
@@ -3196,7 +3216,7 @@ func TestFailure_FailedForgetDoesNotLetLaterEventsOvertakeTheMarker(
 			),
 	)
 
-	implSendUpd(
+	sendUpd(
 		t,
 		inst,
 		"agg",
@@ -3294,18 +3314,18 @@ func TestFailure_FailedForgetDoesNotLetLaterEventsOvertakeTheMarker(
 	}
 }
 
-type implHealthGate struct {
+type healthGate struct {
 	mu      sync.Mutex
 	healthy bool
 }
 
-func (g *implHealthGate) setHealthy() {
+func (g *healthGate) setHealthy() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.healthy = true
 }
 
-func (g *implHealthGate) handle(
+func (g *healthGate) handle(
 	context.Context,
 	models.Event[mocks.Order],
 ) error {
@@ -3318,7 +3338,7 @@ func (g *implHealthGate) handle(
 	return nil
 }
 
-func implRecordLive(
+func recordLive(
 	v *versions,
 ) func(context.Context, models.Event[mocks.Order]) {
 	return func(
@@ -3329,16 +3349,16 @@ func implRecordLive(
 	}
 }
 
-type implPausedCount struct {
+type pausedCount struct {
 	inst asynx.Asynx[mocks.Order]
 	want int
 }
 
-func (p implPausedCount) reached() bool {
+func (p pausedCount) reached() bool {
 	return len(p.inst.PausedAggregates()) == p.want
 }
 
-func implSubscribeOrFatal(
+func subscribeOrFatal(
 	t *testing.T,
 	inst asynx.Asynx[mocks.Order],
 	pattern string,
@@ -3360,7 +3380,7 @@ func TestFailure_ResumeDoesNotReplayLiveSubscribers(
 ) {
 	s := store.New()
 	ctx := context.Background()
-	gate := &implHealthGate{}
+	gate := &healthGate{}
 	var live, cancelled versions
 	inst := build(
 		t,
@@ -3375,20 +3395,20 @@ func TestFailure_ResumeDoesNotReplayLiveSubscribers(
 				gate.handle,
 			),
 	)
-	implSubscribeOrFatal(
+	subscribeOrFatal(
 		t,
 		inst,
 		"OrderUpdated",
-		implRecordLive(&live),
+		recordLive(&live),
 	)
-	implSubscribeOrFatal(
+	subscribeOrFatal(
 		t,
 		inst,
 		"OrderCancelled",
-		implRecordLive(&cancelled),
+		recordLive(&cancelled),
 	)
 
-	implSendUpd(
+	sendUpd(
 		t,
 		inst,
 		"agg",
@@ -3398,7 +3418,7 @@ func TestFailure_ResumeDoesNotReplayLiveSubscribers(
 	eventually(
 		t,
 		"aggregate paused",
-		implPausedCount{inst: inst, want: 1}.reached,
+		pausedCount{inst: inst, want: 1}.reached,
 	)
 	if _, err := inst.SendWait(
 		ctx,
@@ -3456,12 +3476,12 @@ func TestFailure_ResumeDoesNotReplayLiveSubscribers(
 	}
 }
 
-type implSelfForget struct {
+type selfForget struct {
 	inst asynx.Asynx[mocks.Order]
 	got  chan<- error
 }
 
-func (h *implSelfForget) handle(
+func (h *selfForget) handle(
 	ctx context.Context,
 	e models.Event[mocks.Order],
 ) error {
@@ -3479,7 +3499,7 @@ func TestFailure_HandlerForgettingItsOwnAggregateFailsFast(
 		chan error,
 		1,
 	)
-	handler := &implSelfForget{got: got}
+	handler := &selfForget{got: got}
 	inst := build(
 		t,
 		eight(store.New()).
@@ -3489,7 +3509,7 @@ func TestFailure_HandlerForgettingItsOwnAggregateFailsFast(
 			),
 	)
 	handler.inst = inst
-	implSendWaitUpd(
+	sendWaitUpd(
 		t,
 		inst,
 		"agg",
@@ -3523,14 +3543,14 @@ func TestFailure_HandlerForgettingItsOwnAggregateFailsFast(
 		)
 	}
 
-	implShutdownOrFatal(
+	shutdownOrFatal(
 		t,
 		inst,
 		"Shutdown",
 	)
 }
 
-func implAlwaysDown(
+func alwaysDown(
 	context.Context,
 	models.Event[mocks.Order],
 ) error {
@@ -3552,10 +3572,10 @@ func TestFailure_RestartAfterAFailedForgetDeliversTheMarkerFirst(
 			WithDeliveryMaxAttempts(2).
 			WithSubscriber(
 				"OrderUpdated",
-				implAlwaysDown,
+				alwaysDown,
 			),
 	)
-	implSendUpd(
+	sendUpd(
 		t,
 		down,
 		"agg",
@@ -3591,13 +3611,13 @@ func TestFailure_RestartAfterAFailedForgetDeliversTheMarkerFirst(
 		)
 	}
 
-	implShutdownOrFatal(
+	shutdownOrFatal(
 		t,
 		down,
 		"Shutdown",
 	)
 
-	log := &implDeliveryLog{healthy: true}
+	log := &deliveryLog{healthy: true}
 	up := build(
 		t,
 		eight(s).
@@ -3731,7 +3751,7 @@ func (s *blockingSnapshots) Put(
 	)
 }
 
-func implIdentityUpcaster(
+func identityUpcaster(
 	_ context.Context,
 	_ string,
 	p []byte,
@@ -3740,7 +3760,7 @@ func implIdentityUpcaster(
 		nil
 }
 
-func implGetInto(
+func getInto(
 	ctx context.Context,
 	inst asynx.Asynx[mocks.Order],
 	id string,
@@ -3753,7 +3773,7 @@ func implGetInto(
 	dst <- err
 }
 
-func implForgetTo(
+func forgetTo(
 	ctx context.Context,
 	inst asynx.Asynx[mocks.Order],
 	id string,
@@ -3765,7 +3785,7 @@ func implForgetTo(
 	)
 }
 
-func implSendWaitCmd(
+func sendWaitCmd(
 	t *testing.T,
 	inst asynx.Asynx[mocks.Order],
 	cmd models.Command[mocks.Order],
@@ -3794,7 +3814,7 @@ func TestGet_AutoSnapshotCannotResurrectAForgottenAggregate(
 		"ws",
 		20,
 	)} {
-		implSendWaitCmd(
+		sendWaitCmd(
 			t,
 			old,
 			cmd,
@@ -3812,7 +3832,7 @@ func TestGet_AutoSnapshotCannotResurrectAForgottenAggregate(
 			WithSchemaVersion(2).
 			WithUpcaster(
 				1,
-				implIdentityUpcaster,
+				identityUpcaster,
 			),
 	)
 	snaps.armed.Store(true)
@@ -3820,7 +3840,7 @@ func TestGet_AutoSnapshotCannotResurrectAForgottenAggregate(
 		chan error,
 		1,
 	)
-	go implGetInto(
+	go getInto(
 		ctx,
 		inst,
 		"ws",
@@ -3836,7 +3856,7 @@ func TestGet_AutoSnapshotCannotResurrectAForgottenAggregate(
 		chan error,
 		1,
 	)
-	go implForgetTo(
+	go forgetTo(
 		ctx,
 		inst,
 		"ws",
@@ -3902,13 +3922,13 @@ func TestGet_AutoSnapshotCannotResurrectAForgottenAggregate(
 	}
 }
 
-type implBlocker struct {
+type blockingHandler struct {
 	entered  chan struct{}
 	release  chan struct{}
 	finished atomic.Bool
 }
 
-func (b *implBlocker) handle(
+func (b *blockingHandler) handle(
 	context.Context,
 	models.Event[mocks.Order],
 ) {
@@ -3925,7 +3945,7 @@ func TestSendWait_RetryOfAnIdempotentCommandWaitsForTheOriginalHandlers(
 		t,
 		eight(store.New()),
 	)
-	blocker := &implBlocker{
+	blocker := &blockingHandler{
 		entered: make(
 			chan struct{},
 			1,
@@ -3971,7 +3991,7 @@ func TestSendWait_RetryOfAnIdempotentCommandWaitsForTheOriginalHandlers(
 		chan error,
 		1,
 	)
-	go implSendWaitInto(
+	go sendWaitIntoChannel(
 		ctx,
 		inst,
 		retried,
@@ -4003,12 +4023,12 @@ func TestSendWait_RetryOfAnIdempotentCommandWaitsForTheOriginalHandlers(
 	}
 }
 
-type implBgForget struct {
+type bgForget struct {
 	inst asynx.Asynx[mocks.Order]
 	out  chan<- error
 }
 
-func (h *implBgForget) handle(
+func (h *bgForget) handle(
 	_ context.Context,
 	e models.Event[mocks.Order],
 ) error {
@@ -4019,7 +4039,7 @@ func (h *implBgForget) handle(
 	return nil
 }
 
-func implBoundedShutdown(
+func boundedShutdown(
 	inst asynx.Asynx[mocks.Order],
 ) {
 	bounded, cancel := context.WithTimeout(
@@ -4030,11 +4050,11 @@ func implBoundedShutdown(
 	inst.Shutdown(bounded)
 }
 
-type implFenceProbe struct {
+type fenceProbe struct {
 	inst asynx.Asynx[mocks.Order]
 }
 
-func (p implFenceProbe) raised() bool {
+func (p fenceProbe) raised() bool {
 	_, err := p.inst.Send(
 		context.Background(),
 		upd(
@@ -4056,7 +4076,7 @@ func TestShutdown_ReleasesAHandlerWaitingOnItsOwnAggregatesForget(
 		chan error,
 		1,
 	)
-	handler := &implBgForget{out: forgetResult}
+	handler := &bgForget{out: forgetResult}
 	inst, err := eight(store.New()).
 		WithSubscriber(
 			"OrderCreated",
@@ -4067,7 +4087,7 @@ func TestShutdown_ReleasesAHandlerWaitingOnItsOwnAggregatesForget(
 	}
 
 	handler.inst = inst
-	t.Cleanup(func() { implBoundedShutdown(inst) })
+	t.Cleanup(func() { boundedShutdown(inst) })
 	if _, err := inst.Send(
 		ctx,
 		mocks.CreateOrderCmd{ID: "agg", Total: 1},
@@ -4078,10 +4098,10 @@ func TestShutdown_ReleasesAHandlerWaitingOnItsOwnAggregatesForget(
 	eventually(
 		t,
 		"the Forget to raise its fence",
-		implFenceProbe{inst: inst}.raised,
+		fenceProbe{inst: inst}.raised,
 	)
 
-	implShutdownOrFatal(
+	shutdownOrFatal(
 		t,
 		inst,
 		"Shutdown",
@@ -4107,11 +4127,11 @@ func TestShutdown_ReleasesAHandlerWaitingOnItsOwnAggregatesForget(
 	}
 }
 
-type implErrDeadSink struct {
+type errDeadSink struct {
 	got chan<- error
 }
 
-func (d implErrDeadSink) handle(
+func (d errDeadSink) handle(
 	_ context.Context,
 	_ models.Event[mocks.Order],
 	err error,
@@ -4120,7 +4140,7 @@ func (d implErrDeadSink) handle(
 	return nil
 }
 
-func implFailWith(
+func failWith(
 	err error,
 ) func(context.Context, models.Event[mocks.Order]) error {
 	return func(
@@ -4147,17 +4167,17 @@ func TestFailure_DeadLetterLearnsEverySubscriberThatFailed(
 				time.Millisecond,
 				time.Millisecond,
 			).
-			WithDeadLetterHandler(implErrDeadSink{got: got}.handle).
+			WithDeadLetterHandler(errDeadSink{got: got}.handle).
 			WithSubscriber(
 				"OrderUpdated",
-				implFailWith(billing),
+				failWith(billing),
 			).
 			WithSubscriber(
 				"OrderUpdated",
-				implFailWith(search),
+				failWith(search),
 			),
 	)
-	implSendUpd(
+	sendUpd(
 		t,
 		inst,
 		"agg",
@@ -4206,11 +4226,11 @@ func TestFailure_DeadLetterLearnsEverySubscriberThatFailed(
 	}
 }
 
-type implDownFromV2 struct {
+type downFromV2 struct {
 	down atomic.Bool
 }
 
-func (d *implDownFromV2) handle(
+func (d *downFromV2) handle(
 	_ context.Context,
 	e models.Event[mocks.Order],
 ) error {
@@ -4226,7 +4246,7 @@ func TestSendWait_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWasTold(
 	t *testing.T,
 ) {
 	ctx := context.Background()
-	handler := &implDownFromV2{}
+	handler := &downFromV2{}
 	handler.down.Store(true)
 	inst := build(
 		t,
@@ -4269,7 +4289,7 @@ func TestSendWait_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWasTold(
 	eventually(
 		t,
 		"the aggregate to park",
-		implPausedCount{inst: inst, want: 1}.reached,
+		pausedCount{inst: inst, want: 1}.reached,
 	)
 	if _, err := inst.SendWait(
 		ctx,
@@ -4370,12 +4390,12 @@ func BenchmarkSend_SingleSerial(
 	}
 }
 
-type implBenchDifferent struct {
+type benchDifferent struct {
 	instance asynx.Asynx[mocks.Order]
 	n        int
 }
 
-func (d implBenchDifferent) run(
+func (d benchDifferent) run(
 	pb *testing.PB,
 ) {
 	i := 0
@@ -4400,14 +4420,14 @@ func BenchmarkSend_Parallel_DifferentAggregates(
 	instance := newBenchInstance(b)
 	b.ResetTimer()
 
-	b.RunParallel(implBenchDifferent{instance: instance, n: b.N}.run)
+	b.RunParallel(benchDifferent{instance: instance, n: b.N}.run)
 }
 
-type implBenchSame struct {
+type benchSame struct {
 	instance asynx.Asynx[mocks.Order]
 }
 
-func (s implBenchSame) run(
+func (s benchSame) run(
 	pb *testing.PB,
 ) {
 	for pb.Next() {
@@ -4428,7 +4448,7 @@ func BenchmarkSend_Parallel_SameAggregate(
 	instance := newBenchInstance(b)
 	b.ResetTimer()
 
-	b.RunParallel(implBenchSame{instance: instance}.run)
+	b.RunParallel(benchSame{instance: instance}.run)
 }
 
 func BenchmarkGet_WarmPath(
@@ -4551,7 +4571,7 @@ func BenchmarkPublish_FiveHandlers(
 		ids[i] = id
 	}
 
-	defer implUnsubscribeAll(
+	defer unsubscribeAll(
 		instance,
 		ids,
 	)
@@ -4616,7 +4636,7 @@ func BenchmarkShutdown_NoInFlight(
 	}
 }
 
-func implSpawnSends(
+func spawnSends(
 	instance asynx.Asynx[mocks.Order],
 	n int,
 ) {
@@ -4639,7 +4659,7 @@ func BenchmarkShutdown_WithInFlight(
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		instance := newBenchInstance(b)
-		implSpawnSends(
+		spawnSends(
 			instance,
 			100,
 		)
@@ -4711,12 +4731,12 @@ func BenchmarkAllocations_Get(
 	}
 }
 
-type implCancelCounter struct {
+type cancelCounter struct {
 	mu        sync.Mutex
 	successes int
 }
 
-func (c *implCancelCounter) attempt(
+func (c *cancelCounter) attempt(
 	ctx context.Context,
 	instance asynx.Asynx[mocks.Order],
 	start <-chan struct{},
@@ -4771,7 +4791,7 @@ func countConcurrentCancelSuccesses(
 
 	var (
 		wg      sync.WaitGroup
-		counter = &implCancelCounter{}
+		counter = &cancelCounter{}
 		start   = make(chan struct{})
 	)
 	for i := 0; i < attempts; i++ {
@@ -4793,7 +4813,7 @@ func countConcurrentCancelSuccesses(
 	return counter.successes
 }
 
-func implRequireOneCancel(
+func requireOneCancel(
 	t *testing.T,
 	workers int,
 ) {
@@ -4817,18 +4837,18 @@ func TestConcurrentCancel_AcceptsExactlyOne(
 	t *testing.T,
 ) {
 	for _, workers := range []int{1, 8} {
-		implRequireOneCancel(
+		requireOneCancel(
 			t,
 			workers,
 		)
 	}
 }
 
-type implFailBad struct {
+type failBad struct {
 	err error
 }
 
-func (f implFailBad) handle(
+func (f failBad) handle(
 	_ context.Context,
 	e models.Event[mocks.Order],
 ) error {
@@ -4856,14 +4876,14 @@ func TestAsynx_InspectDelivery_ShowsWhyAnAggregateIsParked(
 				2*time.Millisecond,
 			).
 			WithDeliveryMaxAttempts(3).
-			WithDeliveryErrorHandler(implParkReporter{parked: parked}.handle).
+			WithDeliveryErrorHandler(parkReporter{parked: parked}.handle).
 			WithSubscriber(
 				"OrderUpdated",
-				implFailBad{err: readModelDown}.handle,
+				failBad{err: readModelDown}.handle,
 			),
 	)
 
-	implSendUpd(
+	sendUpd(
 		t,
 		inst,
 		"bad",

@@ -11,7 +11,8 @@ import (
 )
 
 // WithSyncProjections registers projections that run, in order, inside the
-// transaction that appends each event.
+// transaction that appends each event; a failing projection aborts the
+// transaction and the command fails with ErrSyncProjection.
 func WithSyncProjections[T any](
 	p []models.SyncProjection[T],
 ) Opt[T] {
@@ -36,7 +37,9 @@ func WithDurableDelivery[T any](
 }
 
 // WithSnapshotErrorHandler sets the callback invoked when a post-commit
-// snapshot write fails. When nil, snapshot errors are dropped.
+// snapshot write fails. The command has already committed, so a snapshot error
+// never fails it. When nil, snapshot errors are dropped by design: the
+// aggregate is simply rebuilt from its stream next time.
 func WithSnapshotErrorHandler[T any](
 	fn func(context.Context, asynxmd.Event[T], error),
 ) Opt[T] {
@@ -48,7 +51,8 @@ func WithSnapshotErrorHandler[T any](
 }
 
 // New builds a CommandExecutor over the event store and the dispatcher, which
-// may be nil, applying opts.
+// may be nil (then events are committed but never delivered and Execute's wait
+// is nil), applying opts in order.
 func New[T any](
 	es eventstore.EventStore[T],
 	d asynxmd.Dispatcher[T],
@@ -62,7 +66,15 @@ func New[T any](
 	return e
 }
 
-// Execute runs the pipeline and returns once the event is committed and queued.
+// Execute runs the write pipeline under the aggregate's lock and returns once
+// the event is committed and queued for delivery; it does not wait for
+// handlers. It fails with ErrContextCancelled when ctx ends while waiting for
+// the lock, ErrForgetInProgress while the aggregate is being forgotten, a
+// validation error unchanged, or ErrPipelineFailed wrapping a storage or
+// delivery failure. When only the enqueue after the commit fails, the committed
+// event is returned together with the error and the aggregate is parked if its
+// event is durable. The processor calls it on the sender's goroutine when the
+// command's turn comes.
 func (e *CommandExecutor[T]) Execute(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
@@ -101,7 +113,8 @@ func (e *CommandExecutor[T]) ExecuteWait(
 }
 
 // ExecuteAsync runs the pipeline and returns once the event is committed and
-// queued. The returned Wait (nil when there is no dispatcher or the command was
+// queued, releasing the aggregate's lock before it returns so the wait never
+// holds it. The returned Wait (nil when there is no dispatcher or the command was
 // answered from a receipt) lets the caller, not a worker, do the waiting.
 func (e *CommandExecutor[T]) ExecuteAsync(
 	ctx context.Context,
@@ -139,7 +152,12 @@ func (e *CommandExecutor[T]) ExecuteAsync(
 	)
 }
 
-// WithLock runs fn holding the aggregate's command lock.
+// WithLock runs fn holding the aggregate's command lock, so fn is serialised
+// against commands, forgets and other WithLock sections of the same aggregate,
+// never against other aggregates. It returns ErrContextCancelled (wrapping the
+// context error) when ctx ends before the lock is taken, otherwise fn's error.
+// fn must not lock the same aggregate again: the lock is not reentrant. Resume
+// uses it to redeliver an aggregate without a live event overtaking.
 func (e *CommandExecutor[T]) WithLock(
 	ctx context.Context,
 	id string,
@@ -162,7 +180,10 @@ func (e *CommandExecutor[T]) WithLock(
 }
 
 // WithLockIfFree runs fn holding the aggregate's command lock, unless someone
-// holds it: then fn is not run and false is returned. It never waits.
+// holds it: then fn is not run and false is returned. It never waits, so it is
+// safe to call from code that may itself run inside a command (the event
+// store's automatic snapshots use it to skip a snapshot instead of blocking).
+// It reports whether fn ran.
 func (e *CommandExecutor[T]) WithLockIfFree(
 	id string,
 	fn func(),
@@ -375,7 +396,12 @@ func (e *CommandExecutor[T]) ackFor(
 	}
 }
 
-// CommandExecutor runs commands through the write pipeline under per-aggregate locks.
+// CommandExecutor runs commands through the write pipeline: it takes the
+// aggregate's lock, appends the event with its synchronous projections and
+// delivery entry in one transaction, snapshots when due and enqueues the event
+// on the dispatcher. It also implements Forget and the idempotency receipts.
+// All per-aggregate work, from any goroutine, is serialised by one keyed lock;
+// the executor is safe for concurrent use. Build it with New.
 type CommandExecutor[T any] struct {
 	es              eventstore.EventStore[T]
 	dispatcher      asynxmd.Dispatcher[T]

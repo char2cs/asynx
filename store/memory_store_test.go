@@ -49,12 +49,14 @@ func TestSetError_IsOneShot_SubsequentAppendSucceeds(
 		errors.New("once"),
 	)
 
-	s.Append(
+	if err := s.Append(
 		ctx,
 		"agg1",
 		1,
 		[]byte("x"),
-	)
+	); err == nil {
+		t.Fatal("the scheduled error was not returned by the next Append")
+	}
 
 	if err := s.Append(
 		ctx,
@@ -135,8 +137,9 @@ func TestAppend_StoresBlob(
 		)
 	}
 
-	blobs, _ := s.ReadFrom(
-		ctx,
+	blobs := readBlobsFrom(
+		t,
+		s,
 		"agg1",
 		1,
 	)
@@ -155,8 +158,9 @@ func TestAppend_DuplicateVersion_ReturnsErrPipelineFailed(
 	s := New()
 	ctx := context.Background()
 
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		1,
 		[]byte("first"),
@@ -214,7 +218,6 @@ func TestAppend_VersionsAreIndependentPerAggregate(
 	t *testing.T,
 ) {
 	s := New()
-	ctx := context.Background()
 
 	appendVersions(
 		t,
@@ -222,8 +225,9 @@ func TestAppend_VersionsAreIndependentPerAggregate(
 		3,
 	)
 
-	blobs, _ := s.ReadFrom(
-		ctx,
+	blobs := readBlobsFrom(
+		t,
+		s,
 		"agg1",
 		1,
 	)
@@ -241,20 +245,23 @@ func TestReadFrom_ReturnsAllBlobsFromVersion(
 	s := New()
 	ctx := context.Background()
 
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		1,
 		[]byte("v1"),
 	)
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		2,
 		[]byte("v2"),
 	)
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		3,
 		[]byte("v3"),
@@ -292,23 +299,25 @@ func TestReadFrom_FromZero_ReturnsAll(
 	t *testing.T,
 ) {
 	s := New()
-	ctx := context.Background()
 
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		1,
 		[]byte("v1"),
 	)
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		2,
 		[]byte("v2"),
 	)
 
-	blobs, _ := s.ReadFrom(
-		ctx,
+	blobs := readBlobsFrom(
+		t,
+		s,
 		"agg1",
 		0,
 	)
@@ -348,17 +357,18 @@ func TestReadFrom_VersionBeyondAll_ReturnsEmpty(
 	t *testing.T,
 ) {
 	s := New()
-	ctx := context.Background()
 
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		1,
 		[]byte("v1"),
 	)
 
-	blobs, _ := s.ReadFrom(
-		ctx,
+	blobs := readBlobsFrom(
+		t,
+		s,
 		"agg1",
 		99,
 	)
@@ -376,20 +386,23 @@ func TestReadRange_ReturnsUpToCount(
 	s := New()
 	ctx := context.Background()
 
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		1,
 		[]byte("v1"),
 	)
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		2,
 		[]byte("v2"),
 	)
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		3,
 		[]byte("v3"),
@@ -430,14 +443,16 @@ func TestReadRange_CountExceedsAvailable_ReturnsAll(
 	s := New()
 	ctx := context.Background()
 
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		1,
 		[]byte("v1"),
 	)
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		2,
 		[]byte("v2"),
@@ -468,29 +483,32 @@ func TestReadRange_FromMidRange(
 	t *testing.T,
 ) {
 	s := New()
-	ctx := context.Background()
 
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		1,
 		[]byte("v1"),
 	)
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		2,
 		[]byte("v2"),
 	)
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		3,
 		[]byte("v3"),
 	)
 
-	blobs, _ := s.ReadRange(
-		ctx,
+	blobs := readBlobsInRange(
+		t,
+		s,
 		"agg1",
 		2,
 		10,
@@ -541,8 +559,9 @@ func TestReadRange_CountZero_ReturnsEmpty(
 	s := New()
 	ctx := context.Background()
 
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		1,
 		[]byte("v1"),
@@ -575,20 +594,23 @@ func TestAppend_OutOfOrder_ReadsInVersionOrder(
 	s := New()
 	ctx := context.Background()
 
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		3,
 		[]byte("v3"),
 	)
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		1,
 		[]byte("v1"),
 	)
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		2,
 		[]byte("v2"),
@@ -686,6 +708,7 @@ func TestConcurrentAppend_UniqueVersions_AllSucceed(
 	for i := 1; i <= n; i++ {
 		wg.Add(1)
 		go appendAsync(
+			t,
 			&wg,
 			s,
 			int64(i),
@@ -754,6 +777,7 @@ func appendVersion(
 }
 
 func appendAsync(
+	t *testing.T,
 	wg *sync.WaitGroup,
 	s Memory,
 	version int64,
@@ -767,7 +791,11 @@ func appendAsync(
 		[]byte("data"),
 	)
 	if err != nil {
-		return
+		t.Errorf(
+			"Append agg1 v%d: %v",
+			version,
+			err,
+		)
 	}
 }
 
@@ -824,14 +852,16 @@ func TestDelete_RemovesAllEntries(
 	s := New()
 	ctx := context.Background()
 
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		1,
 		[]byte("v1"),
 	)
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		2,
 		[]byte("v2"),
@@ -888,23 +918,30 @@ func TestDelete_DoesNotAffectOtherAggregates(
 	s := New()
 	ctx := context.Background()
 
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg1",
 		1,
 		[]byte("v1"),
 	)
-	s.Append(
-		ctx,
+	mustAppendAt(
+		t,
+		s,
 		"agg2",
 		1,
 		[]byte("v2"),
 	)
 
-	s.Delete(
+	if err := s.Delete(
 		ctx,
 		"agg1",
-	)
+	); err != nil {
+		t.Fatalf(
+			"Delete: %v",
+			err,
+		)
+	}
 
 	blobs, err := s.ReadFrom(
 		ctx,
@@ -1087,11 +1124,17 @@ func TestGetReceipt_ReturnsWhatWasStored(
 		)
 	}
 
-	if _, found, _ := s.GetReceipt(
+	_, found, err = s.GetReceipt(
 		ctx,
 		"other",
-	); found {
-		t.Fatal("found a receipt that was never stored")
+	)
+	if err != nil ||
+		found {
+		t.Fatalf(
+			"GetReceipt(other) = %v, %v; want not found and no error",
+			found,
+			err,
+		)
 	}
 }
 
@@ -1143,15 +1186,95 @@ func TestAckDelivery_RemovesOnlyTheNamedEntry(
 		)
 	}
 
-	pending, _ := s.PendingDeliveries(
-		ctx,
-		10,
+	pending := pendingCount(
+		t,
+		s,
 	)
 	if len(pending) != 1 ||
 		pending[0].Version != 2 {
 		t.Fatalf(
 			"pending = %v, want only a v2",
 			pending,
+		)
+	}
+}
+
+func TestReadRange_NegativeCount_ReturnsEmptyInsteadOfPanicking(
+	t *testing.T,
+) {
+	s := New()
+	mustAppend(
+		t,
+		s,
+		"agg1",
+		"v1",
+	)
+
+	blobs := readBlobsInRange(
+		t,
+		s,
+		"agg1",
+		1,
+		-1,
+	)
+	if len(blobs) != 0 {
+		t.Errorf(
+			"expected empty for a negative count, got %d blobs",
+			len(blobs),
+		)
+	}
+}
+
+func TestPendingDeliveries_NonPositiveLimit_ReturnsNone(
+	t *testing.T,
+) {
+	s := New()
+	ctx := context.Background()
+	enqueue := func(
+		tx asynxmd.Tx,
+	) error {
+		return tx.EnqueueDelivery(
+			ctx,
+			"a",
+			1,
+		)
+	}
+	mustAtomically(
+		t,
+		s,
+		enqueue,
+	)
+
+	wantNoneListed(
+		t,
+		s,
+		0,
+	)
+	wantNoneListed(
+		t,
+		s,
+		-1,
+	)
+}
+
+func wantNoneListed(
+	t *testing.T,
+	s Memory,
+	limit int,
+) {
+	t.Helper()
+
+	pending, err := s.PendingDeliveries(
+		context.Background(),
+		limit,
+	)
+	if err != nil ||
+		len(pending) != 0 {
+		t.Errorf(
+			"PendingDeliveries(%d) = %v, %v; want none",
+			limit,
+			pending,
+			err,
 		)
 	}
 }

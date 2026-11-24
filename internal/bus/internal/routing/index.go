@@ -9,14 +9,22 @@ import (
 )
 
 // IsExactPattern reports whether pattern contains no regexp metacharacters,
-// i.e. it can be matched with a plain string equality check.
+// i.e. it can be matched with a plain string equality check. The empty pattern
+// is exact. The result decides which half of a PublishIndex a subscription is
+// stored in, so Subscribe and Unsubscribe must classify a pattern identically.
 func IsExactPattern(
 	pattern string,
 ) bool {
 	return regexp.QuoteMeta(pattern) == pattern
 }
 
-// IndexWith returns a new PublishIndex with sub added. The caller must hold subMu.
+// IndexWith returns a new PublishIndex with sub added; old is left untouched,
+// so readers still holding it keep a consistent view. Callers must serialise
+// IndexWith and IndexWithout (the bus does so with its subscription mutex),
+// otherwise concurrent updates built from the same old index lose one another.
+// An exact pattern is appended after its existing subscriptions, a regex
+// pattern after the existing regex subscriptions, so delivery order within a
+// pattern is registration order.
 //
 // For exact-match patterns this clones the entire ExactSubs map (O(n) in the
 // number of distinct patterns), which is the deliberate cost of keeping Publish
@@ -63,7 +71,10 @@ func IndexWith[T any](
 	return &models.PublishIndex[T]{ExactSubs: newExact, RegexSubs: old.RegexSubs}
 }
 
-// IndexWithout returns a new PublishIndex with sub removed. The caller must hold subMu.
+// IndexWithout returns a new PublishIndex with sub removed, matched by pointer
+// identity; old is left untouched. A subscription that is not in old yields an
+// equal copy, and an exact pattern left without subscriptions disappears from
+// the map. The serialisation requirement of IndexWith applies.
 func IndexWithout[T any](
 	old *models.PublishIndex[T],
 	sub *models.Subscription[T],

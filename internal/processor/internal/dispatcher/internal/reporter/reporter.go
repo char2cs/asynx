@@ -9,9 +9,15 @@ import (
 )
 
 // Reporter calls the configured error and panic handlers on behalf of the
-// dispatcher. A handler that panics is swallowed, because it must not take down
-// a worker or abandon a delivery and release the hold on the aggregate's later
-// events. A nil handler makes the matching method a no-op.
+// dispatcher. A nil handler makes the matching method a no-op.
+//
+// A handler that panics must not abandon a delivery, which would release the
+// hold on the aggregate's later events, so its panic is recovered and reported
+// to the panic handler as if a subscriber had panicked: PublishError and
+// DeliveryError forward the panic of their handler to Panic. The panic handler
+// is the last hook there is, so a panic in the panic handler itself has nowhere
+// left to go: Panic recovers it and drops it, and that is its documented
+// contract.
 type Reporter[T any] interface {
 	// PublishError reports an error from publishing job's event to the live
 	// subscribers.

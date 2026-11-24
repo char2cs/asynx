@@ -1,7 +1,8 @@
 package aggregates
 
 // Item is what the Registry queues: one delivery of one event of an aggregate.
-// The dispatcher's job type satisfies it.
+// The dispatcher's job type satisfies it. The registry finds the item's record
+// through Keyed and settles and completes it through Settler.
 type Item interface {
 	Keyed
 	Settler

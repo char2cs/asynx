@@ -5,7 +5,14 @@ import (
 	"github.com/char2cs/asynx/models"
 )
 
-// DeliveryControl inspects and resumes parked durable deliveries.
+// DeliveryControl is the operator's handle on durable delivery (see
+// Builder.WithSubscriber): it shows which aggregates stopped receiving events
+// because a durable subscriber kept failing, why, and lets them continue once
+// the cause is fixed.
+//
+// Parking is per aggregate and never affects other aggregates or live
+// subscribers. It is the alternative to dropping an event, which durable
+// delivery never does: the aggregate's events wait in the store, in order.
 type DeliveryControl[T any] interface {
 	// PausedAggregates lists the aggregates whose durable delivery is parked:
 	// attempts ran out (see Builder.WithDeliveryMaxAttempts) or a Forget could

@@ -172,17 +172,18 @@ func TestReporter_NilHandlersAreNoOps(
 	)
 }
 
-func TestReporter_SwallowsHandlerPanics(
+func TestReporter_ForwardsAnErrorHandlerPanicToThePanicHandler(
 	t *testing.T,
 ) {
-	onPublishError2 := func(
+	var got []any
+	onPublishError := func(
 		context.Context,
 		asynxmd.Event[string],
 		error,
 	) {
 		panic("publish")
 	}
-	onDeliveryError2 := func(
+	onDeliveryError := func(
 		context.Context,
 		asynxmd.Event[string],
 		error,
@@ -190,17 +191,20 @@ func TestReporter_SwallowsHandlerPanics(
 	) {
 		panic("delivery")
 	}
-	onPanic2 := func(
-		context.Context,
-		asynxmd.Event[string],
-		any,
+	onPanic := func(
+		_ context.Context,
+		_ asynxmd.Event[string],
+		recovered any,
 	) {
-		panic("panic")
+		got = append(
+			got,
+			recovered,
+		)
 	}
 	rep := reporter.New(
-		onPublishError2,
-		onDeliveryError2,
-		onPanic2,
+		onPublishError,
+		onDeliveryError,
+		onPanic,
 	)
 	job := newJob()
 
@@ -215,9 +219,59 @@ func TestReporter_SwallowsHandlerPanics(
 		errors.New("x"),
 		1,
 	)
+
+	if len(got) != 2 ||
+		got[0] != "publish" ||
+		got[1] != "delivery" {
+		t.Fatalf(
+			"panic handler saw %v, want the publish and delivery panics",
+			got,
+		)
+	}
+}
+
+func TestReporter_DropsAPanicOfThePanicHandler(
+	t *testing.T,
+) {
+	onPanic := func(
+		context.Context,
+		asynxmd.Event[string],
+		any,
+	) {
+		panic("panic")
+	}
+	rep := reporter.New[string](
+		nil,
+		nil,
+		onPanic,
+	)
+
 	rep.Panic(
 		markedContext(),
-		job,
+		newJob(),
 		"x",
+	)
+}
+
+func TestReporter_RecoversErrorHandlerPanicsWithoutAPanicHandler(
+	t *testing.T,
+) {
+	onPublishError := func(
+		context.Context,
+		asynxmd.Event[string],
+		error,
+	) {
+		panic("publish")
+	}
+	rep := reporter.New(
+		onPublishError,
+		nil,
+		nil,
+	)
+
+	rep.PublishError(
+		markedContext(),
+		newJob(),
+		errors.New("x"),
 	)
 }

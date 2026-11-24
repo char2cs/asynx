@@ -608,7 +608,8 @@ type gatedUpdate struct {
 	gate    <-chan struct{}
 }
 
-// Validate is the test double implementation for the code under test.
+// Validate announces on entered, then blocks until the gate is released, so a
+// test can hold an update mid-flight on its worker.
 func (c gatedUpdate) Validate(
 	*order,
 ) error {
@@ -964,7 +965,9 @@ type gatedCreate struct {
 	gate    <-chan struct{}
 }
 
-// Validate is the test double implementation for the code under test.
+// Validate announces on entered, blocks until the gate is released and then
+// validates as the plain create command, so a test can hold a create
+// mid-flight on its worker.
 func (c gatedCreate) Validate(
 	current *order,
 ) error {
@@ -1168,7 +1171,10 @@ type recordingExecutor struct {
 	gate     chan struct{}
 }
 
-// ExecuteAsync is the test double implementation for the code under test.
+// ExecuteAsync notes whether two calls ever ran at once (overlap), holds the
+// first call on entered and gate so a test can queue commands behind it, and
+// appends each update's total to order, so a test can assert that commands of
+// one aggregate ran serially and in the order they were sent.
 func (r *recordingExecutor) ExecuteAsync(
 	_ context.Context,
 	cmd asynxmd.Command[order],

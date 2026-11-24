@@ -6,7 +6,16 @@ import (
 	"time"
 )
 
-// Builder configures and builds an Asynx instance.
+// Builder collects the configuration of an Asynx instance and builds it. Get
+// one from New, call the With methods that apply, and finish with Build. Every
+// With method returns the receiver so the calls chain, and a later call to the
+// same option replaces an earlier one, except WithUpcaster, WithForgetHandler,
+// WithSyncProjection and WithSubscriber, which accumulate.
+//
+// WithEventStore and WithSnapshotStore are required; everything else has a
+// default. A Builder is not safe for concurrent use and is meant to be used
+// for one Build: building twice from one Builder would share its stores and
+// bus between the two instances. T is the aggregate type of the instance.
 type Builder[T any] struct {
 	eventStore          models.Store
 	snapshotStore       models.SnapshotStore
@@ -21,6 +30,7 @@ type Builder[T any] struct {
 	syncProjections     []syncProjectionDef[T]
 	subscribers         []subscriberDef[T]
 	snapshotErrHandler  func(context.Context, models.Event[T], error)
+	listenerErrHandler  func(error)
 	deliveryErrHandler  models.DeliveryErrorHandler[T]
 	retryInitial        time.Duration
 	retryMax            time.Duration
@@ -31,7 +41,10 @@ type Builder[T any] struct {
 
 const defaultShards = 8
 
-// New returns a Builder with the default schema version and sharding options.
+// New returns a Builder for aggregates of type T with the defaults: schema
+// version 1, no upcasters, 8 shards (see ShardingOpts), the in-memory bus and
+// the in-memory dispatcher. It has no event store or snapshot store yet; Build
+// fails until both are set.
 func New[T any]() *Builder[T] {
 	return &Builder[T]{
 		schemaVersion: 1,
@@ -40,7 +53,10 @@ func New[T any]() *Builder[T] {
 	}
 }
 
-// WithEventStore sets the event store. Required: Build returns ErrMissingEventStore without it.
+// WithEventStore sets the store that holds the event streams, the command
+// receipts and the delivery log. It is required: Build returns
+// models.ErrMissingEventStore without it. The store/storetest suite checks an
+// implementation of models.Store against the guarantees the instance relies on.
 func (b *Builder[T]) WithEventStore(
 	s models.Store,
 ) *Builder[T] {
@@ -48,8 +64,9 @@ func (b *Builder[T]) WithEventStore(
 	return b
 }
 
-// WithSnapshotStore sets the snapshot store. Required — Build returns
-// ErrMissingSnapshotStore without it.
+// WithSnapshotStore sets the store that caches aggregate snapshots. It is
+// required: Build returns models.ErrMissingSnapshotStore without it. Snapshots
+// are a derived cache, so losing them costs read speed, never data.
 //
 // This cannot default to the event store: snapshots are upserted cells keyed
 // by aggregateID (models.SnapshotStore), not append-only versioned streams
@@ -61,7 +78,11 @@ func (b *Builder[T]) WithSnapshotStore(
 	return b
 }
 
-// WithBus replaces the default in-memory bus.
+// WithBus replaces the default in-memory bus that delivers committed events to
+// the live subscribers (Subscribe, Listen, OnForget). A custom bus must satisfy
+// models.Bus. The instance owns the bus it is given: Shutdown closes it, and so
+// does a failed Build. WithPanicHandler configures only the default bus, so a
+// custom bus handles handler panics its own way.
 func (b *Builder[T]) WithBus(
 	bus models.Bus[T],
 ) *Builder[T] {
@@ -69,7 +90,9 @@ func (b *Builder[T]) WithBus(
 	return b
 }
 
-// WithShardingOpts sets the processor's worker pool options.
+// WithShardingOpts sets how commands are spread over workers and how many may
+// queue; see ShardingOpts for the fields, their defaults and the ordering
+// guarantees, which hold whatever the values.
 func (b *Builder[T]) WithShardingOpts(
 	opts ShardingOpts,
 ) *Builder[T] {
@@ -77,7 +100,10 @@ func (b *Builder[T]) WithShardingOpts(
 	return b
 }
 
-// WithSchemaVersion sets the schema version stamped on new events.
+// WithSchemaVersion sets the schema version stamped on newly written events
+// (default 1). Events written with an older version are migrated to this one
+// when they are read, by the upcasters registered with WithUpcaster. Raise it
+// whenever the shape of what commands emit changes.
 func (b *Builder[T]) WithSchemaVersion(
 	v int,
 ) *Builder[T] {
@@ -85,7 +111,12 @@ func (b *Builder[T]) WithSchemaVersion(
 	return b
 }
 
-// WithUpcaster registers the migration from events of fromVersion to the next schema version.
+// WithUpcaster registers the migration for events written at schema version
+// fromVersion: fn receives their stored patches and returns patches valid for
+// fromVersion+1. Reads chain the upcasters from an event's version up to the
+// current one (WithSchemaVersion). Registering a second upcaster for the same
+// fromVersion replaces the first. Upcasters must be stateless and safe for
+// concurrent use (see models.Upcaster).
 func (b *Builder[T]) WithUpcaster(
 	fromVersion int,
 	fn models.Upcaster,
@@ -94,7 +125,11 @@ func (b *Builder[T]) WithUpcaster(
 	return b
 }
 
-// WithPanicHandler sets the handler called when a projection or durable handler panics.
+// WithPanicHandler sets the handler called when a projection handler or a
+// durable handler panics. It receives the context and event of the delivery
+// and the recovered value. It applies to the default in-memory bus and to
+// durable delivery; a bus supplied with WithBus is responsible for its own
+// panics. The panic never reaches the caller of Send.
 func (b *Builder[T]) WithPanicHandler(
 	fn models.PanicHandler[T],
 ) *Builder[T] {
@@ -104,7 +139,9 @@ func (b *Builder[T]) WithPanicHandler(
 
 // WithCorruptionHook registers a callback invoked when a snapshot cannot be
 // deserialized. The hook receives the deserialization error and is called
-// before falling back to the cold replay path.
+// before falling back to the cold replay path, so a corrupt snapshot costs
+// speed, not correctness; use the hook to alert on it. It may be called from
+// any goroutine that reads an aggregate.
 func (b *Builder[T]) WithCorruptionHook(
 	fn func(error),
 ) *Builder[T] {
@@ -123,8 +160,10 @@ func (b *Builder[T]) WithPublishErrorHandler(
 	return b
 }
 
-// WithForgetHandler registers a ForgetHandler at build time.
-// Equivalent to calling OnForget after Build. Multiple calls register multiple handlers.
+// WithForgetHandler registers a models.ForgetHandler at build time, so no
+// Forget can run before it is in place. It is equivalent to calling OnForget on
+// the built instance, except that a registration failure fails Build. Multiple
+// calls register multiple handlers, in the order of the calls.
 func (b *Builder[T]) WithForgetHandler(
 	fn models.ForgetHandler[T],
 ) *Builder[T] {
@@ -195,6 +234,23 @@ func (b *Builder[T]) WithSubscriber(
 		b.subscribers,
 		subscriberDef[T]{pattern: pattern, handler: handler, opts: opts},
 	)
+	return b
+}
+
+// WithListenerErrorHandler sets a callback invoked when removing the
+// subscription behind a Listen or SubscribeWait fails: the bus refused the
+// Unsubscribe that the listener's unsubscribe function, or the automatic
+// unsubscribe after the last of count events, performed. The error wraps the
+// bus's. Those paths have no error to return (the unsubscribe function is a
+// func()), so the callback is the only way to learn of it; SubscribeWait
+// additionally returns a failure of its own unsubscribe, joined with its
+// result. When not set, such failures are dropped. The default bus never fails
+// to unsubscribe, so this matters for a bus supplied with WithBus. It may be
+// called from any goroutine.
+func (b *Builder[T]) WithListenerErrorHandler(
+	fn func(error),
+) *Builder[T] {
+	b.listenerErrHandler = fn
 	return b
 }
 

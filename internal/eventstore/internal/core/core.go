@@ -10,8 +10,14 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-// EventStore[T] is the public API for durable aggregate persistence.
-// Construct it with New; all fields are set up by the constructor.
+// EventStore is the implementation behind the eventstore.EventStore interface:
+// it wires a Reader, a Writer and a Replayer over one event store and one
+// snapshot store and exposes them as the read, write and maintenance
+// operations. It adds the one thing none of the three can do alone, the write
+// path that loads state, validates a command and appends the resulting event in
+// a single transaction. It holds no mutable state of its own beyond what New
+// sets up (the snapshot guard is installed once at wiring time), and is safe
+// for concurrent use. Construct it with New.
 type EventStore[T any] struct {
 	reader   *reader.Reader[T]
 	writer   *writer.Writer[T]
@@ -20,8 +26,9 @@ type EventStore[T any] struct {
 
 // New builds a fully-configured EventStore. eventStore and snapshotStore use
 // different contracts (models.Store vs models.SnapshotStore) and cannot be
-// the same instance. upcasters maps SchemaVersion → migration func;
-// schemaVersion is the current (target) schema version for all new events.
+// the same instance. upcasters maps SchemaVersion to the migration that lifts
+// an event one version up and is cloned, so the caller may keep mutating its
+// map; schemaVersion is the current (target) schema version for all new events.
 // onCorruption is called when a snapshot cannot be deserialized; pass nil to
 // silently fall back to the cold replay path.
 func New[T any](
@@ -63,7 +70,10 @@ func New[T any](
 // GuardAutoSnapshots installs the guard under which a lock-free Get or Preload
 // writes the auto-snapshot of an upcast state: it must run its function while
 // no command or Forget runs for the aggregate, and return false without running
-// it when that cannot be arranged. See models.SnapshotGuard.
+// it when that cannot be arranged, which skips the snapshot. Without it a
+// concurrent Forget could be undone by a late snapshot. Call it once, while
+// wiring, before the store is used from several goroutines. See
+// models.SnapshotGuard.
 func (es *EventStore[T]) GuardAutoSnapshots(
 	guard esmodels.SnapshotGuard,
 ) {
@@ -83,7 +93,8 @@ func (es *EventStore[T]) Get(
 }
 
 // Exists returns true if the aggregate has at least one event in the store.
-// It is faster than Get as it issues a minimal single-event ReadRange query.
+// It is faster than Get as it issues a minimal single-event ReadRange query and
+// never looks at snapshots. Storage errors are returned with false.
 func (es *EventStore[T]) Exists(
 	ctx context.Context,
 	aggregateID string,
@@ -296,7 +307,11 @@ func (es *EventStore[T]) appendWithHook(
 		)
 }
 
-// Snapshot upserts the snapshot for evt.Aggregate at evt.Version.
+// Snapshot upserts the snapshot of evt.Aggregate at evt.Version, replacing the
+// aggregate's previous snapshot. It is called after the event's transaction
+// committed, so a failure leaves the event durable and only costs a slower next
+// read; the caller decides whether to report it (the command executor does,
+// through the snapshot error handler, Write returns it).
 func (es *EventStore[T]) Snapshot(
 	ctx context.Context,
 	evt asynxmd.Event[T],
@@ -307,12 +322,17 @@ func (es *EventStore[T]) Snapshot(
 	)
 }
 
-// Store returns the backing event store.
+// Store returns the backing event store, the same instance appends run on. The
+// command executor uses it to enlist its own writes in the transaction of an
+// append and to read and acknowledge deliveries.
 func (es *EventStore[T]) Store() asynxmd.Store {
 	return es.writer.EventStore()
 }
 
-// DeleteSnapshot removes the aggregate's snapshot. Idempotent.
+// DeleteSnapshot removes the aggregate's snapshot and leaves its events alone,
+// so the next read replays from event 1. Idempotent: a missing snapshot is not
+// an error. Forget calls it before erasing the stream so that a half-failed
+// erase can never leave a stale snapshot behind.
 func (es *EventStore[T]) DeleteSnapshot(
 	ctx context.Context,
 	aggregateID string,
@@ -323,8 +343,12 @@ func (es *EventStore[T]) DeleteSnapshot(
 	)
 }
 
-// Delete removes all events and snapshots for the aggregate from the backing stores.
-// Idempotent — deleting a non-existent aggregate is not an error.
+// Delete removes all events and snapshots for the aggregate from the backing
+// stores: first the event stream, in one transaction, then the snapshot.
+// Idempotent, deleting a non-existent aggregate is not an error. If removing the
+// snapshot fails the events are already gone and the error is returned; calling
+// Delete again finishes the job. The caller must keep commands for the
+// aggregate out while it runs.
 func (es *EventStore[T]) Delete(
 	ctx context.Context,
 	aggregateID string,

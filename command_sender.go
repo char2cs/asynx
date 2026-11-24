@@ -5,11 +5,23 @@ import (
 	"github.com/char2cs/asynx/models"
 )
 
-// CommandSender sends commands and forgets aggregates.
+// CommandSender is how state changes: it runs commands against aggregates and
+// erases aggregates for good.
+//
+// Commands for one aggregate run strictly one at a time, so there is no
+// lost-update window, and an aggregate's events reach handlers in version
+// order. A command that is refused because the aggregate's queue is full
+// returns models.ErrQueueFull, and one sent after Shutdown began returns
+// models.ErrShuttingDown; neither is run.
 type CommandSender[T any] interface {
 	// Send validates and persists the command, then returns the resulting Event[T]
 	// once it is durably written. Projection handlers are fired asynchronously —
-	// when Send returns, handlers may not have run yet.
+	// when Send returns, handlers may not have run yet. A command whose
+	// Validate fails returns that error (conventionally models.ErrValidation)
+	// and writes nothing, as does a store failure. If ctx ends before the
+	// command ran, Send returns models.ErrContextCancelled; if it ends after the
+	// command started, the command still commits and Send still returns
+	// models.ErrContextCancelled.
 	// Use SendWait when the caller needs projections to be up to date before proceeding.
 	Send(
 		ctx context.Context,

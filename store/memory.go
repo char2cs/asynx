@@ -4,20 +4,26 @@ import (
 	"github.com/char2cs/asynx/models"
 )
 
-// Memory is a thread-safe in-memory store for tests and examples.
-// It satisfies models.Store, adds failure injection via SetError, and offers
-// Append/Delete helpers for seeding streams without writing a transaction.
+// Memory is a thread-safe in-memory store for tests and examples. It
+// satisfies models.Store, so it passes the store/storetest conformance suite,
+// adds failure injection through SetError, and offers the Append and Delete
+// seeding helpers of MemorySeeder for building streams without writing a
+// transaction.
 //
 // Transactions are serialized and rolled back through an undo log. Isolation
 // is read-uncommitted: reads outside a transaction may observe its writes
-// before it commits.
+// before it commits, and see them disappear if it rolls back. Nothing is
+// persisted: all data is lost when the process ends, so production
+// deployments must implement models.Store over a durable backend.
 type Memory interface {
 	models.Store
 	MemorySeeder
 
 	// SetError schedules a one-shot error for the next Append call on
-	// streamID. The error is consumed and removed after the first
-	// matching Append.
+	// streamID, whether made through MemorySeeder or inside a transaction.
+	// That Append returns err unchanged and stores nothing, and the schedule
+	// is then cleared. Scheduling again before it fired replaces the earlier
+	// error, and other streams are not affected.
 	SetError(
 		streamID string,
 		err error,

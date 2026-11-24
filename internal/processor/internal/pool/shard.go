@@ -7,7 +7,18 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-// Shard is a queue of commands served by a dispatcher and a set of workers.
+// Shard is one command queue of the pool. A single dispatcher goroutine reads
+// envelopes from the command channel and hands them to the job queue; the
+// shard's workers take jobs from it. All commands of one aggregate land on the
+// same shard, and the shard keeps them serial: the first command of an
+// aggregate is served by a worker, the ones that arrive meanwhile wait in the
+// aggregate's mailbox, bounded by the queue depth (at least the worker count), and the same worker runs
+// them in arrival order. Commands of different aggregates run in parallel on
+// different workers. A worker grants a command its turn and waits for the
+// sender to finish it (see models.CommandEnvelope), so it never runs a command
+// itself. When the shard is told to stop, envelopes still queued are rejected
+// with ErrShuttingDown and workers finish what they hold. Shards are created by
+// the pool.
 type Shard[T any] struct {
 	id           int
 	commandChan  chan *models.CommandEnvelope[T]
@@ -49,7 +60,11 @@ func newShard[T any](
 	}
 }
 
-// CommandChan returns the channel commands are submitted on.
+// CommandChan returns the buffered channel senders enqueue envelopes on. Its
+// capacity is the shard's queue depth: a send that finds it full should fail
+// with ErrQueueFull rather than wait, which is what the processor does. The
+// channel is never closed; after the shard stops, nothing reads it, so a
+// sender must not enqueue after the processor began shutting down.
 func (s *Shard[T]) CommandChan() chan *models.CommandEnvelope[T] {
 	return s.commandChan
 }
@@ -61,11 +76,11 @@ func (s *Shard[T]) dispatchCommands(
 
 	stopped := false
 	for !stopped {
-		stopped = s.handleDispatch()
+		stopped = s.dispatchNext()
 	}
 }
 
-func (s *Shard[T]) handleDispatch() bool {
+func (s *Shard[T]) dispatchNext() bool {
 	select {
 	case <-s.stopChan:
 		s.failQueued()
@@ -85,7 +100,10 @@ func (s *Shard[T]) accept(
 		return true
 	}
 
-	s.dispatchJob(envelope)
+	s.jobQueue <- &models.CommandJob[T]{
+		Envelope: envelope,
+	}
+
 	if s.onDispatched != nil {
 		s.onDispatched()
 	}
@@ -117,18 +135,7 @@ func (s *Shard[T]) failEnvelope(
 		return
 	}
 
-	s.sendResult(
-		envelope.ResultChan,
-		models.CommandResult[T]{Err: asynxmd.ErrShuttingDown},
-	)
-}
-
-func (s *Shard[T]) dispatchJob(
-	envelope *models.CommandEnvelope[T],
-) {
-	s.jobQueue <- &models.CommandJob[T]{
-		Envelope: envelope,
-	}
+	envelope.Reject(asynxmd.ErrShuttingDown)
 }
 
 func (s *Shard[T]) workerLoop(
@@ -153,7 +160,7 @@ func (s *Shard[T]) serve(
 	}
 
 	for job != nil {
-		s.executeJob(job)
+		job.Envelope.GrantTurn()
 		job = s.next(aggregateID)
 	}
 }
@@ -181,10 +188,7 @@ func (s *Shard[T]) claim(
 	s.mailboxMu.Unlock()
 
 	if isFull {
-		s.sendResult(
-			job.Envelope.ResultChan,
-			models.CommandResult[T]{Err: asynxmd.ErrQueueFull},
-		)
+		job.Envelope.Reject(asynxmd.ErrQueueFull)
 	}
 
 	return false
@@ -210,22 +214,6 @@ func (s *Shard[T]) next(
 	return job
 }
 
-func (s *Shard[T]) executeJob(
-	job *models.CommandJob[T],
-) {
-	job.Envelope.GrantTurn()
-}
-
-func (s *Shard[T]) sendResult(
-	resultChan chan models.CommandResult[T],
-	result models.CommandResult[T],
-) {
-	select {
-	case resultChan <- result:
-	default:
-	}
-}
-
 func (s *Shard[T]) signalStop() {
 	s.stopMu.Lock()
 	defer s.stopMu.Unlock()
@@ -237,11 +225,13 @@ func (s *Shard[T]) signalStop() {
 }
 
 // ForTesting: Stopping returns a channel that closes once the shard has been
-// told to stop. Do not call in production code.
+// told to stop, so a test can wait for Drain to reach the shard. Do not call in
+// production code.
 func (s *Shard[T]) Stopping() <-chan struct{} { return s.stopChan }
 
 // ForTesting: Backlog reports how many commands wait in aggregate mailboxes
-// behind a running one. Do not call in production code.
+// behind a running one, taken under the mailbox lock, so a test can tell that
+// commands have queued. Do not call in production code.
 func (s *Shard[T]) Backlog() int {
 	s.mailboxMu.Lock()
 	defer s.mailboxMu.Unlock()
@@ -253,9 +243,10 @@ func (s *Shard[T]) Backlog() int {
 	return n
 }
 
-// ForTesting: SetOnDispatched sets a callback invoked each time the dispatcher
-// reads a command from commandChan (slot is now free for new senders).
-// Do not call in production code.
+// ForTesting: SetOnDispatched sets a callback the shard's dispatcher invokes
+// each time it moves a command off the command channel, meaning a queue slot is
+// free for new senders. It is not synchronised: set it before the first
+// command. Do not call in production code.
 func (s *Shard[T]) SetOnDispatched(
 	fn func(),
 ) {

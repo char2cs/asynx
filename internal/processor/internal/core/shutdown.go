@@ -119,8 +119,10 @@ func (p *Processor[T]) closeBus(
 	return p.bus.Close(ctx)
 }
 
-// ForTesting: WaitPublish blocks until all dispatched events have been delivered.
-// Do not call in production code.
+// ForTesting: WaitPublish blocks until the dispatcher has delivered every event
+// enqueued so far, and returns at once without a dispatcher. Events enqueued
+// while it waits extend the wait. It takes no context, so it can block forever
+// on a handler that never returns. Do not call in production code.
 func (p *Processor[T]) WaitPublish() {
 	if p.dispatcher != nil {
 		p.dispatcher.WaitIdle()

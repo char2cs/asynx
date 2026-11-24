@@ -22,7 +22,9 @@ type Writer[T any] struct {
 	currentSchemaVersion int
 }
 
-// New constructs a Writer.
+// New constructs a Writer over the event store it appends to and the snapshot
+// store it upserts into. schemaVersion is stamped on every event and snapshot it
+// writes, so readers know which upcasts they still need.
 func New[T any](
 	es asynxmd.Store,
 	ss asynxmd.SnapshotStore,
@@ -233,7 +235,10 @@ func appendInternal(
 	)
 }
 
-// Snapshot upserts the snapshot of evt.Aggregate at evt.Version.
+// Snapshot upserts the snapshot of evt.Aggregate at evt.Version in the snapshot
+// store, replacing the aggregate's earlier snapshot and stamping it with the
+// current schema version. It runs outside any event transaction and is safe to
+// retry. A failure is returned unchanged and leaves events untouched.
 func (w *Writer[T]) Snapshot(
 	ctx context.Context,
 	evt asynxmd.Event[T],
@@ -246,12 +251,14 @@ func (w *Writer[T]) Snapshot(
 	)
 }
 
-// EventStore returns the backing event store.
+// EventStore returns the event store Writer appends to, so the caller can open
+// its own transaction on it (see AppendTx). The same instance every call.
 func (w *Writer[T]) EventStore() asynxmd.Store {
 	return w.eventStore
 }
 
-// SnapshotStore returns the backing snapshot store.
+// SnapshotStore returns the snapshot store Writer upserts into, which callers
+// use to delete a snapshot. The same instance every call.
 func (w *Writer[T]) SnapshotStore() asynxmd.SnapshotStore {
 	return w.snapshotStore
 }

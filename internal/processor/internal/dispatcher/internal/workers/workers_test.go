@@ -837,7 +837,10 @@ func (b *fakeBus) seen() context.Context {
 	return b.ctx
 }
 
-// PublishSync satisfies the interface that fakeBus fakes.
+// PublishSync records the context it was called with, notes "live" in the
+// shared journal to fix the order of the publish against the delivery, the
+// park and the report, and returns the result of the scripted publish
+// function, nil without one.
 func (b *fakeBus) PublishSync(
 	ctx context.Context,
 	event asynxmd.Event[int],
@@ -853,7 +856,8 @@ func (b *fakeBus) PublishSync(
 	return b.publish(event)
 }
 
-// Publish satisfies the interface that fakeBus fakes.
+// Publish does nothing and reports success: the dispatcher publishes through
+// PublishSync only.
 func (b *fakeBus) Publish(
 	context.Context,
 	asynxmd.Event[int],
@@ -861,7 +865,8 @@ func (b *fakeBus) Publish(
 	return nil
 }
 
-// Subscribe satisfies the interface that fakeBus fakes.
+// Subscribe registers nothing and returns an empty subscription id: the
+// dispatcher never subscribes through the bus.
 func (b *fakeBus) Subscribe(
 	string,
 	asynxmd.ProjectionHandler[int],
@@ -871,21 +876,21 @@ func (b *fakeBus) Subscribe(
 		nil
 }
 
-// Unsubscribe satisfies the interface that fakeBus fakes.
+// Unsubscribe does nothing and reports success: nothing was ever subscribed.
 func (b *fakeBus) Unsubscribe(
 	string,
 ) error {
 	return nil
 }
 
-// Close satisfies the interface that fakeBus fakes.
+// Close does nothing and reports success: the double holds no resources.
 func (b *fakeBus) Close(
 	context.Context,
 ) error {
 	return nil
 }
 
-// WaitForHandlers satisfies the interface that fakeBus fakes.
+// WaitForHandlers returns at once: the double runs no handlers of its own.
 func (b *fakeBus) WaitForHandlers() {
 }
 
@@ -903,7 +908,9 @@ func (d *fakeDeliverer) seen() context.Context {
 	return d.ctx
 }
 
-// Deliver satisfies the interface that fakeDeliverer fakes.
+// Deliver records the context it received, notes "deliver" in the shared
+// journal and returns the result of the scripted deliver function, nil
+// without one.
 func (d *fakeDeliverer) Deliver(
 	ctx context.Context,
 	_ string,
@@ -921,14 +928,13 @@ func (d *fakeDeliverer) Deliver(
 	return d.deliver(job)
 }
 
-// ParkThenReport satisfies the interface that fakeDeliverer fakes.
-func (d *fakeDeliverer) ParkThenReport(
-	ctx context.Context,
+// Park records the park in the journal and parks the registry as the real
+// deliverer does.
+func (d *fakeDeliverer) Park(
 	aggregateID string,
 	halt <-chan struct{},
 	job jobs.Job[int],
 	cause error,
-	report func(context.Context),
 ) {
 	d.journal.add("park")
 	if job.Acked() {
@@ -938,8 +944,6 @@ func (d *fakeDeliverer) ParkThenReport(
 			cause,
 		)
 	}
-
-	report(ctx)
 }
 
 type fakeReporter struct {
@@ -949,7 +953,8 @@ type fakeReporter struct {
 	errs    []error
 }
 
-// PublishError satisfies the interface that fakeReporter fakes.
+// PublishError notes "report" in the shared journal and records the context
+// and the error it was given.
 func (r *fakeReporter) PublishError(
 	ctx context.Context,
 	_ jobs.Job[int],
@@ -965,7 +970,8 @@ func (r *fakeReporter) PublishError(
 	)
 }
 
-// DeliveryError satisfies the interface that fakeReporter fakes.
+// DeliveryError does nothing: the pool under test reports through
+// PublishError only.
 func (r *fakeReporter) DeliveryError(
 	context.Context,
 	jobs.Job[int],
@@ -974,7 +980,7 @@ func (r *fakeReporter) DeliveryError(
 ) {
 }
 
-// Panic satisfies the interface that fakeReporter fakes.
+// Panic does nothing: the pool under test reports through PublishError only.
 func (r *fakeReporter) Panic(
 	context.Context,
 	jobs.Job[int],

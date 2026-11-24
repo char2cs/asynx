@@ -31,5 +31,8 @@ type Tracker[T any] interface {
 
 // New creates an empty Tracker.
 func New[T any]() Tracker[T] {
-	return &inflightTracker[T]{}
+	return &inflightTracker[T]{
+		inflight: make(map[jobs.Job[T]]struct{}),
+		tickets:  make(map[ticketKey]jobs.Job[T]),
+	}
 }

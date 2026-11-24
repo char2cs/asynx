@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -76,7 +77,6 @@ func TestHydrate_BasicPatchApplication(
 
 	result, err := r.Hydrate(
 		context.Background(),
-		"agg1",
 		seed,
 		events,
 	)
@@ -119,7 +119,6 @@ func TestHydrate_MultipleEvents(
 
 	result, err := r.Hydrate(
 		context.Background(),
-		"agg1",
 		seed,
 		events,
 	)
@@ -152,7 +151,6 @@ func TestHydrate_EmptyEvents_ReturnsSeed(
 	seed := order{ID: "1", Status: "Pending"}
 	result, err := r.Hydrate(
 		context.Background(),
-		"agg1",
 		seed,
 		nil,
 	)
@@ -187,7 +185,6 @@ func TestHydrate_EmptyPatches_NoOp(
 
 	result, err := r.Hydrate(
 		context.Background(),
-		"agg1",
 		seed,
 		events,
 	)
@@ -232,7 +229,6 @@ func TestHydrate_WithUpcasting_WritesAutoSnapshot(
 
 	result, err := r.Hydrate(
 		context.Background(),
-		"agg1",
 		order{},
 		events,
 	)
@@ -270,7 +266,6 @@ func TestHydrate_NoAutoSnapshot_WhenNoUpcasting(
 
 	result, err := r.Hydrate(
 		context.Background(),
-		"agg1",
 		order{},
 		events,
 	)
@@ -313,7 +308,6 @@ func TestHydrate_MarshalSeedError(
 
 	_, err := r.Hydrate(
 		context.Background(),
-		"agg1",
 		mocks.ErrMarshal{},
 		events,
 	)
@@ -338,7 +332,6 @@ func TestHydrate_UnmarshalResultError(
 
 	_, err := r.Hydrate(
 		context.Background(),
-		"agg1",
 		mocks.BadUnmarshal{},
 		events,
 	)
@@ -375,7 +368,6 @@ func TestHydrate_UpcasterError_PropagatesFast(
 
 	_, err := r.Hydrate(
 		context.Background(),
-		"agg1",
 		order{},
 		events,
 	)
@@ -427,7 +419,6 @@ func TestHydrate_UpcasterPanic_Propagates(
 	defer expectPanicPropagated()
 	r.Hydrate(
 		context.Background(),
-		"agg1",
 		order{},
 		events,
 	)
@@ -1165,7 +1156,6 @@ func TestHydrate_PatchApplyError(
 
 	_, err := r.Hydrate(
 		context.Background(),
-		"agg1",
 		order{},
 		events,
 	)
@@ -1429,10 +1419,7 @@ func BenchmarkHydrate(
 ) {
 	for _, n := range benchEventCounts() {
 		b.Run(
-			fmt.Sprintf(
-				"events=%d",
-				n,
-			),
+			"events="+groupedCount(n),
 			hydrateBench(n),
 		)
 	}
@@ -1506,7 +1493,6 @@ func mustHydrate(
 
 	_, err := r.Hydrate(
 		context.Background(),
-		"agg1",
 		order{},
 		events,
 	)
@@ -1520,10 +1506,7 @@ func BenchmarkReplay(
 ) {
 	for _, n := range benchEventCounts() {
 		b.Run(
-			fmt.Sprintf(
-				"events=%d",
-				n,
-			),
+			"events="+groupedCount(n),
 			replayBench(n),
 		)
 	}
@@ -1588,4 +1571,18 @@ func mustReplay(
 	if err != nil {
 		b.Fatal(err)
 	}
+}
+
+func groupedCount(
+	n int,
+) string {
+	if n < 1000 {
+		return strconv.Itoa(n)
+	}
+
+	return groupedCount(n/1000) +
+		fmt.Sprintf(
+			"_%03d",
+			n%1000,
+		)
 }

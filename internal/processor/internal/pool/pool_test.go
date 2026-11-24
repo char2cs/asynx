@@ -22,7 +22,8 @@ type blockingBus[T any] struct {
 	unblockCh chan struct{}
 }
 
-// Publish is the test double implementation for the code under test.
+// Publish accepts the event and does nothing; the bus is only here to block
+// PublishSync.
 func (b *blockingBus[T]) Publish(
 	_ context.Context,
 	_ asynxmd.Event[T],
@@ -30,7 +31,8 @@ func (b *blockingBus[T]) Publish(
 	return nil
 }
 
-// PublishSync is the test double implementation for the code under test.
+// PublishSync blocks until the test closes unblockCh, holding delivery stuck
+// so tests can observe the pool meanwhile.
 func (b *blockingBus[T]) PublishSync(
 	_ context.Context,
 	_ asynxmd.Event[T],
@@ -39,7 +41,7 @@ func (b *blockingBus[T]) PublishSync(
 	return nil
 }
 
-// Subscribe is the test double implementation for the code under test.
+// Subscribe registers nothing and returns an empty id.
 func (b *blockingBus[T]) Subscribe(
 	_ string,
 	_ asynxmd.ProjectionHandler[T],
@@ -49,21 +51,21 @@ func (b *blockingBus[T]) Subscribe(
 		nil
 }
 
-// Unsubscribe is the test double implementation for the code under test.
+// Unsubscribe does nothing.
 func (b *blockingBus[T]) Unsubscribe(
 	_ string,
 ) error {
 	return nil
 }
 
-// Close is the test double implementation for the code under test.
+// Close does nothing and succeeds.
 func (b *blockingBus[T]) Close(
 	_ context.Context,
 ) error {
 	return nil
 }
 
-// WaitForHandlers is the test double implementation for the code under test.
+// WaitForHandlers returns at once; nothing is tracked.
 func (b *blockingBus[T]) WaitForHandlers() {}
 
 type order = mocks.Order

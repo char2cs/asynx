@@ -13,8 +13,23 @@ import (
 	"time"
 )
 
-// Build requires WithEventStore and WithSnapshotStore; all other options have
-// defaults.
+// Build assembles the instance from the configuration and returns it, ready to
+// use. WithEventStore and WithSnapshotStore are required (it returns
+// models.ErrMissingEventStore or models.ErrMissingSnapshotStore without them);
+// all other options have defaults.
+//
+// Build validates the durable subscribers and synchronous projections: an empty
+// pattern (models.ErrEmptyPattern), a nil handler (models.ErrNilHandler), a
+// pattern that is not a valid regular expression, or WithFallback on a durable
+// subscriber (models.ErrFallbackUnsupported) fails it. When the instance has
+// durable subscribers Build also queues the deliveries a crash left
+// unacknowledged for redelivery, in per-aggregate order, and returns without
+// waiting for the handlers.
+//
+// A failed Build leaves nothing running: the bus and the processor it created
+// are shut down, within 30 seconds, and a failure of that cleanup is joined
+// to the returned error (see errors.Is and errors.As), never dropped. On
+// failure the Asynx is nil.
 func (b *Builder[T]) Build() (Asynx[T], error) {
 	err := b.requireStores()
 	if err != nil {
@@ -34,14 +49,16 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 			err
 	}
 
-	instance := &asynxImpl[T]{
+	built := &instance[T]{
 		proc: proc,
 		es:   es,
 		bus:  activeBus,
+
+		onListenerError: b.listenerErrHandler,
 	}
 
 	err = b.finish(
-		instance,
+		built,
 		proc,
 	)
 	if err != nil {
@@ -52,7 +69,7 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 			)
 	}
 
-	return instance,
+	return built,
 		nil
 }
 
@@ -241,13 +258,13 @@ func (b *Builder[T]) retryOpts() []procmodels.Opt[T] {
 }
 
 func (b *Builder[T]) finish(
-	instance *asynxImpl[T],
+	built *instance[T],
 	proc processor.Processor[T],
 ) error {
 	register := func(
 		fn models.ForgetHandler[T],
 	) error {
-		_, err := instance.OnForget(fn)
+		_, err := built.OnForget(fn)
 		return err
 	}
 

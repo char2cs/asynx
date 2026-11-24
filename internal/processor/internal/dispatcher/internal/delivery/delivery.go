@@ -2,13 +2,15 @@ package delivery
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"slices"
+	"time"
+
+	asynxmd "github.com/char2cs/asynx/models"
+
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/reporter"
-	asynxmd "github.com/char2cs/asynx/models"
-	"time"
 )
 
 // New creates a Deliverer for the durable subscribers, dead-letter handler and
@@ -45,7 +47,10 @@ type durableDeliverer[T any] struct {
 }
 
 // Deliver runs job's durable delivery with retries, as documented on
-// Deliverer.Deliver.
+// Deliverer.Deliver: the subscribers that receive the event are tried one
+// after the other, the failed ones are retried after a jittered, doubling
+// backoff, and the job settles once the first attempt is over. The returned
+// error says why a delivery that did not succeed stopped.
 func (d *durableDeliverer[T]) Deliver(
 	ctx context.Context,
 	aggregateID string,
@@ -74,209 +79,33 @@ func (d *durableDeliverer[T]) Deliver(
 	return loop.run(ctx)
 }
 
-// ParkThenReport parks the aggregate of an acked job, then calls report, as
-// documented on Deliverer.ParkThenReport.
-func (d *durableDeliverer[T]) ParkThenReport(
-	ctx context.Context,
+// Park parks the aggregate of an acked job through the registry's
+// ParkIfCurrent, as documented on Deliverer.Park. A job without an Ack never
+// parks its aggregate, and a halt channel that was closed since the job began
+// leaves whatever park or supersede closed it untouched.
+func (d *durableDeliverer[T]) Park(
 	aggregateID string,
 	halt <-chan struct{},
 	job jobs.Job[T],
 	cause error,
-	report func(context.Context),
 ) {
-	if job.Acked() {
-		d.registry.ParkIfCurrent(
-			aggregateID,
-			halt,
-			cause,
-		)
+	if !job.Acked() {
+		return
 	}
 
-	report(ctx)
+	d.registry.ParkIfCurrent(
+		aggregateID,
+		halt,
+		cause,
+	)
 }
 
 func (d *durableDeliverer[T]) subscribersFor(
 	job jobs.Job[T],
-) (subs []asynxmd.DurableSub[T]) {
-	for _, sub := range d.subs {
-		subs = appendReceiver(
-			subs,
-			sub,
-			job,
-		)
-	}
-
-	return subs
-}
-
-func (d *durableDeliverer[T]) attempt(
-	ctx context.Context,
-	job jobs.Job[T],
-	pending []asynxmd.DurableSub[T],
-	attempt int,
-) (failed []asynxmd.DurableSub[T], err error) {
-	var errs []error
-	for _, sub := range pending {
-		failed, errs = d.try(
-			ctx,
-			job,
-			sub,
-			attempt,
-			failed,
-			errs,
-		)
-	}
-
-	return failed,
-		errors.Join(errs...)
-}
-
-func (d *durableDeliverer[T]) try(
-	ctx context.Context,
-	job jobs.Job[T],
-	sub asynxmd.DurableSub[T],
-	attempt int,
-	failed []asynxmd.DurableSub[T],
-	errs []error,
-) ([]asynxmd.DurableSub[T], []error) {
-	err := d.runDurable(
-		ctx,
-		job,
-		sub,
-		attempt,
-	)
-	if err == nil {
-		return failed,
-			errs
-	}
-
-	failure := &asynxmd.SubscriberError{Subscriber: sub.Name, Err: err}
-	d.reports.DeliveryError(
-		ctx,
-		job,
-		failure,
-		attempt,
-	)
-	return append(
-			failed,
-			sub,
-		),
-		append(
-			errs,
-			failure,
-		)
-}
-
-func (d *durableDeliverer[T]) runDurable(
-	ctx context.Context,
-	job jobs.Job[T],
-	sub asynxmd.DurableSub[T],
-	attempt int,
-) error {
-	if sub.Timeout <= 0 {
-		return d.callRecovering(
-			ctx,
-			job,
-			sub,
-		)
-	}
-
-	result := make(
-		chan error,
-		1,
-	)
-	go d.callInto(
-		ctx,
-		result,
-		job,
-		sub,
-	)
-	timer := time.NewTimer(sub.Timeout)
-	defer timer.Stop()
-	select {
-	case err := <-result:
-		return err
-	case <-timer.C:
-		d.reportTimeout(
-			ctx,
-			job,
-			sub,
-			attempt,
-		)
-		return <-result
-	}
-}
-
-func (d *durableDeliverer[T]) reportTimeout(
-	ctx context.Context,
-	job jobs.Job[T],
-	sub asynxmd.DurableSub[T],
-	attempt int,
-) {
-	timedOut := &asynxmd.SubscriberError{
-		Subscriber: sub.Name,
-		Err: fmt.Errorf(
-			"%w after %v",
-			asynxmd.ErrHandlerTimeout,
-			sub.Timeout,
-		),
-	}
-	d.reports.DeliveryError(
-		ctx,
-		job,
-		timedOut,
-		attempt,
-	)
-}
-
-func (d *durableDeliverer[T]) callInto(
-	ctx context.Context,
-	result chan<- error,
-	job jobs.Job[T],
-	sub asynxmd.DurableSub[T],
-) {
-	result <- d.callRecovering(
-		ctx,
-		job,
-		sub,
-	)
-}
-
-func (d *durableDeliverer[T]) callRecovering(
-	ctx context.Context,
-	job jobs.Job[T],
-	sub asynxmd.DurableSub[T],
-) (err error) {
-	defer d.recoverHandlerPanic(
-		ctx,
-		job,
-		&err,
-	)
-	return sub.Handler(
-		ctx,
-		job.Event(),
-	)
-}
-
-func (d *durableDeliverer[T]) recoverHandlerPanic(
-	ctx context.Context,
-	job jobs.Job[T],
-	err *error,
-) {
-	recovered := recover()
-	if recovered == nil {
-		return
-	}
-
-	d.reports.Panic(
-		ctx,
-		job,
-		recovered,
-	)
-	*err = fmt.Errorf(
-		"%w: %v",
-		asynxmd.ErrHandlerPanic,
-		recovered,
+) []asynxmd.DurableSub[T] {
+	return slices.DeleteFunc(
+		slices.Clone(d.subs),
+		notReceiving(job),
 	)
 }
 
@@ -291,13 +120,11 @@ func (d *durableDeliverer[T]) wait(
 	defer timer.Stop()
 	select {
 	case <-d.interrupted:
-		d.ParkThenReport(
-			ctx,
+		d.Park(
 			aggregateID,
 			halt,
 			job,
 			asynxmd.ErrDispatcherClosed,
-			noReport,
 		)
 		return asynxmd.ErrDispatcherClosed
 	case <-halt:
@@ -308,23 +135,6 @@ func (d *durableDeliverer[T]) wait(
 			halt,
 		)
 	}
-}
-
-func noReport(
-	context.Context,
-) {
-}
-
-func backoffEnded[T any](
-	job jobs.Job[T],
-	halt <-chan struct{},
-) error {
-	if job.Acked() &&
-		isClosed(halt) {
-		return asynxmd.ErrDeliveryParked
-	}
-
-	return nil
 }
 
 func (d *durableDeliverer[T]) giveUp(
@@ -348,47 +158,23 @@ func (d *durableDeliverer[T]) giveUp(
 		return nil
 	}
 
-	return d.parkExhausted(
-		ctx,
-		aggregateID,
-		halt,
-		job,
-		last,
-		attempt,
-	)
-}
-
-func (d *durableDeliverer[T]) parkExhausted(
-	ctx context.Context,
-	aggregateID string,
-	halt <-chan struct{},
-	job jobs.Job[T],
-	last error,
-	attempt int,
-) error {
 	parked := fmt.Errorf(
 		"%w after %d attempts: %w",
 		asynxmd.ErrDeliveryParked,
 		attempt,
 		last,
 	)
-	report := func(
-		ctx context.Context,
-	) {
-		d.reports.DeliveryError(
-			ctx,
-			job,
-			parked,
-			attempt,
-		)
-	}
-	d.ParkThenReport(
-		ctx,
+	d.Park(
 		aggregateID,
 		halt,
 		job,
 		parked,
-		report,
+	)
+	d.reports.DeliveryError(
+		ctx,
+		job,
+		parked,
+		attempt,
 	)
 	return parked
 }
@@ -457,20 +243,27 @@ func (d *durableDeliverer[T]) callDeadLetter(
 	)
 }
 
-func appendReceiver[T any](
-	subs []asynxmd.DurableSub[T],
-	sub asynxmd.DurableSub[T],
+func backoffEnded[T any](
 	job jobs.Job[T],
-) []asynxmd.DurableSub[T] {
-	if !job.Forget() &&
-		!sub.Match(job.Event().EventName) {
-		return subs
+	halt <-chan struct{},
+) error {
+	if job.Acked() &&
+		isClosed(halt) {
+		return asynxmd.ErrDeliveryParked
 	}
 
-	return append(
-		subs,
-		sub,
-	)
+	return nil
+}
+
+func notReceiving[T any](
+	job jobs.Job[T],
+) func(asynxmd.DurableSub[T]) bool {
+	return func(
+		sub asynxmd.DurableSub[T],
+	) bool {
+		return !job.Forget() &&
+			!sub.Match(job.Event().EventName)
+	}
 }
 
 func recoverAsError(

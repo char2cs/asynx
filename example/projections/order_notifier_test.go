@@ -241,3 +241,26 @@ func TestOrderNotifier_GetOutbox_EmptyInitially(
 		)
 	}
 }
+
+func TestOrderNotifier_GetOutbox_ReturnsACopy(
+	t *testing.T,
+) {
+	notifier := &OrderNotifier{}
+	notifier.Handle(
+		context.Background(),
+		models.Event[domain.Order]{
+			EventName: "OrderCreated",
+			Aggregate: domain.Order{ID: "ORD-001"},
+		},
+	)
+
+	first := notifier.GetOutbox()
+	first[0] = "tampered"
+
+	if got := notifier.GetOutbox()[0]; got == "tampered" {
+		t.Errorf(
+			"GetOutbox()[0] = %q, the caller's edit reached the outbox",
+			got,
+		)
+	}
+}

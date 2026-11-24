@@ -70,6 +70,83 @@ func readBlobs(
 	return blobs
 }
 
+func mustAppendAt(
+	t *testing.T,
+	s Memory,
+	streamID string,
+	version int64,
+	data []byte,
+) {
+	t.Helper()
+
+	err := s.Append(
+		context.Background(),
+		streamID,
+		version,
+		data,
+	)
+	if err != nil {
+		t.Fatalf(
+			"append %s v%d: %v",
+			streamID,
+			version,
+			err,
+		)
+	}
+}
+
+func readBlobsFrom(
+	t *testing.T,
+	s Memory,
+	streamID string,
+	from int64,
+) [][]byte {
+	t.Helper()
+
+	blobs, err := s.ReadFrom(
+		context.Background(),
+		streamID,
+		from,
+	)
+	if err != nil {
+		t.Fatalf(
+			"read %s from %d: %v",
+			streamID,
+			from,
+			err,
+		)
+	}
+
+	return blobs
+}
+
+func readBlobsInRange(
+	t *testing.T,
+	s Memory,
+	streamID string,
+	from int64,
+	count int64,
+) [][]byte {
+	t.Helper()
+
+	blobs, err := s.ReadRange(
+		context.Background(),
+		streamID,
+		from,
+		count,
+	)
+	if err != nil {
+		t.Fatalf(
+			"read range %s from %d: %v",
+			streamID,
+			from,
+			err,
+		)
+	}
+
+	return blobs
+}
+
 func pendingCount(
 	t *testing.T,
 	s Memory,
@@ -492,6 +569,82 @@ func TestPutReceipt_DuplicateAcrossTransactionsIsRejected(
 		t.Fatalf(
 			"err = %v, want ErrDuplicateReceipt",
 			err,
+		)
+	}
+}
+
+func TestAtomically_RollbackRemovesOnlyTheVersionsItInserted(
+	t *testing.T,
+) {
+	s := New()
+	ctx := context.Background()
+	mustAppendAt(
+		t,
+		s,
+		"s1",
+		2,
+		[]byte("two"),
+	)
+	mustAppendAt(
+		t,
+		s,
+		"s1",
+		4,
+		[]byte("four"),
+	)
+	boom := errors.New("boom")
+	interleave := func(
+		tx asynxmd.Tx,
+	) error {
+		return errors.Join(
+			tx.Append(
+				ctx,
+				"s1",
+				3,
+				[]byte("three"),
+			),
+			tx.Append(
+				ctx,
+				"s1",
+				1,
+				[]byte("one"),
+			),
+			tx.Append(
+				ctx,
+				"s1",
+				5,
+				[]byte("five"),
+			),
+			boom,
+		)
+	}
+
+	err := s.Atomically(
+		ctx,
+		interleave,
+	)
+	if !errors.Is(
+		err,
+		boom,
+	) {
+		t.Fatalf(
+			"err = %v, want boom",
+			err,
+		)
+	}
+
+	blobs := readBlobsFrom(
+		t,
+		s,
+		"s1",
+		1,
+	)
+	if len(blobs) != 2 ||
+		string(blobs[0]) != "two" ||
+		string(blobs[1]) != "four" {
+		t.Fatalf(
+			"stream after rollback = %q, want [two four]",
+			blobs,
 		)
 	}
 }

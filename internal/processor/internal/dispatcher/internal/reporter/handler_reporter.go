@@ -14,7 +14,9 @@ type handlerReporter[T any] struct {
 	onPanic         asynxmd.PanicHandler[T]
 }
 
-// PublishError calls the publish error handler, if any, swallowing its panic.
+// PublishError calls the publish error handler, if any, with the event of job
+// and err. A panic in the handler is recovered and reported to the panic
+// handler, so it never reaches the delivery that is reporting.
 func (r *handlerReporter[T]) PublishError(
 	ctx context.Context,
 	job contracts.Job[T],
@@ -24,7 +26,10 @@ func (r *handlerReporter[T]) PublishError(
 		return
 	}
 
-	defer swallowPanic()
+	defer r.forwardPanic(
+		ctx,
+		job,
+	)
 	r.onPublishError(
 		ctx,
 		job.Event(),
@@ -32,7 +37,10 @@ func (r *handlerReporter[T]) PublishError(
 	)
 }
 
-// DeliveryError calls the delivery error handler, if any, swallowing its panic.
+// DeliveryError calls the delivery error handler, if any, with the event of
+// job, err and the attempt number. A panic in the handler is recovered and
+// reported to the panic handler, so it never reaches the delivery that is
+// reporting.
 func (r *handlerReporter[T]) DeliveryError(
 	ctx context.Context,
 	job contracts.Job[T],
@@ -43,7 +51,10 @@ func (r *handlerReporter[T]) DeliveryError(
 		return
 	}
 
-	defer swallowPanic()
+	defer r.forwardPanic(
+		ctx,
+		job,
+	)
 	r.onDeliveryError(
 		ctx,
 		job.Event(),
@@ -52,7 +63,10 @@ func (r *handlerReporter[T]) DeliveryError(
 	)
 }
 
-// Panic calls the panic handler, if any, swallowing its panic.
+// Panic calls the panic handler, if any, with the event of job and the
+// recovered value. A panic in the panic handler itself is recovered and
+// dropped: it is the last hook there is, so there is nowhere left to report
+// that panic to, and letting it escape would abandon the delivery.
 func (r *handlerReporter[T]) Panic(
 	ctx context.Context,
 	job contracts.Job[T],
@@ -62,7 +76,7 @@ func (r *handlerReporter[T]) Panic(
 		return
 	}
 
-	defer swallowPanic()
+	defer dropPanicHandlerPanic()
 	r.onPanic(
 		ctx,
 		job.Event(),
@@ -70,7 +84,24 @@ func (r *handlerReporter[T]) Panic(
 	)
 }
 
-func swallowPanic() {
+func (r *handlerReporter[T]) forwardPanic(
+	ctx context.Context,
+	job contracts.Job[T],
+) {
 	recovered := recover()
-	_ = recovered
+	if recovered == nil {
+		return
+	}
+
+	r.Panic(
+		ctx,
+		job,
+		recovered,
+	)
+}
+
+func dropPanicHandlerPanic() {
+	if recover() != nil {
+		return
+	}
 }

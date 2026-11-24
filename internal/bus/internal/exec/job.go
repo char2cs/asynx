@@ -5,8 +5,12 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-// MakeJob builds an exec.HandlerJob from a models.Subscription, an event,
-// and optional per-job callback overrides.
+// MakeJob builds the HandlerJob that delivers event to the handler registered
+// by sub. The handler, fallback and timeout are copied from the subscription;
+// onPanic and onTimeout are the bus-level observers and may be nil, in which
+// case Handler falls back to its default stderr reporters. The returned job is
+// fresh on every call, so the caller may adjust it (for instance set
+// WaitAfterTimeout) before handing it to Handler.
 func MakeJob[T any](
 	sub *models.Subscription[T],
 	event asynxmd.Event[T],

@@ -3,50 +3,42 @@ package storetest
 import (
 	"bytes"
 	"context"
+	"errors"
 	"github.com/char2cs/asynx/models"
+	"github.com/char2cs/asynx/store/storetest/internal/race"
+	"slices"
 	"testing"
 )
 
-const (
-	roundTripVersion = 7
-	oldVersion       = 5
-	newerVersion     = 2
-	snapshotWriters  = 16
-)
-
 // RunSnapshots executes the conformance suite for models.SnapshotStore
-// implementations built by newStore.
+// implementations built by newStore. Each scenario runs as a subtest against
+// its own empty store.
+//
+// The scenarios check that a snapshot store behaves as the single mutable cell
+// per aggregate that models.SnapshotStore describes. GetOfUnknownAggregateIsNotFoundNotAnError
+// checks that a missing snapshot is reported as not found, which callers
+// answer by replaying from version 1, and not as an error.
+// PutThenGetReturnsTheBytes checks that arbitrary bytes round-trip unchanged.
+// PutReplacesTheSnapshot checks that Put upserts rather than accumulates, so
+// Get returns only the newest. AggregatesAreIndependent checks that deleting
+// one aggregate's snapshot leaves the others. DeleteRemovesAndIsIdempotent
+// checks that Delete removes the snapshot and that deleting twice, or deleting
+// an unknown aggregate, is not an error. PutAfterDeleteStores checks that an
+// aggregate can be snapshotted again, even from a lower version, after its
+// snapshot was deleted. ConcurrentPutsLeaveOneOfThem checks that concurrent
+// writers never produce a torn value: Get returns exactly one writer's bytes.
+// CancelledContextFailsEveryOperation checks that a context that is already
+// done fails Put, Get and Delete and leaves the stored snapshot unchanged.
 func RunSnapshots(
 	t *testing.T,
 	newStore SnapshotFactory,
 ) {
 	t.Helper()
-
-	tests := snapshotScenarios()
-
-	for name, fn := range tests {
-		t.Run(
-			name,
-			snapshotCase(
-				fn,
-				newStore,
-			),
-		)
-	}
-}
-
-func snapshotCase(
-	fn scenario[models.SnapshotStore],
-	newStore SnapshotFactory,
-) func(*testing.T) {
-	return func(
-		t *testing.T,
-	) {
-		fn(
-			t,
-			newStore(t),
-		)
-	}
+	runScenarios(
+		t,
+		snapshotScenarios(),
+		newStore,
+	)
 }
 
 func snapshotUnknown(
@@ -134,6 +126,11 @@ func mustGet(
 		found
 }
 
+const (
+	arbitraryVersion = 7
+	staleVersion     = 5
+)
+
 func snapshotRoundTrip(
 	t testing.TB,
 	s models.SnapshotStore,
@@ -143,7 +140,7 @@ func snapshotRoundTrip(
 	err := s.Put(
 		ctx,
 		"a",
-		roundTripVersion,
+		arbitraryVersion,
 		want,
 	)
 	if err != nil {
@@ -288,7 +285,7 @@ func snapshotPutAfterDelete(
 		t,
 		s,
 		"a",
-		oldVersion,
+		staleVersion,
 		"old",
 	)
 	mustDelete(
@@ -325,11 +322,13 @@ func writerPayload(
 	return []byte{'v', byte('a' + i)}
 }
 
-func putAsWriter(
-	ctx context.Context,
+func snapshotConcurrentPuts(
+	t testing.TB,
 	s models.SnapshotStore,
-) func(int) error {
-	return func(
+) {
+	const writers = 16
+	ctx := context.Background()
+	putOwnPayload := func(
 		i int,
 	) error {
 		return s.Put(
@@ -339,83 +338,73 @@ func putAsWriter(
 			writerPayload(i),
 		)
 	}
-}
 
-func writerCandidates() map[string]struct{} {
-	candidates := map[string]struct{}{}
-	for i := range snapshotWriters {
-		candidates[string(writerPayload(i))] = struct{}{}
-	}
+	results := race.All(
+		writers,
+		putOwnPayload,
+	)
 
-	return candidates
-}
-
-func reportPutErrors(
-	t testing.TB,
-	results []error,
-) {
-	t.Helper()
-	for i, err := range results {
-		reportPutError(
-			t,
-			i,
+	if err := errors.Join(results...); err != nil {
+		t.Errorf(
+			"concurrent Put failed: %v",
 			err,
 		)
 	}
-}
 
-func reportPutError(
-	t testing.TB,
-	i int,
-	err error,
-) {
-	t.Helper()
-	if err == nil {
-		return
-	}
-
-	t.Errorf(
-		"Put v%d: %v",
-		i+1,
-		err,
+	wantOneWritersBytes(
+		t,
+		s,
+		writers,
 	)
 }
 
-func snapshotConcurrentPuts(
+func wantOneWritersBytes(
 	t testing.TB,
 	s models.SnapshotStore,
+	writers int,
 ) {
-	ctx := context.Background()
-	results := raceAll(
-		snapshotWriters,
-		putAsWriter(
-			ctx,
-			s,
-		),
-	)
-	reportPutErrors(
+	t.Helper()
+	got, found := mustGet(
 		t,
-		results,
-	)
-
-	got, found, err := s.Get(
-		ctx,
+		s,
 		"a",
 	)
-	if err != nil ||
-		!found {
+	if !found ||
+		!slices.ContainsFunc(
+			writtenPayloads(writers),
+			bytesEqualTo(got),
+		) {
 		t.Fatalf(
-			"Get = %q, %v, %v",
+			"Get = %q, %v; want exactly one writer's bytes (no torn write)",
 			got,
 			found,
-			err,
 		)
 	}
+}
 
-	if _, ok := writerCandidates()[string(got)]; !ok {
-		t.Fatalf(
-			"Get = %q, which no writer wrote (torn write)",
+func writtenPayloads(
+	writers int,
+) [][]byte {
+	payloads := make(
+		[][]byte,
+		writers,
+	)
+	for i := range writers {
+		payloads[i] = writerPayload(i)
+	}
+
+	return payloads
+}
+
+func bytesEqualTo(
+	want []byte,
+) func([]byte) bool {
+	return func(
+		got []byte,
+	) bool {
+		return bytes.Equal(
 			got,
+			want,
 		)
 	}
 }
@@ -433,10 +422,13 @@ func snapshotCancelled(
 	)
 	done, cancel := context.WithCancel(context.Background())
 	cancel()
-	failsOnCancelled(
-		done,
+
+	wantAllFailed(
 		t,
-		s,
+		cancelledSnapshotOutcomes(
+			done,
+			s,
+		),
 	)
 
 	got, found := mustGet(
@@ -454,34 +446,29 @@ func snapshotCancelled(
 	}
 }
 
-func failsOnCancelled(
+func cancelledSnapshotOutcomes(
 	done context.Context,
-	t testing.TB,
 	s models.SnapshotStore,
-) {
-	t.Helper()
-	if err := s.Put(
+) map[string]error {
+	const newerVersion = 2
+	outcomes := map[string]error{
+		"Put": s.Put(
+			done,
+			"a",
+			newerVersion,
+			[]byte("B"),
+		),
+		"Delete": s.Delete(
+			done,
+			"a",
+		),
+	}
+	_, _, outcomes["Get"] = s.Get(
 		done,
 		"a",
-		newerVersion,
-		[]byte("B"),
-	); err == nil {
-		t.Error("Put succeeded on a cancelled context")
-	}
+	)
 
-	if _, _, err := s.Get(
-		done,
-		"a",
-	); err == nil {
-		t.Error("Get succeeded on a cancelled context")
-	}
-
-	if err := s.Delete(
-		done,
-		"a",
-	); err == nil {
-		t.Error("Delete succeeded on a cancelled context")
-	}
+	return outcomes
 }
 
 func snapshotScenarios() map[string]scenario[models.SnapshotStore] {

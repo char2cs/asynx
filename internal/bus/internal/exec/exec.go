@@ -9,11 +9,33 @@ import (
 	"time"
 )
 
-// Handler runs job.Handler (via WithTimeout), recovers from any
-// panic, and optionally calls job.FallbackHandler. It calls wg.Done() when it
-// returns. Intended to be called as a goroutine. The panic and timeout callbacks
-// run in goroutines nobody recovers, so a panic inside one is swallowed: a
-// misbehaving observer must not take the process down.
+// Handler runs one subscription handler for one event and reports how it
+// ended. It is meant to be started as its own goroutine by the bus, which
+// reserves a slot on wg beforehand; Handler calls wg.Done exactly once, when
+// everything it started for the job has finished, so a bus can count in-flight
+// work with the group.
+//
+// job.Handler runs inline on the calling goroutine when job.Timeout is zero,
+// and on a separate goroutine bounded by the timeout otherwise. A panic in the
+// handler never escapes Handler: it is reported through job.OnPanic (the
+// default OnHandlerPanic when nil). A timeout is reported through
+// job.OnTimeout (the default OnHandlerTimeout when nil); the handler goroutine
+// is then abandoned, unless job.WaitAfterTimeout is set, in which case Handler
+// still waits for it to finish before returning.
+//
+// job.FallbackHandler, when set, runs after the primary handler panicked on the
+// calling goroutine, which happens only when no timeout is configured: a
+// handler running under a timeout has its panic recovered and reported on its
+// own goroutine and the fallback is not started. The fallback gets the same
+// event, timeout and wait mode; a panic in it is reported through the same
+// callback and ends the job, so there is no second fallback.
+//
+// The panic and timeout callbacks run on goroutines nobody recovers, so a
+// panic raised inside one is contained, never propagated: a misbehaving
+// observer must not take the process down. With no further observer to tell,
+// the contained panic is written to stderr as one line, which is the only trace
+// of it. This is the documented guarantee for WithPanicHandler and
+// WithTimeoutHandler.
 func Handler[T any](
 	ctx context.Context,
 	wg *sync.WaitGroup,
@@ -21,22 +43,22 @@ func Handler[T any](
 ) {
 	defer wg.Done()
 
-	panicFn := panicCallback(
+	panicFn := panicNotifier(
 		ctx,
 		job,
 	)
-	timeoutFn := timeoutCallback(
+	timeoutFn := timeoutNotifier(
 		ctx,
 		job,
 	)
-	defer fallBackOnPanic(
+	defer recoverAndFallBack(
 		ctx,
 		job,
 		panicFn,
 		timeoutFn,
 	)
 
-	executeWithTimeout(
+	runWithDeadline(
 		ctx,
 		job.Handler,
 		job.Event,
@@ -47,13 +69,20 @@ func Handler[T any](
 	)
 }
 
-func swallowPanic() {
-	if recover() != nil {
+func containObserverPanic() {
+	recovered := recover()
+	if recovered == nil {
 		return
 	}
+
+	fmt.Fprintf(
+		os.Stderr,
+		"asynx: a panic observer panicked and was contained: %v\n",
+		recovered,
+	)
 }
 
-func reportRecovered(
+func forwardPanic(
 	panicFn func(any),
 ) {
 	recovered := recover()
@@ -64,14 +93,14 @@ func reportRecovered(
 	panicFn(recovered)
 }
 
-func panicCallback[T any](
+func panicNotifier[T any](
 	ctx context.Context,
 	job *HandlerJob[T],
 ) func(any) {
 	return func(
 		v any,
 	) {
-		defer swallowPanic()
+		defer containObserverPanic()
 		notifyPanic(
 			ctx,
 			job,
@@ -100,12 +129,12 @@ func notifyPanic[T any](
 	)
 }
 
-func timeoutCallback[T any](
+func timeoutNotifier[T any](
 	ctx context.Context,
 	job *HandlerJob[T],
 ) func() {
 	return func() {
-		defer swallowPanic()
+		defer containObserverPanic()
 		notifyTimeout(
 			ctx,
 			job,
@@ -132,7 +161,7 @@ func notifyTimeout[T any](
 	)
 }
 
-func fallBackOnPanic[T any](
+func recoverAndFallBack[T any](
 	ctx context.Context,
 	job *HandlerJob[T],
 	panicFn func(any),
@@ -148,7 +177,7 @@ func fallBackOnPanic[T any](
 		return
 	}
 
-	runFallback(
+	runFallbackHandler(
 		ctx,
 		job,
 		panicFn,
@@ -156,14 +185,14 @@ func fallBackOnPanic[T any](
 	)
 }
 
-func runFallback[T any](
+func runFallbackHandler[T any](
 	ctx context.Context,
 	job *HandlerJob[T],
 	panicFn func(any),
 	timeoutFn func(),
 ) {
-	defer reportRecovered(panicFn)
-	executeWithTimeout(
+	defer forwardPanic(panicFn)
+	runWithDeadline(
 		ctx,
 		job.FallbackHandler,
 		job.Event,
@@ -174,10 +203,18 @@ func runFallback[T any](
 	)
 }
 
-// WithTimeout calls handler inline when timeout is zero, or in a
-// goroutine with a deadline otherwise. Panics inside the goroutine are
-// recovered and reported via onPanic (if non-nil) before closing the done
-// channel, so they never propagate.
+// WithTimeout calls handler for event inline when timeout is zero, or on its
+// own goroutine with a deadline otherwise, and returns once the handler is done
+// or the deadline passed, whichever is first. When the deadline passes first,
+// onTimeout (if non-nil) is called and the handler goroutine is abandoned: it
+// keeps running and its eventual result is ignored.
+//
+// A panic in the handler is recovered on its goroutine and handed to onPanic
+// before the handler counts as done, so it never propagates to the caller. When
+// onPanic is nil the recovered value is dropped; Handler always passes a
+// notifier, so only direct callers can hit that. A panic raised by onPanic
+// itself is contained and written to stderr. With a zero timeout the handler runs on the
+// caller's goroutine and a panic propagates to the caller.
 func WithTimeout[T any](
 	ctx context.Context,
 	handler asynxmd.ProjectionHandler[T],
@@ -186,7 +223,7 @@ func WithTimeout[T any](
 	onPanic func(any),
 	onTimeout func(),
 ) {
-	executeWithTimeout(
+	runWithDeadline(
 		ctx,
 		handler,
 		event,
@@ -197,7 +234,7 @@ func WithTimeout[T any](
 	)
 }
 
-func executeWithTimeout[T any](
+func runWithDeadline[T any](
 	ctx context.Context,
 	handler asynxmd.ProjectionHandler[T],
 	event asynxmd.Event[T],
@@ -215,7 +252,7 @@ func executeWithTimeout[T any](
 	}
 
 	done := make(chan struct{})
-	go runGuarded(
+	go runRecovering(
 		ctx,
 		handler,
 		event,
@@ -229,7 +266,7 @@ func executeWithTimeout[T any](
 	select {
 	case <-done:
 	case <-timer.C:
-		afterTimeout(
+		handleTimeout(
 			onTimeout,
 			mode,
 			done,
@@ -237,7 +274,7 @@ func executeWithTimeout[T any](
 	}
 }
 
-func runGuarded[T any](
+func runRecovering[T any](
 	ctx context.Context,
 	handler asynxmd.ProjectionHandler[T],
 	event asynxmd.Event[T],
@@ -245,14 +282,14 @@ func runGuarded[T any](
 	done chan<- struct{},
 ) {
 	defer close(done)
-	defer reportPanic(onPanic)
+	defer reportRecoveredPanic(onPanic)
 	handler(
 		ctx,
 		event,
 	)
 }
 
-func reportPanic(
+func reportRecoveredPanic(
 	onPanic func(any),
 ) {
 	recovered := recover()
@@ -261,11 +298,11 @@ func reportPanic(
 		return
 	}
 
-	defer swallowPanic()
+	defer containObserverPanic()
 	onPanic(recovered)
 }
 
-func afterTimeout(
+func handleTimeout(
 	onTimeout func(),
 	mode waitMode,
 	done <-chan struct{},
@@ -279,7 +316,10 @@ func afterTimeout(
 	}
 }
 
-// OnHandlerPanic is the default panic callback: it logs the panic to stderr.
+// OnHandlerPanic is the panic callback a job without its own OnPanic falls
+// back to. It writes one line naming the event and the recovered value to
+// stderr and returns; it never fails and does not re-raise the panic. Handler
+// calls it on the goroutine that recovered the panic.
 func OnHandlerPanic[T any](
 	panicValue any,
 	job *HandlerJob[T],
@@ -292,8 +332,10 @@ func OnHandlerPanic[T any](
 	)
 }
 
-// OnHandlerTimeout is the default timeout callback: it logs the timeout to
-// stderr.
+// OnHandlerTimeout is the timeout callback a job without its own OnTimeout
+// falls back to. It writes one line naming the event and the configured timeout
+// to stderr and returns. Handler calls it from the goroutine waiting on the
+// handler, at the moment the deadline passes.
 func OnHandlerTimeout[T any](
 	event asynxmd.Event[T],
 	timeout time.Duration,

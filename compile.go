@@ -6,7 +6,6 @@ import (
 	procmodels "github.com/char2cs/asynx/internal/processor/models"
 	"github.com/char2cs/asynx/models"
 	"regexp"
-	"slices"
 )
 
 func (b *Builder[T]) compileSyncProjections() ([]procmodels.SyncProjection[T], error) {
@@ -92,7 +91,7 @@ func (b *Builder[T]) compileDurable() ([]models.DurableSub[T], func(string) bool
 	}
 
 	return subs,
-		wantedBy(subs),
+		durableEvents[T](subs).wants,
 		nil
 }
 
@@ -148,44 +147,11 @@ func compileSubscriber[T any](
 		nil
 }
 
-func wantedBy[T any](
-	subs []models.DurableSub[T],
-) func(string) bool {
-	return func(
-		name string,
-	) bool {
-		return slices.ContainsFunc(
-			subs,
-			matchesName[T](name),
-		)
-	}
-}
-
-func matchesName[T any](
-	name string,
-) func(models.DurableSub[T]) bool {
-	return func(
-		sub models.DurableSub[T],
-	) bool {
-		return sub.Match(name)
-	}
-}
-
-func exactMatcher(
-	pattern string,
-) func(string) bool {
-	return func(
-		name string,
-	) bool {
-		return name == pattern
-	}
-}
-
 func matcher(
 	pattern string,
 ) (func(string) bool, error) {
 	if bus.IsExactPattern(pattern) {
-		return exactMatcher(pattern),
+		return exactPattern(pattern).matches,
 			nil
 	}
 

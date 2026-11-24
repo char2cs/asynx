@@ -4,7 +4,12 @@ import (
 	"time"
 )
 
-// WithFallback registers a secondary handler invoked when the primary panics.
+// WithFallback registers a secondary handler invoked, with the same context and
+// event, when the primary handler panics, so a subscriber can degrade to a
+// simpler action instead of losing the event. The panic is still reported to
+// the bus's PanicHandler. The fallback is not retried. Durable subscribers
+// retry instead of falling back, and Build rejects the option on them with
+// ErrFallbackUnsupported.
 func WithFallback[T any](
 	handler ProjectionHandler[T],
 ) SubscriptionOpt[T] {

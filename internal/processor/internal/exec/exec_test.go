@@ -695,7 +695,7 @@ type recordingBus[T any] struct {
 	onPublishSync  func()
 }
 
-// Publish is the test double implementation for the code under test.
+// Publish accepts the event and does nothing.
 func (b *recordingBus[T]) Publish(
 	_ context.Context,
 	_ asynxmd.Event[T],
@@ -703,7 +703,9 @@ func (b *recordingBus[T]) Publish(
 	return nil
 }
 
-// PublishSync is the test double implementation for the code under test.
+// PublishSync counts the call, records the context it was given in lastCtx,
+// runs onPublishSync when set and returns publishSyncErr, so a test can
+// assert what the dispatcher delivered and with which context.
 func (b *recordingBus[T]) PublishSync(
 	ctx context.Context,
 	_ asynxmd.Event[T],
@@ -720,7 +722,7 @@ func (b *recordingBus[T]) PublishSync(
 	return err
 }
 
-// Subscribe is the test double implementation for the code under test.
+// Subscribe registers nothing and returns an empty id.
 func (b *recordingBus[T]) Subscribe(
 	_ string,
 	_ asynxmd.ProjectionHandler[T],
@@ -730,21 +732,21 @@ func (b *recordingBus[T]) Subscribe(
 		nil
 }
 
-// Unsubscribe is the test double implementation for the code under test.
+// Unsubscribe does nothing.
 func (b *recordingBus[T]) Unsubscribe(
 	_ string,
 ) error {
 	return nil
 }
 
-// Close is the test double implementation for the code under test.
+// Close does nothing and succeeds.
 func (b *recordingBus[T]) Close(
 	_ context.Context,
 ) error {
 	return nil
 }
 
-// WaitForHandlers is the test double implementation for the code under test.
+// WaitForHandlers returns at once; nothing is tracked.
 func (b *recordingBus[T]) WaitForHandlers() {}
 
 func newEnv(

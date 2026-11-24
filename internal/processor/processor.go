@@ -8,8 +8,13 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-// Processor routes commands to per-aggregate shards, runs them through the
-// write pipeline and delivers the resulting events. Construct it with New.
+// Processor is the command side of asynx: it routes each command to a
+// per-aggregate shard so that one aggregate's commands run strictly one at a
+// time, runs them through the write pipeline, delivers the committed events to
+// subscribers and the bus, and offers the operations to inspect, recover and
+// shut down delivery. It is composed of Sender (write), Lifecycle (stop) and
+// Delivery (inspect and redeliver). Implementations are safe for concurrent
+// use; construct one with New and end it with Shutdown.
 type Processor[T any] interface {
 	api.Sender[T]
 	api.Lifecycle

@@ -12,8 +12,8 @@ type Winddown interface {
 		done chan<- struct{},
 	)
 
-	// Close makes every later Enqueue fail with ErrDispatcherClosed. It
-	// reports whether this call closed the registry (false when it was
-	// already closed).
-	Close() bool
+	// Close makes every later Enqueue fail with ErrDispatcherClosed. Jobs the
+	// registry already admitted still run and finish; closing a closed
+	// registry changes nothing.
+	Close()
 }

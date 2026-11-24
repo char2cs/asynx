@@ -28,7 +28,7 @@ func TestRetryLoop_SettlesTheJobAfterTheFirstAttempt(
 	}
 	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
 		Match: match,
-		Handler: makeHandler2(
+		Handler: settledAtSecondRunHandler(
 			&runs,
 			settledAtSecond,
 			&job,
@@ -79,7 +79,7 @@ func TestRetryLoop_RetriesOnlyTheFailedSubscribers(
 	}
 	f := newFixture(asynxmd.DispatcherConfig[int]{MaxAttempts: 5, DurableSubs: []asynxmd.DurableSub[int]{
 		{Match: match2, Handler: handler},
-		{Match: match3, Handler: makeHandler3(&flakyRuns)},
+		{Match: match3, Handler: flakyHandler(&flakyRuns)},
 	}})
 	job, halt := f.begin(
 		t,
@@ -156,26 +156,6 @@ func TestRetryLoop_StopsAtTheAttemptCap(
 	}
 }
 
-func stepRetrying(
-	t *testing.T,
-	loop *retryLoop[int],
-) {
-	t.Helper()
-	err := loop.step(context.Background())
-	if errors.Is(
-		err,
-		errRetrying,
-	) {
-		return
-	}
-
-	t.Fatalf(
-		"step = %v, want %v",
-		err,
-		errRetrying,
-	)
-}
-
 func TestRetryLoop_DoublesTheBackoffUpToTheMaximum(
 	t *testing.T,
 ) {
@@ -196,10 +176,7 @@ func TestRetryLoop_DoublesTheBackoffUpToTheMaximum(
 
 	var backoffs []time.Duration
 	for range 3 {
-		stepRetrying(
-			t,
-			loop,
-		)
+		loop.advance()
 		backoffs = append(
 			backoffs,
 			loop.backoff,
@@ -278,7 +255,7 @@ func requireParkedWait(
 	}
 }
 
-func makeHandler2(
+func settledAtSecondRunHandler(
 	runs *atomic.Int32,
 	settledAtSecond chan bool,
 	job *jobs.Job[int],
@@ -287,7 +264,7 @@ func makeHandler2(
 		p0 context.Context,
 		p1 asynxmd.Event[int],
 	) error {
-		return runHandler2(
+		return recordSettledAtSecondRun(
 			runs,
 			settledAtSecond,
 			job,
@@ -297,7 +274,7 @@ func makeHandler2(
 	}
 }
 
-func runHandler2(
+func recordSettledAtSecondRun(
 	runs *atomic.Int32,
 	settledAtSecond chan bool,
 	job *jobs.Job[int],
@@ -312,14 +289,14 @@ func runHandler2(
 	return nil
 }
 
-func makeHandler3(
+func flakyHandler(
 	flakyRuns *atomic.Int32,
 ) func(context.Context, asynxmd.Event[int]) error {
 	return func(
 		p0 context.Context,
 		p1 asynxmd.Event[int],
 	) error {
-		return runHandler3(
+		return failTwiceThenSucceed(
 			flakyRuns,
 			p0,
 			p1,
@@ -327,7 +304,7 @@ func makeHandler3(
 	}
 }
 
-func runHandler3(
+func failTwiceThenSucceed(
 	flakyRuns *atomic.Int32,
 	_ context.Context,
 	_ asynxmd.Event[int],

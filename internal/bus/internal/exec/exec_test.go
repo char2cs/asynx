@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -99,7 +100,7 @@ func newJob(
 	}
 }
 
-func TestExecuteHandler_Normal(
+func TestHandler_Normal(
 	t *testing.T,
 ) {
 	called := make(
@@ -134,7 +135,7 @@ func TestExecuteHandler_Normal(
 	}
 }
 
-func TestExecuteHandler_PanicNoFallbackNoTimeout(
+func TestHandler_PanicNoFallbackNoTimeout(
 	t *testing.T,
 ) {
 	newJobFn := func(
@@ -186,7 +187,7 @@ func TestExecuteHandler_PanicNoFallbackNoTimeout(
 	}
 }
 
-func TestExecuteHandler_PanicWithFallback(
+func TestHandler_PanicWithFallback(
 	t *testing.T,
 ) {
 	fallbackCalled := make(
@@ -233,7 +234,7 @@ func TestExecuteHandler_PanicWithFallback(
 	}
 }
 
-func TestExecuteHandler_PanicWithTimeout(
+func TestHandler_PanicWithTimeout(
 	t *testing.T,
 ) {
 	newJobFn := func(
@@ -275,7 +276,7 @@ func TestExecuteHandler_PanicWithTimeout(
 	}
 }
 
-func TestExecuteHandler_DoublePanic(
+func TestHandler_DoublePanic(
 	t *testing.T,
 ) {
 	handler := func(
@@ -315,7 +316,7 @@ func TestExecuteHandler_DoublePanic(
 	)
 }
 
-func TestExecuteHandler_DoublePanic_BothLogged(
+func TestHandler_DoublePanic_BothLogged(
 	t *testing.T,
 ) {
 	var panicCount int32
@@ -368,7 +369,7 @@ func TestExecuteHandler_DoublePanic_BothLogged(
 	}
 }
 
-func TestExecuteWithTimeout_ZeroTimeout(
+func TestWithTimeout_ZeroTimeout(
 	t *testing.T,
 ) {
 	called := false
@@ -391,7 +392,7 @@ func TestExecuteWithTimeout_ZeroTimeout(
 	}
 }
 
-func TestExecuteWithTimeout_FinishesBeforeTimeout(
+func TestWithTimeout_FinishesBeforeTimeout(
 	t *testing.T,
 ) {
 	called := make(
@@ -420,7 +421,7 @@ func TestExecuteWithTimeout_FinishesBeforeTimeout(
 	}
 }
 
-func TestExecuteWithTimeout_HandlerTimesOut(
+func TestWithTimeout_HandlerTimesOut(
 	t *testing.T,
 ) {
 	started := make(chan struct{})
@@ -455,7 +456,7 @@ func TestExecuteWithTimeout_HandlerTimesOut(
 	}
 }
 
-func TestExecuteWithTimeout_PanicInsideGoroutine(
+func TestWithTimeout_PanicInsideGoroutine(
 	t *testing.T,
 ) {
 	withTimeoutFn := func(
@@ -474,7 +475,7 @@ func TestExecuteWithTimeout_PanicInsideGoroutine(
 	)
 }
 
-func TestExecuteWithTimeout_PanicCallsOnPanic(
+func TestWithTimeout_PanicCallsOnPanic(
 	t *testing.T,
 ) {
 	got := make(
@@ -508,7 +509,7 @@ func TestExecuteWithTimeout_PanicCallsOnPanic(
 	)
 }
 
-func TestExecuteHandler_CustomPanicCallback(
+func TestHandler_CustomPanicCallback(
 	t *testing.T,
 ) {
 	got := make(
@@ -567,7 +568,7 @@ func TestExecuteHandler_CustomPanicCallback(
 	)
 }
 
-func TestExecuteHandler_DefaultTimeoutCallback(
+func TestHandler_DefaultTimeoutCallback(
 	t *testing.T,
 ) {
 	started := make(chan struct{})
@@ -613,7 +614,7 @@ func TestExecuteHandler_DefaultTimeoutCallback(
 	}
 }
 
-func TestExecuteHandler_CustomTimeoutCallback(
+func TestHandler_CustomTimeoutCallback(
 	t *testing.T,
 ) {
 	fired := make(
@@ -772,7 +773,7 @@ func TestOnHandlerTimeout_Smoke(
 	}
 }
 
-func TestExecuteWithTimeout_PanicCallbackPanics(
+func TestWithTimeout_PanicCallbackPanics(
 	t *testing.T,
 ) {
 	done := make(chan struct{})
@@ -798,7 +799,54 @@ func TestExecuteWithTimeout_PanicCallbackPanics(
 	close(done)
 }
 
-func TestExecuteHandler_PanicInTheObserversIsSwallowed(
+func TestHandler_PanicInAnObserverLeavesATraceOnStderr(
+	t *testing.T,
+) {
+	handler := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		panic("handler")
+	}
+	onPanic := func(
+		context.Context,
+		models.Event[string],
+		any,
+	) {
+		panic("observer failure")
+	}
+	job := newJob(
+		handler,
+		nil,
+		0,
+	)
+	job.OnPanic = onPanic
+
+	runJob := func() {
+		var wg sync.WaitGroup
+		wg.Add(1)
+		exec.Handler(
+			context.Background(),
+			&wg,
+			job,
+		)
+	}
+	out := captureStderr(
+		t,
+		runJob,
+	)
+	if !strings.Contains(
+		out,
+		"observer failure",
+	) {
+		t.Errorf(
+			"contained observer panic left no trace on stderr: %q",
+			out,
+		)
+	}
+}
+
+func TestHandler_PanicInTheObserversIsSwallowed(
 	t *testing.T,
 ) {
 	var wg sync.WaitGroup
@@ -861,7 +909,7 @@ func TestExecuteHandler_PanicInTheObserversIsSwallowed(
 	wg.Wait()
 }
 
-func TestExecuteHandler_PanicInTheObserverOfTheFallbackIsSwallowed(
+func TestHandler_PanicInTheObserverOfTheFallbackIsSwallowed(
 	t *testing.T,
 ) {
 	var wg sync.WaitGroup
@@ -901,6 +949,131 @@ func TestExecuteHandler_PanicInTheObserverOfTheFallbackIsSwallowed(
 	wg.Wait()
 }
 
+type ctxKey struct{}
+
+func TestHandler_PassesTheContextToHandlerFallbackAndObservers(
+	t *testing.T,
+) {
+	ctx := context.WithValue(
+		context.Background(),
+		ctxKey{},
+		"caller",
+	)
+	received := make(
+		chan context.Context,
+		4,
+	)
+	handle := func(
+		got context.Context,
+		_ models.Event[string],
+	) {
+		received <- got
+		panic("boom")
+	}
+	fallback := func(
+		got context.Context,
+		_ models.Event[string],
+	) {
+		received <- got
+	}
+	onPanic := func(
+		got context.Context,
+		_ models.Event[string],
+		_ any,
+	) {
+		received <- got
+	}
+	job := newJob(
+		handle,
+		fallback,
+		0,
+	)
+	job.OnPanic = onPanic
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	exec.Handler(
+		ctx,
+		&wg,
+		job,
+	)
+
+	close(received)
+	var contexts []context.Context
+	for got := range received {
+		contexts = append(
+			contexts,
+			got,
+		)
+	}
+
+	if len(contexts) != 3 {
+		t.Errorf(
+			"want handler, observer and fallback to run once each, got %d calls",
+			len(contexts),
+		)
+	}
+
+	isForeign := func(
+		got context.Context,
+	) bool {
+		return got != ctx
+	}
+	if slices.ContainsFunc(
+		contexts,
+		isForeign,
+	) {
+		t.Error("a callback got a different context")
+	}
+}
+
+func TestHandler_PassesTheContextToTheTimeoutObserver(
+	t *testing.T,
+) {
+	ctx := context.WithValue(
+		context.Background(),
+		ctxKey{},
+		"caller",
+	)
+	got := make(
+		chan context.Context,
+		1,
+	)
+	slow := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	onTimeout := func(
+		observed context.Context,
+		_ models.Event[string],
+		_ time.Duration,
+	) {
+		got <- observed
+	}
+	job := newJob(
+		slow,
+		nil,
+		time.Millisecond,
+	)
+	job.OnTimeout = onTimeout
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	exec.Handler(
+		ctx,
+		&wg,
+		job,
+	)
+
+	observed, ok := receiveNow(got)
+	if !ok ||
+		observed != ctx {
+		t.Error("timeout observer did not receive the caller's context")
+	}
+}
+
 func noopJob() *exec.HandlerJob[string] {
 	return &exec.HandlerJob[string]{
 		Handler: func(
@@ -912,7 +1085,7 @@ func noopJob() *exec.HandlerJob[string] {
 	}
 }
 
-func BenchmarkExecuteHandler_NoTimeout(
+func BenchmarkHandler_NoTimeout(
 	b *testing.B,
 ) {
 	job := noopJob()
@@ -929,7 +1102,7 @@ func BenchmarkExecuteHandler_NoTimeout(
 	}
 }
 
-func BenchmarkExecuteHandler_WithTimeout(
+func BenchmarkHandler_WithTimeout(
 	b *testing.B,
 ) {
 	job := noopJob()
@@ -949,7 +1122,7 @@ func BenchmarkExecuteHandler_WithTimeout(
 
 var stderrMu sync.Mutex
 
-func BenchmarkExecuteHandler_PanicRecovery(
+func BenchmarkHandler_PanicRecovery(
 	b *testing.B,
 ) {
 	handler := func(
@@ -1000,7 +1173,7 @@ func BenchmarkExecuteHandler_PanicRecovery(
 	}
 }
 
-func BenchmarkExecuteWithTimeout_ZeroTimeout(
+func BenchmarkWithTimeout_ZeroTimeout(
 	b *testing.B,
 ) {
 	handler := func(
@@ -1022,7 +1195,7 @@ func BenchmarkExecuteWithTimeout_ZeroTimeout(
 	}
 }
 
-func BenchmarkExecuteWithTimeout_WithTimer(
+func BenchmarkWithTimeout_WithTimer(
 	b *testing.B,
 ) {
 	handler := func(

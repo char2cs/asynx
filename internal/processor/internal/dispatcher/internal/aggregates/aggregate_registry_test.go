@@ -38,16 +38,18 @@ func liveItem(
 	return &fakeItem{aggregateID: aggregateID, version: version}
 }
 
-// AggregateID satisfies the interface that fakeItem fakes.
+// AggregateID returns the aggregate the fake item was built for.
 func (f *fakeItem) AggregateID() string { return f.aggregateID }
 
-// Version satisfies the interface that fakeItem fakes.
+// Version returns the version the fake item was built with.
 func (f *fakeItem) Version() int64 { return f.version }
 
-// Acked satisfies the interface that fakeItem fakes.
+// Acked reports whether the fake item was built as a durable job, which a
+// park holds back.
 func (f *fakeItem) Acked() bool { return f.durable }
 
-// MarkUnrun satisfies the interface that fakeItem fakes.
+// MarkUnrun counts the call and keeps the last reason, so a test can assert
+// how often and why the registry settled the item as unrun.
 func (f *fakeItem) MarkUnrun(
 	err error,
 ) {
@@ -57,7 +59,8 @@ func (f *fakeItem) MarkUnrun(
 	f.unrun = err
 }
 
-// Complete satisfies the interface that fakeItem fakes.
+// Complete counts the call and keeps the last error, so a test can assert
+// that the registry completed the item once and with what.
 func (f *fakeItem) Complete(
 	err error,
 ) {
@@ -494,13 +497,8 @@ func TestEnqueue_RefusedAfterClose(
 	t *testing.T,
 ) {
 	r, hooks := newRegistry()
-	if !r.Close() {
-		t.Fatal("first Close reported already closed")
-	}
-
-	if r.Close() {
-		t.Fatal("second Close reported it closed the registry")
-	}
+	r.Close()
+	r.Close()
 
 	job := durableItem(
 		"a",
@@ -1309,14 +1307,11 @@ func TestParkIfCurrent_WithAnOpenHaltParksTheAggregate(
 		queued,
 	)
 
-	if !r.ParkIfCurrent(
+	r.ParkIfCurrent(
 		"a",
 		halt,
 		errHalted,
-	) {
-		t.Fatal("ParkIfCurrent under an open halt did not park")
-	}
-
+	)
 	generation(
 		t,
 		r,
@@ -1361,14 +1356,11 @@ func TestParkIfCurrent_WithAClosedHaltDoesNothing(
 		queued,
 	)
 
-	if r.ParkIfCurrent(
+	r.ParkIfCurrent(
 		"a",
 		halt,
 		errHalted,
-	) {
-		t.Fatal("ParkIfCurrent with a closed halt reported a park")
-	}
-
+	)
 	if len(r.Parks()) != 0 {
 		t.Fatalf(
 			"Parks = %v: a superseded delivery parked the aggregate again",
@@ -1411,12 +1403,12 @@ func TestParkIfCurrent_AfterALiftDoesNotParkAgain(
 			"a",
 		),
 	)
-	if r.ParkIfCurrent(
+	r.ParkIfCurrent(
 		"a",
 		halt,
 		errHalted,
-	) ||
-		len(r.Parks()) != 0 {
+	)
+	if len(r.Parks()) != 0 {
 		t.Fatal("ParkIfCurrent re-imposed a park that was lifted")
 	}
 }

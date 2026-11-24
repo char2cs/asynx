@@ -5,7 +5,10 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-// CommandResult is the outcome of a command a shard worker ran.
+// CommandResult is the single outcome of an envelope: the committed event and
+// error of a command that ran, or only an error for a command the shard
+// rejected. It is written once to the envelope's ResultChan and read by the
+// sender.
 type CommandResult[T any] struct {
 	Event asynxmd.Event[T]
 	Err   error

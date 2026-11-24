@@ -22,13 +22,13 @@ type ParkSetter[J any] interface {
 	// ParkIfCurrent parks the aggregate for cause as Park does, unless halt
 	// (the channel Begin returned with the job) has been closed since: then
 	// someone else has already settled the aggregate's fate (a Supersede
-	// abandoned the delivery, a park was imposed and possibly lifted). It
-	// reports whether halt was still open, so the park call took effect.
+	// abandoned the delivery, a park was imposed and possibly lifted), and the
+	// call changes nothing.
 	ParkIfCurrent(
 		aggregateID string,
 		halt <-chan struct{},
 		cause error,
-	) bool
+	)
 
 	// SettleIfParked settles job as unrun with ErrDeliveryParked if its
 	// aggregate is parked, or was parked since halt was taken, and reports

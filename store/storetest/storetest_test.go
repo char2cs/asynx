@@ -278,6 +278,94 @@ func TestSuite_FlagsStoresThatFail(
 	}
 }
 
+type deafStore struct{ models.Store }
+
+// Atomically runs under a fresh context, ignoring cancellation.
+func (d deafStore) Atomically(
+	_ context.Context,
+	fn func(models.Tx) error,
+) error {
+	return d.Store.Atomically(
+		context.Background(),
+		fn,
+	)
+}
+
+// ReadFrom reads under a fresh context, ignoring cancellation.
+func (d deafStore) ReadFrom(
+	_ context.Context,
+	streamID string,
+	fromVersion int64,
+) ([][]byte, error) {
+	return d.Store.ReadFrom(
+		context.Background(),
+		streamID,
+		fromVersion,
+	)
+}
+
+// ReadRange reads under a fresh context, ignoring cancellation.
+func (d deafStore) ReadRange(
+	_ context.Context,
+	streamID string,
+	fromVersion int64,
+	count int64,
+) ([][]byte, error) {
+	return d.Store.ReadRange(
+		context.Background(),
+		streamID,
+		fromVersion,
+		count,
+	)
+}
+
+// GetReceipt reads under a fresh context, ignoring cancellation.
+func (d deafStore) GetReceipt(
+	_ context.Context,
+	commandID string,
+) (models.Receipt, bool, error) {
+	return d.Store.GetReceipt(
+		context.Background(),
+		commandID,
+	)
+}
+
+// PendingDeliveries lists under a fresh context, ignoring cancellation.
+func (d deafStore) PendingDeliveries(
+	_ context.Context,
+	limit int,
+) ([]models.Delivery, error) {
+	return d.Store.PendingDeliveries(
+		context.Background(),
+		limit,
+	)
+}
+
+// AckDelivery acknowledges under a fresh context, ignoring cancellation.
+func (d deafStore) AckDelivery(
+	_ context.Context,
+	aggregateID string,
+	version int64,
+) error {
+	return d.Store.AckDelivery(
+		context.Background(),
+		aggregateID,
+		version,
+	)
+}
+
+func TestSuite_FlagsStoresThatIgnoreCancellation(
+	t *testing.T,
+) {
+	failed := failures(
+		storeScenarios(),
+		models.Store(deafStore{Store: store.New()}),
+	)
+	if !failed["CancelledContextFailsEveryOperation"] {
+		t.Fatal("a store that ignores cancelled contexts passed the cancellation scenario")
+	}
+}
+
 type forgetfulSnapshots struct{ models.SnapshotStore }
 
 // Put reports success without storing anything.

@@ -57,7 +57,7 @@ type retrySettings struct {
 	maxAttempts int
 }
 
-func TestParkThenReport_ParksTheAggregateBeforeReporting(
+func TestPark_ParksTheAggregateOfAnAckedJob(
 	t *testing.T,
 ) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{})
@@ -66,45 +66,28 @@ func TestParkThenReport_ParksTheAggregateBeforeReporting(
 		acked("test.event"),
 	)
 
-	var parkedWhenTold []string
-	report2 := func(
-		context.Context,
-	) {
-		parkedWhenTold = slices.Sorted(maps.Keys(f.registry.Parks()))
-	}
-	f.deliverer.ParkThenReport(
-		context.Background(),
+	f.deliverer.Park(
 		"a",
 		halt,
 		job,
 		errStopped,
-		report2,
 	)
 
+	parked := slices.Sorted(maps.Keys(f.registry.Parks()))
 	if !slices.Equal(
-		parkedWhenTold,
+		parked,
 		[]string{"a"},
 	) {
 		t.Fatalf(
-			"parked when told = %v, want [a]",
-			parkedWhenTold,
+			"parked = %v, want [a]",
+			parked,
 		)
 	}
 }
 
 var errStopped = errors.New("stopped")
 
-type reportFlag struct {
-	called bool
-}
-
-func (r *reportFlag) report(
-	context.Context,
-) {
-	r.called = true
-}
-
-func TestParkThenReport_RecordsTheCause(
+func TestPark_RecordsTheCause(
 	t *testing.T,
 ) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{})
@@ -113,13 +96,11 @@ func TestParkThenReport_RecordsTheCause(
 		acked("test.event"),
 	)
 
-	f.deliverer.ParkThenReport(
-		context.Background(),
+	f.deliverer.Park(
 		"a",
 		halt,
 		job,
 		errStopped,
-		noReport,
 	)
 
 	if got := f.registry.Inspect("a"); !got.Parked ||
@@ -135,7 +116,7 @@ func TestParkThenReport_RecordsTheCause(
 	}
 }
 
-func TestParkThenReport_LeavesASettledAggregateAloneButStillReports(
+func TestPark_LeavesASettledAggregateAlone(
 	t *testing.T,
 ) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{})
@@ -145,14 +126,11 @@ func TestParkThenReport_LeavesASettledAggregateAloneButStillReports(
 	)
 	f.registry.Supersede("a")
 
-	reported := &reportFlag{}
-	f.deliverer.ParkThenReport(
-		context.Background(),
+	f.deliverer.Park(
 		"a",
 		halt,
 		job,
 		errStopped,
-		reported.report,
 	)
 
 	if len(f.registry.Parks()) != 0 {
@@ -161,13 +139,9 @@ func TestParkThenReport_LeavesASettledAggregateAloneButStillReports(
 			f.registry.Parks(),
 		)
 	}
-
-	if !reported.called {
-		t.Fatal("the report was skipped")
-	}
 }
 
-func TestParkThenReport_NeverParksForAJobWithoutAnAck(
+func TestPark_NeverParksForAJobWithoutAnAck(
 	t *testing.T,
 ) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{})
@@ -176,13 +150,11 @@ func TestParkThenReport_NeverParksForAJobWithoutAnAck(
 		tombstone(nil),
 	)
 
-	f.deliverer.ParkThenReport(
-		context.Background(),
+	f.deliverer.Park(
 		"a",
 		halt,
 		job,
 		errStopped,
-		noReport,
 	)
 
 	if len(f.registry.Parks()) != 0 {
@@ -588,7 +560,7 @@ func TestDeliver_AHandlerPanicIsReportedAndRetried(
 	}
 	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
 		Match:   match3,
-		Handler: makeHandler(&runs),
+		Handler: panicOnFirstRunHandler(&runs),
 	}}})
 	job, halt := f.begin(
 		t,
@@ -833,7 +805,9 @@ func (r *recordingReporter) record(
 	)
 }
 
-// PublishError satisfies the interface that recordingReporter fakes.
+// PublishError records a publish report with the aggregates parked at that
+// moment, so a test can assert what was parked when the error handler was
+// told.
 func (r *recordingReporter) PublishError(
 	_ context.Context,
 	_ jobs.Job[int],
@@ -845,7 +819,9 @@ func (r *recordingReporter) PublishError(
 	)
 }
 
-// DeliveryError satisfies the interface that recordingReporter fakes.
+// DeliveryError records a delivery report with the aggregates parked at that
+// moment, so a test can assert what was parked when the error handler was
+// told.
 func (r *recordingReporter) DeliveryError(
 	_ context.Context,
 	_ jobs.Job[int],
@@ -858,7 +834,7 @@ func (r *recordingReporter) DeliveryError(
 	)
 }
 
-// Panic satisfies the interface that recordingReporter fakes.
+// Panic keeps the recovered value for the test to read back.
 func (r *recordingReporter) Panic(
 	_ context.Context,
 	_ jobs.Job[int],
@@ -884,14 +860,14 @@ type report struct {
 	parked []string
 }
 
-func makeHandler(
+func panicOnFirstRunHandler(
 	runs *atomic.Int32,
 ) func(context.Context, asynxmd.Event[int]) error {
 	return func(
 		p0 context.Context,
 		p1 asynxmd.Event[int],
 	) error {
-		return runHandler(
+		return panicOnFirstRun(
 			runs,
 			p0,
 			p1,
@@ -899,7 +875,7 @@ func makeHandler(
 	}
 }
 
-func runHandler(
+func panicOnFirstRun(
 	runs *atomic.Int32,
 	_ context.Context,
 	_ asynxmd.Event[int],

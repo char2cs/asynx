@@ -172,7 +172,8 @@ func TestForget_UnknownAggregateIsValidationError(
 
 type deleteFailStore struct{ store.Memory }
 
-// Atomically is the test double implementation for the code under test.
+// Atomically runs fn in a transaction whose DeleteStream fails, simulating a
+// store that cannot erase a stream.
 func (s deleteFailStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
@@ -190,7 +191,7 @@ func (s deleteFailStore) Atomically(
 
 type deleteFailTx struct{ asynxmd.Tx }
 
-// DeleteStream is the test double implementation for the code under test.
+// DeleteStream always fails with "disk gone".
 func (deleteFailTx) DeleteStream(
 	context.Context,
 	string,
@@ -852,7 +853,8 @@ func runRefusalRound(
 
 type snapshotDeleteFailStore struct{ asynxmd.SnapshotStore }
 
-// Delete is the test double implementation for the code under test.
+// Delete always fails with "snap gone", simulating a snapshot store that
+// cannot delete a snapshot.
 func (snapshotDeleteFailStore) Delete(
 	context.Context,
 	string,
@@ -1650,7 +1652,8 @@ type deliveryFailStore struct {
 	drop, enqueue bool
 }
 
-// Atomically is the test double implementation for the code under test.
+// Atomically runs fn in a transaction whose delivery-log operations fail as
+// configured by drop and enqueue.
 func (s deliveryFailStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
@@ -1671,7 +1674,8 @@ type deliveryFailTx struct {
 	drop, enqueue bool
 }
 
-// DropDeliveries is the test double implementation for the code under test.
+// DropDeliveries fails with "log gone" when drop is set and otherwise
+// delegates to the wrapped transaction.
 func (t deliveryFailTx) DropDeliveries(
 	ctx context.Context,
 	agg string,
@@ -1686,7 +1690,8 @@ func (t deliveryFailTx) DropDeliveries(
 	)
 }
 
-// EnqueueDelivery is the test double implementation for the code under test.
+// EnqueueDelivery fails with "log gone" when enqueue is set and otherwise
+// delegates to the wrapped transaction.
 func (t deliveryFailTx) EnqueueDelivery(
 	ctx context.Context,
 	agg string,

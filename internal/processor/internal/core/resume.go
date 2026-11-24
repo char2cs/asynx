@@ -110,26 +110,45 @@ func (p *Processor[T]) resumeAll(
 	halted []string,
 	backlogs map[string][]asynxmd.Delivery,
 ) error {
-	var errs []error
 	resumeOne := func(
 		agg string,
-	) bool {
-		errs = append(
-			errs,
-			p.resumeAggregate(
-				ctx,
-				agg,
-				parks[agg],
-				backlogs[agg],
-			),
+	) error {
+		return p.resumeAggregate(
+			ctx,
+			agg,
+			parks[agg],
+			backlogs[agg],
 		)
-		return ctx.Err() != nil
 	}
-	_ = slices.IndexFunc(
+	return resumeUntilDone(
+		ctx,
 		halted,
 		resumeOne,
 	)
-	return errors.Join(errs...)
+}
+
+func resumeUntilDone(
+	ctx context.Context,
+	aggregates []string,
+	resumeOne func(string) error,
+) error {
+	if len(aggregates) == 0 {
+		return nil
+	}
+
+	err := resumeOne(aggregates[0])
+	if ctx.Err() != nil {
+		return err
+	}
+
+	return errors.Join(
+		err,
+		resumeUntilDone(
+			ctx,
+			aggregates[1:],
+			resumeOne,
+		),
+	)
 }
 
 func (p *Processor[T]) resumeAggregate(

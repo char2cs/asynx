@@ -11,10 +11,20 @@ import (
 )
 
 // Reader loads the current aggregate state from storage using the optimal path:
-// snapshot + delta replay (warm path) when a snapshot exists, or full replay
-// from event 1 (cold path) when it does not.
+// snapshot + delta replay (warm path) when a usable snapshot exists, or full
+// replay from event 1 (cold path) when it does not. A snapshot that cannot be
+// decoded is reported to the corruption callback and treated as absent.
 //
-// Reader is stateless and safe for concurrent use.
+// Reading is a query except for one deliberate side effect: when replay had to
+// upcast an old event, the reader seals the migration by storing the upcast
+// state as a snapshot, so later reads take the warm path. That write is best
+// effort and its failure is dropped without a report, because the state it
+// would have cached is already durable in the event store and a missing
+// snapshot only costs a slower next read; there is no observer for it
+// (the corruption callback is about undecodable snapshots, not failed writes).
+//
+// Reader holds no per-call state and is safe for concurrent use, with one
+// exception: SetSnapshotGuard must be called before the reader is shared.
 type Reader[T any] struct {
 	eventStore           asynxmd.Store
 	snapshotStore        asynxmd.SnapshotStore
@@ -25,17 +35,26 @@ type Reader[T any] struct {
 	guard                esmodels.SnapshotGuard
 }
 
-// SetSnapshotGuard installs the guard a lock-free read takes before writing an
-// auto-snapshot. Without one the write is only checked against the stream, not
-// serialised with anything.
+// SetSnapshotGuard installs the guard a lock-free Get takes before storing an
+// auto-snapshot. The guard runs the write while no command or Forget runs for
+// the aggregate and reports false, without running it, when it cannot arrange
+// that; the snapshot is then skipped, which is safe because the next command
+// that snapshots replaces it anyway. Without a guard the write is only checked
+// against the stream and not serialised with anything. Call it before the
+// reader is used from more than one goroutine; Load never uses the guard because
+// its caller already holds the aggregate's command lock.
 func (r *Reader[T]) SetSnapshotGuard(
 	guard esmodels.SnapshotGuard,
 ) {
 	r.guard = guard
 }
 
-// New constructs a Reader. onCorruption is called when a snapshot cannot be
-// deserialized; pass nil to silently fall back to the cold path.
+// New constructs a Reader over the event and snapshot stores. rep hydrates
+// events into state and decides whether a replay upcast anything; schemaVersion
+// is the version stamped on the auto-snapshots the reader writes; zeroValue is
+// the seed for a cold replay and the state returned alongside an error.
+// onCorruption is called with the decoding error when a snapshot cannot be
+// deserialized; pass nil to fall back to the cold path silently.
 func New[T any](
 	es asynxmd.Store,
 	ss asynxmd.SnapshotStore,
@@ -54,54 +73,56 @@ func New[T any](
 	}
 }
 
-// Get returns the current aggregate state, selecting warm or cold path
-// transparently. Snapshot corruption falls back to full cold replay. It does
-// not hold the aggregate's command lock, so an auto-snapshot it writes after an
-// upcast goes through the snapshot guard (see saveUpcasted).
+// Get returns the current aggregate state, selecting the warm or cold path
+// transparently. It does not hold the aggregate's command lock, so an
+// auto-snapshot it writes after an upcast goes through the snapshot guard and
+// is skipped when the aggregate is busy or the stream moved on or was erased
+// since it was read, which keeps a concurrent Forget from being undone.
 //
 // Errors:
 //   - ErrNotFound if the aggregate has no events.
-//   - Storage errors propagated from Store.
-//   - Upcaster panics propagated (fail fast).
+//   - Storage errors propagated from the stores.
+//   - Upcaster failures propagated.
 //
-// A failed auto-snapshot write is dropped: the state is already durable in the
-// event store.
+// A failed or skipped auto-snapshot write is not an error and is not reported.
 func (r *Reader[T]) Get(
 	ctx context.Context,
 	aggregateID string,
 ) (T, error) {
-	state, _, err := r.load(
+	loaded, err := r.read(
 		ctx,
 		aggregateID,
-		lockNotHeld,
 	)
-	return state,
-		err
+	if err != nil {
+		return r.stateZeroValue,
+			err
+	}
+
+	r.sealUpcastLockFree(
+		ctx,
+		aggregateID,
+		loaded,
+	)
+	return loaded.state,
+		nil
 }
 
-// Load returns the current aggregate state together with its version — the
+// Load returns the current aggregate state together with its version: the
 // version of the last event applied to build that state (or the snapshot
 // version when no deltas follow it). The version is captured from the same
 // read that produced the state, so callers can use it as the expected version
 // for an optimistic-concurrency write. A brand-new aggregate returns
-// ErrNotFound with version 0. The caller holds the aggregate's command lock.
+// ErrNotFound with version 0.
+//
+// The caller must hold the aggregate's command lock. That is what lets Load
+// store the auto-snapshot of an upcast state directly, without the guard or the
+// stream check Get needs; as with Get, a failed write is dropped without a
+// report.
 func (r *Reader[T]) Load(
 	ctx context.Context,
 	aggregateID string,
 ) (T, int64, error) {
-	return r.load(
-		ctx,
-		aggregateID,
-		lockHeld,
-	)
-}
-
-func (r *Reader[T]) load(
-	ctx context.Context,
-	aggregateID string,
-	mode lockMode,
-) (T, int64, error) {
-	snap, usable, err := r.readSnapshot(
+	loaded, err := r.read(
 		ctx,
 		aggregateID,
 	)
@@ -111,18 +132,39 @@ func (r *Reader[T]) load(
 			err
 	}
 
+	r.sealUpcastLockHeld(
+		ctx,
+		aggregateID,
+		loaded,
+	)
+	return loaded.state,
+		loaded.version,
+		nil
+}
+
+func (r *Reader[T]) read(
+	ctx context.Context,
+	aggregateID string,
+) (loadedState[T], error) {
+	snap, usable, err := r.readSnapshot(
+		ctx,
+		aggregateID,
+	)
+	if err != nil {
+		return loadedState[T]{},
+			err
+	}
+
 	if !usable {
 		return r.coldPath(
 			ctx,
 			aggregateID,
-			mode,
 		)
 	}
 
 	return r.warmPath(
 		ctx,
 		aggregateID,
-		mode,
 		snap,
 	)
 }
@@ -171,24 +213,20 @@ func (r *Reader[T]) reportCorruption(
 func (r *Reader[T]) warmPath(
 	ctx context.Context,
 	aggregateID string,
-	mode lockMode,
 	snap esmodels.SnapshotBlob[T],
-) (T, int64, error) {
+) (loadedState[T], error) {
 	events, err := r.readEvents(
 		ctx,
 		aggregateID,
 		snap.Version+1,
 	)
 	if err != nil {
-		return r.stateZeroValue,
-			0,
+		return loadedState[T]{},
 			err
 	}
 
 	return r.hydrate(
 		ctx,
-		aggregateID,
-		mode,
 		snap.State,
 		snap.Version,
 		events,
@@ -198,29 +236,24 @@ func (r *Reader[T]) warmPath(
 func (r *Reader[T]) coldPath(
 	ctx context.Context,
 	aggregateID string,
-	mode lockMode,
-) (T, int64, error) {
+) (loadedState[T], error) {
 	events, err := r.readEvents(
 		ctx,
 		aggregateID,
 		1,
 	)
 	if err != nil {
-		return r.stateZeroValue,
-			0,
+		return loadedState[T]{},
 			err
 	}
 
 	if len(events) == 0 {
-		return r.stateZeroValue,
-			0,
+		return loadedState[T]{},
 			asynxmd.ErrNotFound
 	}
 
 	return r.hydrate(
 		ctx,
-		aggregateID,
-		mode,
 		r.stateZeroValue,
 		0,
 		events,
@@ -247,168 +280,38 @@ func (r *Reader[T]) readEvents(
 
 func (r *Reader[T]) hydrate(
 	ctx context.Context,
-	aggregateID string,
-	mode lockMode,
 	seed T,
 	seedVersion int64,
 	events []esmodels.InternalEvent,
-) (T, int64, error) {
+) (loadedState[T], error) {
 	result, err := r.replayer.Hydrate(
 		ctx,
-		aggregateID,
 		seed,
 		events,
 	)
 	if err != nil {
-		return r.stateZeroValue,
-			0,
+		return loadedState[T]{},
 			err
 	}
 
-	loadedVersion := seedVersion
+	loaded := loadedState[T]{
+		state:    result.State,
+		version:  seedVersion,
+		upcasted: result.DidUpcast,
+	}
 	if len(events) > 0 {
-		loadedVersion = events[len(events)-1].Version
+		last := events[len(events)-1]
+		loaded.version = last.Version
+		loaded.lastEventID = last.ID
 	}
 
-	if result.DidUpcast {
-		r.saveUpcasted(
-			ctx,
-			aggregateID,
-			mode,
-			result,
-			events[len(events)-1].ID,
-		)
-	}
-
-	return result.State,
-		loadedVersion,
+	return loaded,
 		nil
 }
 
-func (r *Reader[T]) saveUpcasted(
-	ctx context.Context,
-	aggregateID string,
-	mode lockMode,
-	result replayer.HydrateResult[T],
-	lastEventID string,
-) {
-	if mode == lockHeld {
-		r.saveBestEffort(
-			ctx,
-			aggregateID,
-			result,
-		)
-		return
-	}
-
-	saveIfStreamUnchanged := func() {
-		r.saveIfStreamHolds(
-			ctx,
-			aggregateID,
-			result,
-			lastEventID,
-		)
-	}
-	if r.guard == nil {
-		saveIfStreamUnchanged()
-		return
-	}
-
-	r.guard(
-		aggregateID,
-		saveIfStreamUnchanged,
-	)
-}
-
-func (r *Reader[T]) saveIfStreamHolds(
-	ctx context.Context,
-	aggregateID string,
-	result replayer.HydrateResult[T],
-	lastEventID string,
-) {
-	if !r.streamHolds(
-		ctx,
-		aggregateID,
-		result.LastVersion,
-		lastEventID,
-	) {
-		return
-	}
-
-	r.saveBestEffort(
-		ctx,
-		aggregateID,
-		result,
-	)
-}
-
-func (r *Reader[T]) saveBestEffort(
-	ctx context.Context,
-	aggregateID string,
-	result replayer.HydrateResult[T],
-) {
-	err := r.writeAutoSnapshot(
-		ctx,
-		aggregateID,
-		result.LastVersion,
-		result.State,
-	)
-	if err != nil {
-		return
-	}
-}
-
-func (r *Reader[T]) streamHolds(
-	ctx context.Context,
-	aggregateID string,
-	version int64,
-	eventID string,
-) bool {
-	blobs, err := r.eventStore.ReadRange(
-		ctx,
-		"events:"+aggregateID,
-		version,
-		1,
-	)
-	if err != nil ||
-		len(blobs) != 1 {
-		return false
-	}
-
-	events, err := deserializeEvents(blobs)
-	if err != nil {
-		return false
-	}
-
-	return events[0].Version == version && events[0].ID == eventID
-}
-
-func (r *Reader[T]) writeAutoSnapshot(
-	ctx context.Context,
-	aggregateID string,
-	version int64,
-	state T,
-) error {
-	snap := esmodels.SnapshotBlob[T]{
-		Version:       version,
-		SchemaVersion: r.currentSchemaVersion,
-		State:         state,
-	}
-	snapJSON, err := json.Marshal(snap)
-	if err != nil {
-		return err
-	}
-
-	return r.snapshotStore.Put(
-		ctx,
-		aggregateID,
-		version,
-		snapJSON,
-	)
-}
-
-// Exists returns true if the aggregate has at least one event.
-// It issues a minimal ReadRange(count=1) query and is faster than Get.
+// Exists reports whether the aggregate has at least one event. It reads a
+// single event instead of rebuilding state, so it never touches snapshots and is
+// much cheaper than Get. A storage error is returned with false.
 func (r *Reader[T]) Exists(
 	ctx context.Context,
 	aggregateID string,
@@ -428,10 +331,11 @@ func (r *Reader[T]) Exists(
 		nil
 }
 
-// Preload pays the cold-path cost offline by triggering a full Get and
-// discarding the result. ErrNotFound is not an error (aggregate may not
-// exist yet). Subsequent Get calls for this aggregate use the warm path
-// if a snapshot was written during hydration.
+// Preload pays the cold-path cost ahead of time by performing a Get and
+// discarding the state. ErrNotFound is not an error, because the aggregate may
+// not exist yet; every other error is returned. Like Get it runs lock-free and
+// may store an auto-snapshot of an upcast state, so a later Get takes the warm
+// path.
 func (r *Reader[T]) Preload(
 	ctx context.Context,
 	aggregateID string,

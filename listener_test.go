@@ -2,8 +2,10 @@ package asynx_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/char2cs/asynx"
+	"github.com/char2cs/asynx/internal/mockbuses"
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/models"
 	"github.com/char2cs/asynx/store"
@@ -12,15 +14,15 @@ import (
 	"time"
 )
 
-type lstEvents = <-chan models.Event[mocks.Order]
+type eventStream = <-chan models.Event[mocks.Order]
 
-func lstListen(
+func listenOrFatal(
 	t *testing.T,
 	instance asynx.Asynx[mocks.Order],
 	pattern string,
 	count int,
 	label string,
-) (lstEvents, func()) {
+) (eventStream, func()) {
 	t.Helper()
 
 	ch, unsub, err := instance.Listen(
@@ -39,7 +41,7 @@ func lstListen(
 		unsub
 }
 
-func lstSendWait(
+func sendWait(
 	t *testing.T,
 	instance asynx.Asynx[mocks.Order],
 	cmd mocks.CreateOrderCmd,
@@ -60,9 +62,9 @@ func lstSendWait(
 	}
 }
 
-func lstRecv(
+func recv(
 	t *testing.T,
-	ch lstEvents,
+	ch eventStream,
 	timeoutMsg string,
 ) models.Event[mocks.Order] {
 	t.Helper()
@@ -77,15 +79,15 @@ func lstRecv(
 	return models.Event[mocks.Order]{}
 }
 
-func lstRecvOpen(
+func recvOpen(
 	t *testing.T,
-	ch lstEvents,
+	ch eventStream,
 ) {
 	t.Helper()
 
 	select {
 	case _, ok := <-ch:
-		lstRequireTrue(
+		requireTrue(
 			t,
 			ok,
 			"channel closed before delivering event",
@@ -95,15 +97,15 @@ func lstRecvOpen(
 	}
 }
 
-func lstRecvClosed(
+func recvClosed(
 	t *testing.T,
-	ch lstEvents,
+	ch eventStream,
 ) {
 	t.Helper()
 
 	select {
 	case _, ok := <-ch:
-		lstRequireTrue(
+		requireTrue(
 			t,
 			!ok,
 			"expected channel to be closed after count events",
@@ -113,7 +115,7 @@ func lstRecvClosed(
 	}
 }
 
-func lstRequireTrue(
+func requireTrue(
 	t *testing.T,
 	cond bool,
 	msg string,
@@ -125,9 +127,9 @@ func lstRequireTrue(
 	}
 }
 
-func lstExpectSilent(
+func expectSilent(
 	t *testing.T,
-	ch lstEvents,
+	ch eventStream,
 	wait time.Duration,
 	label string,
 ) {
@@ -135,7 +137,7 @@ func lstExpectSilent(
 
 	select {
 	case evt, ok := <-ch:
-		lstRequireTrue(
+		requireTrue(
 			t,
 			!ok,
 			fmt.Sprintf(
@@ -148,9 +150,9 @@ func lstExpectSilent(
 	}
 }
 
-func lstExpectEventID(
+func expectEventID(
 	t *testing.T,
-	ch lstEvents,
+	ch eventStream,
 	expected string,
 	idx int,
 ) {
@@ -158,7 +160,7 @@ func lstExpectEventID(
 
 	select {
 	case evt := <-ch:
-		lstRequireTrue(
+		requireTrue(
 			t,
 			evt.AggregateID == expected,
 			fmt.Sprintf(
@@ -175,7 +177,7 @@ func lstExpectEventID(
 	}
 }
 
-func lstSendWaitSeries(
+func sendWaitSeries(
 	t *testing.T,
 	instance asynx.Asynx[mocks.Order],
 	prefix string,
@@ -184,7 +186,7 @@ func lstSendWaitSeries(
 	t.Helper()
 
 	for i := range n {
-		lstSendWait(
+		sendWait(
 			t,
 			instance,
 			mocks.CreateOrderCmd{ID: fmt.Sprintf(
@@ -197,7 +199,7 @@ func lstSendWaitSeries(
 	}
 }
 
-func lstSendOne(
+func sendOne(
 	wg *sync.WaitGroup,
 	instance asynx.Asynx[mocks.Order],
 	id string,
@@ -210,7 +212,7 @@ func lstSendOne(
 	)
 }
 
-func lstSendBurst(
+func sendBurst(
 	wg *sync.WaitGroup,
 	instance asynx.Asynx[mocks.Order],
 	prefix string,
@@ -219,7 +221,7 @@ func lstSendBurst(
 ) {
 	for i := range n {
 		wg.Add(1)
-		go lstSendOne(
+		go sendOne(
 			wg,
 			instance,
 			fmt.Sprintf(
@@ -233,24 +235,24 @@ func lstSendBurst(
 	}
 }
 
-func lstDrain(
-	ch lstEvents,
+func drain(
+	ch eventStream,
 ) {
 	for range ch {
 	}
 }
 
-func lstDrainThenClose(
-	ch lstEvents,
+func drainThenClose(
+	ch eventStream,
 	drained chan<- struct{},
 ) {
-	lstDrain(ch)
+	drain(ch)
 	close(drained)
 }
 
-func lstNext(
+func nextEvent(
 	t *testing.T,
-	ch lstEvents,
+	ch eventStream,
 	deadline <-chan time.Time,
 	what string,
 	got int,
@@ -292,7 +294,7 @@ func TestListen_EventArrivesBeforeDeadline(
 ) {
 	instance := newInstance(t)
 
-	ch, unsub := lstListen(
+	ch, unsub := listenOrFatal(
 		t,
 		instance,
 		"OrderCreated",
@@ -301,14 +303,14 @@ func TestListen_EventArrivesBeforeDeadline(
 	)
 	defer unsub()
 
-	lstSendWait(
+	sendWait(
 		t,
 		instance,
 		mocks.CreateOrderCmd{ID: "listen-1", Total: 50.0},
 		"SendWait",
 	)
 
-	evt := lstRecv(
+	evt := recv(
 		t,
 		ch,
 		"timed out waiting for event",
@@ -326,7 +328,7 @@ func TestListen_UnsubscribeCleansUp(
 ) {
 	instance := newInstance(t)
 
-	ch, unsub := lstListen(
+	ch, unsub := listenOrFatal(
 		t,
 		instance,
 		"OrderCreated",
@@ -336,14 +338,14 @@ func TestListen_UnsubscribeCleansUp(
 
 	unsub()
 
-	lstSendWait(
+	sendWait(
 		t,
 		instance,
 		mocks.CreateOrderCmd{ID: "listen-unsub", Total: 50.0},
 		"SendWait",
 	)
 
-	lstExpectSilent(
+	expectSilent(
 		t,
 		ch,
 		200*time.Millisecond,
@@ -356,7 +358,7 @@ func TestListen_UnsubIsIdempotent(
 ) {
 	instance := newInstance(t)
 
-	_, unsub := lstListen(
+	_, unsub := listenOrFatal(
 		t,
 		instance,
 		"OrderCreated",
@@ -373,7 +375,7 @@ func TestListen_CountAutoCloses(
 ) {
 	instance := newInstance(t)
 
-	ch, unsub := lstListen(
+	ch, unsub := listenOrFatal(
 		t,
 		instance,
 		"OrderCreated",
@@ -382,24 +384,24 @@ func TestListen_CountAutoCloses(
 	)
 	defer unsub()
 
-	lstSendWait(
+	sendWait(
 		t,
 		instance,
 		mocks.CreateOrderCmd{ID: "listen-auto", Total: 50.0},
 		"SendWait",
 	)
 
-	lstRecvOpen(
+	recvOpen(
 		t,
 		ch,
 	)
-	lstRecvClosed(
+	recvClosed(
 		t,
 		ch,
 	)
 }
 
-func lstRaceOnce(
+func raceOnce(
 	t *testing.T,
 	instance asynx.Asynx[mocks.Order],
 	w int,
@@ -446,7 +448,7 @@ func lstRaceOnce(
 	}
 }
 
-func lstRaceWorker(
+func raceWorker(
 	t *testing.T,
 	wg *sync.WaitGroup,
 	instance asynx.Asynx[mocks.Order],
@@ -457,7 +459,7 @@ func lstRaceWorker(
 
 	ok := true
 	for n := 0; ok && n < iterations; n++ {
-		ok = lstRaceOnce(
+		ok = raceOnce(
 			t,
 			instance,
 			w,
@@ -475,7 +477,7 @@ func TestListen_UnsubRightAfterLastEventDoesNotDoubleClose(
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
-		go lstRaceWorker(
+		go raceWorker(
 			t,
 			&wg,
 			instance,
@@ -492,7 +494,7 @@ func TestListen_BufferedChannelPreservesEvent(
 ) {
 	instance := newInstance(t)
 
-	ch, unsub := lstListen(
+	ch, unsub := listenOrFatal(
 		t,
 		instance,
 		"OrderCreated",
@@ -501,14 +503,14 @@ func TestListen_BufferedChannelPreservesEvent(
 	)
 	defer unsub()
 
-	lstSendWait(
+	sendWait(
 		t,
 		instance,
 		mocks.CreateOrderCmd{ID: "listen-buf", Total: 75.0},
 		"SendWait",
 	)
 
-	evt := lstRecv(
+	evt := recv(
 		t,
 		ch,
 		"event was lost — not in buffer",
@@ -526,7 +528,7 @@ func TestListen_Unbounded_ReceivesMultipleEvents(
 ) {
 	instance := newInstance(t)
 
-	ch, unsub := lstListen(
+	ch, unsub := listenOrFatal(
 		t,
 		instance,
 		"OrderCreated",
@@ -535,7 +537,7 @@ func TestListen_Unbounded_ReceivesMultipleEvents(
 	)
 	defer unsub()
 
-	lstSendWaitSeries(
+	sendWaitSeries(
 		t,
 		instance,
 		"listen-ub",
@@ -543,7 +545,7 @@ func TestListen_Unbounded_ReceivesMultipleEvents(
 	)
 
 	for i := range 3 {
-		lstExpectEventID(
+		expectEventID(
 			t,
 			ch,
 			fmt.Sprintf(
@@ -560,7 +562,7 @@ func TestListen_UsesTopicPattern(
 ) {
 	instance := newInstance(t)
 
-	ch, unsub := lstListen(
+	ch, unsub := listenOrFatal(
 		t,
 		instance,
 		"*",
@@ -569,14 +571,14 @@ func TestListen_UsesTopicPattern(
 	)
 	defer unsub()
 
-	lstSendWait(
+	sendWait(
 		t,
 		instance,
 		mocks.CreateOrderCmd{ID: "listen-topic", Total: 10.0},
 		"SendWait",
 	)
 
-	evt := lstRecv(
+	evt := recv(
 		t,
 		ch,
 		"topic pattern did not match — Listen should use Topic() internally",
@@ -633,7 +635,7 @@ func TestListen_CountOverflow_DoesNotBlock(
 	}
 }
 
-func lstOverflowIter(
+func overflowIter(
 	t *testing.T,
 	iter int,
 ) {
@@ -644,7 +646,7 @@ func lstOverflowIter(
 		"iter %d: ",
 		iter,
 	)
-	ch, unsub := lstListen(
+	ch, unsub := listenOrFatal(
 		t,
 		instance,
 		"OrderCreated",
@@ -654,7 +656,7 @@ func lstOverflowIter(
 	defer unsub()
 
 	var wg sync.WaitGroup
-	lstSendBurst(
+	sendBurst(
 		&wg,
 		instance,
 		"ovfc",
@@ -670,7 +672,7 @@ func lstOverflowIter(
 
 	got := 0
 	deadline := time.After(2 * time.Second)
-	for lstNext(
+	for nextEvent(
 		t,
 		ch,
 		deadline,
@@ -697,7 +699,7 @@ func TestListen_CountOverflowConcurrent_GuardsEnforced(
 	t *testing.T,
 ) {
 	for iter := range 10 {
-		lstOverflowIter(
+		overflowIter(
 			t,
 			iter,
 		)
@@ -749,7 +751,7 @@ func TestListen_NegativeCount_TreatedAsZero(
 
 	defer unsub()
 
-	lstSendWaitSeries(
+	sendWaitSeries(
 		t,
 		instance,
 		"neg",
@@ -757,7 +759,7 @@ func TestListen_NegativeCount_TreatedAsZero(
 	)
 
 	for i := range 2 {
-		lstExpectEventID(
+		expectEventID(
 			t,
 			ch,
 			fmt.Sprintf(
@@ -769,7 +771,7 @@ func TestListen_NegativeCount_TreatedAsZero(
 	}
 }
 
-func lstRaceIter(
+func raceIter(
 	t *testing.T,
 	iter int,
 	count int,
@@ -778,7 +780,7 @@ func lstRaceIter(
 ) {
 	instance := newInstance(t)
 
-	ch, unsub := lstListen(
+	ch, unsub := listenOrFatal(
 		t,
 		instance,
 		"OrderCreated",
@@ -790,10 +792,10 @@ func lstRaceIter(
 	)
 	defer unsub()
 
-	go lstDrain(ch)
+	go drain(ch)
 
 	var wg sync.WaitGroup
-	lstSendBurst(
+	sendBurst(
 		&wg,
 		instance,
 		prefix,
@@ -812,7 +814,7 @@ func TestListen_BoundedRace_NOverCount(
 	t *testing.T,
 ) {
 	for iter := range 10 {
-		lstRaceIter(
+		raceIter(
 			t,
 			iter,
 			1,
@@ -826,7 +828,7 @@ func TestListen_BoundedRace_PostClosedGuard(
 	t *testing.T,
 ) {
 	for iter := range 10 {
-		lstRaceIter(
+		raceIter(
 			t,
 			iter,
 			5,
@@ -836,13 +838,13 @@ func TestListen_BoundedRace_PostClosedGuard(
 	}
 }
 
-func lstUnsubDuringHandlerIter(
+func unsubDuringHandlerIter(
 	t *testing.T,
 	iter int,
 ) {
 	instance := newInstance(t)
 
-	ch, unsub := lstListen(
+	ch, unsub := listenOrFatal(
 		t,
 		instance,
 		"OrderCreated",
@@ -854,13 +856,13 @@ func lstUnsubDuringHandlerIter(
 	)
 
 	drained := make(chan struct{})
-	go lstDrainThenClose(
+	go drainThenClose(
 		ch,
 		drained,
 	)
 
 	var wg sync.WaitGroup
-	lstSendBurst(
+	sendBurst(
 		&wg,
 		instance,
 		"uh",
@@ -879,14 +881,14 @@ func TestListen_UnsubDuringHandler_BoundedReturnsCleanly(
 	t *testing.T,
 ) {
 	for iter := 0; iter < 100; iter++ {
-		lstUnsubDuringHandlerIter(
+		unsubDuringHandlerIter(
 			t,
 			iter,
 		)
 	}
 }
 
-func lstImmediateFireIter(
+func immediateFireIter(
 	t *testing.T,
 	iter int,
 ) {
@@ -896,7 +898,7 @@ func lstImmediateFireIter(
 		"iter %d: ",
 		iter,
 	)
-	ch, unsub := lstListen(
+	ch, unsub := listenOrFatal(
 		t,
 		instance,
 		"OrderCreated",
@@ -904,27 +906,27 @@ func lstImmediateFireIter(
 		label,
 	)
 
-	lstSendWait(
+	sendWait(
 		t,
 		instance,
 		mocks.CreateOrderCmd{ID: "leak-1", Total: 1.0},
 		label+"SendWait",
 	)
 
-	lstRecv(
+	recv(
 		t,
 		ch,
 		label+"did not receive event",
 	)
 
-	lstSendWait(
+	sendWait(
 		t,
 		instance,
 		mocks.CreateOrderCmd{ID: "leak-2", Total: 1.0},
 		label+"SendWait 2",
 	)
 
-	lstExpectSilent(
+	expectSilent(
 		t,
 		ch,
 		50*time.Millisecond,
@@ -939,14 +941,14 @@ func TestListen_BoundedSubID_NoLeakOnImmediateFire(
 	t *testing.T,
 ) {
 	for iter := 0; iter < 50; iter++ {
-		lstImmediateFireIter(
+		immediateFireIter(
 			t,
 			iter,
 		)
 	}
 }
 
-func lstUnsubThenClose(
+func unsubThenClose(
 	unsub func(),
 	done chan<- struct{},
 ) {
@@ -954,8 +956,8 @@ func lstUnsubThenClose(
 	close(done)
 }
 
-func lstTake(
-	ch lstEvents,
+func take(
+	ch eventStream,
 	deadline <-chan time.Time,
 ) bool {
 	select {
@@ -966,7 +968,7 @@ func lstTake(
 	}
 }
 
-func lstFill(
+func fillBuffer(
 	t *testing.T,
 	instance asynx.Asynx[mocks.Order],
 	n int,
@@ -974,7 +976,7 @@ func lstFill(
 	t.Helper()
 
 	for i := range n {
-		lstSendFill(
+		sendFill(
 			t,
 			instance,
 			i,
@@ -982,7 +984,7 @@ func lstFill(
 	}
 }
 
-func lstSendFill(
+func sendFill(
 	t *testing.T,
 	instance asynx.Asynx[mocks.Order],
 	i int,
@@ -1010,7 +1012,7 @@ func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(
 ) {
 	instance := newInstance(t)
 
-	ch, unsub := lstListen(
+	ch, unsub := listenOrFatal(
 		t,
 		instance,
 		"OrderCreated",
@@ -1018,7 +1020,7 @@ func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(
 		"",
 	)
 
-	lstFill(
+	fillBuffer(
 		t,
 		instance,
 		25,
@@ -1031,7 +1033,7 @@ func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(
 	)
 
 	done := make(chan struct{})
-	go lstUnsubThenClose(
+	go unsubThenClose(
 		unsub,
 		done,
 	)
@@ -1043,14 +1045,14 @@ func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(
 	}
 
 	drainTimeout := time.After(500 * time.Millisecond)
-	for lstTake(
+	for take(
 		ch,
 		drainTimeout,
 	) {
 	}
 }
 
-func lstConcurrentIter(
+func concurrentIter(
 	t *testing.T,
 	iter int,
 ) {
@@ -1061,7 +1063,7 @@ func lstConcurrentIter(
 		"iter %d",
 		iter,
 	)
-	ch, unsub := lstListen(
+	ch, unsub := listenOrFatal(
 		t,
 		instance,
 		"OrderCreated",
@@ -1070,7 +1072,7 @@ func lstConcurrentIter(
 	)
 
 	var wg sync.WaitGroup
-	lstSendBurst(
+	sendBurst(
 		&wg,
 		instance,
 		"br",
@@ -1082,7 +1084,7 @@ func lstConcurrentIter(
 
 	received := 0
 	deadline := time.After(5 * time.Second)
-	for lstNext(
+	for nextEvent(
 		t,
 		ch,
 		deadline,
@@ -1109,9 +1111,132 @@ func TestListen_BoundedConcurrent_DeliversAllCountEvents(
 	t *testing.T,
 ) {
 	for iter := 0; iter < 20; iter++ {
-		lstConcurrentIter(
+		concurrentIter(
 			t,
 			iter,
+		)
+	}
+}
+
+type refusingBus struct {
+	mockbuses.Bus[mocks.Order]
+	err error
+}
+
+// Unsubscribe refuses every removal with the configured error.
+func (b *refusingBus) Unsubscribe(
+	_ string,
+) error {
+	return b.err
+}
+
+type errorLog struct {
+	all []error
+}
+
+func (l *errorLog) add(
+	err error,
+) {
+	l.all = append(
+		l.all,
+		err,
+	)
+}
+
+func buildWithRefusingBus(
+	t *testing.T,
+	refusal error,
+	onError func(error),
+) asynx.Asynx[mocks.Order] {
+	t.Helper()
+
+	instance, err := asynx.New[mocks.Order]().
+		WithEventStore(store.New()).
+		WithSnapshotStore(store.NewSnapshots()).
+		WithBus(&refusingBus{err: refusal}).
+		WithListenerErrorHandler(onError).
+		Build()
+	if err != nil {
+		t.Fatalf(
+			"Build: %v",
+			err,
+		)
+	}
+
+	return instance
+}
+
+func TestListen_RefusedUnsubscribeIsReportedToTheListenerErrorHandler(
+	t *testing.T,
+) {
+	refusal := errors.New("bus refused")
+	var errs errorLog
+	instance := buildWithRefusingBus(
+		t,
+		refusal,
+		errs.add,
+	)
+
+	_, unsub, err := instance.Listen(
+		"OrderCreated",
+		0,
+	)
+	if err != nil {
+		t.Fatalf(
+			"Listen: %v",
+			err,
+		)
+	}
+
+	unsub()
+	unsub()
+
+	reported := errs.all
+	if len(reported) != 1 {
+		t.Fatalf(
+			"reported %d errors, want 1 (unsub is idempotent)",
+			len(reported),
+		)
+	}
+
+	if !errors.Is(
+		reported[0],
+		refusal,
+	) {
+		t.Errorf(
+			"reported = %v, want it to wrap the bus error",
+			reported[0],
+		)
+	}
+}
+
+func TestSubscribeWait_RefusedUnsubscribeIsJoinedToTheResult(
+	t *testing.T,
+) {
+	refusal := errors.New("bus refused")
+	instance := buildWithRefusingBus(
+		t,
+		refusal,
+		nil,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := instance.SubscribeWait(
+		ctx,
+		"OrderCreated",
+	)
+	if !errors.Is(
+		err,
+		context.Canceled,
+	) ||
+		!errors.Is(
+			err,
+			refusal,
+		) {
+		t.Errorf(
+			"SubscribeWait = %v, want both the context error and the bus error",
+			err,
 		)
 	}
 }

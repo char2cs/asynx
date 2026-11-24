@@ -1,60 +1,93 @@
 package storetest
 
 import (
-	"context"
 	"errors"
 	"github.com/char2cs/asynx/models"
 	"maps"
 	"testing"
-	"time"
 )
 
-// Factory returns a fresh, empty store for one subtest.
+// Factory returns a fresh, empty store for one subtest. The suite calls it
+// once per scenario and never shares a store between scenarios, so a
+// Factory may hand out a store backed by a new temporary database, or by the
+// same one if it is emptied first.
 type Factory func(
 	t *testing.T,
 ) models.Store
 
 var errBoom = errors.New("storetest: boom")
 
-// Run executes the full conformance suite against stores built by newStore.
+// Run executes the full conformance suite for models.Store implementations
+// against stores built by newStore. A store that passes it keeps the
+// guarantees asynx builds on: events are written atomically with their
+// receipts and deliveries, a (stream, version) pair is stored once, reads
+// return streams in version order, and every operation honours its context.
+// Call it from a test in the package that provides the store:
+//
+//	func TestConformance(t *testing.T) {
+//		storetest.Run(t, func(t *testing.T) models.Store { return newMyStore(t) })
+//	}
+//
+// Each scenario runs as a subtest named after the guarantee it checks, against
+// its own empty store.
+//
+// The scenarios cover, by guarantee:
+//
+// Streams. AppendCommitsAndReadFromReturnsInOrder and ReadRangeLimitsCount
+// check that committed blobs read back in order and that ReadRange cuts the
+// window to its count. AppendsOutOfVersionOrderReadInOrder checks that reads
+// return a stream by ascending version however it was appended.
+// ReadsOfUnknownStreamAreEmpty checks that a missing stream is empty, not an
+// error. DeleteStreamIsIdempotentAndScoped checks that DeleteStream empties
+// only its stream, tolerates a missing one and leaves the stream usable again.
+// CommitInsideAtomicallyIsVisibleAfterwards checks that separate commits
+// accumulate.
+//
+// Transactions. DuplicateVersionConflictsAndRollsBack checks that a second
+// write of one (stream, version) fails with models.ErrPipelineFailed and takes
+// the rest of its transaction with it. ErrorRollsBackEverything checks that an
+// error from the callback undoes appends, receipts and deliveries alike and is
+// returned to the caller. RollbackRestoresDroppedDeliveries checks that a
+// rolled-back DropDeliveries brings the entries back. NativeIsCallable checks
+// that Tx.Native can be called inside a transaction.
+// CancelledContextFailsEveryOperation checks that a context that is already
+// done fails every method and changes nothing. ReadsDuringAnOpenTransactionDoNotFail
+// checks that a read made while a transaction is open neither fails nor
+// deadlocks it, and that the committed write is visible afterwards.
+//
+// Receipts and deliveries. ReceiptsAreStoredAndDuplicatesRejected checks that
+// a receipt reads back as stored, that a second receipt for one command fails
+// with models.ErrDuplicateReceipt, and that an unknown command has none.
+// DeliveriesKeepEnqueueOrderAndAckRemoves, PendingDeliveriesHonoursLimit and
+// DropDeliveriesOnlyAffectsThatAggregate check the delivery log's ordering,
+// limit and scoping. AckOfUnknownDeliveryIsNotAnError and
+// AckAfterDropIsNotAnError check that acknowledging is idempotent.
+// DropThenEnqueueInOneTxKeepsTheNewEntry checks that a Forget can drop an
+// aggregate's entries and record its tombstone in one transaction, the new
+// entry surviving the drop and sorting after the others.
+// DeliveryKeyCanBeEnqueuedAgain checks that an acknowledged or dropped key may
+// be enqueued again, since a forgotten aggregate restarts at version 1.
+//
+// Concurrency. ConcurrentAppendsOfOneVersionAdmitOne checks that of many
+// writers racing for one version exactly one commits and the rest fail with
+// models.ErrPipelineFailed. ConcurrentAppendsOfDistinctVersionsAllCommit
+// checks that writers that do not conflict all commit and nothing is lost.
 func Run(
 	t *testing.T,
 	newStore Factory,
 ) {
 	t.Helper()
-
-	tests := storeScenarios()
-
-	for name, fn := range tests {
-		t.Run(
-			name,
-			scenarioCase(
-				fn,
-				newStore,
-			),
-		)
-	}
-}
-
-func scenarioCase(
-	fn scenario[models.Store],
-	newStore Factory,
-) func(*testing.T) {
-	return func(
-		t *testing.T,
-	) {
-		fn(
-			t,
-			newStore(t),
-		)
-	}
+	runScenarios(
+		t,
+		storeScenarios(),
+		newStore,
+	)
 }
 
 func storeScenarios() map[string]scenario[models.Store] {
 	scenarios := map[string]scenario[models.Store]{}
 	for _, group := range []map[string]scenario[models.Store]{
 		appendScenarios(),
-		concurrencyScenarios(),
 		transactionScenarios(),
 		deliveryScenarios(),
 	} {
@@ -67,215 +100,15 @@ func storeScenarios() map[string]scenario[models.Store] {
 	return scenarios
 }
 
-const (
-	listLimit       = 10
-	wideLimit       = 100
-	smallLimit      = 2
-	versionTwo      = 2
-	versionThree    = 3
-	versionFour     = 4
-	versionFive     = 5
-	ghostVersion    = 7
-	conflictVersion = 99
-	readWait        = 100 * time.Millisecond
-)
-
-func opAppend(
-	streamID string,
-	version int64,
-	data []byte,
-) func(context.Context, models.Tx) error {
-	return func(
-		ctx context.Context,
-		tx models.Tx,
-	) error {
-		return tx.Append(
-			ctx,
-			streamID,
-			version,
-			data,
-		)
-	}
-}
-
-func opEnqueue(
-	d models.Delivery,
-) func(context.Context, models.Tx) error {
-	return func(
-		ctx context.Context,
-		tx models.Tx,
-	) error {
-		return tx.EnqueueDelivery(
-			ctx,
-			d.AggregateID,
-			d.Version,
-		)
-	}
-}
-
-func opDrop(
+func deliveryOf(
 	aggregateID string,
-) func(context.Context, models.Tx) error {
-	return func(
-		ctx context.Context,
-		tx models.Tx,
-	) error {
-		return tx.DropDeliveries(
-			ctx,
-			aggregateID,
-		)
-	}
+	version int64,
+) models.Delivery {
+	return models.Delivery{AggregateID: aggregateID, Version: version}
 }
 
-func opReceipt(
-	commandID string,
-	r models.Receipt,
-) func(context.Context, models.Tx) error {
-	return func(
-		ctx context.Context,
-		tx models.Tx,
-	) error {
-		return tx.PutReceipt(
-			ctx,
-			commandID,
-			r,
-		)
-	}
-}
-
-func opFail(
-	err error,
-) func(context.Context, models.Tx) error {
-	return func(
-		context.Context,
-		models.Tx,
-	) error {
-		return err
-	}
-}
-
-func runOps(
-	ops ...func(context.Context, models.Tx) error,
-) func(models.Tx) error {
-	return func(
-		tx models.Tx,
-	) error {
-		return applyOps(
-			tx,
-			ops,
-		)
-	}
-}
-
-func applyOps(
-	tx models.Tx,
-	ops []func(context.Context, models.Tx) error,
-) error {
-	if len(ops) == 0 {
-		return nil
-	}
-
-	if err := ops[0](
-		context.Background(),
-		tx,
-	); err != nil {
-		return err
-	}
-
-	return applyOps(
-		tx,
-		ops[1:],
-	)
-}
-
-func commit(
-	t testing.TB,
-	s models.Store,
-	ops ...func(context.Context, models.Tx) error,
-) {
-	t.Helper()
-	mustAtomically(
-		t,
-		s,
-		runOps(ops...),
-	)
-}
-
-func blobsOrFatal(
-	t testing.TB,
-	s models.Store,
-	streamID string,
-	from int64,
-) [][]byte {
-	t.Helper()
-	blobs, err := s.ReadFrom(
-		context.Background(),
-		streamID,
-		from,
-	)
-	if err != nil {
-		t.Fatalf(
-			"ReadFrom: %v",
-			err,
-		)
-	}
-
-	return blobs
-}
-
-func pendingOrFatal(
-	t testing.TB,
-	s models.Store,
-	limit int,
-) []models.Delivery {
-	t.Helper()
-	pending, err := s.PendingDeliveries(
-		context.Background(),
-		limit,
-	)
-	if err != nil {
-		t.Fatalf(
-			"PendingDeliveries: %v",
-			err,
-		)
-	}
-
-	return pending
-}
-
-func receiptOrFatal(
-	t testing.TB,
-	s models.Store,
-	commandID string,
-) (found bool) {
-	t.Helper()
-	_, found, err := s.GetReceipt(
-		context.Background(),
-		commandID,
-	)
-	if err != nil {
-		t.Fatalf(
-			"GetReceipt: %v",
-			err,
-		)
-	}
-
-	return found
-}
-
-func mustAtomically(
-	t testing.TB,
-	s models.Store,
-	fn func(models.Tx) error,
-) {
-	t.Helper()
-	if err := s.Atomically(
-		context.Background(),
-		fn,
-	); err != nil {
-		t.Fatalf(
-			"Atomically: %v",
-			err,
-		)
-	}
+func successor(
+	d models.Delivery,
+) models.Delivery {
+	return models.Delivery{AggregateID: d.AggregateID, Version: d.Version + 1}
 }

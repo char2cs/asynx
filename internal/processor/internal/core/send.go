@@ -8,12 +8,32 @@ import (
 )
 
 // Send runs cmd on the shard that owns its aggregate and returns its event once
-// it is committed.
+// it is committed and queued for delivery; it does not wait for the event's
+// handlers.
+//
+// Commands for one aggregate run one at a time, in the order their senders
+// enqueued them, on the shard the router picks for the aggregate id. The
+// command itself runs on the calling goroutine, with ctx, when the shard
+// worker grants it its turn; ctx is never stored. Errors: ErrShuttingDown
+// once Shutdown has begun, ErrContextCancelled when ctx ends before the
+// command ran or while it waits for its turn, ErrQueueFull when the shard
+// queue or the aggregate's mailbox has no room, and whatever the write
+// pipeline returns (validation, storage, pipeline failures). Send is safe for
+// concurrent use and Shutdown waits for every Send in flight. If ctx ends
+// after the command started, the command still finishes and commits but Send
+// returns ErrContextCancelled.
 func (p *Processor[T]) Send(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
 ) (asynxmd.Event[T], error) {
-	if !p.beginSend() {
+	p.lifeMu.Lock()
+	refused := p.isShuttingDown()
+	if !refused {
+		p.sends.Add(1)
+	}
+
+	p.lifeMu.Unlock()
+	if refused {
 		return asynxmd.Event[T]{},
 			asynxmd.ErrShuttingDown
 	}
@@ -33,12 +53,25 @@ func (p *Processor[T]) Send(
 	)
 }
 
-// SendWait is Send that also waits for the handlers of the event to run once.
+// SendWait is Send that also waits for the event's handlers to run once, so the
+// caller sees their effects when it returns. The wait happens on the caller's
+// goroutine, never on a shard worker, so a slow or failing handler does not
+// stall the shard's other aggregates and the aggregate's lock is not held.
+// Besides Send's errors it returns ErrSendWaitFromHandler when called from a
+// handler of the same aggregate (the handler would wait for itself) and, when
+// ctx ends while waiting, the committed event with ErrContextCancelled.
 func (p *Processor[T]) SendWait(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
 ) (asynxmd.Event[T], error) {
-	if !p.beginSend() {
+	p.lifeMu.Lock()
+	refused := p.isShuttingDown()
+	if !refused {
+		p.sends.Add(1)
+	}
+
+	p.lifeMu.Unlock()
+	if refused {
 		return asynxmd.Event[T]{},
 			asynxmd.ErrShuttingDown
 	}
@@ -94,17 +127,6 @@ func (p *Processor[T]) enqueueTarget(
 
 func (p *Processor[T]) isShuttingDown() bool {
 	return p.shuttingDown.Load()
-}
-
-func (p *Processor[T]) beginSend() bool {
-	p.lifeMu.Lock()
-	defer p.lifeMu.Unlock()
-	if p.isShuttingDown() {
-		return false
-	}
-
-	p.sends.Add(1)
-	return true
 }
 
 func (p *Processor[T]) sendAndWait(
@@ -187,30 +209,38 @@ func awaitHandlers[T any](
 		err
 }
 
-// ForTesting: SetOnSendPending sets a callback invoked after a command is
-// enqueued but before Send or SendWait blocks waiting for its result.
-// Do not call in production code.
+// ForTesting: SetOnSendPending installs a hook that Send and SendWait call
+// after the command is enqueued and before they block for their turn, letting
+// a test know the command is queued. It is not synchronised: set it before
+// the first send. Do not call in production code.
 func (p *Processor[T]) SetOnSendPending(
 	fn func(),
 ) {
 	p.onSendPending = fn
 }
 
-// Forget erases the aggregate; see CommandExecutor.Forget. It does not occupy a
-// shard worker while waiting for handlers, so a slow handler cannot stall the
-// shard's other aggregates.
+// Forget erases the aggregate, its stream, snapshot and delivery entries, after
+// delivering a tombstone event to the handlers and durable subscribers; see
+// CommandExecutor.Forget for the full protocol. It runs on the caller's
+// goroutine and bypasses the shard queues, so it does not occupy a shard worker
+// while waiting for handlers and a slow handler cannot stall the shard's other
+// aggregates. It returns ErrShuttingDown once Shutdown has begun, and
+// Shutdown waits for every Forget in flight.
 func (p *Processor[T]) Forget(
 	ctx context.Context,
 	aggregateID string,
 ) error {
 	p.lifeMu.Lock()
-	if p.isShuttingDown() {
-		p.lifeMu.Unlock()
+	refused := p.isShuttingDown()
+	if !refused {
+		p.forgets.Add(1)
+	}
+
+	p.lifeMu.Unlock()
+	if refused {
 		return asynxmd.ErrShuttingDown
 	}
 
-	p.forgets.Add(1)
-	p.lifeMu.Unlock()
 	defer p.forgets.Done()
 
 	if err := ctx.Err(); err != nil {

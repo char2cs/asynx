@@ -129,7 +129,8 @@ func assertDeliveredTo(
 
 type ackErrStore struct{ store.Memory }
 
-// AckDelivery is the test double implementation for the code under test.
+// AckDelivery always fails with "ack failed", simulating a store that cannot
+// record that a delivery finished.
 func (ackErrStore) AckDelivery(
 	context.Context,
 	string,
@@ -241,7 +242,9 @@ type flakyPendingStore struct {
 	fail atomic.Bool
 }
 
-// PendingDeliveries is the test double implementation for the code under test.
+// PendingDeliveries fails with "log unreadable" while fail is set and
+// otherwise reads the in-memory delivery log, simulating a delivery log that
+// is temporarily unreadable.
 func (s *flakyPendingStore) PendingDeliveries(
 	ctx context.Context,
 	limit int,
@@ -514,7 +517,8 @@ type rowCountingStore struct {
 	rows atomic.Int64
 }
 
-// ReadFrom is the test double implementation for the code under test.
+// ReadFrom reads the stream and adds the number of rows returned to rows, so
+// a test can assert how much of a stream a recovery replayed.
 func (s *rowCountingStore) ReadFrom(
 	ctx context.Context,
 	streamID string,
@@ -599,7 +603,8 @@ type logCountingStore struct {
 	reads atomic.Int64
 }
 
-// PendingDeliveries is the test double implementation for the code under test.
+// PendingDeliveries reads the delivery log and counts the read and the rows
+// it returned, so a test can assert how often the log is scanned.
 func (s *logCountingStore) PendingDeliveries(
 	ctx context.Context,
 	limit int,
@@ -870,7 +875,9 @@ type validatingUpdate struct {
 	validate func() error
 }
 
-// Validate is the test double implementation for the code under test.
+// Validate runs the test-supplied validate function and returns its error,
+// ignoring the aggregate, so a test can run code at the point where a command
+// validates under the lock.
 func (c validatingUpdate) Validate(
 	*order,
 ) error {
@@ -884,7 +891,8 @@ type readHookStore struct {
 	)
 }
 
-// ReadFrom is the test double implementation for the code under test.
+// ReadFrom calls onRead with the stream id before reading it, letting a test
+// act while a replay is in progress.
 func (s *readHookStore) ReadFrom(
 	ctx context.Context,
 	streamID string,
@@ -905,7 +913,9 @@ type staleLogStore struct {
 	sender    *Processor[order]
 }
 
-// PendingDeliveries is the test double implementation for the code under test.
+// PendingDeliveries returns the log as read and, on the first call only, runs
+// afterRead, so a test can change state after the log was read but before it
+// is used, simulating a stale scan.
 func (s *staleLogStore) PendingDeliveries(
 	ctx context.Context,
 	limit int,
@@ -1218,7 +1228,8 @@ type idemOrderUpdate struct {
 	Cmd string
 }
 
-// CommandID is the test double implementation for the code under test.
+// CommandID returns the idempotency key the test put in Cmd, making the
+// update an IdempotentCommand.
 func (c idemOrderUpdate) CommandID() string { return c.Cmd }
 
 type failingReadsStore struct {
@@ -1227,7 +1238,9 @@ type failingReadsStore struct {
 	stream string
 }
 
-// ReadFrom is the test double implementation for the code under test.
+// ReadFrom fails while fail is set, for every stream or only for stream when
+// one is named, and otherwise reads normally, simulating unreadable event
+// streams.
 func (s *failingReadsStore) ReadFrom(
 	ctx context.Context,
 	streamID string,
@@ -1468,7 +1481,8 @@ type ackSignalStore struct {
 	acked chan struct{}
 }
 
-// AckDelivery is the test double implementation for the code under test.
+// AckDelivery records the acknowledgement in the store, then signals on acked
+// without blocking, so a test can wait for a delivery to be acknowledged.
 func (s *ackSignalStore) AckDelivery(
 	ctx context.Context,
 	aggregateID string,
