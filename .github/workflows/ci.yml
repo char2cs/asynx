@@ -24,7 +24,7 @@ jobs:
           go-version: "1.26"
 
       - name: Check coding standards
-        uses: rabbytesoftware/agent-protection@v0.4.0
+        uses: rabbytesoftware/agent-protection@v0.4.1
 
   test-coverage:
     name: Tests & Coverage

@@ -2,7 +2,7 @@
 # lefthook.yml, .claude/settings.json and the CI workflow read it instead of
 # hardcoding their own copy. Keep the `uses:` tag in .github/workflows/ci.yml
 # in step with it when bumping.
-version: v0.4.0
+version: v0.4.1
 
 exclude: []
 
