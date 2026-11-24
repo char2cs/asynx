@@ -31,3 +31,6 @@ go.work.sum
 # .idea/
 # .vscode/
 site/
+
+# Agent Protection report
+ap-report.json

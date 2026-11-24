@@ -203,7 +203,7 @@ Handler panics don't crash the system, but they do indicate bugs that need fixin
 
 ## Fallback Handler Dispatch
 
-The projection system (not the bus itself) manages fallback handlers. When a primary handler panics or times out, the bus publishes the same event to a fallback handler if one is registered. See the `projection` specification for fallback handler details.
+The projection system (not the bus itself) manages fallback handlers. When a primary handler panics or times out, the bus runs the subscription's fallback handler, if one is registered, once for the same event with the same context, timeout and wait mode. This holds with or without a handler timeout. After a timeout the fallback starts right after the timeout is reported. On the dispatcher path, which waits for timed-out handlers, it starts only once the primary has finished, so the two never overlap; on a bus path that abandons timed-out handlers it starts at once, possibly while the abandoned primary is still running. A panic in the fallback is reported through the same panic callback and ends the job, with no second fallback. See the `projection` specification for fallback handler details.
 
 ---
 

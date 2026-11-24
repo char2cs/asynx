@@ -892,7 +892,7 @@ func (r *Replayer[T]) applyPatches(state T, patches []jsonpatch.JsonPatchOperati
 }
 ```
 
-**Who actually writes the snapshot:** the caller. `Reader.Get` and `Reader.coldPath` inspect `result.DidUpcast` and, only when it is true, call `Reader.writeAutoSnapshot` (which serializes a snapshot blob and calls `SnapshotStore.Put`). This is a best-effort write — its failure is logged/ignored, not propagated, since the hydrated state is already correct and durable in the event store. A `Get` that takes the cold path but upcasts nothing (the common case right after a snapshot-table migration or deletion) returns correct state and writes no snapshot at all.
+**Who actually writes the snapshot:** the caller. `Reader.Get` and `Reader.coldPath` inspect `result.DidUpcast` and, only when it is true, call `Reader.writeAutoSnapshot` (which serializes a snapshot blob and calls `SnapshotStore.Put`). This is a best-effort write — its failure is not propagated (it is reported to the snapshot error handler when one is installed, and dropped otherwise), since the hydrated state is already correct and durable in the event store. A `Get` that takes the cold path but upcasts nothing (the common case right after a snapshot-table migration or deletion) returns correct state and writes no snapshot at all.
 
 ### Always-Upcast Design
 
@@ -1156,7 +1156,7 @@ When old events get upcasted during hydration, a snapshot should be written to "
 - First time an old event is loaded, it's upcasted (possibly expensive)
 - Snapshot "seals the migration" — subsequent loads use warm path (snapshot+delta)
 - Cost paid once per aggregate, then fast path forever
-- The write is best-effort: on failure, Reader silently ignores the error, since the hydrated state is already correct and durable in the event store
+- The write is best-effort: on failure, Reader does not fail the read; it reports the error to the snapshot error handler (`eventstore.WithSnapshotErrorHandler`, fed by the builder's `WithSnapshotErrorHandler`) and drops it when none is installed, since the hydrated state is already correct and durable in the event store
 
 **Call Paths:**
 - **Reader.Get (warm path) → hydrate() → Reader.writeAutoSnapshot if DidUpcast** ✅

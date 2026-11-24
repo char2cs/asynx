@@ -1,4 +1,4 @@
-.PHONY: test test-coverage lint tidy example
+.PHONY: test test-coverage lint tidy example ap hooks
 
 test: test-coverage
 
@@ -15,3 +15,10 @@ tidy:
 example:
 	@echo "Running asynx E-Commerce Order example..."
 	@cd example && go run .
+
+ap:
+	ap check .
+
+hooks:
+	./scripts/ap-install.sh
+	lefthook install

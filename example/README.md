@@ -207,7 +207,7 @@ go run .
 **Important**: This example uses only the **public asynx API**:
 - `asynx.New[T]()` - Builder for creating Asynx instances
 - `asynx.ShardingOpts` - Configuration for sharding
-- `models.Store`, `models.Bus`, `models.Command` - Public interfaces
+- `storage.Store`, `pubsub.Bus`, `command.Command` - Public interfaces
 
 The example uses the public `store` package for the in-memory store, which is provided for testing/example purposes.
 

@@ -13,12 +13,12 @@ The `Asynx[T]` interface is the single unified surface developers interact with.
 ```go
 type Asynx[T any] interface {
     // Commands
-    Send(ctx context.Context, cmd models.Command[T]) (models.Event[T], error)
-    SendWait(ctx context.Context, cmd models.Command[T]) (models.Event[T], error)
+    Send(ctx context.Context, cmd command.Command[T]) (event.Event[T], error)
+    SendWait(ctx context.Context, cmd command.Command[T]) (event.Event[T], error)
 
     // Erasure
     Forget(ctx context.Context, aggregateID string) error
-    OnForget(fn models.ForgetHandler[T]) (string, error)
+    OnForget(fn handler.Forget[T]) (string, error)
 
     // Queries
     Get(ctx context.Context, aggregateID string) (T, error)
@@ -26,20 +26,20 @@ type Asynx[T any] interface {
     Preload(ctx context.Context, aggregateID string) error
 
     // Subscriptions
-    Subscribe(pattern string, handler models.ProjectionHandler[T],
-        opts ...models.SubscriptionOpt[T]) (string, error)
+    Subscribe(pattern string, fn handler.Projection[T],
+        opts ...subscription.Opt[T]) (string, error)
     Unsubscribe(id string) error
-    Listen(pattern string, count int) (<-chan models.Event[T], func(), error)
-    SubscribeWait(ctx context.Context, pattern string) (models.Event[T], error)
+    Listen(pattern string, count int) (<-chan event.Event[T], func(), error)
+    SubscribeWait(ctx context.Context, pattern string) (event.Event[T], error)
 
     // Replay
     Replay(ctx context.Context, aggregateID string, fromVersion, toVersion int64,
-        fn models.ProjectionHandler[T]) error
+        fn handler.Projection[T]) error
 
     // Durable delivery
     PausedAggregates() []string
     ResumeDeliveries(ctx context.Context) error
-    InspectDelivery(aggregateID string) models.DeliveryStatus
+    InspectDelivery(aggregateID string) dispatch.Status
 
     // Lifecycle
     Shutdown(ctx context.Context) error
@@ -65,11 +65,11 @@ ax, err := asynx.New[Order]().
     WithEventStore(store).
     WithSnapshotStore(snapshotStore).
     // Runs inside the event's transaction: commits or rolls back with it.
-    WithSyncProjection("Order.*", func(ctx context.Context, tx models.Tx, evt models.Event[Order]) error {
+    WithSyncProjection("Order.*", func(ctx context.Context, tx storage.Tx, evt event.Event[Order]) error {
         return readModel.ApplyInTx(ctx, tx, evt)
     }).
     // Durable, at-least-once, in order per aggregate; an error is retried with backoff.
-    WithSubscriber("Order.*", func(ctx context.Context, evt models.Event[Order]) error {
+    WithSubscriber("Order.*", func(ctx context.Context, evt event.Event[Order]) error {
         return search.Index(ctx, evt)
     }).
     Build()
@@ -77,7 +77,7 @@ ax, err := asynx.New[Order]().
 
 See [Write-Path Guarantees](guarantees.md#durable-delivery) for retry, parking, dead-lettering and the deletion marker.
 
-`WithDispatcher(models.DispatcherFactory[T])` replaces the component that orders, retries and parks durable deliveries. The library ships only the in-memory implementation; see [dispatcher.md](./dispatcher.md) for the contract a replacement must carry. A factory error (wrapped as `asynx: dispatcher factory: ...`), or a factory that returns no dispatcher, fails `Build`; a nil factory is ignored.
+`WithDispatcher(dispatcher.Factory[T])` replaces the component that orders, retries and parks durable deliveries. The library ships only the in-memory implementation; see [dispatcher.md](./dispatcher.md) for the contract a replacement must carry. A factory error (wrapped as `asynx: dispatcher factory: ...`), or a factory that returns no dispatcher, fails `Build`; a nil factory is ignored.
 
 ---
 
@@ -85,16 +85,16 @@ See [Write-Path Guarantees](guarantees.md#durable-delivery) for retry, parking, 
 
 ### Command Execution
 
-#### `Send(ctx context.Context, cmd models.Command[T]) (models.Event[T], error)`
+#### `Send(ctx context.Context, cmd command.Command[T]) (event.Event[T], error)`
 
 **Defined in:** `processor` module
 **Purpose:** Issue a command to the system. Returns the resulting event once it is durably written. Projection handlers fire asynchronously — when `Send` returns, handlers may not have run yet.
 
 ```go
 event, err := ax.Send(ctx, createOrderCmd)
-if errors.Is(err, models.ErrValidation) {
+if errors.Is(err, failure.ErrValidation) {
     // Command invalid
-} else if errors.Is(err, models.ErrPipelineFailed) {
+} else if errors.Is(err, failure.ErrPipelineFailed) {
     // Write conflict, retry from scratch
 }
 ```
@@ -103,7 +103,7 @@ if errors.Is(err, models.ErrValidation) {
 
 ---
 
-#### `SendWait(ctx context.Context, cmd models.Command[T]) (models.Event[T], error)`
+#### `SendWait(ctx context.Context, cmd command.Command[T]) (event.Event[T], error)`
 
 **Defined in:** `processor` module
 **Purpose:** Same as `Send`, but additionally blocks until all matching projection handlers have completed. When `SendWait` returns without error, the event is persisted and every projection subscribed to it has finished.
@@ -147,21 +147,21 @@ err := ax.Shutdown(ctx)
 #### `Forget(ctx context.Context, aggregateID string) error`
 
 **Defined in:** `processor` + `eventstore` modules
-**Purpose:** Write a tombstone event, notify all `ForgetHandler`s synchronously, then erase all events, snapshots, and cached state for the aggregate. See [forget.md](./forget.md).
+**Purpose:** Write a tombstone event, notify all `handler.Forget`s synchronously, then erase all events, snapshots, and cached state for the aggregate. See [forget.md](./forget.md).
 
 ```go
 err := ax.Forget(ctx, "order_123")
-if errors.Is(err, models.ErrValidation) {
+if errors.Is(err, failure.ErrValidation) {
     // Aggregate does not exist
 }
-if errors.Is(err, models.ErrForgetFailed) {
+if errors.Is(err, failure.ErrForgetFailed) {
     // Tombstone written, deletion failed — retry Forget
 }
 ```
 
 ---
 
-#### `OnForget(fn models.ForgetHandler[T]) (string, error)`
+#### `OnForget(fn handler.Forget[T]) (string, error)`
 
 **Defined in:** `bus` module
 **Purpose:** Register a handler invoked when any aggregate is forgotten. The handler receives the tombstone event; `Event.Aggregate` holds the last known state. Returns a subscription ID usable with `Unsubscribe`.
@@ -177,7 +177,7 @@ if errors.Is(err, models.ErrForgetFailed) {
 
 ```go
 order, err := ax.Get(ctx, "order_123")
-if errors.Is(err, models.ErrNotFound) {
+if errors.Is(err, failure.ErrNotFound) {
     // Aggregate doesn't exist
 }
 ```
@@ -215,13 +215,13 @@ err := ax.Preload(ctx, "hot_order_123")
 
 ### Event Subscription (Eventual Consistency)
 
-#### `Subscribe(pattern string, handler models.ProjectionHandler[T], opts ...models.SubscriptionOpt[T]) (string, error)`
+#### `Subscribe(pattern string, fn handler.Projection[T], opts ...subscription.Opt[T]) (string, error)`
 
 **Defined in:** `bus` module
 **Purpose:** Register a callback for events matching a regex pattern. For dotted, topic-style event names, wrap the pattern in `asynx.Topic()`.
 
 ```go
-id, err := ax.Subscribe("OrderPlaced", func(ctx context.Context, e models.Event[Order]) {
+id, err := ax.Subscribe("OrderPlaced", func(ctx context.Context, e event.Event[Order]) {
     // Handle event
     updateReadModel(e)
 })
@@ -230,8 +230,8 @@ defer ax.Unsubscribe(id)
 ```
 
 **Options:**
-- `models.WithFallback(handler)` — Fallback if primary fails
-- `models.WithHandlerTimeout(duration)` — Timeout for handler execution
+- `subscription.WithFallback(handler)` — Fallback if primary fails
+- `subscription.WithHandlerTimeout(duration)` — Timeout for handler execution
 
 ---
 
@@ -246,7 +246,7 @@ err := ax.Unsubscribe(subscriptionID)
 
 ---
 
-#### `Listen(pattern string, count int) (<-chan models.Event[T], func(), error)`
+#### `Listen(pattern string, count int) (<-chan event.Event[T], func(), error)`
 
 **Defined in:** `asynx` (over the `bus` module)
 **Purpose:** Channel-based subscription. The pattern is converted via `Topic()` internally.
@@ -266,7 +266,7 @@ for e := range ch {
 
 ---
 
-#### `SubscribeWait(ctx context.Context, pattern string) (models.Event[T], error)`
+#### `SubscribeWait(ctx context.Context, pattern string) (event.Event[T], error)`
 
 **Defined in:** `asynx` (over `Listen`)
 **Purpose:** Block until the first event matching the pattern arrives or the context is done. Auto-unsubscribes in all cases. Bound the wait with a context deadline.
@@ -281,14 +281,14 @@ event, err := ax.SubscribeWait(ctx, "order.shipped.*")
 
 ### Event Replay (Read-Only Recovery)
 
-#### `Replay(ctx context.Context, aggregateID string, fromVersion int64, toVersion int64, fn models.ProjectionHandler[T]) error`
+#### `Replay(ctx context.Context, aggregateID string, fromVersion int64, toVersion int64, fn handler.Projection[T]) error`
 
 **Defined in:** `eventstore.replayer` (replayer sub-module)
 **Purpose:** Iterate events for manual re-projection
 
 ```go
 // Replay to recover projection after failure
-err := ax.Replay(ctx, "order_123", 0, 0, func(ctx context.Context, e models.Event[Order]) {
+err := ax.Replay(ctx, "order_123", 0, 0, func(ctx context.Context, e event.Event[Order]) {
     // Re-run projection logic
     readModel.UpdateOrder(e)
 })
@@ -302,7 +302,7 @@ err := ax.Replay(ctx, "order_123", 0, 0, func(ctx context.Context, e models.Even
 
 ### Delivery State
 
-#### `InspectDelivery(aggregateID string) models.DeliveryStatus`
+#### `InspectDelivery(aggregateID string) dispatch.Status`
 
 **Defined in:** `processor` over the dispatcher
 **Purpose:** Read-only view of an aggregate's durable delivery state, answering why it is parked.
@@ -366,7 +366,7 @@ if err != nil {
 }
 
 // Subscribe to events (projection)
-ax.Subscribe("OrderPlaced", func(ctx context.Context, e models.Event[Order]) {
+ax.Subscribe("OrderPlaced", func(ctx context.Context, e event.Event[Order]) {
     updateReadModel(e.Aggregate)
 })
 
@@ -378,17 +378,17 @@ if err != nil {
 
 // Issue command (validation → write → async publish)
 _, err = ax.Send(ctx, updateOrderCmd)
-if errors.Is(err, models.ErrValidation) {
+if errors.Is(err, failure.ErrValidation) {
     // Validation failed, try different command
     _, err = ax.Send(ctx, differentCmd)
 }
-if errors.Is(err, models.ErrPipelineFailed) {
+if errors.Is(err, failure.ErrPipelineFailed) {
     // Write conflict with a concurrent writer — safe to retry
     _, err = ax.Send(ctx, updateOrderCmd)
 }
 
 // Recover projection after failure (read-only replay)
-err = ax.Replay(ctx, orderID, 0, 0, func(ctx context.Context, e models.Event[Order]) {
+err = ax.Replay(ctx, orderID, 0, 0, func(ctx context.Context, e event.Event[Order]) {
     updateReadModel(e.Aggregate)
 })
 
@@ -402,7 +402,7 @@ err = ax.Shutdown(ctx)
 
 ## Error Types
 
-All errors are sentinel values in the `models` package; match with `errors.Is`. See [models/errors.go](../../models/errors.go) for the authoritative list.
+All errors are sentinel values in the `models/failure` package (for example `failure.ErrValidation`); match with `errors.Is`. See [models/failure/errors.go](https://github.com/char2cs/asynx/blob/develop/models/failure/errors.go) for the authoritative list.
 
 **Where the common ones come from:**
 - `ErrValidation` — from `cmd.Validate()` failure, or `Forget` on a missing aggregate

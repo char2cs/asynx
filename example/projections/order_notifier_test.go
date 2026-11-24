@@ -1,0 +1,266 @@
+package projections
+
+import (
+	"context"
+	"github.com/char2cs/asynx/v2/example/domain"
+	"github.com/char2cs/asynx/v2/models/event"
+	"sync"
+	"testing"
+)
+
+func TestOrderNotifier_Handle_OrderCreated(
+	t *testing.T,
+) {
+	notifier := &OrderNotifier{}
+	ctx := context.Background()
+	evt := event.Event[domain.Order]{
+		EventName: "OrderCreated",
+		Aggregate: domain.Order{
+			ID:     "ORD-001",
+			Status: domain.OrderPending,
+			Total:  99.99,
+			Items:  2,
+			ShipTo: "123 Main St",
+		},
+	}
+
+	notifier.Handle(
+		ctx,
+		evt,
+	)
+	outbox := notifier.GetOutbox()
+	if len(outbox) != 1 {
+		t.Errorf(
+			"GetOutbox() length = %d, want 1",
+			len(outbox),
+		)
+	}
+
+	if outbox[0] != "📧 Confirmation email sent for order ORD-001" {
+		t.Errorf(
+			"GetOutbox()[0] = %q, want %q",
+			outbox[0],
+			"📧 Confirmation email sent for order ORD-001",
+		)
+	}
+}
+
+func TestOrderNotifier_Handle_OrderConfirmed(
+	t *testing.T,
+) {
+	notifier := &OrderNotifier{}
+	ctx := context.Background()
+	evt := event.Event[domain.Order]{
+		EventName: "OrderConfirmed",
+		Aggregate: domain.Order{
+			ID:     "ORD-002",
+			Status: domain.OrderConfirmed,
+			Total:  149.99,
+			Items:  3,
+			ShipTo: "456 Oak Ave",
+		},
+	}
+
+	notifier.Handle(
+		ctx,
+		evt,
+	)
+	outbox := notifier.GetOutbox()
+	if len(outbox) != 1 {
+		t.Errorf(
+			"GetOutbox() length = %d, want 1",
+			len(outbox),
+		)
+	}
+
+	if outbox[0] != "🎉 Order ORD-002 confirmed! Warehouse notified." {
+		t.Errorf(
+			"GetOutbox()[0] = %q, want %q",
+			outbox[0],
+			"🎉 Order ORD-002 confirmed! Warehouse notified.",
+		)
+	}
+}
+
+func TestOrderNotifier_Handle_OrderShipped(
+	t *testing.T,
+) {
+	notifier := &OrderNotifier{}
+	ctx := context.Background()
+	evt := event.Event[domain.Order]{
+		EventName: "OrderShipped",
+		Aggregate: domain.Order{
+			ID:     "ORD-003",
+			Status: domain.OrderShipped,
+			Total:  199.99,
+			Items:  5,
+			ShipTo: "789 Elm St",
+		},
+	}
+
+	notifier.Handle(
+		ctx,
+		evt,
+	)
+	outbox := notifier.GetOutbox()
+	if len(outbox) != 1 {
+		t.Errorf(
+			"GetOutbox() length = %d, want 1",
+			len(outbox),
+		)
+	}
+
+	if outbox[0] != "📦 Order ORD-003 shipped! Customer notified." {
+		t.Errorf(
+			"GetOutbox()[0] = %q, want %q",
+			outbox[0],
+			"📦 Order ORD-003 shipped! Customer notified.",
+		)
+	}
+}
+
+func TestOrderNotifier_Handle_UnknownEvent(
+	t *testing.T,
+) {
+	notifier := &OrderNotifier{}
+	ctx := context.Background()
+	evt := event.Event[domain.Order]{
+		EventName: "UnknownEvent",
+		Aggregate: domain.Order{
+			ID: "ORD-004",
+		},
+	}
+
+	notifier.Handle(
+		ctx,
+		evt,
+	)
+	outbox := notifier.GetOutbox()
+	if len(outbox) != 0 {
+		t.Errorf(
+			"GetOutbox() length = %d, want 0",
+			len(outbox),
+		)
+	}
+}
+
+func TestOrderNotifier_Handle_MultipleEvents(
+	t *testing.T,
+) {
+	notifier := &OrderNotifier{}
+	ctx := context.Background()
+
+	event1 := event.Event[domain.Order]{
+		EventName: "OrderCreated",
+		Aggregate: domain.Order{ID: "ORD-001"},
+	}
+	event2 := event.Event[domain.Order]{
+		EventName: "OrderConfirmed",
+		Aggregate: domain.Order{ID: "ORD-001"},
+	}
+	event3 := event.Event[domain.Order]{
+		EventName: "OrderShipped",
+		Aggregate: domain.Order{ID: "ORD-001"},
+	}
+
+	notifier.Handle(
+		ctx,
+		event1,
+	)
+	notifier.Handle(
+		ctx,
+		event2,
+	)
+	notifier.Handle(
+		ctx,
+		event3,
+	)
+
+	outbox := notifier.GetOutbox()
+	if len(outbox) != 3 {
+		t.Errorf(
+			"GetOutbox() length = %d, want 3",
+			len(outbox),
+		)
+	}
+}
+
+func handleCreated(
+	ctx context.Context,
+	notifier *OrderNotifier,
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
+	notifier.Handle(
+		ctx,
+		event.Event[domain.Order]{
+			EventName: "OrderCreated",
+			Aggregate: domain.Order{
+				ID: "ORD-001",
+			},
+		},
+	)
+}
+
+func TestOrderNotifier_Handle_Concurrent(
+	t *testing.T,
+) {
+	notifier := &OrderNotifier{}
+	ctx := context.Background()
+	wg := sync.WaitGroup{}
+
+	for range 10 {
+		wg.Add(1)
+		go handleCreated(
+			ctx,
+			notifier,
+			&wg,
+		)
+	}
+
+	wg.Wait()
+
+	outbox := notifier.GetOutbox()
+	if len(outbox) != 10 {
+		t.Errorf(
+			"GetOutbox() length after concurrent calls = %d, want 10",
+			len(outbox),
+		)
+	}
+}
+
+func TestOrderNotifier_GetOutbox_EmptyInitially(
+	t *testing.T,
+) {
+	notifier := &OrderNotifier{}
+	outbox := notifier.GetOutbox()
+	if len(outbox) != 0 {
+		t.Errorf(
+			"GetOutbox() on fresh notifier = %d, want 0",
+			len(outbox),
+		)
+	}
+}
+
+func TestOrderNotifier_GetOutbox_ReturnsACopy(
+	t *testing.T,
+) {
+	notifier := &OrderNotifier{}
+	notifier.Handle(
+		context.Background(),
+		event.Event[domain.Order]{
+			EventName: "OrderCreated",
+			Aggregate: domain.Order{ID: "ORD-001"},
+		},
+	)
+
+	first := notifier.GetOutbox()
+	first[0] = "tampered"
+
+	if got := notifier.GetOutbox()[0]; got == "tampered" {
+		t.Errorf(
+			"GetOutbox()[0] = %q, the caller's edit reached the outbox",
+			got,
+		)
+	}
+}

@@ -3,138 +3,345 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
-	"github.com/char2cs/asynx"
-	"github.com/char2cs/asynx/example/commands"
-	"github.com/char2cs/asynx/example/domain"
-	"github.com/char2cs/asynx/example/projections"
-	"github.com/char2cs/asynx/store"
+	"github.com/char2cs/asynx/v2"
+	"github.com/char2cs/asynx/v2/example/commands"
+	"github.com/char2cs/asynx/v2/example/domain"
+	"github.com/char2cs/asynx/v2/example/projections"
+	"github.com/char2cs/asynx/v2/models/command"
+	"github.com/char2cs/asynx/v2/store"
 )
 
-func run(ctx context.Context) error {
-	// ========================================================================
-	// Setup: Create Asynx Instance using Public API
-	// ========================================================================
-	fmt.Println("=== Asynx E-Commerce Order Example ===")
-	fmt.Println("Step 1: Building asynx instance...")
+const (
+	exampleShards = 4
+	orderTotal    = 99.99
+	orderItems    = 2
+)
 
-	// Create using the public asynx.Builder API
-	// Use asynx's built-in in-memory stores for this example
-	eventStore := store.New()
-	snapshotStore := store.NewSnapshots()
+type phase struct {
+	verb    string
+	past    string
+	factory func(orderID string) command.Command[domain.Order]
+}
 
-	ax, err := asynx.New[domain.Order]().
-		WithEventStore(eventStore).
-		WithSnapshotStore(snapshotStore).
+func build() (asynx.Asynx[domain.Order], error) {
+	return asynx.New[domain.Order]().
+		WithEventStore(store.New()).
+		WithSnapshotStore(store.NewSnapshots()).
 		WithShardingOpts(asynx.ShardingOpts{
-			Shards: 4,
+			Shards: exampleShards,
 		}).
 		Build()
+}
+
+func subscribeAll(
+	ax asynx.Asynx[domain.Order],
+	reporter *projections.OrderReporter,
+	notifier *projections.OrderNotifier,
+) error {
+	_, err := ax.Subscribe(
+		"Order.*",
+		reporter.Handle,
+	)
 	if err != nil {
 		return err
 	}
 
-	// ========================================================================
-	// Setup: Register Event Subscribers
-	// ========================================================================
-	fmt.Println("Step 2: Registering event subscribers...")
+	_, err = ax.Subscribe(
+		"Order.*",
+		notifier.Handle,
+	)
 
-	reporter := &projections.OrderReporter{}
-	notifier := &projections.OrderNotifier{}
+	return err
+}
 
-	// Subscribe to order events
-	ax.Subscribe("Order.*", reporter.Handle) // Match: OrderCreated, OrderConfirmed, OrderShipped
-	ax.Subscribe("Order.*", notifier.Handle)
-
-	// ========================================================================
-	// Execution: Submit Commands
-	// ========================================================================
-	fmt.Println("Step 3: Executing commands...")
-
-	orders := []string{"ORD-001", "ORD-002", "ORD-003"}
-
-	// Create orders
-	for _, orderID := range orders {
-		cmd := commands.CreateOrderCmd{
-			ID:     orderID,
-			Total:  99.99,
-			Items:  2,
-			ShipTo: "123 Main St",
-		}
-
-		if _, err := ax.Send(ctx, cmd); err != nil {
-			fmt.Printf("❌ Failed to create order %s: %v\n", orderID, err)
-			continue
-		}
-		fmt.Printf("✓ Order %s created\n", orderID)
+func sendOne(
+	ctx context.Context,
+	ax asynx.Asynx[domain.Order],
+	orderID string,
+	step phase,
+) error {
+	_, err := ax.Send(
+		ctx,
+		step.factory(orderID),
+	)
+	if err != nil {
+		fmt.Printf(
+			"❌ Failed to %s order %s: %v\n",
+			step.verb,
+			orderID,
+			err,
+		)
+		return fmt.Errorf(
+			"%s order %s: %w",
+			step.verb,
+			orderID,
+			err,
+		)
 	}
-	ax.WaitPublish() // Wait for event handlers
+
+	fmt.Printf(
+		"✓ Order %s %s\n",
+		orderID,
+		step.past,
+	)
+
+	return nil
+}
+
+func sendAll(
+	ctx context.Context,
+	ax asynx.Asynx[domain.Order],
+	orders []string,
+	step phase,
+) (err error) {
+	for _, orderID := range orders {
+		err = errors.Join(
+			err,
+			sendOne(
+				ctx,
+				ax,
+				orderID,
+				step,
+			),
+		)
+	}
+
+	ax.WaitPublish()
 	fmt.Println()
 
-	// Confirm orders
-	for _, orderID := range orders {
-		cmd := commands.ConfirmOrderCmd{ID: orderID}
-		if _, err := ax.Send(ctx, cmd); err != nil {
-			fmt.Printf("❌ Failed to confirm order %s: %v\n", orderID, err)
-			continue
-		}
-		fmt.Printf("✓ Order %s confirmed\n", orderID)
-	}
-	ax.WaitPublish() // Wait for event handlers
-	fmt.Println()
+	return err
+}
 
-	// Ship orders
-	for _, orderID := range orders {
-		cmd := commands.ShipOrderCmd{ID: orderID}
-		if _, err := ax.Send(ctx, cmd); err != nil {
-			fmt.Printf("❌ Failed to ship order %s: %v\n", orderID, err)
-			continue
-		}
-		fmt.Printf("✓ Order %s shipped\n", orderID)
-	}
-	ax.WaitPublish() // Wait for event handlers
-	fmt.Println()
-
-	// ========================================================================
-	// Verification: Query Aggregate State
-	// ========================================================================
-	fmt.Println("Step 4: Verifying final state...")
-
-	for _, orderID := range orders {
-		order, err := ax.Get(ctx, orderID)
-		if err != nil {
-			fmt.Printf("❌ Failed to load order %s: %v\n", orderID, err)
-			continue
-		}
-
-		orderJSON, _ := json.MarshalIndent(order, "", "  ")
-		fmt.Printf("Order %s:\n%s\n\n", orderID, string(orderJSON))
+func printOrder(
+	ctx context.Context,
+	ax asynx.Asynx[domain.Order],
+	orderID string,
+) error {
+	order, err := ax.Get(
+		ctx,
+		orderID,
+	)
+	if err != nil {
+		fmt.Printf(
+			"❌ Failed to load order %s: %v\n",
+			orderID,
+			err,
+		)
+		return fmt.Errorf(
+			"load order %s: %w",
+			orderID,
+			err,
+		)
 	}
 
-	// ========================================================================
-	// Output: Notification Outbox
-	// ========================================================================
+	return printJSON(
+		orderID,
+		order,
+	)
+}
+
+func printJSON(
+	orderID string,
+	order domain.Order,
+) error {
+	orderJSON, err := json.MarshalIndent(
+		order,
+		"",
+		"  ",
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"encode order %s: %w",
+			orderID,
+			err,
+		)
+	}
+
+	fmt.Printf(
+		"Order %s:\n%s\n\n",
+		orderID,
+		string(orderJSON),
+	)
+
+	return nil
+}
+
+func printOrders(
+	ctx context.Context,
+	ax asynx.Asynx[domain.Order],
+	orders []string,
+) (err error) {
+	for _, orderID := range orders {
+		err = errors.Join(
+			err,
+			printOrder(
+				ctx,
+				ax,
+				orderID,
+			),
+		)
+	}
+
+	return err
+}
+
+func createCmd(
+	orderID string,
+) command.Command[domain.Order] {
+	return commands.CreateOrderCmd{
+		ID:     orderID,
+		Total:  orderTotal,
+		Items:  orderItems,
+		ShipTo: "123 Main St",
+	}
+}
+
+func confirmCmd(
+	orderID string,
+) command.Command[domain.Order] {
+	return commands.ConfirmOrderCmd{ID: orderID}
+}
+
+func shipCmd(
+	orderID string,
+) command.Command[domain.Order] {
+	return commands.ShipOrderCmd{ID: orderID}
+}
+
+func sendPhases(
+	ctx context.Context,
+	ax asynx.Asynx[domain.Order],
+	orders []string,
+) (err error) {
+	steps := []phase{
+		{verb: "create", past: "created", factory: createCmd},
+		{verb: "confirm", past: "confirmed", factory: confirmCmd},
+		{verb: "ship", past: "shipped", factory: shipCmd},
+	}
+	for _, step := range steps {
+		err = errors.Join(
+			err,
+			sendAll(
+				ctx,
+				ax,
+				orders,
+				step,
+			),
+		)
+	}
+
+	return err
+}
+
+func printOutbox(
+	notifier *projections.OrderNotifier,
+) {
 	fmt.Println("Step 5: Notifications sent:")
 	for i, notification := range notifier.GetOutbox() {
-		fmt.Printf("%d. %s\n", i+1, notification)
+		fmt.Printf(
+			"%d. %s\n",
+			i+1,
+			notification,
+		)
 	}
+}
 
-	// ========================================================================
-	// Cleanup: Graceful Shutdown
-	// ========================================================================
-	if err := ax.Shutdown(ctx); err != nil {
-		fmt.Printf("❌ Shutdown error: %v\n", err)
+func shutdown(
+	ctx context.Context,
+	ax asynx.Asynx[domain.Order],
+) error {
+	err := ax.Shutdown(ctx)
+	if err != nil {
+		fmt.Printf(
+			"❌ Shutdown error: %v\n",
+			err,
+		)
 		return err
 	}
 
 	fmt.Println("\n✅ Example completed successfully!")
+
 	return nil
+}
+
+func setup() (asynx.Asynx[domain.Order], *projections.OrderNotifier, error) {
+	fmt.Println("Step 1: Building asynx instance...")
+
+	ax, err := build()
+	if err != nil {
+		return nil,
+			nil,
+			err
+	}
+
+	fmt.Println("Step 2: Registering event subscribers...")
+
+	notifier := &projections.OrderNotifier{}
+
+	err = subscribeAll(
+		ax,
+		&projections.OrderReporter{},
+		notifier,
+	)
+	if err != nil {
+		return nil,
+			nil,
+			err
+	}
+
+	return ax,
+		notifier,
+		nil
+}
+
+func run(
+	ctx context.Context,
+) error {
+	fmt.Println("=== Asynx E-Commerce Order Example ===")
+
+	ax, notifier, err := setup()
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("Step 3: Executing commands...")
+
+	orders := []string{"ORD-001", "ORD-002", "ORD-003"}
+
+	sendErr := sendPhases(
+		ctx,
+		ax,
+		orders,
+	)
+
+	fmt.Println("Step 4: Verifying final state...")
+
+	printErr := printOrders(
+		ctx,
+		ax,
+		orders,
+	)
+
+	printOutbox(notifier)
+
+	return errors.Join(
+		sendErr,
+		printErr,
+		shutdown(
+			ctx,
+			ax,
+		),
+	)
 }
 
 func main() {
 	ctx := context.Background()
-	if err := run(ctx); err != nil {
+
+	err := run(ctx)
+	if err != nil {
 		panic(err)
 	}
 }

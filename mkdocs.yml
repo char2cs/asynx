@@ -3,10 +3,12 @@ site_description: An event sourcing + CQRS framework for Go
 site_author: Rabbyte
 repo_url: https://github.com/char2cs/asynx
 repo_name: asynx
-edit_uri: edit/docs/initial-spec/docs/
+edit_uri: edit/develop/docs/
 
 theme:
   name: material
+  logo: assets/icon.svg
+  favicon: assets/icon.svg
   features:
     - navigation.instant
     - navigation.tabs
@@ -17,6 +19,9 @@ theme:
     - content.code.copy
     - content.code.select
 
+extra_css:
+  - stylesheets/extra.css
+
 extra_javascript:
   - https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js
 
@@ -26,6 +31,8 @@ nav:
     - Overview: spec/overview.md
     - Write-Path Guarantees: spec/guarantees.md
     - Dispatcher: spec/dispatcher.md
+  - Migration:
+    - Models package split: migration-models-split.md
 
 plugins:
   - search

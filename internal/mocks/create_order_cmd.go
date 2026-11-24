@@ -1,0 +1,46 @@
+package mocks
+
+import (
+	"github.com/char2cs/asynx/v2/models/failure"
+)
+
+// CreateOrderCmd is the test command that creates an Order with the given ID
+// and Total. It is valid only for a positive Total, emits OrderCreated, leaves
+// the new Order Pending and never asks for a snapshot.
+type CreateOrderCmd struct {
+	ID    string
+	Total float64
+}
+
+// AggregateID returns the ID of the aggregate the command targets.
+func (c CreateOrderCmd) AggregateID() string {
+	return c.ID
+}
+
+// EventName returns the name of the event the command emits.
+func (c CreateOrderCmd) EventName() string {
+	return "OrderCreated"
+}
+
+// ShouldSnapshot reports whether a snapshot is written after the command.
+func (c CreateOrderCmd) ShouldSnapshot() bool {
+	return false
+}
+
+// Validate checks the command against the current aggregate state.
+func (c CreateOrderCmd) Validate(
+	current *Order,
+) error {
+	if c.Total <= 0 {
+		return failure.ErrValidation
+	}
+
+	return nil
+}
+
+// EmitEvent applies the command to the current aggregate and returns the resulting state.
+func (c CreateOrderCmd) EmitEvent(
+	current *Order,
+) Order {
+	return Order{ID: c.ID, Total: c.Total, Status: "Pending"}
+}

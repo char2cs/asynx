@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="Asynx" width="510">
+</p>
+
 # asynx
 
 **Validate early, commit confidently.** Event sourcing + CQRS for Go with command-first validation and automatic event diffs.
@@ -5,7 +9,7 @@
 ## Install
 
 ```bash
-go get github.com/char2cs/asynx
+go get github.com/char2cs/asynx/v2
 ```
 
 ## Quick Start
@@ -33,10 +37,10 @@ func (c CreateOrderCmd) ShouldSnapshot() bool { return false }
 // Validation runs before any events are written
 func (c CreateOrderCmd) Validate(current *Order) error {
 	if c.Total <= 0 {
-		return models.ErrValidation // Fails fast
+		return failure.ErrValidation // Fails fast
 	}
 	if current != nil {
-		return models.ErrValidation // Already exists
+		return failure.ErrValidation // Already exists
 	}
 	return nil
 }
@@ -50,9 +54,9 @@ func (c CreateOrderCmd) EmitEvent(current *Order) Order {
 **Initialize and send commands:**
 ```go
 import (
-	"github.com/char2cs/asynx"
-	"github.com/char2cs/asynx/models"
-	"github.com/char2cs/asynx/store" // in-memory store for tests/examples
+	"github.com/char2cs/asynx/v2"
+	"github.com/char2cs/asynx/v2/models/failure"
+	"github.com/char2cs/asynx/v2/store" // in-memory store for tests/examples
 )
 
 ax, _ := asynx.New[Order]().
@@ -61,7 +65,7 @@ ax, _ := asynx.New[Order]().
 	Build()
 
 event, err := ax.Send(ctx, CreateOrderCmd{ID: "ORD-001", Total: 99.99})
-if errors.Is(err, models.ErrValidation) {
+if errors.Is(err, failure.ErrValidation) {
 	// Invalid command rejected before event creation
 }
 
@@ -83,10 +87,10 @@ type UpdateOrderCmd struct {
 
 func (c UpdateOrderCmd) Validate(current *Order) error {
 	if current == nil {
-		return models.ErrNotFound
+		return failure.ErrNotFound
 	}
 	if current.Status == "Shipped" {
-		return models.ErrValidation // Can't update shipped orders
+		return failure.ErrValidation // Can't update shipped orders
 	}
 	return nil
 }
@@ -126,14 +130,14 @@ Decoupled event subscribers. Can fail independently without affecting the event 
 
 ```go
 // Projection fails: event still safely stored
-ax.Subscribe("Order.*", func(ctx context.Context, event models.Event[Order]) {
+ax.Subscribe("Order.*", func(ctx context.Context, evt event.Event[Order]) {
 	// Can panic, timeout, or fail — events remain durable
-	saveToDatabase(event) // Even if this fails
+	saveToDatabase(evt) // Even if this fails
 })
 ```
 
 ### Store
-Persistent event backend (`models.Store`) — event streams, command receipts and the delivery log behind one transactional write path. Bring your own (PostgreSQL, SQLite, DynamoDB) and prove it with `store/storetest`, or use the bundled in-memory `store` package for testing. A separate `models.SnapshotStore` — one upserted row per aggregate, holding only the newest snapshot — is also required; see [Bring Your Own Store](#bring-your-own-store).
+Persistent event backend (`storage.Store`) — event streams, command receipts and the delivery log behind one transactional write path. Bring your own (PostgreSQL, SQLite, DynamoDB) and prove it with `store/storetest`, or use the bundled in-memory `store` package for testing. A separate `storage.SnapshotStore` — one upserted row per aggregate, holding only the newest snapshot — is also required; see [Bring Your Own Store](#bring-your-own-store).
 
 ### Bus
 Event publication after durably writing to store. In-process by default; can be replaced.
@@ -145,9 +149,9 @@ Subscribe to events with regex patterns. Subscriptions are decoupled from comman
 **Basic subscription:**
 ```go
 // Match events by name (regex)
-id, err := ax.Subscribe("Order.*", func(ctx context.Context, event models.Event[Order]) {
+id, err := ax.Subscribe("Order.*", func(ctx context.Context, evt event.Event[Order]) {
 	// Called after event is durably stored
-	fmt.Printf("%s: %s\n", event.EventName, event.Aggregate.ID)
+	fmt.Printf("%s: %s\n", evt.EventName, evt.Aggregate.ID)
 })
 ```
 
@@ -174,10 +178,11 @@ ax.Subscribe(asynx.Topic("order.*.ORD-001"), handler)
 
 **Fallback handler (failure resilience):**
 ```go
-// If primary panics, fallback runs instead
+// If the primary panics or exceeds its WithHandlerTimeout, the fallback runs
+// once with the same event; a panic in the fallback ends the job
 ax.Subscribe("Order.*",
 	primaryHandler,
-	models.WithFallback[Order](fallbackHandler),
+	subscription.WithFallback[Order](fallbackHandler),
 )
 ```
 
@@ -186,20 +191,20 @@ ax.Subscribe("Order.*",
 // Alarm if the handler takes longer than 5 seconds (it is still waited for, not cancelled)
 ax.Subscribe("Order.*",
 	handler,
-	models.WithHandlerTimeout[Order](5 * time.Second),
+	subscription.WithHandlerTimeout[Order](5 * time.Second),
 )
 ```
 
 **Access event details:**
 ```go
-handler := func(ctx context.Context, event models.Event[Order]) {
-	event.AggregateID         // "ORD-001"
-	event.EventName           // "OrderConfirmed"
-	event.Version             // Total changes for this aggregate
-	event.SchemaVersion       // Schema version of the event
-	event.Aggregate           // New state
-	event.PreviousAggregate   // State before this event
-	event.OccurredAt          // Timestamp
+handler := func(ctx context.Context, evt event.Event[Order]) {
+	evt.AggregateID         // "ORD-001"
+	evt.EventName           // "OrderConfirmed"
+	evt.Version             // Total changes for this aggregate
+	evt.SchemaVersion       // Schema version of the event
+	evt.Aggregate           // New state
+	evt.PreviousAggregate   // State before this event
+	evt.OccurredAt          // Timestamp
 }
 ```
 
@@ -232,17 +237,17 @@ ax.Unsubscribe(subID) // Stop receiving events
 
 ## Forgetting Aggregates
 
-`Forget` permanently erases an aggregate — a tombstone event is written, all `ForgetHandler`s are notified with the last known state, then every event, snapshot, and cached entry is deleted. Useful for GDPR-style erasure.
+`Forget` permanently erases an aggregate — a tombstone event is written, all `handler.Forget`s are notified with the last known state, then every event, snapshot, and cached entry is deleted. Useful for GDPR-style erasure.
 
 ```go
 // React to erasure (e.g., clean up read models)
-ax.OnForget(func(ctx context.Context, event models.Event[Order]) {
-	deleteFromReadModel(event.AggregateID) // event.Aggregate = last known state
+ax.OnForget(func(ctx context.Context, evt event.Event[Order]) {
+	deleteFromReadModel(evt.AggregateID) // evt.Aggregate = last known state
 })
 
 // Erase the aggregate
 err := ax.Forget(ctx, "ORD-001")
-if errors.Is(err, models.ErrValidation) {
+if errors.Is(err, failure.ErrValidation) {
 	// Aggregate does not exist
 }
 ```
@@ -309,7 +314,8 @@ func upcastOrderV1toV2(ctx context.Context, eventName string, patches []byte) ([
 | `WithDeliveryErrorHandler(fn)` / `WithDeliveryRetry(initial, max)` | Observe failed durable deliveries / tune retry backoff | silent / 100ms→30s | No |
 | `WithDeliveryMaxAttempts(n)` / `WithDeadLetterHandler(fn)` | Stop retrying after `n` attempts; dead-letter or park the aggregate | 20 / park | No |
 | `WithDispatcher(factory)` | Replace the delivery dispatcher ([contract](./docs/spec/dispatcher.md)) | In-memory dispatcher | No |
-| `WithSnapshotErrorHandler(fn)` | Observe failed (non-fatal) snapshot writes | Silently dropped | No |
+| `WithSnapshotErrorHandler(fn)` | Observe failed (non-fatal) snapshot writes, both post-commit and the auto-snapshot a read caches after an upcast | Silently dropped | No |
+| `WithListenerErrorHandler(fn)` | Observe a failed unsubscribe behind `Listen` / `SubscribeWait` (only a custom `WithBus` bus can fail one) | Silently dropped | No |
 
 **Configure concurrency:**
 ```go
@@ -330,9 +336,9 @@ ax, _ := asynx.New[Order]().
 ax, _ := asynx.New[Order]().
 	WithEventStore(store).
 	WithSnapshotStore(snapshotStore).
-	WithPanicHandler(func(ctx context.Context, event models.Event[Order], p any) {
+	WithPanicHandler(func(ctx context.Context, evt event.Event[Order], p any) {
 		// Custom panic handling: alert, log, etc.
-		log.Printf("Projection panicked on %s: %v", event.EventName, p)
+		log.Printf("Projection panicked on %s: %v", evt.EventName, p)
 	}).
 	Build()
 ```
@@ -355,9 +361,9 @@ ax, _ := asynx.New[Order]().
 ax, _ := asynx.New[Order]().
 	WithEventStore(store).
 	WithSnapshotStore(snapshotStore).
-	WithPublishErrorHandler(func(ctx context.Context, event models.Event[Order], err error) {
+	WithPublishErrorHandler(func(ctx context.Context, evt event.Event[Order], err error) {
 		// Event is already durably stored; this is observability only
-		log.Printf("publish failed for %s: %v", event.EventName, err)
+		log.Printf("publish failed for %s: %v", evt.EventName, err)
 	}).
 	Build()
 ```
@@ -395,7 +401,7 @@ type Tx interface {
 Run the conformance suite against your implementation:
 ```go
 func TestConformance(t *testing.T) {
-	storetest.Run(t, func(t *testing.T) models.Store { return newMyStore(t) })
+	storetest.Run(t, func(t *testing.T) storage.Store { return newMyStore(t) })
 }
 ```
 
@@ -420,7 +426,7 @@ type SnapshotStore interface {
 ```go
 type PostgresStore struct{ db *sql.DB }
 
-func (s *PostgresStore) Atomically(ctx context.Context, fn func(models.Tx) error) error {
+func (s *PostgresStore) Atomically(ctx context.Context, fn func(storage.Tx) error) error {
 	sqlTx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -443,7 +449,7 @@ func (t *pgTx) Append(ctx context.Context, streamID string, v int64, data []byte
 	)
 	if isUniqueViolation(err) {
 		// UNIQUE(stream_id, version) detects concurrent writers.
-		return fmt.Errorf("%w: version conflict", models.ErrPipelineFailed)
+		return fmt.Errorf("%w: version conflict", failure.ErrPipelineFailed)
 	}
 	return err
 }
@@ -501,7 +507,7 @@ ax, _ := asynx.New[Order]().
 
 **For testing, use the bundled in-memory stores:**
 ```go
-import "github.com/char2cs/asynx/store"
+import "github.com/char2cs/asynx/v2/store"
 
 ax, _ := asynx.New[Order]().
 	WithEventStore(store.New()).            // Fast, no persistence
@@ -515,9 +521,9 @@ See [docs/spec/guarantees.md](./docs/spec/guarantees.md#store-contract) for the 
 
 ## Pluggable Dispatcher and Inspect
 
-Durable delivery (per-aggregate ordering, retry with backoff, dead-lettering, parking) is done by a dispatcher, a public interface `models.Dispatcher[T]` with a written ten-rule contract. `Builder.WithDispatcher(factory)` replaces it. **The library ships only the in-memory implementation and no broker clients**; a Kafka or NATS dispatcher is yours to write. It is still single-process: a custom dispatcher changes where handlers run, not who may write.
+Durable delivery (per-aggregate ordering, retry with backoff, dead-lettering, parking) is done by a dispatcher, a public interface `dispatcher.Dispatcher[T]` with a written ten-rule contract. `Builder.WithDispatcher(factory)` replaces it. **The library ships only the in-memory implementation and no broker clients**; a Kafka or NATS dispatcher is yours to write. It is still single-process: a custom dispatcher changes where handlers run, not who may write.
 
-To see why an aggregate is parked, ask: `ax.InspectDelivery("order-42")` returns a `models.DeliveryStatus` with `Parked`, `Generation`, `Cause` and `Undelivered`. Details: [docs/spec/dispatcher.md](./docs/spec/dispatcher.md).
+To see why an aggregate is parked, ask: `ax.InspectDelivery("order-42")` returns a `dispatch.Status` with `Parked`, `Generation`, `Cause` and `Undelivered`. Details: [docs/spec/dispatcher.md](./docs/spec/dispatcher.md).
 
 ## Guarantees
 
@@ -525,28 +531,32 @@ For every command, in a single process, asynx guarantees — for any `WorkersPer
 
 - **One writer per aggregate**, with that aggregate's events delivered to handlers in version order.
 - **One transaction**: the event, your synchronous projections (`WithSyncProjection`), the command receipt and the delivery entry commit together or not at all.
-- **Crash- and failure-safe delivery**: durable subscribers (`WithSubscriber`, handlers return `error`) are redelivered on restart and retried on failure, at-least-once and in order — also across a shutdown mid-retry. A failing event holds back its own aggregate (for all durable subscribers), never others. Retries are capped: after `WithDeliveryMaxAttempts` the event is dead-lettered or the aggregate is parked (its events stay pending; `PausedAggregates` lists it, `SendWait` on it returns `ErrDeliveryParked`, and `ResumeDeliveries` brings the events back to the durable subscribers). Dedupe on `(AggregateID, Version)` and clear that state on the deletion marker (`models.ForgetEventName`), which every durable subscriber receives.
+- **Crash- and failure-safe delivery**: durable subscribers (`WithSubscriber`, handlers return `error`) are redelivered on restart and retried on failure, at-least-once and in order — also across a shutdown mid-retry. A failing event holds back its own aggregate (for all durable subscribers), never others. Retries are capped: after `WithDeliveryMaxAttempts` the event is dead-lettered or the aggregate is parked (its events stay pending; `PausedAggregates` lists it, `SendWait` on it returns `ErrDeliveryParked`, and `ResumeDeliveries` brings the events back to the durable subscribers). Dedupe on `(AggregateID, Version)` and clear that state on the deletion marker (`event.ForgetEventName`), which every durable subscriber receives.
 - **Idempotent commands**: implement `CommandID() string` and a retry is a no-op; a rejection stays rejected.
 - **Fenced `Forget`**: from the tombstone until the erase completes, commands for the aggregate are rejected with `ErrForgetInProgress`, so none can commit in between.
 - **A slow or failing handler never occupies a shard worker**: `SendWait` and `Forget` wait in the caller's goroutine and honor its context, and `Shutdown` interrupts retries.
 
 Details, semantics and limits: [docs/spec/guarantees.md](./docs/spec/guarantees.md).
 
+## Breaking change: the `models` package is split
+
+This is the v2 release. The module path is now `github.com/char2cs/asynx/v2` (there is no `v2/` directory; the major version lives only in `go.mod` and the import paths), and the old `github.com/char2cs/asynx/models` package is gone. Its types now live in `models/event`, `models/handler`, `models/subscription`, `models/command`, `models/storage`, `models/pubsub`, `models/dispatch`, `models/dispatcher` and `models/failure`. See [docs/migration-models-split.md](./docs/migration-models-split.md) for the old-to-new table.
+
 ## Breaking changes in v0.9.0
 
-`models.Store` has a single transactional write path. `Append` and `Delete` moved onto the `Tx` passed to `Store.Atomically`, and `Store` gained `GetReceipt`, `PendingDeliveries` and `AckDelivery` (receipts and the delivery log). Keep your existing events table and the `events:` stream-ID prefix — no data migration — add `receipts` and `deliveries` tables, and run `storetest.Run` against your store. Snapshot failures no longer fail `Send`, and same-aggregate commands no longer race into `ErrPipelineFailed` within one process. `WithSubscriber` handlers return an `error`. Commands for an aggregate being forgotten now fail with `ErrForgetInProgress`; `Forget` waits for durable subscribers (they receive `models.ForgetEventName`), drops the aggregate's older pending deliveries in the tombstone's transaction, parks the aggregate and returns `ErrForgetFailed` if it cannot finish, and fails with `ErrForgetFromHandler` when called from the aggregate's own handler; `SendWait` on a parked aggregate returns `ErrDeliveryParked`; `SendWait` that gives up waiting returns the committed event with `ErrContextCancelled`; `Build()` queues recovery for the durable subscribers without waiting for handlers (live subscribers never see recovered events), and `Shutdown` can be retried when its context ended; the `Asynx` interface gained `ResumeDeliveries` and `PausedAggregates`. Full migration notes: [docs/spec/guarantees.md § Migration from v0.8.x](./docs/spec/guarantees.md#migration-from-v08x).
+`storage.Store` has a single transactional write path. `Append` and `Delete` moved onto the `Tx` passed to `Store.Atomically`, and `Store` gained `GetReceipt`, `PendingDeliveries` and `AckDelivery` (receipts and the delivery log). Keep your existing events table and the `events:` stream-ID prefix — no data migration — add `receipts` and `deliveries` tables, and run `storetest.Run` against your store. Snapshot failures no longer fail `Send`, and same-aggregate commands no longer race into `ErrPipelineFailed` within one process. `WithSubscriber` handlers return an `error`. Commands for an aggregate being forgotten now fail with `ErrForgetInProgress`; `Forget` waits for durable subscribers (they receive `event.ForgetEventName`), drops the aggregate's older pending deliveries in the tombstone's transaction, parks the aggregate and returns `ErrForgetFailed` if it cannot finish, and fails with `ErrForgetFromHandler` when called from the aggregate's own handler; `SendWait` on a parked aggregate returns `ErrDeliveryParked`; `SendWait` that gives up waiting returns the committed event with `ErrContextCancelled`; `Build()` queues recovery for the durable subscribers without waiting for handlers (live subscribers never see recovered events), and `Shutdown` can be retried when its context ended; the `Asynx` interface gained `ResumeDeliveries` and `PausedAggregates`. Full migration notes: [docs/spec/guarantees.md § Migration from v0.8.x](./docs/spec/guarantees.md#migration-from-v08x).
 
 ## Breaking changes in v0.8.0
 
-`WithSnapshotStore` now takes a `models.SnapshotStore`, not a `models.Store`, and is **required** — `Build()` returns `models.ErrMissingSnapshotStore` if it's not set. It no longer defaults to the event store.
+`WithSnapshotStore` now takes a `storage.SnapshotStore`, not a `storage.Store`, and is **required** — `Build()` returns `failure.ErrMissingSnapshotStore` if it's not set. It no longer defaults to the event store.
 
-`Count` is removed from `models.Store` — it was dead API, unused since optimistic concurrency replaced the version-counting write path. Implementers should just delete their `Count` method. No data migration is needed: `Count` was read-only, so nothing stored changes; this is a compile-time-only update.
+`Count` is removed from `storage.Store` — it was dead API, unused since optimistic concurrency replaced the version-counting write path. Implementers should just delete their `Count` method. No data migration is needed: `Count` was read-only, so nothing stored changes; this is a compile-time-only update.
 
-Snapshots are a derived cache, so there is nothing to migrate: implement `models.SnapshotStore` against a table keyed by `aggregate_id` alone, drop the old snapshot table (or leave it orphaned), and pass the new store to `WithSnapshotStore`. After the switch, `Get` cold-replays correctly with no snapshot present — reading alone never writes one. The snapshot row reappears on the next command whose `ShouldSnapshot()` returns true (or a `Get` that triggers schema upcasting). Full details: [docs/spec/store.md § Migrating from v0.7.x](./docs/spec/store.md#migrating-from-v07x).
+Snapshots are a derived cache, so there is nothing to migrate: implement `storage.SnapshotStore` against a table keyed by `aggregate_id` alone, drop the old snapshot table (or leave it orphaned), and pass the new store to `WithSnapshotStore`. After the switch, `Get` cold-replays correctly with no snapshot present — reading alone never writes one. The snapshot row reappears on the next command whose `ShouldSnapshot()` returns true (or a `Get` that triggers schema upcasting). Full details: [docs/spec/store.md § Migrating from v0.7.x](./docs/spec/store.md#migrating-from-v07x).
 
 ## Error Handling
 
-All errors are sentinel values in the `models` package — match them with `errors.Is`:
+All errors are sentinel values in the `models/failure` package (`failure.ErrValidation`, ...), shown below without the package prefix — match them with `errors.Is`:
 
 | Error | When | Action |
 |-------|------|--------|
@@ -569,7 +579,7 @@ All errors are sentinel values in the `models` package — match them with `erro
 | `ErrBusClosed` | Subscribe/publish after bus shutdown | Rebuild or stop using the instance |
 | `ErrDispatcherClosed` | Internal dispatch after shutdown | Stop sending |
 
-See [models/errors.go](./models/errors.go) for the full list.
+See [models/failure/errors.go](./models/failure/errors.go) for the full list.
 
 ## Asynx Interface
 
@@ -577,10 +587,10 @@ See [models/errors.go](./models/errors.go) for the full list.
 type Asynx[T any] interface {
 	// Send validates and persists the command, returning the resulting event
 	// once durably written. Projections fire asynchronously.
-	Send(ctx context.Context, cmd models.Command[T]) (models.Event[T], error)
+	Send(ctx context.Context, cmd command.Command[T]) (event.Event[T], error)
 
 	// SendWait is Send, but also blocks until all matching projections finish
-	SendWait(ctx context.Context, cmd models.Command[T]) (models.Event[T], error)
+	SendWait(ctx context.Context, cmd command.Command[T]) (event.Event[T], error)
 
 	// Get reconstructs current aggregate state (replayed from events)
 	Get(ctx context.Context, aggregateID string) (T, error)
@@ -596,25 +606,25 @@ type Asynx[T any] interface {
 	Forget(ctx context.Context, aggregateID string) error
 
 	// OnForget registers a handler invoked when any aggregate is forgotten
-	OnForget(fn models.ForgetHandler[T]) (string, error)
+	OnForget(fn handler.Forget[T]) (string, error)
 
 	// Subscribe registers an event handler (async, non-blocking)
-	Subscribe(pattern string, handler models.ProjectionHandler[T],
-		opts ...models.SubscriptionOpt[T]) (string, error)
+	Subscribe(pattern string, fn handler.Projection[T],
+		opts ...subscription.Opt[T]) (string, error)
 
 	// Unsubscribe stops an event handler
 	Unsubscribe(id string) error
 
 	// Listen opens a channel-based subscription; count > 0 auto-closes
 	// after count events, count <= 0 is unbounded (call unsub to clean up)
-	Listen(pattern string, count int) (<-chan models.Event[T], func(), error)
+	Listen(pattern string, count int) (<-chan event.Event[T], func(), error)
 
 	// SubscribeWait blocks until the first matching event or ctx is done
-	SubscribeWait(ctx context.Context, pattern string) (models.Event[T], error)
+	SubscribeWait(ctx context.Context, pattern string) (event.Event[T], error)
 
 	// Replay runs a handler over a version range (for resync/migration)
 	Replay(ctx context.Context, aggregateID string, fromVersion, toVersion int64,
-		fn models.ProjectionHandler[T]) error
+		fn handler.Projection[T]) error
 
 	// Shutdown gracefully stops command processing and event publication
 	Shutdown(ctx context.Context) error
@@ -629,7 +639,7 @@ type Asynx[T any] interface {
 Send command and check for validation errors:
 ```go
 _, err := ax.Send(ctx, cmd)
-if errors.Is(err, models.ErrValidation) {
+if errors.Is(err, failure.ErrValidation) {
 	// Invalid command — event not created
 }
 ```
@@ -643,7 +653,7 @@ event, err := ax.SendWait(ctx, cmd)
 Read current state:
 ```go
 order, err := ax.Get(ctx, "ORD-001")
-if errors.Is(err, models.ErrNotFound) {
+if errors.Is(err, failure.ErrNotFound) {
 	// Aggregate doesn't exist
 }
 ```
@@ -656,7 +666,7 @@ order, _ := ax.Get(ctx, "ORD-001") // Fast: from cache
 
 Replay events for reporting:
 ```go
-ax.Replay(ctx, "ORD-001", 1, 10, func(ctx context.Context, event models.Event[Order]) {
+ax.Replay(ctx, "ORD-001", 1, 10, func(ctx context.Context, evt event.Event[Order]) {
 	// Process events 1-10: can rebuild custom projections
 })
 ```
@@ -676,6 +686,30 @@ Battle-tested patterns for running asynx in real applications — optimistic-con
 ## Full Specification
 
 For detailed design rationale, consistency guarantees, and advanced patterns, see the [docs/](./docs/spec).
+
+## Contributing
+
+All work happens on `develop`. Branch off it with a typed prefix and open a pull request back to it; the prefix
+decides the release that merging cuts:
+
+| Branch prefix | Release |
+|---|---|
+| `feature/*`, `enhancement/*` | minor |
+| `fix/*`, `hotfix/*` | patch |
+| `refactor/*`, `docs/*`, `chore/*`, `ci/*`, `test/*` | none |
+
+Add the `breaking-change` label for a major bump (a `v2` release also needs the module path to end in `/v2`).
+
+Code must pass [Agent Protection](https://github.com/rabbytesoftware/agent-protection), the Rabbyte coding-standards
+gate, both in CI and before every commit. Install the pinned `ap` binary and the git hook once per clone:
+
+```bash
+make hooks   # installs the ap version pinned in .ap.yaml and runs `lefthook install`
+make ap      # run the gate by hand
+```
+
+The hook is a fast-feedback layer; CI is the enforcement. Agent sessions (`.claude/settings.json`) are denied
+`--no-verify` and any change to the hook setup.
 
 ## License
 

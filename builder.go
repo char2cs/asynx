@@ -2,78 +2,102 @@ package asynx
 
 import (
 	"context"
-	"fmt"
-	"maps"
-	"regexp"
-	"slices"
+	"github.com/char2cs/asynx/v2/models/dispatcher"
+	"github.com/char2cs/asynx/v2/models/event"
+	"github.com/char2cs/asynx/v2/models/handler"
+	"github.com/char2cs/asynx/v2/models/pubsub"
+	"github.com/char2cs/asynx/v2/models/storage"
+	"github.com/char2cs/asynx/v2/models/subscription"
 	"time"
-
-	"github.com/char2cs/asynx/internal/bus"
-	"github.com/char2cs/asynx/internal/bus/utils"
-	"github.com/char2cs/asynx/internal/eventstore"
-	"github.com/char2cs/asynx/internal/processor"
-	"github.com/char2cs/asynx/internal/processor/exec"
-	internalutils "github.com/char2cs/asynx/internal/utils"
-	"github.com/char2cs/asynx/models"
 )
 
+// Builder collects the configuration of an Asynx instance and builds it. Get
+// one from New, call the With methods that apply, and finish with Build. Every
+// With method returns the receiver so the calls chain, and a later call to the
+// same option replaces an earlier one, except WithUpcaster, WithForgetHandler,
+// WithSyncProjection and WithSubscriber, which accumulate.
+//
+// WithEventStore and WithSnapshotStore are required; everything else has a
+// default. A Builder is not safe for concurrent use and is meant to be used
+// for one Build: building twice from one Builder would share its stores and
+// bus between the two instances. T is the aggregate type of the instance.
 type Builder[T any] struct {
-	eventStore          models.Store
-	snapshotStore       models.SnapshotStore
-	bus                 models.Bus[T]
+	eventStore          storage.Store
+	snapshotStore       storage.SnapshotStore
+	bus                 pubsub.Bus[T]
 	shardingOpts        ShardingOpts
 	schemaVersion       int
-	upcasters           map[int]models.Upcaster
-	panicHandler        models.PanicHandler[T]
+	upcasters           map[int]event.Upcaster
+	panicHandler        handler.Panic[T]
 	corruptionHook      func(error)
-	publishErrorHandler models.PublishErrorHandler[T]
-	forgetHandlers      []models.ForgetHandler[T]
+	publishErrorHandler handler.PublishError[T]
+	forgetHandlers      []handler.Forget[T]
 	syncProjections     []syncProjectionDef[T]
 	subscribers         []subscriberDef[T]
-	snapshotErrHandler  func(context.Context, models.Event[T], error)
-	deliveryErrHandler  models.DeliveryErrorHandler[T]
+	snapshotErrHandler  func(context.Context, event.Event[T], error)
+	listenerErrHandler  func(error)
+	deliveryErrHandler  handler.DeliveryError[T]
 	retryInitial        time.Duration
 	retryMax            time.Duration
 	maxAttempts         int
-	deadLetter          models.DeadLetterHandler[T]
-	dispatcherFactory   models.DispatcherFactory[T]
+	deadLetter          handler.DeadLetter[T]
+	dispatcherFactory   dispatcher.Factory[T]
 }
 
+const defaultShards = 8
+
+// New returns a Builder for aggregates of type T with the defaults: schema
+// version 1, no upcasters, 8 shards (see ShardingOpts), the in-memory bus and
+// the in-memory dispatcher. It has no event store or snapshot store yet; Build
+// fails until both are set.
 func New[T any]() *Builder[T] {
 	return &Builder[T]{
 		schemaVersion: 1,
-		upcasters:     make(map[int]models.Upcaster),
-		shardingOpts:  ShardingOpts{Shards: 8},
+		upcasters:     make(map[int]event.Upcaster),
+		shardingOpts:  ShardingOpts{Shards: defaultShards},
 	}
 }
 
+// WithEventStore sets the store that holds the event streams, the command
+// receipts and the delivery log. It is required: Build returns
+// failure.ErrMissingEventStore without it. The store/storetest suite checks an
+// implementation of storage.Store against the guarantees the instance relies on.
 func (b *Builder[T]) WithEventStore(
-	s models.Store,
+	s storage.Store,
 ) *Builder[T] {
 	b.eventStore = s
 	return b
 }
 
-// WithSnapshotStore sets the snapshot store. Required — Build returns
-// ErrMissingSnapshotStore without it.
+// WithSnapshotStore sets the store that caches aggregate snapshots. It is
+// required: Build returns failure.ErrMissingSnapshotStore without it. Snapshots
+// are a derived cache, so losing them costs read speed, never data.
 //
 // This cannot default to the event store: snapshots are upserted cells keyed
-// by aggregateID (models.SnapshotStore), not append-only versioned streams
-// (models.Store).
+// by aggregateID (storage.SnapshotStore), not append-only versioned streams
+// (storage.Store).
 func (b *Builder[T]) WithSnapshotStore(
-	s models.SnapshotStore,
+	s storage.SnapshotStore,
 ) *Builder[T] {
 	b.snapshotStore = s
 	return b
 }
 
+// WithBus replaces the default in-memory bus that delivers committed events to
+// the live subscribers (Subscribe, Listen, OnForget). A custom bus must satisfy
+// pubsub.Bus. The instance owns the bus it is given: Shutdown closes it, and so
+// does a failed Build. WithPanicHandler configures only the default bus, so a
+// custom bus handles handler panics its own way.
 func (b *Builder[T]) WithBus(
-	bus models.Bus[T],
+	bus pubsub.Bus[T],
 ) *Builder[T] {
 	b.bus = bus
 	return b
 }
 
+// WithShardingOpts sets how commands are spread over workers and how many may
+// queue; see ShardingOpts for the fields, their defaults and the ordering
+// guarantees, which hold whatever the values.
 func (b *Builder[T]) WithShardingOpts(
 	opts ShardingOpts,
 ) *Builder[T] {
@@ -81,6 +105,10 @@ func (b *Builder[T]) WithShardingOpts(
 	return b
 }
 
+// WithSchemaVersion sets the schema version stamped on newly written events
+// (default 1). Events written with an older version are migrated to this one
+// when they are read, by the upcasters registered with WithUpcaster. Raise it
+// whenever the shape of what commands emit changes.
 func (b *Builder[T]) WithSchemaVersion(
 	v int,
 ) *Builder[T] {
@@ -88,16 +116,27 @@ func (b *Builder[T]) WithSchemaVersion(
 	return b
 }
 
+// WithUpcaster registers the migration for events written at schema version
+// fromVersion: fn receives their stored patches and returns patches valid for
+// fromVersion+1. Reads chain the upcasters from an event's version up to the
+// current one (WithSchemaVersion). Registering a second upcaster for the same
+// fromVersion replaces the first. Upcasters must be stateless and safe for
+// concurrent use (see event.Upcaster).
 func (b *Builder[T]) WithUpcaster(
 	fromVersion int,
-	fn models.Upcaster,
+	fn event.Upcaster,
 ) *Builder[T] {
 	b.upcasters[fromVersion] = fn
 	return b
 }
 
+// WithPanicHandler sets the handler called when a projection handler or a
+// durable handler panics. It receives the context and event of the delivery
+// and the recovered value. It applies to the default in-memory bus and to
+// durable delivery; a bus supplied with WithBus is responsible for its own
+// panics. The panic never reaches the caller of Send.
 func (b *Builder[T]) WithPanicHandler(
-	fn models.PanicHandler[T],
+	fn handler.Panic[T],
 ) *Builder[T] {
 	b.panicHandler = fn
 	return b
@@ -105,8 +144,12 @@ func (b *Builder[T]) WithPanicHandler(
 
 // WithCorruptionHook registers a callback invoked when a snapshot cannot be
 // deserialized. The hook receives the deserialization error and is called
-// before falling back to the cold replay path.
-func (b *Builder[T]) WithCorruptionHook(fn func(error)) *Builder[T] {
+// before falling back to the cold replay path, so a corrupt snapshot costs
+// speed, not correctness; use the hook to alert on it. It may be called from
+// any goroutine that reads an aggregate.
+func (b *Builder[T]) WithCorruptionHook(
+	fn func(error),
+) *Builder[T] {
 	b.corruptionHook = fn
 	return b
 }
@@ -115,15 +158,24 @@ func (b *Builder[T]) WithCorruptionHook(fn func(error)) *Builder[T] {
 // non-nil error inside an async publish goroutine. The event has already been
 // durably written to the event store; this callback is for observability only.
 // When not set, publish errors are silently dropped.
-func (b *Builder[T]) WithPublishErrorHandler(fn models.PublishErrorHandler[T]) *Builder[T] {
+func (b *Builder[T]) WithPublishErrorHandler(
+	fn handler.PublishError[T],
+) *Builder[T] {
 	b.publishErrorHandler = fn
 	return b
 }
 
-// WithForgetHandler registers a ForgetHandler at build time.
-// Equivalent to calling OnForget after Build. Multiple calls register multiple handlers.
-func (b *Builder[T]) WithForgetHandler(fn models.ForgetHandler[T]) *Builder[T] {
-	b.forgetHandlers = append(b.forgetHandlers, fn)
+// WithForgetHandler registers a handler.Forget at build time, so no
+// Forget can run before it is in place. It is equivalent to calling OnForget on
+// the built instance, except that a registration failure fails Build. Multiple
+// calls register multiple handlers, in the order of the calls.
+func (b *Builder[T]) WithForgetHandler(
+	fn handler.Forget[T],
+) *Builder[T] {
+	b.forgetHandlers = append(
+		b.forgetHandlers,
+		fn,
+	)
 	return b
 }
 
@@ -138,9 +190,12 @@ func (b *Builder[T]) WithForgetHandler(fn models.ForgetHandler[T]) *Builder[T] {
 // it contains metacharacters. Projections run in registration order.
 func (b *Builder[T]) WithSyncProjection(
 	pattern string,
-	fn func(ctx context.Context, tx models.Tx, evt models.Event[T]) error,
+	fn func(ctx context.Context, tx storage.Tx, evt event.Event[T]) error,
 ) *Builder[T] {
-	b.syncProjections = append(b.syncProjections, syncProjectionDef[T]{pattern: pattern, fn: fn})
+	b.syncProjections = append(
+		b.syncProjections,
+		syncProjectionDef[T]{pattern: pattern, fn: fn},
+	)
 	return b
 }
 
@@ -162,7 +217,7 @@ func (b *Builder[T]) WithSyncProjection(
 //     (WithDeadLetterHandler) or the aggregate is parked until
 //     ResumeDeliveries. Observe failures with WithDeliveryErrorHandler.
 //   - Every durable subscriber also receives the deletion marker Forget writes
-//     (models.ForgetEventName), whatever its pattern, so state keyed by
+//     (event.ForgetEventName), whatever its pattern, so state keyed by
 //     (AggregateID, Version) can be cleared.
 //   - A timeout (WithHandlerTimeout) is an alarm: it is reported but the handler
 //     is still waited for. WithFallback is not supported and makes Build fail
@@ -177,17 +232,39 @@ func (b *Builder[T]) WithSyncProjection(
 // it contains metacharacters.
 func (b *Builder[T]) WithSubscriber(
 	pattern string,
-	handler models.DurableHandler[T],
-	opts ...models.SubscriptionOpt[T],
+	callback handler.Durable[T],
+	opts ...subscription.Opt[T],
 ) *Builder[T] {
-	b.subscribers = append(b.subscribers, subscriberDef[T]{pattern: pattern, handler: handler, opts: opts})
+	b.subscribers = append(
+		b.subscribers,
+		subscriberDef[T]{pattern: pattern, handler: callback, opts: opts},
+	)
+	return b
+}
+
+// WithListenerErrorHandler sets a callback invoked when removing the
+// subscription behind a Listen or SubscribeWait fails: the bus refused the
+// Unsubscribe that the listener's unsubscribe function, or the automatic
+// unsubscribe after the last of count events, performed. The error wraps the
+// bus's. Those paths have no error to return (the unsubscribe function is a
+// func()), so the callback is the only way to learn of it; SubscribeWait
+// additionally returns a failure of its own unsubscribe, joined with its
+// result. When not set, such failures are dropped. The default bus never fails
+// to unsubscribe, so this matters for a bus supplied with WithBus. It may be
+// called from any goroutine.
+func (b *Builder[T]) WithListenerErrorHandler(
+	fn func(error),
+) *Builder[T] {
+	b.listenerErrHandler = fn
 	return b
 }
 
 // WithDeliveryErrorHandler sets a callback invoked for every failed attempt of
 // a durable delivery (handler error, panic or timeout), with the attempt number
 // of the current failing streak. When not set, failures are retried silently.
-func (b *Builder[T]) WithDeliveryErrorHandler(fn models.DeliveryErrorHandler[T]) *Builder[T] {
+func (b *Builder[T]) WithDeliveryErrorHandler(
+	fn handler.DeliveryError[T],
+) *Builder[T] {
 	b.deliveryErrHandler = fn
 	return b
 }
@@ -213,28 +290,49 @@ func (b *Builder[T]) WithDeliveryRetry(
 // is delivered for it, and the failure is reported to the
 // delivery error handler with ErrDeliveryParked. Other aggregates are
 // unaffected. ResumeDeliveries (or a restart) redelivers a parked aggregate.
-func (b *Builder[T]) WithDeliveryMaxAttempts(n int) *Builder[T] {
+func (b *Builder[T]) WithDeliveryMaxAttempts(
+	n int,
+) *Builder[T] {
 	b.maxAttempts = n
 	return b
 }
 
 // WithDeadLetterHandler sets the handler called when a durable delivery ran out
 // of attempts. Its error argument holds the failure of every subscriber that
-// failed on the last attempt, each a *models.SubscriberError naming the
+// failed on the last attempt, each a *failure.SubscriberError naming the
 // subscriber by pattern and registration order (such as "OrderUpdated#2").
 // Returning nil acknowledges the event as dealt with (typically
 // after storing it somewhere for inspection) and lets the aggregate's later
 // events flow; returning an error parks the aggregate.
-func (b *Builder[T]) WithDeadLetterHandler(fn models.DeadLetterHandler[T]) *Builder[T] {
+func (b *Builder[T]) WithDeadLetterHandler(
+	fn handler.DeadLetter[T],
+) *Builder[T] {
 	b.deadLetter = fn
 	return b
 }
 
-// WithSnapshotErrorHandler sets a callback invoked when a snapshot write fails.
-// Snapshots are a derived cache written after the event commits, so a failure
-// never fails the command or blocks delivery. When not set, snapshot errors are
-// dropped.
-func (b *Builder[T]) WithSnapshotErrorHandler(fn func(context.Context, models.Event[T], error)) *Builder[T] {
+// WithSnapshotErrorHandler sets a callback that observes failed snapshot
+// writes. Snapshots are a derived cache, so a failure never fails the command
+// or the read and never blocks delivery. Two kinds of write are observed:
+//
+//   - The snapshot a command asks for (ShouldSnapshot), written after its event
+//     committed. fn receives the committed event in full and runs on the
+//     goroutine that executed the command.
+//   - The auto-snapshot a read (Get, Load or Preload) caches after it had to
+//     upcast old events. fn receives an Event with only what a read knows:
+//     AggregateID, Version (the version the snapshot was meant for), ID (the
+//     id of that version's event), SchemaVersion (the current schema version)
+//     and Aggregate (the state that was not cached); EventName, OccurredAt and
+//     PreviousAggregate are zero. fn runs synchronously on the goroutine that
+//     performed the read, before the read returns; for a lock-free Get it runs
+//     while the aggregate's command lock is held, so it should return quickly.
+//
+// A failed read-side write does not change what the read returns. A panic in
+// fn during a read is contained and never breaks the read. When not set, or
+// set to nil, snapshot errors of both kinds are dropped.
+func (b *Builder[T]) WithSnapshotErrorHandler(
+	fn func(context.Context, event.Event[T], error),
+) *Builder[T] {
 	b.snapshotErrHandler = fn
 	return b
 }
@@ -244,7 +342,7 @@ func (b *Builder[T]) WithSnapshotErrorHandler(fn func(context.Context, models.Ev
 // is the component that takes each committed event and runs the subscribers'
 // handlers in order per aggregate, retrying and parking an aggregate when the
 // attempts run out. The library ships only the in-memory implementation; the
-// contract a replacement must keep is models.Dispatcher, and the in-memory
+// contract a replacement must keep is dispatcher.Dispatcher, and the in-memory
 // implementation is checked against it by the library's own tests. The factory
 // is called once per Build, with the configuration the instance was built with:
 // the bus, the durable subscribers, the handlers, and the retry and attempt
@@ -253,287 +351,13 @@ func (b *Builder[T]) WithSnapshotErrorHandler(fn func(context.Context, models.Ev
 // Shutdown interrupts and then closes. A factory error fails Build, and what
 // was built so far is shut down. A nil factory is ignored.
 //
-// The dispatcher must keep the guarantees documented on models.Dispatcher. The
+// The dispatcher must keep the guarantees documented on dispatcher.Dispatcher. The
 // delivery log, the aggregate lock and recovery stay with asynx: Build reads
 // the log and hands the pending deliveries to the dispatcher as
-// models.DispatchRedelivery requests.
+// dispatch.KindRedelivery requests.
 func (b *Builder[T]) WithDispatcher(
-	factory models.DispatcherFactory[T],
+	factory dispatcher.Factory[T],
 ) *Builder[T] {
 	b.dispatcherFactory = factory
 	return b
-}
-
-// Build requires WithEventStore and WithSnapshotStore; all other options have
-// defaults.
-func (b *Builder[T]) Build() (Asynx[T], error) {
-	if b.eventStore == nil {
-		return nil, models.ErrMissingEventStore
-	}
-
-	if b.snapshotStore == nil {
-		return nil, models.ErrMissingSnapshotStore
-	}
-
-	activeBus := b.activeBus()
-
-	es := eventstore.New[T](
-		b.eventStore,
-		b.snapshotStore,
-		maps.Clone(b.upcasters),
-		b.schemaVersion,
-		b.corruptionHook,
-	)
-
-	procOpts, err := b.processorOpts()
-	if err != nil {
-		return nil, err
-	}
-	proc, err := processor.New(es, activeBus, procOpts...)
-	if err != nil {
-		closeAbandonedBus(activeBus)
-		return nil, err
-	}
-
-	instance := &asynxImpl[T]{
-		proc: proc,
-		es:   es,
-		bus:  activeBus,
-	}
-
-	built := false
-	defer shutdownUnlessBuilt(proc, &built)
-
-	err = b.finish(instance, proc)
-	if err != nil {
-		return nil, err
-	}
-
-	built = true
-	return instance, nil
-}
-
-func (b *Builder[T]) activeBus() models.Bus[T] {
-	if b.bus != nil {
-		return b.bus
-	}
-	if b.panicHandler != nil {
-		return bus.NewChannelBus[T](
-			bus.WithPanicHandler[T](b.panicHandler),
-		)
-	}
-	return bus.NewChannelBus[T]()
-}
-
-func (b *Builder[T]) processorOpts() ([]processor.ProcessorOpt[T], error) {
-	syncs, err := b.compileSyncProjections()
-	if err != nil {
-		return nil, err
-	}
-
-	procOpts := []processor.ProcessorOpt[T]{
-		processor.WithShards[T](b.shardingOpts.Shards),
-		processor.WithQueueDepth[T](b.shardingOpts.QueueDepth),
-		processor.WithWorkersPerShard[T](b.shardingOpts.WorkersPerShard),
-	}
-	if len(syncs) > 0 {
-		procOpts = append(procOpts, processor.WithSyncProjections(syncs))
-	}
-	durableSubs, durableMatch, err := b.compileDurable()
-	if err != nil {
-		return nil, err
-	}
-	procOpts = append(procOpts, b.durableOpts(durableSubs, durableMatch)...)
-	if b.snapshotErrHandler != nil {
-		procOpts = append(procOpts, processor.WithSnapshotErrorHandler(b.snapshotErrHandler))
-	}
-	if b.publishErrorHandler != nil {
-		procOpts = append(procOpts, processor.WithPublishErrorHandler[T](b.publishErrorHandler))
-	}
-	if b.dispatcherFactory != nil {
-		procOpts = append(procOpts, processor.WithDispatcherFactory(b.dispatcherFactory))
-	}
-	return procOpts, nil
-}
-
-func (b *Builder[T]) durableOpts(
-	durableSubs []models.DurableSub[T],
-	durableMatch func(string) bool,
-) []processor.ProcessorOpt[T] {
-	if durableMatch == nil {
-		return nil
-	}
-	opts := []processor.ProcessorOpt[T]{
-		processor.WithDurableDelivery[T](durableMatch),
-		processor.WithDurableSubscribers(durableSubs),
-	}
-	if b.deliveryErrHandler != nil {
-		opts = append(opts, processor.WithDeliveryErrorHandler(b.deliveryErrHandler))
-	}
-	if b.panicHandler != nil {
-		opts = append(opts, processor.WithDeliveryPanicHandler(b.panicHandler))
-	}
-	opts = append(opts, processor.WithDeliveryRetry[T](b.retryInitial, b.retryMax))
-	if b.maxAttempts > 0 {
-		opts = append(opts, processor.WithDeliveryMaxAttempts[T](b.maxAttempts))
-	}
-	if b.deadLetter != nil {
-		opts = append(opts, processor.WithDeadLetterHandler(b.deadLetter))
-	}
-	return opts
-}
-
-func (b *Builder[T]) finish(
-	instance *asynxImpl[T],
-	proc *processor.Processor[T],
-) error {
-	err := internalutils.FirstError(
-		b.forgetHandlers,
-		func(fn models.ForgetHandler[T]) error {
-			_, err := instance.OnForget(fn)
-			return err
-		},
-	)
-	if err != nil {
-		return err
-	}
-
-	if len(b.subscribers) == 0 {
-		return nil
-	}
-	return proc.Recover(context.Background(), recoveryBatch)
-}
-
-func shutdownUnlessBuilt[T any](
-	proc *processor.Processor[T],
-	built *bool,
-) {
-	if *built {
-		return
-	}
-	sctx, cancel := context.WithTimeout(context.Background(), failedBuildShutdown)
-	defer cancel()
-	_ = proc.Shutdown(sctx)
-}
-
-// closeAbandonedBus closes the bus of a Build that failed before a processor
-// existed to shut it down, within the same bound.
-func closeAbandonedBus[T any](
-	activeBus models.Bus[T],
-) {
-	ctx, cancel := context.WithTimeout(context.Background(), failedBuildShutdown)
-	defer cancel()
-	_ = activeBus.Close(ctx)
-}
-
-// failedBuildShutdown bounds how long a failed Build waits for the instance it
-// abandons to shut down, so a hung recovered handler cannot hang Build too.
-const failedBuildShutdown = 30 * time.Second
-
-// recoveryBatch is how many pending deliveries Build redelivers per round.
-const recoveryBatch = 100
-
-func (b *Builder[T]) compileSyncProjections() ([]exec.SyncProjection[T], error) {
-	out := make([]exec.SyncProjection[T], 0, len(b.syncProjections))
-	for _, def := range b.syncProjections {
-		sp, err := compileSyncProjection(def)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, sp)
-	}
-	return out, nil
-}
-
-func compileSyncProjection[T any](
-	def syncProjectionDef[T],
-) (exec.SyncProjection[T], error) {
-	if def.pattern == "" {
-		return exec.SyncProjection[T]{}, models.ErrEmptyPattern
-	}
-	if def.fn == nil {
-		return exec.SyncProjection[T]{}, models.ErrNilHandler
-	}
-
-	match, err := matcher(def.pattern)
-	if err != nil {
-		return exec.SyncProjection[T]{}, err
-	}
-	return exec.SyncProjection[T]{Match: match, Fn: def.fn}, nil
-}
-
-// compileDurable validates the durable subscribers and returns them with a
-// predicate accepting the events at least one of them wants (nil when there are
-// none). Events nobody durable listens to get no delivery entry.
-func (b *Builder[T]) compileDurable() ([]models.DurableSub[T], func(string) bool, error) {
-	if len(b.subscribers) == 0 {
-		return nil, nil, nil
-	}
-
-	subs, err := b.compileSubscribers()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return subs, wantedBy(subs), nil
-}
-
-func (b *Builder[T]) compileSubscribers() ([]models.DurableSub[T], error) {
-	subs := make([]models.DurableSub[T], 0, len(b.subscribers))
-	for i, def := range b.subscribers {
-		sub, err := compileSubscriber(i, def)
-		if err != nil {
-			return nil, err
-		}
-		subs = append(subs, sub)
-	}
-	return subs, nil
-}
-
-func compileSubscriber[T any](
-	index int,
-	def subscriberDef[T],
-) (models.DurableSub[T], error) {
-	if def.pattern == "" {
-		return models.DurableSub[T]{}, models.ErrEmptyPattern
-	}
-	if def.handler == nil {
-		return models.DurableSub[T]{}, models.ErrNilHandler
-	}
-
-	cfg := &models.SubscriptionConfig[T]{}
-	for _, opt := range def.opts {
-		opt(cfg)
-	}
-	if cfg.Fallback != nil {
-		return models.DurableSub[T]{}, models.ErrFallbackUnsupported
-	}
-
-	m, err := matcher(def.pattern)
-	if err != nil {
-		return models.DurableSub[T]{}, err
-	}
-	name := fmt.Sprintf("%s#%d", def.pattern, index+1)
-	return models.DurableSub[T]{Name: name, Match: m, Handler: def.handler, Timeout: cfg.Timeout}, nil
-}
-
-func wantedBy[T any](subs []models.DurableSub[T]) func(string) bool {
-	return func(name string) bool {
-		return slices.ContainsFunc(subs, func(sub models.DurableSub[T]) bool {
-			return sub.Match(name)
-		})
-	}
-}
-
-// matcher mirrors the bus's pattern rule: an exact event name, or an
-// (unanchored) regular expression when the pattern has metacharacters.
-func matcher(pattern string) (func(string) bool, error) {
-	if utils.IsExactPattern(pattern) {
-		return func(name string) bool { return name == pattern }, nil
-	}
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return nil, fmt.Errorf("asynx: invalid pattern %q: %w", pattern, err)
-	}
-	return re.MatchString, nil
 }

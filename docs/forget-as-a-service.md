@@ -7,7 +7,7 @@ Forget as a Service (FaaS) lets you completely erase an aggregate and all its st
 Calling `Forget` performs three steps in sequence:
 
 1. **Tombstone write** — Asynx writes a final event named `asynx.aggregate.forget` to the event store. The event carries the aggregate's last known state as its payload.
-2. **Handler notification** — All `ForgetHandler` callbacks registered for this instance are called synchronously with the tombstone event. Forget blocks until every handler completes.
+2. **Handler notification** — All `handler.Forget` callbacks registered for this instance are called synchronously with the tombstone event. Forget blocks until every handler completes.
 3. **Erasure** — All events and snapshots for the aggregate are deleted from the backing store. After this point, `Get` returns `ErrNotFound`.
 
 Forget is routed through the same aggregate shard as `Send` and `SendWait`, so it is naturally serialized with any in-flight commands for that aggregate — a Forget called while a command is executing will queue behind it.
@@ -23,12 +23,12 @@ if err != nil {
 
 `Forget` returns `nil` once the aggregate is fully erased. The original context deadline applies to the tombstone write and handler phase; the deletion phase always runs to completion regardless of context cancellation.
 
-## Cleaning up read models with ForgetHandler
+## Cleaning up read models with handler.Forget
 
-The tombstone event is published to all registered `ForgetHandler` callbacks before any data is deleted. Use this to keep your read models consistent:
+The tombstone event is published to all registered `handler.Forget` callbacks before any data is deleted. Use this to keep your read models consistent:
 
 ```go
-ax.OnForget(func(ctx context.Context, e models.Event[Order]) {
+ax.OnForget(func(ctx context.Context, e event.Event[Order]) {
     readModel.Delete(e.AggregateID)
     cache.Invalidate(e.AggregateID)
 })
@@ -52,7 +52,7 @@ If you know your handler at startup, use `WithForgetHandler` on the builder inst
 ```go
 ax, err := asynx.New[Order]().
     WithEventStore(store).
-    WithForgetHandler(func(ctx context.Context, e models.Event[Order]) {
+    WithForgetHandler(func(ctx context.Context, e event.Event[Order]) {
         readModel.Delete(e.AggregateID)
     }).
     Build()
@@ -75,7 +75,7 @@ ax, err := asynx.New[Order]().
 
 - **It does not affect other aggregates.** Only the specified aggregate ID is erased.
 - **It does not stop in-flight commands.** Commands already enqueued ahead of Forget will complete first.
-- **It does not clean up your read models automatically.** Register a `ForgetHandler` to do that.
+- **It does not clean up your read models automatically.** Register a `handler.Forget` to do that.
 - **It is not a soft delete.** There is no recovery path once erasure completes.
 
 ## The `asynx.*` event namespace

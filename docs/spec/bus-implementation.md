@@ -6,10 +6,10 @@ This specification details the **internal architecture and mechanics** of the bu
 
 The bus is the event dispatcher that connects the processor (which publishes events) to projections (which subscribe to events). The bus interface is pluggable, but this spec documents the default `ChannelBus[T]` implementation suitable for single-node applications.
 
-The bus does not own ordering, retry or parking of durable deliveries. The dispatcher (see [dispatcher.md](./dispatcher.md)) does, and it is handed the bus as its live-subscriber transport: it calls `PublishSync` for `DispatchEvent` and `DispatchTombstone` requests and never for `DispatchRedelivery`.
+The bus does not own ordering, retry or parking of durable deliveries. The dispatcher (see [dispatcher.md](./dispatcher.md)) does, and it is handed the bus as its live-subscriber transport: it calls `PublishSync` for `dispatch.KindEvent` and `dispatch.KindTombstone` requests and never for `dispatch.KindRedelivery`.
 
 **Key Design Principles:**
-- **Lazy pattern compilation** — patterns compiled on first use, cached
+- **Pattern compilation at subscribe time** — each regex pattern is compiled once, when the subscription is registered, and kept with it
 - **Recover & continue** — handler panic doesn't block other handlers
 - **RWLock synchronization** — concurrent publishes allowed, safe subscription changes
 - **Wait for in-flight** — graceful shutdown waits for all handlers to complete
@@ -86,7 +86,7 @@ type subscription[T any] struct {
 - All subscription operations are guarded by `mu`
 - Publish uses RLock (allows concurrent publishes)
 - Subscribe/Unsubscribe use Lock (exclusive)
-- Pattern compilation is cached (lazy)
+- Pattern compilation happens once, at subscribe time
 - Each handler execution tracked in `inFlightWg`
 
 ---
@@ -148,7 +148,7 @@ func (b *ChannelBus[T]) Subscribe(
 - Pattern can be exact match (e.g., "OrderPlaced") or regex (e.g., "^Order.*")
 - Handler must not be nil
 - Subscription ID is unique (counter-based, guaranteed unique within process)
-- Fallback handler optional (runs if primary panics)
+- Fallback handler optional (runs once if the primary panics, with or without a timeout, or times out)
 - Timeout optional (0 = no timeout)
 
 ### Unsubscribe Method
@@ -216,17 +216,17 @@ func (b *ChannelBus[T]) getCompiledPattern(pattern string) (*regexp.Regexp, erro
 }
 ```
 
-**Strategy: Lazy Compilation (Option C)**
-- Patterns stored as strings at subscription time
-- Compiled on first publish (if pattern doesn't match exact event name)
-- Compiled regex cached in `compiledPatterns` map
+**Strategy: compile at subscribe time (the pseudocode above shows the earlier lazy variant)**
+- A pattern is compiled once, under the subscription lock, when `Subscribe` registers it
+- The compiled regex, or the compile error, is kept with the pattern; an invalid pattern is accepted and never matches
+- Publish only reads the stored result, so it never compiles and never mutates the bus
 - Fast path: exact match (O(1) string comparison)
-- Slow path: regex match (O(n) in pattern size, but only once per pattern)
+- Slow path: regex match (O(n) in pattern size)
 
 **Benefits:**
-- Low memory overhead if many patterns registered but few publishes to them
-- Unbounded latency on first publish with new pattern (one-time cost)
-- Subsequent publishes with same pattern use cached regex (fast)
+- No first-publish latency spike for a new pattern
+- Publishing is a pure lookup, which keeps the read path free of writes
+- Cost: every registered pattern is compiled even if nothing is ever published to it
 
 ---
 
@@ -302,7 +302,9 @@ func (b *ChannelBus[T]) executeHandler(job *handlerJob[T]) {
         }
     }()
 
-    // Execute handler with optional timeout
+    // Execute handler with optional timeout. The shipped implementation also
+    // starts the fallback when the primary times out, and when the primary
+    // panics on its timeout goroutine (see internal/bus/internal/exec).
     b.executeWithTimeout(job.handler, job.event, job.timeout)
 }
 
@@ -540,7 +542,7 @@ Check Subscription 2: "OrderPlaced" == "OrderCancelled" → NO MATCH
 Handler 1 executed
 ```
 
-### Regex Matches (Lazy Compilation)
+### Regex Matches (compiled at subscribe time)
 
 ```
 Subscription 1: pattern = "^Order.*"
@@ -762,7 +764,7 @@ func (b *ChannelBus[T]) Publish(ctx context.Context, event Event[T]) error {
 | Scenario | Handling | Visibility |
 |----------|----------|----------|
 | Handler panics | Caught via defer/recover | Logged to stderr; fallback handler runs if available |
-| Handler timeout | Select expires | Logged to stderr |
+| Handler timeout | Select expires | Logged to stderr; fallback handler runs if available |
 | Pattern regex fails | Silent | Handler doesn't run for that subscription |
 
 **Design Rationale:**
@@ -798,7 +800,7 @@ id, err := bus.Subscribe("OrderPlaced",
 
 The **ChannelBus[T]** is a high-concurrency, fault-tolerant event dispatcher:
 
-- **Lazy pattern compilation** — Patterns compiled on first use, cached
+- **Pattern compilation at subscribe time** — each regex pattern is compiled once, when the subscription is registered, and kept with it
 - **RWLock synchronization** — Concurrent publishes, exclusive subscription changes
 - **Concurrent handler execution** — Handlers run in parallel goroutines
 - **Recover & continue** — Handler panics don't block other handlers

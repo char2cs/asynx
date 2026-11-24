@@ -13,7 +13,7 @@ Asynx guarantees the following about every command, by construction rather than 
 | 5 | **Idempotent commands.** A retry of a command id is a no-op, and a rejection stays rejected. | Receipts written in the event's transaction. |
 | 6 | **Fenced delete.** From the tombstone until the erase completes, no command for the aggregate can commit. | The aggregate is marked as being forgotten; commands are rejected with `ErrForgetInProgress`. |
 
-Guarantee 2, and the retry, parking and ack parts of guarantee 4, are carried by the dispatcher (the delivery log and recovery in `Build()` belong to the store and the processor). It is a public interface (`models.Dispatcher[T]`) with a written contract, and `Builder.WithDispatcher` replaces it; the library ships only the in-memory implementation. See [dispatcher.md](./dispatcher.md). A replacement changes where handlers run, not who may write: guarantees 1, 3, 5 and 6 stay with the processor and the store.
+Guarantee 2, and the retry, parking and ack parts of guarantee 4, are carried by the dispatcher (the delivery log and recovery in `Build()` belong to the store and the processor). It is a public interface (`dispatcher.Dispatcher[T]`) with a written contract, and `Builder.WithDispatcher` replaces it; the library ships only the in-memory implementation. See [dispatcher.md](./dispatcher.md). A replacement changes where handlers run, not who may write: guarantees 1, 3, 5 and 6 stay with the processor and the store.
 
 Scope: **one process per store.** The lock and recovery are in-process. Several processes sharing a store stay free of corruption (the `(streamID, version)` uniqueness check still arbitrates, and a loser gets `ErrPipelineFailed`) but do not get exclusivity, cross-process ordering or coordinated recovery.
 
@@ -82,7 +82,7 @@ type Tx interface {
 
 ```go
 func TestConformance(t *testing.T) {
-    storetest.Run(t, func(t *testing.T) models.Store { return newSQLiteStore(t) })
+    storetest.Run(t, func(t *testing.T) storage.Store { return newSQLiteStore(t) })
 }
 ```
 
@@ -103,7 +103,7 @@ CREATE TABLE deliveries  (seq INTEGER PRIMARY KEY AUTOINCREMENT,
 ## Synchronous Projections
 
 ```go
-b.WithSyncProjection("OrderUpdated", func(ctx context.Context, tx models.Tx, evt models.Event[Order]) error {
+b.WithSyncProjection("OrderUpdated", func(ctx context.Context, tx storage.Tx, evt event.Event[Order]) error {
     sqlTx := tx.Native().(*sql.Tx)
     _, err := sqlTx.ExecContext(ctx, `UPDATE order_view SET total=? WHERE id=?`, evt.Aggregate.Total, evt.AggregateID)
     return err
@@ -115,7 +115,7 @@ Projections match like `Subscribe` (exact event name, or a regular expression wh
 ## Durable Delivery
 
 ```go
-b.WithSubscriber("Order.*", func(ctx context.Context, evt models.Event[Order]) error {
+b.WithSubscriber("Order.*", func(ctx context.Context, evt event.Event[Order]) error {
     return readModel.Apply(ctx, evt)   // return an error to have the delivery retried
 })
 ```
@@ -123,20 +123,20 @@ b.WithSubscriber("Order.*", func(ctx context.Context, evt models.Event[Order]) e
 A durable handler returns an `error`. It is *not* registered on the bus: the dispatcher runs it itself so it can see failure. The dispatcher is a pluggable component with a ten-rule contract, a park state table; everything below describes the in-memory default, which is the only implementation the library ships, and the contract in [dispatcher.md](./dispatcher.md) is what a replacement given to `WithDispatcher` must keep.
 
 - A delivery entry is written in the event's transaction. It is acknowledged only after **every** durable handler matching the event has returned nil. Only events at least one durable pattern matches get an entry.
-- **Failure holds the line.** A handler that returns an error, panics, or fails after exceeding its timeout leaves the delivery pending. The dispatcher retries just the failed handlers with exponential backoff (default 100 ms doubling to 30 s; `WithDeliveryRetry`), each wait randomised within its upper half so deliveries that failed together, because a downstream service went down, do not all retry at the same instant. That aggregate's later events wait behind it, so version 6 is never delivered before version 5 succeeded. Other aggregates are unaffected. Observe every failed attempt with `WithDeliveryErrorHandler(func(ctx, evt, err, attempt))`; its `err` is a `*models.SubscriberError` naming the subscriber (its pattern and registration order, such as `OrderUpdated#2`) around the handler's own error, which `errors.Is` still finds. A panic also reaches `WithPanicHandler`.
+- **Failure holds the line.** A handler that returns an error, panics, or fails after exceeding its timeout leaves the delivery pending. The dispatcher retries just the failed handlers with exponential backoff (default 100 ms doubling to 30 s; `WithDeliveryRetry`), each wait randomised within its upper half so deliveries that failed together, because a downstream service went down, do not all retry at the same instant. That aggregate's later events wait behind it, so version 6 is never delivered before version 5 succeeded. Other aggregates are unaffected. Observe every failed attempt with `WithDeliveryErrorHandler(func(ctx, evt, err, attempt))`; its `err` is a `*failure.SubscriberError` naming the subscriber (its pattern and registration order, such as `OrderUpdated#2`) around the handler's own error, which `errors.Is` still finds. A panic also reaches `WithPanicHandler`.
 - **A subscriber is not isolated from its siblings.** Acknowledgement is per event, not per subscriber, so one failing durable subscriber holds back that aggregate's later events for *every* durable subscriber, and handlers that already succeeded see the event again on each retry (only failed handlers are retried within a streak, but after a restart all of them run again). If subscribers have unrelated failure modes, run them in separate `Asynx` instances over separate delivery logs, or make the slow one hand off to its own queue.
 - **Retries stop: parking.** A delivery is attempted at most `WithDeliveryMaxAttempts(n)` times (default 20, about six minutes with the default backoff). Then:
-  - if a dead-letter handler is set (`WithDeadLetterHandler`) and returns nil, the event is acknowledged as dealt with — store it somewhere for inspection — and the aggregate's later events flow. A dead-letter handler that returns an error (or panics) refuses the event, and the aggregate is parked as below. The deletion marker is never dead-lettered. Its error argument carries the failure of **every** subscriber that failed on the last attempt, each a `*models.SubscriberError`, joined (`errors.As` finds one; `Unwrap() []error` lists them);
+  - if a dead-letter handler is set (`WithDeadLetterHandler`) and returns nil, the event is acknowledged as dealt with — store it somewhere for inspection — and the aggregate's later events flow. A dead-letter handler that returns an error (or panics) refuses the event, and the aggregate is parked as below. The deletion marker is never dead-lettered. Its error argument carries the failure of **every** subscriber that failed on the last attempt, each a `*failure.SubscriberError`, joined (`errors.As` finds one; `Unwrap() []error` lists them);
   - otherwise the aggregate is **parked**: the failed event and every later one stay pending in the store, nothing more is delivered for that aggregate, and the delivery error handler receives an error matching `ErrDeliveryParked`. Other aggregates are unaffected. Commands for the aggregate still commit; their deliveries just wait in the log.
   - `ResumeDeliveries(ctx)` (or a restart; concurrent calls are safe, only the first redelivers) lifts the park and redelivers the pending events in order, under the aggregate's lock so no live event overtakes them. Call it once the handler or its dependency is fixed. It reads the pending log once for all parked aggregates (the store has no per-aggregate query), before lifting any park and holding no lock, so an outage that parks thousands of aggregates costs one scan, not one per aggregate. It then redelivers one aggregate at a time under that aggregate's lock alone, never holding a second one, so a command that sends to another aggregate from inside its validation cannot deadlock with it; only commands for the aggregate being redelivered wait. Events committed after the scan are covered: the dispatcher remembers which events a park left undelivered. A park lifted and imposed again during the call (another resume, a Forget) is a different park and is left for the next call. Parking never lifts by itself.
 - **A failed acknowledgement parks too.** If a delivery's handlers succeeded but the store failed to record the ack, the aggregate is parked (the failure goes to `WithPublishErrorHandler`), so its next event is not delivered ahead of the unacknowledged one; `ResumeDeliveries` redelivers it (handlers see it again: at-least-once).
-- **Parking is visible.** `PausedAggregates()` lists the parked aggregates, sorted, and `SendWait` on one returns the committed event with an error matching `ErrDeliveryParked`, because no handler ran. `InspectDelivery(aggregateID)` says why: it returns a `models.DeliveryStatus` with `Parked`, `Generation`, `Cause` (the error that parked it) and `Undelivered` (the versions no handler took). Without a delivery error handler these are the only signals, so poll `PausedAggregates` and `InspectDelivery` (or set the handler).
+- **Parking is visible.** `PausedAggregates()` lists the parked aggregates, sorted, and `SendWait` on one returns the committed event with an error matching `ErrDeliveryParked`, because no handler ran. `InspectDelivery(aggregateID)` says why: it returns a `dispatch.Status` with `Parked`, `Generation`, `Cause` (the error that parked it) and `Undelivered` (the versions no handler took). Without a delivery error handler these are the only signals, so poll `PausedAggregates` and `InspectDelivery` (or set the handler).
 - **Live subscribers do not replay.** `Subscribe` and `Listen` are fire-and-forget. While an aggregate is parked its live-only events still flow, and a durable event that arrives meanwhile is not shown to live subscribers at all. `ResumeDeliveries` and the recovery at `Build` redeliver to durable subscribers only, so a live stream is never repeated or sent out of order; it just misses what was committed while parked or while the process was down.
 - **The queue is not bounded.** Later events of an aggregate wait in an in-memory FIFO behind a slow or retrying delivery, so memory grows with the commands sent meanwhile. Retries are capped and parking empties the queue of durable events, which keeps a stuck delivery from holding it for long; a merely slow handler is never parked for being slow.
 - **Shutdown is complete and retryable.** `Shutdown` stops accepting `Send`, `SendWait` and `Forget`, waits for those in flight (so none is stranded in a queue nobody reads), drains the workers, then closes the dispatcher and the bus. If its context ends first it returns that error and may be called again to finish; once it has completed, or while another call runs, it returns `ErrAlreadyShuttingDown`.
 - **Shutdown never reorders.** `Shutdown` first interrupts every retry, so callers waiting on a failing delivery are released and the shutdown completes. An interrupted delivery parks its aggregate (without reporting an error to the delivery error handler), so later events of that aggregate drain without being delivered or acknowledged; after a restart they are redelivered, v1 before v2.
 - **A failing live bus does not skip durable delivery.** An error from the in-memory/custom bus's `PublishSync` is reported to `WithPublishErrorHandler`, and the durable handlers still run for that event.
-- **Timeouts are alarms.** `WithHandlerTimeout` reports a slow handler (`ErrHandlerTimeout` to the delivery error handler; the timeout handler for bus subscribers) but the handler is still waited for, so the aggregate's next event never overlaps it and a delivery is never acknowledged while its handler is still running. This applies to every handler the dispatcher runs, durable or not.
+- **Timeouts are alarms.** `WithHandlerTimeout` reports a slow handler (`ErrHandlerTimeout` to the delivery error handler; the timeout handler for bus subscribers) but the handler is still waited for, so the aggregate's next event never overlaps it and a delivery is never acknowledged while its handler is still running. A configured fallback also runs when the primary times out, and only after the primary has finished, so a handler never overlaps its own fallback. This applies to every handler the dispatcher runs, durable or not.
 - **`WaitPublish` is for tests.** It waits for the events queued when it was called and refuses nothing: commands sent while it waits commit and are queued as usual, and are not waited for.
 - `WithFallback` is not supported for durable subscribers (`Build` returns `ErrFallbackUnsupported`): a fallback has no way to report failure.
 - **Recovery.** `Build()` re-enqueues every unacknowledged delivery on the per-aggregate dispatcher, in enqueue order within each aggregate, before it returns. An aggregate's stream is replayed once for all of its pending entries, so a long backlog costs one pass over the stream, not one per entry (`ResumeDeliveries` does the same). It does not wait for them to be handled, so a poison event cannot stop the process from starting; a command sent right after `Build` enqueues behind the recovered events of its aggregate in the same FIFO. Events are rebuilt from the stream (upcasters apply). An entry whose event no longer exists is acknowledged and skipped. An aggregate whose event cannot be rebuilt (a corrupt record, an upcaster error) does not stop `Build` or the other aggregates: it is parked, the error goes to `WithPublishErrorHandler`, its later entries stay pending behind the failed one, and `ResumeDeliveries` retries it (its errors are joined, and the other parked aggregates are still resumed). Acknowledgement failures go to `WithPublishErrorHandler`; the delivery stays pending and is redelivered next start.
@@ -149,7 +149,7 @@ A durable handler returns an `error`. It is *not* registered on the bus: the dis
 
 ### The deletion marker
 
-`Forget` writes a tombstone event named `models.ForgetEventName` (`"asynx.aggregate.forget"`). **Every durable subscriber receives it, whatever its pattern**, so a subscriber that keeps per-aggregate state — a dedupe table, a cursor, a read-model row — can clear it. This matters because a re-created aggregate starts again at version 1: deduplicating on `(AggregateID, Version)` without handling the marker silently drops the new aggregate's events. Check `evt.EventName == models.ForgetEventName` first and ignore the payload otherwise; the tombstone's `Aggregate` field holds the last state. The marker is delivered once, with the same retry and parking rules, and `Forget` does not erase until every durable subscriber has accepted it.
+`Forget` writes a tombstone event named `event.ForgetEventName` (`"asynx.aggregate.forget"`). **Every durable subscriber receives it, whatever its pattern**, so a subscriber that keeps per-aggregate state — a dedupe table, a cursor, a read-model row — can clear it. This matters because a re-created aggregate starts again at version 1: deduplicating on `(AggregateID, Version)` without handling the marker silently drops the new aggregate's events. Check `evt.EventName == event.ForgetEventName` first and ignore the payload otherwise; the tombstone's `Aggregate` field holds the last state. The marker is delivered once, with the same retry and parking rules, and `Forget` does not erase until every durable subscriber has accepted it.
 
 ### Reactions and re-entrancy
 
@@ -157,7 +157,7 @@ Enqueueing never blocks, and the aggregate lock is released before `SendWait` wa
 
 ## Idempotent Commands
 
-A command opts in by implementing `models.IdempotentCommand`:
+A command opts in by implementing `command.Idempotent`:
 
 ```go
 func (c PlaceOrder) CommandID() string { return c.RequestID }   // client-minted
@@ -175,7 +175,7 @@ Receipts are kept as long as your store keeps them. Prune them according to your
 
 ## Snapshots
 
-Snapshots are a derived cache. They are written after the event commits, outside the transaction, and a failure never fails the command or blocks delivery. Observe failures with `WithSnapshotErrorHandler`.
+Snapshots are a derived cache. They are written after the event commits, outside the transaction, and a failure never fails the command or blocks delivery. The same holds for the auto-snapshot a read caches after upcasting old events: a failed write never fails the read. Observe failures of both kinds with `WithSnapshotErrorHandler`; without it they are dropped.
 
 ## Forget
 
@@ -195,7 +195,7 @@ The snapshot is deleted before the stream so a half-failed erase can never leave
 - The retry of an idempotent `SendWait` waits for the original's handlers; a retry that cannot read the original event back fails with `ErrPipelineFailed` instead of returning a hollow event.
 - A panic in a `WithPanicHandler` or timeout callback is swallowed instead of crashing the process.
 - `WaitPublish` no longer refuses concurrent commands.
-- Delivery errors are `*models.SubscriberError`; the dead-letter handler receives every failing subscriber's error, not only the last.
+- Delivery errors are `*failure.SubscriberError`; the dead-letter handler receives every failing subscriber's error, not only the last.
 - Retry delays are jittered.
 - `Shutdown` releases a `Forget` stuck behind its own handler.
 - A retried idempotent `SendWait` reports `ErrDeliveryParked` only for events the park left undelivered (remembered in memory), not for the event whose own failing handler caused the park, and reads nothing from the store to decide.
@@ -211,6 +211,6 @@ This release changes the `Store` contract and is a compile-time break for store 
 - Run `storetest.Run` against the new store.
 - `WithSubscriber` handlers now return an `error` (durable handlers are retried with backoff until they succeed or reach the attempt cap).
 - Behavior changes: snapshot write failures no longer fail `Send`; same-aggregate commands no longer fail with `ErrPipelineFailed` under concurrency within one process; commands for an aggregate being forgotten fail with `ErrForgetInProgress`; `Forget` waits for durable subscribers and honors its context; `SendWait` and `Forget` wait outside the shard workers; `Shutdown` interrupts delivery retries.
-- New knobs: `WithDeliveryMaxAttempts`, `WithDeadLetterHandler`, `ResumeDeliveries`, `PausedAggregates`, and `models.ForgetEventName`.
-- Durable subscribers that dedupe per aggregate must handle `models.ForgetEventName` (see above).
+- New knobs: `WithDeliveryMaxAttempts`, `WithDeadLetterHandler`, `ResumeDeliveries`, `PausedAggregates`, and `event.ForgetEventName`.
+- Durable subscribers that dedupe per aggregate must handle `event.ForgetEventName` (see above).
 - `store.Memory` keeps `Append` and `Delete` as helpers for seeding test data.
