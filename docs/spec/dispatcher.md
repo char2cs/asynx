@@ -67,7 +67,7 @@ type DispatcherFactory[T any] func(DispatcherConfig[T]) (Dispatcher[T], error)
 
 `Ticket` (`Settled`, `Final`, `Err`, `Unrun`) and `DurableSub[T]` live in `models`.
 
-`DispatcherConfig` carries **final values**. The processor fills the defaults where it builds the config, before calling the factory: 20 attempts and a backoff of 100 ms doubling to 30 s, or whatever `WithDeliveryMaxAttempts` and `WithDeliveryRetry` set (non-positive settings are dropped). An implementation never needs to know them. `Bus` is the live-subscriber transport and may be nil, in which case no live subscriber is reached. The idle timeout and worker goroutine counts of the default are not part of the config: they are the default's own business.
+`DispatcherConfig` carries **final values**. The processor fills the defaults where it builds the config, before calling the factory: 20 attempts and a backoff of 100 ms doubling to 30 s, or whatever `WithDeliveryMaxAttempts` and `WithDeliveryRetry` set (non-positive settings are dropped). An implementation never needs to know them. `Bus` is the live-subscriber transport and may be nil, in which case no live subscriber is reached. How the default schedules its delivery goroutines is not part of the config: that is the default's own business.
 
 ### Kinds of request
 
@@ -100,7 +100,7 @@ The delivery guarantee is **at-least-once**. The dead-letter handler and the err
 
 ### The park state table
 
-An aggregate's delivery state is a single record: running, or parked with a generation, a cause and the undelivered versions. Every transition below must be atomic with respect to the others. The table mirrors the package documentation of the default implementation (`internal/bus/dispatcher/internal/aggregates`); "durable" means a request that carries an `Ack`, and any other request is never held back by a park. The code's `Lift` is `ResumeUndelivered`, and its `ParkIfCurrent(halt)` is the delivery loop's give-up.
+An aggregate's delivery state is a single record: running, or parked with a generation, a cause and the undelivered versions. Every transition below must be atomic with respect to the others. The table mirrors the package documentation of the default implementation (`internal/processor/internal/dispatcher/internal/aggregates`); "durable" means a request that carries an `Ack`, and any other request is never held back by a park. The code's `Lift` is `ResumeUndelivered`, and its `ParkIfCurrent(halt)` is the delivery loop's give-up.
 
 | State | Event | Next state | Effect |
 |---|---|---|---|
@@ -155,13 +155,13 @@ What it must not do is change the observable behavior in the ten rules, or write
 
 ## Tests of the default
 
-The library ships no suite for third-party implementations. The in-memory default is checked against the contract by its own tests in `internal/bus/dispatcher`, which also cover goroutine retirement and idle timeouts.
+The library ships no suite for third-party implementations. The in-memory default is checked against the contract by its own tests in `internal/processor/internal/dispatcher`, which also check that closing or going idle leaves no goroutine behind.
 
 ## The in-memory default
 
 The default keeps everything in memory in the process.
 
-- One goroutine per active aggregate drains a FIFO queue and retires after an idle timeout. The queue is not bounded.
+- Each in-flight event runs on its own goroutine, which receives the delivery context as a parameter and waits for its turn behind the previous event of the same aggregate, so an aggregate is delivered in FIFO order. An idle aggregate holds no goroutine. The number of in-flight events is not bounded.
 - Retry: a failed durable delivery retries only the handlers that failed, with exponential backoff from `RetryInitial` doubling up to `RetryMax`. With the defaults that is 100 ms doubling to 30 s, and at most 20 attempts (about six minutes). Each wait is randomised within its upper half (a delay `d` waits between `d/2` and `d`), so deliveries that failed together do not retry in lockstep. Delivery errors are `*models.SubscriberError` values naming the failing subscriber around the handler's error.
 - `WithDeliveryRetry` and `WithDeliveryMaxAttempts` set those values; `WithDeadLetterHandler` sets `DeadLetter`.
 - The park state is held in memory only. A restart loses it; the delivery log still holds the unacknowledged entries, and the `Build()` recovery redelivers them as `DispatchRedelivery` requests.
