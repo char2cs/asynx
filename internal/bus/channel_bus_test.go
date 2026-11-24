@@ -40,10 +40,7 @@ func closeAndWait(
 	}
 }
 
-// Compile-time check that *ChannelBus[T] implements Bus[T].
 var _ models.Bus[string] = (*bus.ChannelBus[string])(nil)
-
-// --- Subscribe ---
 
 func TestSubscribeEmptyPattern(
 	t *testing.T,
@@ -246,7 +243,6 @@ func TestSubscribeWithHandlerTimeout(
 	)
 	<-started
 
-	// Close should return quickly because executeHandler returns on timeout.
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
 		200*time.Millisecond,
@@ -260,8 +256,6 @@ func TestSubscribeWithHandlerTimeout(
 		)
 	}
 }
-
-// --- Unsubscribe ---
 
 func TestUnsubscribeRemovesHandler(
 	t *testing.T,
@@ -336,8 +330,6 @@ func TestUnsubscribeIdempotent(
 		)
 	}
 }
-
-// --- Publish ---
 
 func TestPublishOnClosedBus(
 	t *testing.T,
@@ -579,8 +571,6 @@ func TestPublishEventDataPropagated(
 	}
 }
 
-// --- Context propagation ---
-
 func TestPublish_CancelledContext(
 	t *testing.T,
 ) {
@@ -756,8 +746,6 @@ func TestPublish_CtxPropagatedToFallback(
 	}
 }
 
-// --- Configurable callbacks ---
-
 func TestChannelBus_WithPanicHandler(
 	t *testing.T,
 ) {
@@ -858,8 +846,6 @@ func TestChannelBus_WithTimeoutHandler(
 		t.Error("timeout handler not called")
 	}
 }
-
-// --- Panic recovery ---
 
 func TestHandlerPanicDoesNotBlockOtherHandlers(
 	t *testing.T,
@@ -994,8 +980,6 @@ func TestFallbackReceivesOriginalEvent(
 	}
 }
 
-// --- Pattern matching ---
-
 func TestInvalidRegexTreatedAsNoMatch(
 	t *testing.T,
 ) {
@@ -1007,7 +991,7 @@ func TestInvalidRegexTreatedAsNoMatch(
 		func(
 			_ context.Context,
 			_ models.Event[string],
-		) { // Invalid regex
+		) {
 			atomic.AddInt32(
 				&called,
 				1,
@@ -1115,8 +1099,6 @@ func TestLazyPatternCompilationCached(
 func TestInvalidRegexCompilationCached(
 	t *testing.T,
 ) {
-	// This test verifies that invalid regex patterns are cached and not recompiled on every publish.
-	// Before the fix, invalid patterns would be recompiled each time, wasting CPU.
 	b := newBus[string]()
 
 	var called int32
@@ -1133,7 +1115,6 @@ func TestInvalidRegexCompilationCached(
 		},
 	)
 
-	// Publish multiple times with the invalid regex subscription
 	for range 5 {
 		b.Publish(
 			context.Background(),
@@ -1146,17 +1127,10 @@ func TestInvalidRegexCompilationCached(
 		b,
 	)
 
-	// The handler should never be called because the regex is invalid
 	if atomic.LoadInt32(&called) != 0 {
 		t.Error("handler called for subscription with invalid regex")
 	}
-	// The important part: the bus should have cached the compilation error,
-	// so subsequent publishes don't recompile. This is a structural guarantee—
-	// we verify it by checking that the error cache contains the pattern.
-	// (In production, this reduces CPU usage on invalid patterns.)
 }
-
-// --- Close / shutdown ---
 
 func TestCloseWaitsForHandlers(
 	t *testing.T,
@@ -1292,8 +1266,6 @@ func TestCloseBlocksNewSubscribe(
 	}
 }
 
-// --- Concurrency / race detector ---
-
 func TestConcurrentPublishes(
 	t *testing.T,
 ) {
@@ -1422,8 +1394,6 @@ func TestConcurrentUnsubscribeAndPublish(
 		b,
 	)
 }
-
-// --- PublishSync ---
 
 func TestPublishSync_NoSubscribers(
 	t *testing.T,
@@ -1811,10 +1781,6 @@ func TestPublishSync_ConcurrentCalls(
 	}
 }
 
-// TestGetCompiledPattern_ConcurrentSamePattern exercises the double-checked
-// locking in getCompiledPattern: many goroutines race to compile the same
-// pattern, so after the write-lock is acquired one of them may find the pattern
-// already stored by another goroutine (the "existing, ok" fast-path).
 func TestGetCompiledPattern_ConcurrentSamePattern(
 	t *testing.T,
 ) {
@@ -1827,10 +1793,6 @@ func TestGetCompiledPattern_ConcurrentSamePattern(
 	const pattern = "order\\..*"
 	const goroutines = 100
 
-	// Subscribe a handler using the regex pattern so RegexSubs is populated.
-	// All concurrent publishes will race to compile the same pattern for the
-	// first time, triggering the double-checked-lock fast-path in at least
-	// one goroutine.
 	b.Subscribe(
 		pattern,
 		func(
@@ -1842,9 +1804,6 @@ func TestGetCompiledPattern_ConcurrentSamePattern(
 
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
-	// Use a ready channel to make all goroutines start as close together as
-	// possible, maximising the chance that multiple reach regexp.Compile()
-	// before any one of them acquires the write-lock.
 	ready := make(chan struct{})
 	for i := range goroutines {
 		go func(
@@ -1852,7 +1811,6 @@ func TestGetCompiledPattern_ConcurrentSamePattern(
 		) {
 			defer wg.Done()
 			<-ready
-			// Publish triggers matchedSubs → matchesRegex → getCompiledPattern.
 			b.Publish(
 				context.Background(),
 				ev("order.created"),
@@ -1863,8 +1821,6 @@ func TestGetCompiledPattern_ConcurrentSamePattern(
 	close(ready)
 	wg.Wait()
 }
-
-// --- WaitForHandlers ---
 
 func TestWaitForHandlers_BlocksUntilDone(
 	t *testing.T,
@@ -1908,9 +1864,6 @@ func TestWaitForHandlers_BlocksUntilDone(
 	}
 }
 
-// PublishSync promises every handler has finished on return: a timeout is
-// reported but the slow handler is still waited for, so the next event of an
-// aggregate can never overlap it.
 func TestPublishSync_WaitsForATimedOutHandler(
 	t *testing.T,
 ) {
@@ -1938,7 +1891,7 @@ func TestPublishSync_WaitsForATimedOutHandler(
 			context.Context,
 			models.Event[string],
 		) {
-			<-timedOut // finishes only after the timeout fired
+			<-timedOut
 			finished.Store(true)
 		},
 		models.WithHandlerTimeout[string](20*time.Millisecond),
@@ -2015,8 +1968,6 @@ func TestPublish_StillAbandonsATimedOutHandler(
 	)
 }
 
-// A panic handler that itself panics must not take the process down: handlers
-// run in goroutines nobody recovers.
 func TestChannelBus_APanicHandlerThatPanicsDoesNotCrashTheProcess(
 	t *testing.T,
 ) {
@@ -2060,16 +2011,12 @@ func TestChannelBus_APanicHandlerThatPanicsDoesNotCrashTheProcess(
 	}
 }
 
-// noop is a zero-cost handler used to isolate publish-path overhead.
 var noop = func(
 	_ context.Context,
 	_ models.Event[string],
 ) {
 }
 
-// BenchmarkPublish_ExactMatch measures Publish throughput when the event name
-// exactly matches the subscription pattern, varying the total number of
-// subscriptions. This directly benchmarks the subscription index lookup.
 func BenchmarkPublish_ExactMatch(
 	b *testing.B,
 ) {
@@ -2114,9 +2061,6 @@ func BenchmarkPublish_ExactMatch(
 	}
 }
 
-// BenchmarkPublish_NoMatch measures the cost of publishing an event that
-// matches no subscription — worst case for a full linear scan, best case
-// for an indexed lookup.
 func BenchmarkPublish_NoMatch(
 	b *testing.B,
 ) {
@@ -2161,8 +2105,6 @@ func BenchmarkPublish_NoMatch(
 	}
 }
 
-// BenchmarkPublish_Regex measures Publish when patterns are regex, requiring
-// compilation (first publish) and matching (subsequent publishes).
 func BenchmarkPublish_Regex(
 	b *testing.B,
 ) {
@@ -2207,8 +2149,6 @@ func BenchmarkPublish_Regex(
 	}
 }
 
-// BenchmarkPublish_Fanout measures the cost of dispatching to many matching
-// handlers for a single event (goroutine spawn overhead dominates here).
 func BenchmarkPublish_Fanout(
 	b *testing.B,
 ) {
@@ -2250,8 +2190,6 @@ func BenchmarkPublish_Fanout(
 	}
 }
 
-// BenchmarkPublish_Parallel measures sustained throughput with multiple
-// concurrent publishers (simulates real-world multi-goroutine producers).
 func BenchmarkPublish_Parallel(
 	b *testing.B,
 ) {
@@ -2282,8 +2220,6 @@ func BenchmarkPublish_Parallel(
 	b.StopTimer()
 }
 
-// BenchmarkPublish_MixedSubs benchmarks the realistic case: many exact-match
-// subscriptions plus a few regex patterns.
 func BenchmarkPublish_MixedSubs(
 	b *testing.B,
 ) {
@@ -2341,7 +2277,6 @@ func BenchmarkPublish_MixedSubs(
 	}
 }
 
-// BenchmarkSubscribe measures Subscribe throughput.
 func BenchmarkSubscribe(
 	b *testing.B,
 ) {
@@ -2359,8 +2294,6 @@ func BenchmarkSubscribe(
 	}
 }
 
-// BenchmarkSubscribe_Regex measures Subscribe throughput for regex patterns,
-// which take the slice-append COW path instead of the map-copy path.
 func BenchmarkSubscribe_Regex(
 	b *testing.B,
 ) {
@@ -2378,7 +2311,6 @@ func BenchmarkSubscribe_Regex(
 	}
 }
 
-// BenchmarkUnsubscribe measures Unsubscribe throughput.
 func BenchmarkUnsubscribe(
 	b *testing.B,
 ) {
@@ -2404,8 +2336,6 @@ func BenchmarkUnsubscribe(
 	}
 }
 
-// BenchmarkPublish_Timeout measures the overhead of handler timeout machinery
-// (time.NewTimer vs time.After).
 func BenchmarkPublish_Timeout(
 	b *testing.B,
 ) {

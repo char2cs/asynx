@@ -76,7 +76,6 @@ func TestForgetCommand_EmitEvent_NilLast_ReturnsZeroValue(
 	t *testing.T,
 ) {
 	cmd := NewForgetCommand[order]("agg-1")
-	// EmitEvent without prior Validate — c.last is nil, should return zero value.
 	got := cmd.EmitEvent(nil)
 	var zero order
 	if got != zero {
@@ -87,5 +86,4 @@ func TestForgetCommand_EmitEvent_NilLast_ReturnsZeroValue(
 	}
 }
 
-// Ensure ForgetCommand satisfies models.Command[T] at compile time.
 var _ models.Command[order] = (*ForgetCommand[order])(nil)

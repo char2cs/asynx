@@ -1,5 +1,3 @@
-// Package commands holds internal Asynx commands that are dispatched by the
-// library itself rather than by application code.
 package commands
 
 import (

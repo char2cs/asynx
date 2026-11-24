@@ -1,5 +1,3 @@
-// Package reporter delivers the dispatcher's observability callbacks without
-// letting a misbehaving callback disturb a delivery.
 package reporter
 
 import (

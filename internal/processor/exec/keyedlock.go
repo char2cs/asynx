@@ -15,7 +15,7 @@ type KeyedLock struct {
 }
 
 type lockEntry struct {
-	ch   chan struct{} // capacity 1: holds a token while the key is free
+	ch   chan struct{}
 	refs int
 }
 
@@ -132,7 +132,6 @@ func (k *KeyedLock) release(
 	}
 }
 
-// size reports the number of live entries. For tests.
 func (k *KeyedLock) size() int {
 	k.mu.Lock()
 	defer k.mu.Unlock()

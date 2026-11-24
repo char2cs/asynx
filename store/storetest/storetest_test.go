@@ -38,8 +38,6 @@ func TestMemorySnapshotStoreConforms(
 	)
 }
 
-// recorder stands in for *testing.T so a scenario can fail without failing the
-// test that runs it.
 type recorder struct {
 	testing.TB
 	failed atomic.Bool
@@ -130,7 +128,6 @@ func countFailed(
 	return n
 }
 
-// hollowStore accepts every write and keeps none, and reads nothing back.
 type hollowStore struct{ models.Store }
 
 func (hollowStore) Atomically(
@@ -140,7 +137,6 @@ func (hollowStore) Atomically(
 	return nil
 }
 
-// brokenStore fails every operation.
 type brokenStore struct{ models.Store }
 
 var errBroken = errors.New("broken")
@@ -234,7 +230,6 @@ func TestSuite_FlagsStoresThatFail(
 	}
 }
 
-// forgetfulSnapshots drops every snapshot it is given.
 type forgetfulSnapshots struct{ models.SnapshotStore }
 
 func (forgetfulSnapshots) Put(
@@ -246,7 +241,6 @@ func (forgetfulSnapshots) Put(
 	return nil
 }
 
-// failingSnapshots fails every operation.
 type failingSnapshots struct{ models.SnapshotStore }
 
 func (failingSnapshots) Put(

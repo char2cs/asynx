@@ -1,15 +1,3 @@
-// Package delivery runs the durable half of a job: the attempt loop that
-// hands the event to every durable subscriber that receives it, retrying the
-// failed ones with a jittered, doubling backoff until they all succeed, the
-// attempt cap is reached, the aggregate is parked, or the dispatcher is
-// interrupted.
-//
-// The package has no lock of its own. It changes an aggregate's state only by
-// parking it, and only through the registry's ParkIfCurrent, so a park that
-// someone else imposed or lifted meanwhile is never undone. Every path that
-// parks and then tells someone (attempts exhausted, a failed ack, an
-// interrupt) goes through Deliverer.ParkThenReport, which parks first: whoever
-// is told may act on the park at once.
 package delivery
 
 import (

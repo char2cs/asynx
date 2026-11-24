@@ -15,14 +15,9 @@ import (
 func run(
 	ctx context.Context,
 ) error {
-	// ========================================================================
-	// Setup: Create Asynx Instance using Public API
-	// ========================================================================
 	fmt.Println("=== Asynx E-Commerce Order Example ===")
 	fmt.Println("Step 1: Building asynx instance...")
 
-	// Create using the public asynx.Builder API
-	// Use asynx's built-in in-memory stores for this example
 	eventStore := store.New()
 	snapshotStore := store.NewSnapshots()
 
@@ -37,32 +32,24 @@ func run(
 		return err
 	}
 
-	// ========================================================================
-	// Setup: Register Event Subscribers
-	// ========================================================================
 	fmt.Println("Step 2: Registering event subscribers...")
 
 	reporter := &projections.OrderReporter{}
 	notifier := &projections.OrderNotifier{}
 
-	// Subscribe to order events
 	ax.Subscribe(
 		"Order.*",
 		reporter.Handle,
-	) // Match: OrderCreated, OrderConfirmed, OrderShipped
+	)
 	ax.Subscribe(
 		"Order.*",
 		notifier.Handle,
 	)
 
-	// ========================================================================
-	// Execution: Submit Commands
-	// ========================================================================
 	fmt.Println("Step 3: Executing commands...")
 
 	orders := []string{"ORD-001", "ORD-002", "ORD-003"}
 
-	// Create orders
 	for _, orderID := range orders {
 		cmd := commands.CreateOrderCmd{
 			ID:     orderID,
@@ -89,10 +76,9 @@ func run(
 		)
 	}
 
-	ax.WaitPublish() // Wait for event handlers
+	ax.WaitPublish()
 	fmt.Println()
 
-	// Confirm orders
 	for _, orderID := range orders {
 		cmd := commands.ConfirmOrderCmd{ID: orderID}
 		if _, err := ax.Send(
@@ -113,10 +99,9 @@ func run(
 		)
 	}
 
-	ax.WaitPublish() // Wait for event handlers
+	ax.WaitPublish()
 	fmt.Println()
 
-	// Ship orders
 	for _, orderID := range orders {
 		cmd := commands.ShipOrderCmd{ID: orderID}
 		if _, err := ax.Send(
@@ -137,12 +122,9 @@ func run(
 		)
 	}
 
-	ax.WaitPublish() // Wait for event handlers
+	ax.WaitPublish()
 	fmt.Println()
 
-	// ========================================================================
-	// Verification: Query Aggregate State
-	// ========================================================================
 	fmt.Println("Step 4: Verifying final state...")
 
 	for _, orderID := range orders {
@@ -171,9 +153,6 @@ func run(
 		)
 	}
 
-	// ========================================================================
-	// Output: Notification Outbox
-	// ========================================================================
 	fmt.Println("Step 5: Notifications sent:")
 	for i, notification := range notifier.GetOutbox() {
 		fmt.Printf(
@@ -183,9 +162,6 @@ func run(
 		)
 	}
 
-	// ========================================================================
-	// Cleanup: Graceful Shutdown
-	// ========================================================================
 	if err := ax.Shutdown(ctx); err != nil {
 		fmt.Printf(
 			"❌ Shutdown error: %v\n",

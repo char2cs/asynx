@@ -1,15 +1,3 @@
-// Package workers runs the dispatcher's per-aggregate goroutines: one worker
-// for every aggregate with jobs queued, which hands them, one at a time and in
-// queue order, to the live subscribers (the bus) and then to the durable
-// delivery, and acknowledges each durable job once its subscribers have all
-// succeeded. Different aggregates' workers run concurrently.
-//
-// A worker drains its aggregate's queue, then waits for more work: it loops on
-// a wake signal, drains what is left and exits when the pool is stopped, and
-// retires after the idle timeout unless a job arrived meanwhile (the registry
-// decides that atomically with the enqueue, so no job is ever stranded on a
-// retired worker). The package has no lock of its own: the queue, the halt
-// channel and the park all live in the registry.
 package workers
 
 import (

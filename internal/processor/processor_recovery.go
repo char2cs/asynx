@@ -113,15 +113,6 @@ func (p *Processor[T]) Resume(
 	return errors.Join(errs...)
 }
 
-// resumeAggregate lifts the park of agg, the one listed as generation park, and
-// redelivers what is pending for it:
-// the entries the log read found and the events committed since. A park that
-// has been lifted, or lifted and imposed again, since Resume listed it is left
-// to the next Resume: the log read does not describe it. It holds agg's command
-// lock, and only that one. When the redelivery fails the aggregate is
-// parked again, with the redelivery error as the cause Inspect reports,
-// remembering which of its events no handler has taken, because a
-// lifted park would hide the failure from the next Resume.
 func (p *Processor[T]) resumeAggregate(
 	ctx context.Context,
 	agg string,
@@ -170,9 +161,6 @@ func (p *Processor[T]) resumeAggregate(
 	)
 }
 
-// withUndelivered adds the undelivered versions to the scanned entries. The
-// order does not matter, and a version named twice is redelivered once: the
-// stream is replayed in version order and each version is taken from it once.
 func withUndelivered(
 	agg string,
 	scanned []asynxmd.Delivery,
@@ -189,10 +177,6 @@ func withUndelivered(
 	return backlog
 }
 
-// stillUndelivered keeps the versions of undelivered that remaining names: the
-// ones that were undelivered before the redelivery and still are. An event that
-// had been handed to a handler before the park stays out, as does one the
-// redelivery enqueued.
 func stillUndelivered(
 	undelivered []int64,
 	remaining []int64,
@@ -319,10 +303,6 @@ func recoveryMustStop(
 	)
 }
 
-// scanPending calls visit for every pending delivery once, in enqueue order. It
-// reads the log in growing prefixes, so the total work stays linear. Entries
-// are acknowledged while it runs, which shifts the prefix, so what has been
-// visited is tracked by key rather than by position.
 func (p *Processor[T]) scanPending(
 	ctx context.Context,
 	batch int,
@@ -398,9 +378,6 @@ func visitUnseen(
 	)
 }
 
-// pendingByAggregate reads the delivery log and groups the entries of the
-// aggregates that want selects by aggregate, in enqueue order. order lists the
-// aggregates by first appearance.
 func (p *Processor[T]) pendingByAggregate(
 	ctx context.Context,
 	batch int,
@@ -436,12 +413,6 @@ func (p *Processor[T]) pendingByAggregate(
 		err
 }
 
-// redeliver rebuilds the events behind one aggregate's pending deliveries and
-// enqueues them in version order. The stream is replayed once, however many
-// entries are pending, so a long backlog costs one pass over the stream rather
-// than one per entry. Entries whose event no longer exists are acknowledged
-// instead. On an error the entries not yet enqueued stay pending, and their
-// versions, ascending, are returned.
 func (p *Processor[T]) redeliver(
 	ctx context.Context,
 	agg string,
@@ -471,8 +442,6 @@ func (p *Processor[T]) redeliver(
 		)
 }
 
-// enqueueBacklog replays the stream once and enqueues the events the backlog
-// names. It returns the versions whose event was not found.
 func (p *Processor[T]) enqueueBacklog(
 	ctx context.Context,
 	agg string,

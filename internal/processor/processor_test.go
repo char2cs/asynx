@@ -1152,8 +1152,6 @@ func TestWithPublishErrorHandler_IsInvokedOnPublishError(
 	}
 }
 
-// blockingTestBus is a bus whose PublishSync blocks until unblockCh is closed.
-// Used to hold the worker goroutine inside executeJob so we can control timing.
 type blockingTestBus[T any] struct {
 	unblockCh chan struct{}
 }
@@ -1191,10 +1189,6 @@ func (b *blockingTestBus[T]) Close(
 }
 func (b *blockingTestBus[T]) WaitForHandlers() {}
 
-// TestProcessor_SendWait_ContextCancelledWhileWaiting verifies the second-select
-// ctx.Done branch in sendAndWait: context is cancelled after the command is enqueued
-// but before the result arrives. A blocking bus ensures the worker is still running
-// when ctx is cancelled, making the second-select ctx.Done branch deterministic.
 func TestProcessor_SendWait_ContextCancelledWhileWaiting(
 	t *testing.T,
 ) {
@@ -1303,7 +1297,6 @@ func updateCmd(
 	return mocks.UpdateOrderCmd{ID: id, NewState: order{ID: id, Total: total}}
 }
 
-// parkingOpts makes a delivery give up after two attempts unless healthy is set.
 func parkingOpts(
 	healthy *atomic.Bool,
 	extra ...ProcessorOpt[order],
@@ -1776,7 +1769,6 @@ func TestProcessor_Shutdown_WaitsForForgetInFlightUntilItsContextEnds(
 
 var _ = bus.NewChannelBus[order]
 
-// gatedCmd blocks in Validate until its gate opens, which holds a shard worker.
 type gatedCmd struct {
 	mocks.UpdateOrderCmd
 	entered chan<- struct{}
@@ -1795,8 +1787,6 @@ func (c gatedCmd) Validate(
 	return nil
 }
 
-// Shutdown must not return while a sender is still waiting on a queue the pool
-// has stopped reading: every Send either runs or is refused.
 func TestProcessor_Shutdown_NeverStrandsAQueuedSend(
 	t *testing.T,
 ) {
@@ -2067,8 +2057,6 @@ func TestProcessor_Shutdown_WaitsForASendInFlightUntilItsContextEnds(
 	}
 }
 
-// Applications use one aggregate ID across several instances (an arrow and its
-// runtime): a handler of one instance may Forget or SendWait on the other.
 func TestProcessor_HandlerMayWaitOnAnotherInstanceUnderTheSameID(
 	t *testing.T,
 ) {
@@ -2144,8 +2132,6 @@ func TestProcessor_HandlerMayWaitOnAnotherInstanceUnderTheSameID(
 	}
 }
 
-// WaitPublish waits for what is queued and refuses nothing: a command sent while
-// it waits commits, is not reported as failed, and parks nobody.
 func TestProcessor_WaitPublish_DoesNotFailCommandsSentWhileItWaits(
 	t *testing.T,
 ) {
@@ -2660,8 +2646,6 @@ func BenchmarkSend_WithBusFanout(
 	}
 }
 
-// TestProcessor_IntegrationHighThroughput tests sustained throughput with the jobQueue fix.
-// Sends 200 commands serially across different aggregates to verify no deadlock.
 func TestProcessor_IntegrationHighThroughput(
 	t *testing.T,
 ) {
@@ -2714,7 +2698,6 @@ func TestProcessor_IntegrationHighThroughput(
 	)
 }
 
-// TestProcessor_IntegrationOrderPreservation tests that commands for the same aggregate are processed in order.
 func TestProcessor_IntegrationOrderPreservation(
 	t *testing.T,
 ) {
@@ -2785,8 +2768,6 @@ func TestProcessor_IntegrationOrderPreservation(
 	}
 }
 
-// TestProcessor_IntegrationCancelDuringBurst tests graceful cancellation handling.
-// Verifies that cancellations are properly propagated during concurrent load.
 func TestProcessor_IntegrationCancelDuringBurst(
 	t *testing.T,
 ) {
@@ -2840,7 +2821,6 @@ func TestProcessor_IntegrationCancelDuringBurst(
 	t.Log("Integration: cancellation handling verified")
 }
 
-// TestProcessor_IntegrationShutdownGraceful tests graceful shutdown with in-flight commands.
 func TestProcessor_IntegrationShutdownGraceful(
 	t *testing.T,
 ) {
@@ -2921,7 +2901,6 @@ func TestProcessor_IntegrationShutdownGraceful(
 	}
 }
 
-// TestProcessor_IntegrationWithValidationErrors tests error handling across all shards.
 func TestProcessor_IntegrationWithValidationErrors(
 	t *testing.T,
 ) {
@@ -3006,7 +2985,6 @@ func TestProcessor_IntegrationWithValidationErrors(
 	)
 }
 
-// TestProcessor_IntegrationMemoryStability tests that processor doesn't leak memory under sustained load.
 func TestProcessor_IntegrationMemoryStability(
 	t *testing.T,
 ) {
@@ -3061,7 +3039,6 @@ func TestProcessor_IntegrationMemoryStability(
 	t.Log("Integration: memory stability test completed without panic")
 }
 
-// TestProcessor_IntegrationEventPublishingReliability tests that events are published reliably.
 func TestProcessor_IntegrationEventPublishingReliability(
 	t *testing.T,
 ) {
@@ -3145,7 +3122,6 @@ done:
 	}
 }
 
-// TestProcessor_IntegrationDefaultQueueDepthScaling tests that default queue depth scales with workers.
 func TestProcessor_IntegrationDefaultQueueDepthScaling(
 	t *testing.T,
 ) {

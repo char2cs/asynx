@@ -102,7 +102,6 @@ func TestExecute_Idempotent_RejectedRetryStaysRejected(
 		)
 	}
 
-	// Same id, now with a body that would pass validation: still rejected.
 	good := idemCreate{CreateOrderCmd: mocks.CreateOrderCmd{ID: "agg", Total: 10}, Cmd: "cmd-bad"}
 	_, err = ex.Execute(
 		context.Background(),
@@ -356,8 +355,6 @@ func (getReceiptErrStore) GetReceipt(
 		errors.New("receipt store down")
 }
 
-// A duplicate-receipt failure whose receipt cannot then be found must not be
-// mistaken for a retry answer: it is a pipeline failure.
 type phantomDuplicateStore struct{ store.Memory }
 
 func (s phantomDuplicateStore) Atomically(
@@ -461,8 +458,6 @@ func TestExecute_Idempotent_AcceptedReceiptForErasedAggregateStillAnswers(
 	}
 }
 
-// Simulates losing the race for a command id between the receipt check and the
-// commit: the transaction reports a duplicate and the receipt is then found.
 type raceLostStore struct {
 	store.Memory
 	reads int
@@ -530,8 +525,6 @@ func TestExecute_Idempotent_LosingTheReceiptRaceAnswersWithTheWinner(
 	}
 }
 
-// A rejection that cannot be recorded must not be reported as a rejection: a
-// retry could pass validation later and succeed.
 type putReceiptFailStore struct{ store.Memory }
 
 func (s putReceiptFailStore) Atomically(
@@ -587,7 +580,6 @@ func TestExecute_Idempotent_UnrecordableRejectionFailsThePipeline(
 	}
 }
 
-// Two commands with one id race: the loser's rejection hits the winner's receipt.
 type rejectionRaceStore struct {
 	store.Memory
 	reads int
@@ -652,9 +644,6 @@ func TestExecute_Idempotent_RejectionRaceAnswersFromTheExistingReceipt(
 	}
 }
 
-// A retry after the aggregate was forgotten and re-created, where the new
-// aggregate reuses the version, must not be answered with the new aggregate's
-// event.
 func TestExecute_Idempotent_RetryAfterForgetAndRecreateDoesNotReturnTheNewAggregate(
 	t *testing.T,
 ) {
@@ -721,7 +710,6 @@ func TestExecute_Idempotent_RetryAfterForgetAndRecreateDoesNotReturnTheNewAggreg
 	}
 }
 
-// readFailStore fails the reads of event streams once switched on.
 type readFailStore struct {
 	store.Memory
 	fail atomic.Bool
@@ -744,8 +732,6 @@ func (s *readFailStore) ReadFrom(
 	)
 }
 
-// A retry that cannot read the original event back must say so, not hand the
-// caller a hollow event as if all were well.
 func TestExecute_Idempotent_RetryFailsWhenTheOriginalEventCannotBeRead(
 	t *testing.T,
 ) {
@@ -798,9 +784,6 @@ func TestExecute_Idempotent_RetryFailsWhenTheOriginalEventCannotBeRead(
 	}
 }
 
-// The retry of a command whose handlers are still running waits for them, as
-// the first attempt would have: read-your-writes must not depend on whether the
-// caller is on its first attempt or its second.
 func TestExecute_Idempotent_RetryWaitsForTheOriginalEventsHandlers(
 	t *testing.T,
 ) {
@@ -965,9 +948,6 @@ func TestExecute_Idempotent_RetryWithoutADispatcherHasNothingToWaitOn(
 	}
 }
 
-// The retry of a command whose event the dispatcher left undelivered because its
-// aggregate is parked is told so, as the first attempt was; the retry of one
-// that was delivered before the park is not.
 func TestExecute_Idempotent_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWasTold(
 	t *testing.T,
 ) {

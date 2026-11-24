@@ -71,8 +71,6 @@ func TestNew_WiresADispatcherThatDeliversThroughTheBus(
 	}
 }
 
-// WaitIdle returns once the job is handled, and the worker exits after its
-// idle timeout. Dispatching again then starts a new worker.
 func TestDispatch_IdleCleanup(
 	t *testing.T,
 ) {
@@ -170,7 +168,6 @@ func TestClose_DrainsAllEvents(
 	}
 }
 
-// A second Close returns without panicking.
 func TestClose_Idempotent(
 	t *testing.T,
 ) {
@@ -222,8 +219,6 @@ func TestDispatch_AfterClose(
 	}
 }
 
-// Close gives up when its context expires while the bus blocks forever in
-// PublishSync.
 func TestClose_ContextTimeout(
 	t *testing.T,
 ) {
@@ -269,8 +264,6 @@ func TestClose_ContextTimeout(
 	}
 }
 
-// WaitIdle returns once the job is handled; workers.Wait waits for the
-// goroutine to exit after its idle timeout.
 func TestDispatch_WithIdleTimeoutOption(
 	t *testing.T,
 ) {
@@ -301,8 +294,6 @@ func TestDispatch_WithIdleTimeoutOption(
 	_ = d.Close(ctx)
 }
 
-// Enqueue never blocks on a slow handler, because callers enqueue while
-// holding their per-aggregate command lock.
 func TestEnqueue_NeverBlocksBehindASlowHandler(
 	t *testing.T,
 ) {
@@ -376,9 +367,6 @@ func TestEnqueue_NeverBlocksBehindASlowHandler(
 	}
 }
 
-// Close drains the two jobs queued behind the one inside its handler. Once
-// Interrupted closes, Close has closed the registry and is waiting for the
-// workers.
 func TestClose_DrainsJobsQueuedBehindASlowHandler(
 	t *testing.T,
 ) {
@@ -773,8 +761,6 @@ func TestParkUndelivered_RemembersTheNamedVersionsUntilTheParkLifts(
 	}
 }
 
-// An event whose handlers ran and failed until the attempts ran out is not
-// unrun, because a handler took it.
 func TestUnrun_DoesNotCountAnEventWhoseHandlersRanAndFailed(
 	t *testing.T,
 ) {
@@ -884,8 +870,6 @@ func TestTicketFor_ForgetsQueuedEventsWhenTheyAreParked(
 	close(bus.release)
 }
 
-// WaitIdle waits for what was queued when it was called and refuses nothing:
-// commands keep enqueueing while it waits.
 func TestWaitIdle_DoesNotRefuseEnqueuesWhileItWaits(
 	t *testing.T,
 ) {
@@ -950,8 +934,6 @@ func TestWaitIdle_ReturnsAtOnceWhenNothingIsQueued(
 	d.WaitIdle()
 }
 
-// Interrupt leaves the dispatcher open: a non-durable event is still
-// delivered normally afterwards.
 func TestInterrupt_ReleasesWaitersWithoutClosingTheDispatcher(
 	t *testing.T,
 ) {
@@ -1406,7 +1388,6 @@ func TestResume_LiftsAParkAndDeliversAgain(
 	}
 }
 
-// The tombstone reaches a subscriber whose pattern does not match it.
 func TestSupersede_LetsTheTombstoneThroughAFailingDelivery(
 	t *testing.T,
 ) {
@@ -1861,9 +1842,6 @@ func TestResumeUndelivered_ReturnsWhatTheParkLeftUndeliveredAndForgetsIt(
 	}
 }
 
-// What a caller read about a park is stale once the park has been lifted and
-// imposed again: ResumeUndelivered leaves the new park, and what it left
-// undelivered, alone.
 func TestResumeUndelivered_LeavesAParkImposedAgainSinceItWasListed(
 	t *testing.T,
 ) {
@@ -1955,8 +1933,6 @@ func (b *noopBus[T]) Close(
 }
 func (b *noopBus[T]) WaitForHandlers() {}
 
-// BenchmarkDispatch_SingleAggregate benchmarks async dispatch where all events
-// target a single aggregate "agg1".
 func BenchmarkDispatch_SingleAggregate(
 	b *testing.B,
 ) {
@@ -1983,8 +1959,6 @@ func BenchmarkDispatch_SingleAggregate(
 	_ = d.Close(context.Background())
 }
 
-// BenchmarkDispatch_MultiAggregate benchmarks async dispatch spread across
-// varying numbers of aggregates (10, 100, 1000).
 func BenchmarkDispatch_MultiAggregate(
 	b *testing.B,
 ) {
@@ -2028,8 +2002,6 @@ func BenchmarkDispatch_MultiAggregate(
 	}
 }
 
-// BenchmarkDispatch_Parallel benchmarks concurrent async dispatch to "agg1"
-// using RunParallel.
 func BenchmarkDispatch_Parallel(
 	b *testing.B,
 ) {
@@ -2062,8 +2034,6 @@ func BenchmarkDispatch_Parallel(
 	_ = d.Close(context.Background())
 }
 
-// BenchmarkDispatch_Sync benchmarks synchronous dispatch (waitHandlers=true)
-// where all events target "agg1".
 func BenchmarkDispatch_Sync(
 	b *testing.B,
 ) {
@@ -12073,8 +12043,6 @@ func TestViews_ParksAndResume(
 	}
 }
 
-// Event a2 comes after a1 finally succeeded, which took 3 failed attempts,
-// and another aggregate is not held back by a's failure.
 func TestDurable_FailedHandlerRetriesAndHoldsBackLaterEventsOfTheAggregate(
 	t *testing.T,
 ) {
@@ -12380,8 +12348,6 @@ func TestDurable_APanickingPanicHandlerCannotKillTheWorker(
 	)
 }
 
-// The timeout is reported, and the delivery still waits for a handler that
-// outlives it.
 func TestDurable_TimeoutIsReportedButTheHandlerIsStillWaitedFor(
 	t *testing.T,
 ) {
@@ -12854,8 +12820,6 @@ func TestShutdownDuringRetry_NeverDeliversALaterEventPastTheFailingOne(
 	}
 }
 
-// A later event of the parked aggregate is not queued either, while another
-// aggregate keeps flowing.
 func TestExhaustedAttempts_ParkTheAggregateAndLeaveOthersAlone(
 	t *testing.T,
 ) {
@@ -13198,8 +13162,6 @@ func TestDeadLetter_RefusalParksTheAggregate(
 	}
 }
 
-// Parking after a failed tombstone is Forget's job, not the dispatcher's, so
-// the final ticket only reports the failure.
 func TestTombstone_FinalReportsADurableSubscriberThatKeepsFailing(
 	t *testing.T,
 ) {
@@ -13303,8 +13265,6 @@ func TestEnqueueForget_IsNeverDeadLettered(
 	}
 }
 
-// A Forget that abandons the delivery while its last attempt runs leaves the
-// aggregate unparked.
 func TestGiveUp_AfterASupersedeDoesNotParkTheAggregateAgain(
 	t *testing.T,
 ) {
@@ -13511,8 +13471,6 @@ func TestDeliveryErrorHandlerPanicDoesNotReleaseTheHold(
 	}
 }
 
-// Whoever is told that a delivery gave up may act on it at once, for instance by
-// resuming; the aggregate must already be parked by then.
 func TestGiveUp_TheAggregateIsParkedBeforeTheErrorHandlerIsTold(
 	t *testing.T,
 ) {
@@ -14258,8 +14216,6 @@ func TestDispatch_OrderingGuarantee(
 	}
 }
 
-// agg-fast, dispatched second, finishes before agg-slow, which has a 50ms
-// delay.
 func TestDispatch_CrossAggregateIndependence(
 	t *testing.T,
 ) {
@@ -14476,8 +14432,6 @@ func TestDispatch_PublishErrorHandler(
 	}
 }
 
-// Three aggregates interleave five events each, and each aggregate sees its
-// own events in order.
 func TestDispatch_MultipleAggregatesOrdered(
 	t *testing.T,
 ) {
@@ -14523,7 +14477,6 @@ func TestDispatch_MultipleAggregatesOrdered(
 	}
 }
 
-// Events of one aggregate dispatched concurrently are each delivered once.
 func TestDispatch_ConcurrentSameAggregate(
 	t *testing.T,
 ) {
@@ -14575,8 +14528,6 @@ func TestDispatch_ConcurrentSameAggregate(
 	}
 }
 
-// A panic while handling the first event does not stop the second from being
-// delivered.
 func TestDispatch_WorkerSurvivesPanic(
 	t *testing.T,
 ) {
@@ -14721,8 +14672,6 @@ func TestEnqueue_AckErrorIsReported(
 	}
 }
 
-// A job enqueued while the idle worker is about to retire must still run: each
-// enqueue sleeps the idle timeout first, to land right on the idle deadline.
 func TestEnqueue_NeverStrandedByIdleWorkerRetirement(
 	t *testing.T,
 ) {
@@ -14742,8 +14691,6 @@ func TestEnqueue_NeverStrandedByIdleWorkerRetirement(
 	}
 }
 
-// A panic of the dispatcher itself is reported, and the worker survives and
-// keeps delivering.
 func TestHandle_DispatcherPanicIsReportedNotSwallowed(
 	t *testing.T,
 ) {
@@ -14796,8 +14743,6 @@ func TestHandle_DispatcherPanicIsReportedNotSwallowed(
 	}
 }
 
-// A failing live subscriber must not skip the durable delivery: the next
-// event of the aggregate would otherwise overtake this one.
 func TestEnqueue_DurableDeliveryStillAcksWhenBusRejectsEvent(
 	t *testing.T,
 ) {
@@ -15132,8 +15077,6 @@ func TestPublishErrorHandlerPanicDoesNotCrashTheWorker(
 	)
 }
 
-// A job popped just before a Forget supersedes its aggregate belongs to the old
-// generation: it must not run its retry loop ahead of the marker.
 func TestSupersede_AfterThePopStillSkipsTheSupersededJob(
 	t *testing.T,
 ) {
@@ -15280,7 +15223,6 @@ func TestAckFailure_TheAggregateIsParkedBeforeThePublishErrorHandlerIsTold(
 	}
 }
 
-// If the ack of v1 fails, v2 must not be delivered and acknowledged ahead of it.
 func TestAckFailure_ParksTheAggregateSoALaterEventDoesNotOvertake(
 	t *testing.T,
 ) {

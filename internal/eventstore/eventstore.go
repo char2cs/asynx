@@ -1,16 +1,3 @@
-// Package eventstore provides the persistence layer for Asynx aggregates.
-//
-// EventStore[T] coordinates three sub-modules:
-//   - reader   — optimistic snapshot + delta warm path, full replay cold path
-//   - writer   — RFC 6902 full-state diffs, conditional snapshots
-//   - replayer — sequential patch application, schema upcasting, auto-snapshots
-//
-// All operations are stateless (no in-memory cache). Storage is the single
-// source of truth; operators may layer caching (Redis, Memcached) on top.
-//
-// Events and snapshots use different contracts: models.Store is an append-only
-// versioned stream, models.SnapshotStore is a single upserted cell per
-// aggregate holding only the newest snapshot.
 package eventstore
 
 import (
@@ -172,9 +159,6 @@ func (es *EventStore[T]) WriteTx(
 	cmd asynxmd.Command[T],
 	hook TxHook[T],
 ) (asynxmd.Event[T], error) {
-	// Load state and its version together so the command is validated and the
-	// event is appended against the same version. ErrNotFound yields version 0,
-	// so a first write appends at version 1.
 	current, loadedVersion, err := es.reader.Load(
 		ctx,
 		cmd.AggregateID(),

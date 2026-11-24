@@ -832,8 +832,6 @@ func TestPublishErrorHandler_NilHandlerDoesNotPanic(
 	d.WaitIdle()
 }
 
-// recordingBus is a minimal Bus mock that records PublishSync calls and
-// optionally returns an error or invokes a callback.
 type recordingBus[T any] struct {
 	mu             sync.Mutex
 	count          int
@@ -1526,8 +1524,6 @@ func TestExecute_ValidationErrorPassesThroughUnwrapped(
 	}
 }
 
-// A reaction handler that sends commands back to its own aggregate must not
-// deadlock against commands queued behind a slow handler.
 func TestExecute_ReactionToOwnAggregateDoesNotDeadlockUnderBacklog(
 	t *testing.T,
 ) {
@@ -1882,8 +1878,6 @@ func TestExecute_WaitingOnAParkedAggregateReportsNoHandlerRan(
 	}
 }
 
-// A command committed but not queued must not let the next one be delivered
-// ahead of it.
 func TestExecute_EnqueueFailureAfterCommitParksTheAggregate(
 	t *testing.T,
 ) {

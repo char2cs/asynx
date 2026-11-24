@@ -1,7 +1,3 @@
-// Package store provides an in-memory implementation of models.Store,
-// intended for tests and examples. Data is not persisted across restarts;
-// production deployments should implement models.Store over a durable backend
-// and prove it with store/storetest.
 package store
 
 import (
@@ -48,8 +44,6 @@ type Memory interface {
 }
 
 type memory struct {
-	// txMu serializes every mutation (transactions and acks) so an undo log
-	// can restore state without clobbering a concurrent writer.
 	txMu sync.Mutex
 
 	mu         sync.RWMutex
@@ -300,7 +294,6 @@ func toBlobs(
 	return result
 }
 
-// memoryTx applies writes immediately and records how to undo them.
 type memoryTx struct {
 	s    *memory
 	undo []func()

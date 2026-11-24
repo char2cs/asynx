@@ -1,5 +1,3 @@
-// Package jobs holds the unit of work the default dispatcher moves through its
-// queues: one event, its delivery context and its completion state.
 package jobs
 
 import (

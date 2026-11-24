@@ -15,8 +15,6 @@ import (
 	"github.com/char2cs/asynx/models"
 )
 
-// captureStderr redirects os.Stderr to a pipe, runs f, then returns what was written.
-// f must be fully synchronous (or the caller must synchronize externally before calling).
 func captureStderr(
 	t *testing.T,
 	f func(),
@@ -67,9 +65,6 @@ func newJob(
 	}
 }
 
-// --- ExecuteHandler ---
-
-// 1. Normal handler — called, wg.Done fires.
 func TestExecuteHandler_Normal(
 	t *testing.T,
 ) {
@@ -103,7 +98,6 @@ func TestExecuteHandler_Normal(
 	}
 }
 
-// 2. Panic, no fallback, timeout=0 — OnHandlerPanic fires, wg.Done fires.
 func TestExecuteHandler_PanicNoFallbackNoTimeout(
 	t *testing.T,
 ) {
@@ -153,7 +147,6 @@ func TestExecuteHandler_PanicNoFallbackNoTimeout(
 	}
 }
 
-// 3. Panic, fallback set, timeout=0 — fallback called.
 func TestExecuteHandler_PanicWithFallback(
 	t *testing.T,
 ) {
@@ -197,7 +190,6 @@ func TestExecuteHandler_PanicWithFallback(
 	}
 }
 
-// 4. Panic with timeout set — caught in inner goroutine, OnHandlerPanic IS called, wg.Done fires.
 func TestExecuteHandler_PanicWithTimeout(
 	t *testing.T,
 ) {
@@ -209,7 +201,7 @@ func TestExecuteHandler_PanicWithTimeout(
 			panic("hidden")
 		},
 		nil,
-		5*time.Second, // long timeout so we don't time out
+		5*time.Second,
 	)
 
 	var wg sync.WaitGroup
@@ -237,7 +229,6 @@ func TestExecuteHandler_PanicWithTimeout(
 	}
 }
 
-// 4a. Both primary and fallback panic — process must not crash, wg.Done fires.
 func TestExecuteHandler_DoublePanic(
 	t *testing.T,
 ) {
@@ -271,10 +262,8 @@ func TestExecuteHandler_DoublePanic(
 			wg.Wait()
 		},
 	)
-	// If wg.Wait() returns, wg.Done fired — test passes.
 }
 
-// 4b. Both primary and fallback panic — OnPanic callback fires twice.
 func TestExecuteHandler_DoublePanic_BothLogged(
 	t *testing.T,
 ) {
@@ -323,9 +312,6 @@ func TestExecuteHandler_DoublePanic_BothLogged(
 	}
 }
 
-// --- ExecuteWithTimeout ---
-
-// 5. timeout=0 — inline execution.
 func TestExecuteWithTimeout_ZeroTimeout(
 	t *testing.T,
 ) {
@@ -348,7 +334,6 @@ func TestExecuteWithTimeout_ZeroTimeout(
 	}
 }
 
-// 6. Handler finishes before timeout.
 func TestExecuteWithTimeout_FinishesBeforeTimeout(
 	t *testing.T,
 ) {
@@ -377,7 +362,6 @@ func TestExecuteWithTimeout_FinishesBeforeTimeout(
 	}
 }
 
-// 7. Handler times out — onTimeout fires.
 func TestExecuteWithTimeout_HandlerTimesOut(
 	t *testing.T,
 ) {
@@ -412,11 +396,9 @@ func TestExecuteWithTimeout_HandlerTimesOut(
 	}
 }
 
-// 8. Handler panics inside goroutine — inner recover catches it, onPanic=nil → returns cleanly.
 func TestExecuteWithTimeout_PanicInsideGoroutine(
 	t *testing.T,
 ) {
-	// onPanic=nil: panic is recovered, done channel is closed, returns cleanly.
 	exec.ExecuteWithTimeout(
 		context.Background(),
 		func(
@@ -430,10 +412,8 @@ func TestExecuteWithTimeout_PanicInsideGoroutine(
 		nil,
 		nil,
 	)
-	// If we reach here without a crash, the test passes.
 }
 
-// 8a. Handler panics inside goroutine with onPanic set — callback is called.
 func TestExecuteWithTimeout_PanicCallsOnPanic(
 	t *testing.T,
 ) {
@@ -473,7 +453,6 @@ func TestExecuteWithTimeout_PanicCallsOnPanic(
 	}
 }
 
-// 9a. Custom OnPanic callback used instead of stderr.
 func TestExecuteHandler_CustomPanicCallback(
 	t *testing.T,
 ) {
@@ -536,7 +515,6 @@ func TestExecuteHandler_CustomPanicCallback(
 	}
 }
 
-// 9a. No OnTimeout set — default OnHandlerTimeout writes to stderr.
 func TestExecuteHandler_DefaultTimeoutCallback(
 	t *testing.T,
 ) {
@@ -555,7 +533,6 @@ func TestExecuteHandler_DefaultTimeoutCallback(
 		Timeout: 20 * time.Millisecond,
 		Event:   ev("SlowEvent"),
 		Ctx:     context.Background(),
-		// OnTimeout intentionally nil — default OnHandlerTimeout should fire.
 	}
 
 	var wg sync.WaitGroup
@@ -582,7 +559,6 @@ func TestExecuteHandler_DefaultTimeoutCallback(
 	}
 }
 
-// 9b. Custom OnTimeout callback used instead of stderr.
 func TestExecuteHandler_CustomTimeoutCallback(
 	t *testing.T,
 ) {
@@ -644,9 +620,6 @@ func TestExecuteHandler_CustomTimeoutCallback(
 	}
 }
 
-// --- OnHandlerPanic / OnHandlerTimeout (smoke) ---
-
-// 9. OnHandlerPanic — verifies stderr message format.
 func TestOnHandlerPanic_Smoke(
 	t *testing.T,
 ) {
@@ -697,7 +670,6 @@ func TestOnHandlerPanic_Smoke(
 	}
 }
 
-// 10. OnHandlerTimeout — verifies stderr message format.
 func TestOnHandlerTimeout_Smoke(
 	t *testing.T,
 ) {
@@ -742,7 +714,6 @@ func TestOnHandlerTimeout_Smoke(
 	}
 }
 
-// 11. Handler panics and onPanic callback itself panics — process returns cleanly, no goroutine hang.
 func TestExecuteWithTimeout_PanicCallbackPanics(
 	t *testing.T,
 ) {
@@ -765,11 +736,8 @@ func TestExecuteWithTimeout_PanicCallbackPanics(
 		nil,
 	)
 	close(done)
-	// If we reach here without hanging or crashing, the test passes.
 }
 
-// A panic in the panic or timeout observer is swallowed instead of crashing the
-// process from a goroutine nobody recovers.
 func TestExecuteHandler_PanicInTheObserversIsSwallowed(
 	t *testing.T,
 ) {
@@ -874,8 +842,6 @@ func noopJob() *exec.HandlerJob[string] {
 	}
 }
 
-// BenchmarkExecuteHandler_NoTimeout measures the cost of spawning a goroutine,
-// running a no-op handler inline (timeout=0), and calling wg.Done.
 func BenchmarkExecuteHandler_NoTimeout(
 	b *testing.B,
 ) {
@@ -892,8 +858,6 @@ func BenchmarkExecuteHandler_NoTimeout(
 	}
 }
 
-// BenchmarkExecuteHandler_WithTimeout measures the full timeout path:
-// inner goroutine spawn + timer + done channel + select.
 func BenchmarkExecuteHandler_WithTimeout(
 	b *testing.B,
 ) {
@@ -911,12 +875,8 @@ func BenchmarkExecuteHandler_WithTimeout(
 	}
 }
 
-// stderrMu guards global os.Stderr access in benchmarks.
 var stderrMu sync.Mutex
 
-// BenchmarkExecuteHandler_PanicRecovery measures the cost of the deferred
-// recover path: panic + stack unwind + OnHandlerPanic. Stderr is redirected
-// once for the whole run to avoid polluting benchmark output.
 func BenchmarkExecuteHandler_PanicRecovery(
 	b *testing.B,
 ) {
@@ -966,7 +926,6 @@ func BenchmarkExecuteHandler_PanicRecovery(
 	}
 }
 
-// BenchmarkExecuteWithTimeout_ZeroTimeout measures inline (no goroutine) execution.
 func BenchmarkExecuteWithTimeout_ZeroTimeout(
 	b *testing.B,
 ) {
@@ -989,8 +948,6 @@ func BenchmarkExecuteWithTimeout_ZeroTimeout(
 	}
 }
 
-// BenchmarkExecuteWithTimeout_WithTimer measures the goroutine + timer + channel
-// machinery when the handler completes well before the deadline.
 func BenchmarkExecuteWithTimeout_WithTimer(
 	b *testing.B,
 ) {

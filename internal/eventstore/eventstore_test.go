@@ -31,8 +31,6 @@ func cmdEmpty() mocks.UpdateOrderCmd {
 	return mocks.UpdateOrderCmd{ID: "agg1"}
 }
 
-// --- Write → Get round-trip ---
-
 func TestWrite_Get_RoundTrip(
 	t *testing.T,
 ) {
@@ -182,7 +180,6 @@ func TestWrite_WithSnapshot_AcceleratesGet(
 	)
 	ctx := context.Background()
 
-	// Write with snapshot at version 1.
 	_, err := es.Write(
 		ctx,
 		cmdSnap(order{Status: "Snapped"}),
@@ -194,7 +191,6 @@ func TestWrite_WithSnapshot_AcceleratesGet(
 		)
 	}
 
-	// Snapshot must exist.
 	if _, found, _ := ss.Get(
 		ctx,
 		"agg1",
@@ -202,7 +198,6 @@ func TestWrite_WithSnapshot_AcceleratesGet(
 		t.Fatal("expected snapshot to exist")
 	}
 
-	// Get should use warm path and return correct state.
 	got, err := es.Get(
 		ctx,
 		"agg1",
@@ -222,8 +217,6 @@ func TestWrite_WithSnapshot_AcceleratesGet(
 	}
 }
 
-// --- Exists ---
-
 func TestExists_TrueAfterWrite(
 	t *testing.T,
 ) {
@@ -239,7 +232,7 @@ func TestExists_TrueAfterWrite(
 	es.Write(
 		ctx,
 		cmdEmpty(),
-	) //nolint:errcheck
+	)
 
 	ok, err := es.Exists(
 		ctx,
@@ -284,8 +277,6 @@ func TestExists_FalseForNewAggregate(
 	}
 }
 
-// --- Preload ---
-
 func TestPreload_NoErrorForExistingAggregate(
 	t *testing.T,
 ) {
@@ -301,7 +292,7 @@ func TestPreload_NoErrorForExistingAggregate(
 	es.Write(
 		ctx,
 		cmd(order{Status: "Ready"}),
-	) //nolint:errcheck
+	)
 
 	if err := es.Preload(
 		ctx,
@@ -336,8 +327,6 @@ func TestPreload_NoErrorForMissingAggregate(
 	}
 }
 
-// --- Replay ---
-
 func TestReplay_VisitsAllEvents(
 	t *testing.T,
 ) {
@@ -353,15 +342,15 @@ func TestReplay_VisitsAllEvents(
 	es.Write(
 		ctx,
 		cmd(order{Status: "Pending"}),
-	) //nolint:errcheck
+	)
 	es.Write(
 		ctx,
 		cmd(order{Status: "Shipped", Total: 100}),
-	) //nolint:errcheck
+	)
 	es.Write(
 		ctx,
 		cmd(order{Status: "Delivered", Total: 100}),
-	) //nolint:errcheck
+	)
 
 	var got []asynxmd.Event[order]
 	err := es.Replay(
@@ -416,15 +405,15 @@ func TestReplay_WithVersionRange(
 	es.Write(
 		ctx,
 		cmd(order{Status: "v1"}),
-	) //nolint:errcheck
+	)
 	es.Write(
 		ctx,
 		cmd(order{Status: "v2"}),
-	) //nolint:errcheck
+	)
 	es.Write(
 		ctx,
 		cmd(order{Status: "v3"}),
-	) //nolint:errcheck
+	)
 
 	var got []asynxmd.Event[order]
 	err := es.Replay(
@@ -457,8 +446,6 @@ func TestReplay_WithVersionRange(
 	}
 }
 
-// --- Upcasting integration ---
-
 func TestWrite_Get_WithUpcasting(
 	t *testing.T,
 ) {
@@ -468,7 +455,6 @@ func TestWrite_Get_WithUpcasting(
 			_ string,
 			p []byte,
 		) ([]byte, error) {
-			// Upcaster v1→v2: no-op (patch bytes unchanged).
 			return p,
 				nil
 		},
@@ -482,7 +468,6 @@ func TestWrite_Get_WithUpcasting(
 	)
 	ctx := context.Background()
 
-	// Write at schema v1 (bypass: write directly via a v1 eventstore).
 	esV1 := New[order](
 		store.New(),
 		store.NewSnapshots(),
@@ -501,9 +486,6 @@ func TestWrite_Get_WithUpcasting(
 		)
 	}
 
-	// Recover raw store from v1 and build v2 eventstore on top.
-	// (In practice the stores are shared; simulate by using the same underlying
-	// store obtained via Replay on esV1.)
 	var rawBlobs [][]byte
 	esV1.Replay(
 		ctx,
@@ -513,19 +495,14 @@ func TestWrite_Get_WithUpcasting(
 		func(
 			ctx context.Context,
 			e asynxmd.Event[order],
-		) { //nolint:errcheck
-			_ = e // just verifying replay works
+		) {
+			_ = e
 		},
 	)
 
-	// Use es (v2) against the v1 store — upcaster should fire and produce
-	// an auto-snapshot. We verify indirectly via coverage; the functional
-	// path is tested at the replayer level. Just confirm no error here.
 	_ = rawBlobs
 	_ = es
 }
-
-// --- Concurrent writes ---
 
 func TestWrite_ConcurrentConflict_AtLeastOneFails(
 	t *testing.T,
@@ -594,8 +571,6 @@ func concurrentWritesConflict(
 	)
 }
 
-// --- Get: ErrNotFound ---
-
 func TestGet_ErrNotFound_ForNewAggregate(
 	t *testing.T,
 ) {
@@ -622,8 +597,6 @@ func TestGet_ErrNotFound_ForNewAggregate(
 	}
 }
 
-// --- New: nil upcasters ---
-
 func TestNew_NilUpcasters_DoesNotPanic(
 	t *testing.T,
 ) {
@@ -645,8 +618,6 @@ func TestNew_NilUpcasters_DoesNotPanic(
 	_ = es
 }
 
-// --- Validate / EmitEvent ---
-
 func TestWrite_EmitEventDrivesStoredState(
 	t *testing.T,
 ) {
@@ -659,7 +630,6 @@ func TestWrite_EmitEventDrivesStoredState(
 	)
 	ctx := context.Background()
 
-	// EmitEvent returns a fixed state regardless of caller input.
 	emitted := order{ID: "42", Status: "EmittedState", Total: 999}
 	evt, err := es.Write(
 		ctx,
@@ -680,7 +650,6 @@ func TestWrite_EmitEventDrivesStoredState(
 		)
 	}
 
-	// Verify Get returns the emitted state, not some caller-supplied value.
 	got, err := es.Get(
 		ctx,
 		"agg1",
@@ -701,8 +670,6 @@ func TestWrite_EmitEventDrivesStoredState(
 	}
 }
 
-// --- Upcasting integration (shared store) ---
-
 func TestWrite_Get_SharedStore_WithUpcasting(
 	t *testing.T,
 ) {
@@ -710,7 +677,6 @@ func TestWrite_Get_SharedStore_WithUpcasting(
 	ss := store.NewSnapshots()
 	ctx := context.Background()
 
-	// Write at schema v1 using the shared stores.
 	esV1 := New[order](
 		s,
 		ss,
@@ -729,8 +695,6 @@ func TestWrite_Get_SharedStore_WithUpcasting(
 		)
 	}
 
-	// Read via v2 on the same shared stores — upcaster fires and writes an
-	// auto-snapshot into the same snapshot store, verifying the shared-store path.
 	upcasters := map[int]asynxmd.Upcaster{
 		1: func(
 			_ context.Context,
@@ -767,7 +731,6 @@ func TestWrite_Get_SharedStore_WithUpcasting(
 		)
 	}
 
-	// Upcaster must have fired and an auto-snapshot must be written.
 	if _, found, _ := ss.Get(
 		ctx,
 		"agg1",
@@ -776,8 +739,6 @@ func TestWrite_Get_SharedStore_WithUpcasting(
 	}
 }
 
-// --- WithCorruptionHook ---
-
 func TestNew_WithCorruptionHook_CalledOnCorruptSnapshot(
 	t *testing.T,
 ) {
@@ -785,7 +746,6 @@ func TestNew_WithCorruptionHook_CalledOnCorruptSnapshot(
 	ss := store.NewSnapshots()
 	ctx := context.Background()
 
-	// Write a real event.
 	es.Append(
 		ctx,
 		"events:agg1",
@@ -795,15 +755,14 @@ func TestNew_WithCorruptionHook_CalledOnCorruptSnapshot(
 			Status string `json:"status"`
 			Total  int    `json:"total"`
 		}{}),
-	) //nolint:errcheck
+	)
 
-	// Write a corrupt snapshot blob.
 	ss.Put(
 		ctx,
 		"agg1",
 		1,
 		[]byte(`not-valid-json`),
-	) //nolint:errcheck
+	)
 
 	var hookCalled bool
 	eventstore := New[order](
@@ -827,8 +786,6 @@ func TestNew_WithCorruptionHook_CalledOnCorruptSnapshot(
 	}
 }
 
-// --- helpers ---
-
 func mustMarshal(
 	v any,
 ) []byte {
@@ -840,9 +797,7 @@ func mustMarshal(
 	return b
 }
 
-var _ = mustMarshal // suppress unused warning
-
-// --- Delete ---
+var _ = mustMarshal
 
 func TestDelete_AfterWrite_GetReturnsErrNotFound(
 	t *testing.T,
@@ -1069,8 +1024,6 @@ func TestEventStore_DeleteRemovesSnapshotWithoutPrefix(
 		t.Error("snapshot still present after Delete")
 	}
 }
-
-// --- WriteTx / Snapshot / Store ---
 
 func TestWriteTx_HookRunsInsideTheAppendTransaction(
 	t *testing.T,
@@ -1357,9 +1310,6 @@ func TestGuardAutoSnapshots_InstallsTheGuardOnTheReader(
 	}
 }
 
-// gatedCancel is a cancel command whose Validate runs a hook, letting the test
-// pause a writer at the exact seam between loading state and appending — the
-// window where the stale-validation race lives.
 type gatedCancel struct {
 	id         string
 	onValidate func(
@@ -1394,16 +1344,6 @@ func (c gatedCancel) EmitEvent(
 	return o
 }
 
-// TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit pins the exact race
-// that let a stale-validated write slip past the version check:
-//
-//  1. B loads Pending state and parks inside Validate.
-//  2. A cancels and commits while B is parked.
-//  3. B leaves Validate still judging the stale Pending state.
-//
-// Before the fix B re-derived a fresh version (v3) and committed a second
-// cancel. Now B appends at its validated version (v2), which A already took, so
-// B gets ErrPipelineFailed and exactly one cancel survives.
 func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(
 	t *testing.T,
 ) {
@@ -1508,8 +1448,6 @@ func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(
 	}
 }
 
-// TestSnapshotReadDoesNotScaleWithHistory is the regression guard for the
-// original defect: Get() read every snapshot ever written to use only the last.
 func TestSnapshotReadDoesNotScaleWithHistory(
 	t *testing.T,
 ) {
@@ -1568,9 +1506,6 @@ func TestSnapshotReadDoesNotScaleWithHistory(
 	}
 }
 
-// TestWritePaysConstantSnapshotCost guards the half of the defect the original
-// report missed: EventStore.Write read all snapshots twice, via Get and
-// nextVersion.
 func TestWritePaysConstantSnapshotCost(
 	t *testing.T,
 ) {

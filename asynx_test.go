@@ -19,7 +19,6 @@ import (
 	"github.com/char2cs/asynx/store"
 )
 
-// publishWaiter is satisfied by *asynxImpl[T] via its WaitPublish method.
 type publishWaiter interface {
 	WaitPublish()
 }
@@ -49,8 +48,6 @@ func newInstance(
 	return instance
 }
 
-// Unit tests
-
 func TestSend_Success(
 	t *testing.T,
 ) {
@@ -72,7 +69,7 @@ func TestSend_ValidationFails(
 	t *testing.T,
 ) {
 	instance := newInstance(t)
-	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: -5.0} // Invalid total
+	cmd := mocks.CreateOrderCmd{ID: "order-1", Total: -5.0}
 	_, err := instance.Send(
 		context.Background(),
 		cmd,
@@ -487,8 +484,6 @@ func TestShutdown_Twice(
 	}
 }
 
-// Integration tests
-
 func TestIntegration_FullCommandCycle(
 	t *testing.T,
 ) {
@@ -527,7 +522,6 @@ func TestIntegration_FullCommandCycle(
 		)
 	}
 
-	// Wait for async publication to complete
 	waitPublish(
 		t,
 		instance,
@@ -651,7 +645,6 @@ func TestIntegration_ConcurrentCommandsDifferentAggregates(
 		}
 	}
 
-	// Verify all aggregates were created
 	for i := 0; i < numGoroutines; i++ {
 		orderID := fmt.Sprintf(
 			"order-%d",
@@ -848,7 +841,6 @@ func TestSendWait_ReturnsNewAndPreviousAggregate(
 ) {
 	instance := newInstance(t)
 
-	// Create first
 	cmd1 := mocks.CreateOrderCmd{ID: "ew-agg", Total: 100.0}
 	_, err := instance.SendWait(
 		context.Background(),
@@ -861,7 +853,6 @@ func TestSendWait_ReturnsNewAndPreviousAggregate(
 		)
 	}
 
-	// Update — event should carry both old and new aggregate
 	cmd2 := mocks.UpdateOrderCmd{
 		ID:       "ew-agg",
 		NewState: mocks.Order{ID: "ew-agg", Total: 200.0, Status: "Updated"},
@@ -920,7 +911,6 @@ func TestSendWait_HandlersCompleteBeforeReturn(
 		)
 	}
 
-	// No waitPublish needed — handlers must be done when SendWait returns.
 	if handlerDone.Load() == 0 {
 		t.Error("handler not complete when SendWait returned")
 	}
@@ -1038,7 +1028,6 @@ func TestIntegration_SendWaitThenGet(
 		)
 	}
 
-	// State is immediately consistent — no WaitPublish needed.
 	state, err := instance.Get(
 		context.Background(),
 		"ew-get",
@@ -1065,8 +1054,6 @@ func TestIntegration_SendWaitThenGet(
 		)
 	}
 }
-
-// --- Forget ---
 
 func TestForget_AggregateDoesNotExist_ReturnsErrValidation(
 	t *testing.T,
@@ -1230,20 +1217,17 @@ func TestForget_SerializedAfterSend(
 		)
 	}
 
-	// Enqueue an update and a Forget — Forget must see the updated state.
-	// The Send here is best-effort; it relies on QueueDepth: 1000 in newInstance
-	// to avoid ErrQueueFull. If the update were lost, gotTotal would be 100.0, not 200.0.
 	updated := mocks.Order{ID: "order-1", Total: 200.0, Status: "Updated"}
 	instance.Send(
 		ctx,
 		mocks.UpdateOrderCmd{ID: "order-1", NewState: updated},
-	) //nolint:errcheck
+	)
 
 	var gotTotal float64
 	instance.OnForget(func(
 		_ context.Context,
 		e models.Event[mocks.Order],
-	) { //nolint:errcheck
+	) {
 		gotTotal = e.Aggregate.Total
 	})
 
@@ -1265,8 +1249,6 @@ func TestForget_SerializedAfterSend(
 	}
 }
 
-// deleteErrStore wraps store.Memory and injects a one-shot error on the next
-// DeleteStream call made inside a transaction.
 type deleteErrStore struct {
 	store.Memory
 	deleteErr error
@@ -1385,11 +1367,6 @@ func TestForget_ConcurrentForget_SecondReturnsErrValidation(
 
 	wg.Wait()
 
-	// At least one call must fail: ErrValidation (aggregate already gone),
-	// ErrForgetInProgress (the other Forget is still running) or
-	// ErrPipelineFailed (concurrent write conflict). Both callers succeeding
-	// would mean two tombstone events were written without a conflict, which is
-	// also safe (aggregate is still erased), but we verify the aggregate is gone.
 	successCount := 0
 	for _, err := range errs {
 		if err == nil {
@@ -1413,7 +1390,6 @@ func TestForget_ConcurrentForget_SecondReturnsErrValidation(
 		}
 	}
 
-	// Regardless of success/failure split, the aggregate must be erased.
 	_, getErr := instance.Get(
 		ctx,
 		"order-1",
@@ -1483,8 +1459,6 @@ func TestOnForget_Unsubscribe_StopsHandler(
 		)
 	}
 }
-
-// --- Listen ---
 
 func TestListen_EmptyPattern(
 	t *testing.T,
@@ -1602,7 +1576,7 @@ func TestListen_UnsubIsIdempotent(
 	}
 
 	unsub()
-	unsub() // should not panic, should not error
+	unsub()
 }
 
 func TestListen_CountAutoCloses(
@@ -1653,9 +1627,6 @@ func TestListen_CountAutoCloses(
 	}
 }
 
-// Regression: unsub() called by the consumer the moment it receives the last
-// event must not double-close the channel while the handler is still inside
-// its critical section (between the send and its own close).
 func TestListen_UnsubRightAfterLastEventDoesNotDoubleClose(
 	t *testing.T,
 ) {
@@ -1701,7 +1672,7 @@ func TestListen_UnsubRightAfterLastEventDoesNotDoubleClose(
 
 				select {
 				case <-ch:
-					unsub() // consumer returns immediately, like SubscribeWait's defer
+					unsub()
 				case <-time.After(5 * time.Second):
 					t.Error("timed out waiting for event")
 					unsub()
@@ -1816,12 +1787,6 @@ func TestListen_Unbounded_ReceivesMultipleEvents(
 func TestListen_UsesTopicPattern(
 	t *testing.T,
 ) {
-	// "Order.*" uses Topic()-style dot-segment wildcards.
-	// Topic("Order.*") → ^Order\..*$ which matches "OrderCreated" (no leading dot needed).
-	// A bare Subscribe("Order.*") would use it as a regex directly (matching the same),
-	// but what matters is that Listen internally calls Topic() to translate the pattern.
-	// We use "*" here: Topic("*") → ^.*$ which matches any event name — verifying
-	// that Listen uses Topic() because "*" alone is not valid regex (it would panic).
 	instance := newInstance(t)
 
 	ch, unsub, err := instance.Listen(
@@ -1864,8 +1829,6 @@ func TestListen_UsesTopicPattern(
 func TestListen_CountOverflow_DoesNotBlock(
 	t *testing.T,
 ) {
-	// When count=1 and multiple events are published, only the first is sent.
-	// The second event must not block the publisher (handler returns early).
 	instance := newInstance(t)
 
 	ch, unsub, err := instance.Listen(
@@ -1881,7 +1844,6 @@ func TestListen_CountOverflow_DoesNotBlock(
 
 	defer unsub()
 
-	// First event — fills the channel and triggers auto-close.
 	if _, err := instance.SendWait(
 		context.Background(),
 		mocks.CreateOrderCmd{ID: "ovf-1", Total: 1.0},
@@ -1892,7 +1854,6 @@ func TestListen_CountOverflow_DoesNotBlock(
 		)
 	}
 
-	// Second event — handler must not push to closed channel.
 	if _, err := instance.SendWait(
 		context.Background(),
 		mocks.CreateOrderCmd{ID: "ovf-2", Total: 2.0},
@@ -1903,7 +1864,6 @@ func TestListen_CountOverflow_DoesNotBlock(
 		)
 	}
 
-	// Drain
 	<-ch
 	if _, ok := <-ch; ok {
 		t.Fatal("expected channel closed")
@@ -1913,12 +1873,6 @@ func TestListen_CountOverflow_DoesNotBlock(
 func TestListen_CountOverflowConcurrent_GuardsEnforced(
 	t *testing.T,
 ) {
-	// Exercises the concurrent-overflow branches: count=1 with many concurrent
-	// publishers. Because handlers for different aggregates run in separate
-	// goroutines (the bus spawns one goroutine per subscription per event), two
-	// handlers can overlap: both load received=0 (< count=1) and pass the first
-	// guard, but only n=1 is ≤ count; goroutines where n>1 hit the second guard.
-	// Repeating across iterations makes it highly likely to hit both guards.
 	for iter := range 10 {
 		func() {
 			instance := newInstance(t)
@@ -1938,7 +1892,6 @@ func TestListen_CountOverflowConcurrent_GuardsEnforced(
 
 			defer unsub()
 
-			// Fire many events concurrently before auto-unsubscribe can remove the sub.
 			const total = 16
 			var wg sync.WaitGroup
 			for i := range total {
@@ -1949,7 +1902,7 @@ func TestListen_CountOverflowConcurrent_GuardsEnforced(
 					defer wg.Done()
 					instance.Send(
 						context.Background(),
-						mocks.CreateOrderCmd{ //nolint:errcheck
+						mocks.CreateOrderCmd{
 							ID: fmt.Sprintf(
 								"ovfc-%d-%d",
 								iter,
@@ -1967,7 +1920,6 @@ func TestListen_CountOverflowConcurrent_GuardsEnforced(
 				instance,
 			)
 
-			// Channel must yield exactly 1 event, then close.
 			got := 0
 			deadline := time.After(2 * time.Second)
 			for {
@@ -2002,8 +1954,6 @@ func TestListen_CountOverflowConcurrent_GuardsEnforced(
 func TestListen_SubscribeError_ReturnsError(
 	t *testing.T,
 ) {
-	// If the bus is closed (after Shutdown), Subscribe returns ErrBusClosed.
-	// Listen must propagate that error and return nil channel.
 	s := store.New()
 	instance, err := asynx.New[mocks.Order]().WithEventStore(s).WithSnapshotStore(store.NewSnapshots()).Build()
 	if err != nil {
@@ -2032,7 +1982,6 @@ func TestListen_SubscribeError_ReturnsError(
 func TestListen_NegativeCount_TreatedAsZero(
 	t *testing.T,
 ) {
-	// Document: negative count behaves like 0 (unbounded)
 	instance := newInstance(t)
 	ch, unsub, err := instance.Listen(
 		"OrderCreated",
@@ -2047,7 +1996,6 @@ func TestListen_NegativeCount_TreatedAsZero(
 
 	defer unsub()
 
-	// Channel should not be auto-closing — send 2 events, both must arrive.
 	for i := range 2 {
 		cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf(
 			"neg-%d",
@@ -2087,13 +2035,6 @@ func TestListen_NegativeCount_TreatedAsZero(
 	}
 }
 
-// TestListen_BoundedRace_NOverCount exercises the n > count early-return (branch #1):
-// with count=1 and 50 concurrent senders the auto-unsubscribe goroutine races with
-// further dispatches, so some handlers observe n=2,3,... and return early.
-// The test also covers branch #2 (closed.Load() after sendMu.Lock()) by using count=5
-// so that multiple handlers can pass received.Add before any of them takes the lock;
-// the last one to acquire the lock after the count-th handler has set closed=true
-// returns through that guard.
 func TestListen_BoundedRace_NOverCount(
 	t *testing.T,
 ) {
@@ -2116,13 +2057,11 @@ func TestListen_BoundedRace_NOverCount(
 
 			defer unsub()
 
-			// Drain in background so the buffered channel never blocks a handler.
 			go func() {
 				for range ch {
 				}
 			}()
 
-			// Burst many concurrent events — handlers race around received.Add(1).
 			var wg sync.WaitGroup
 			for i := range 100 {
 				wg.Add(1)
@@ -2132,7 +2071,7 @@ func TestListen_BoundedRace_NOverCount(
 					defer wg.Done()
 					instance.Send(
 						context.Background(),
-						mocks.CreateOrderCmd{ //nolint:errcheck
+						mocks.CreateOrderCmd{
 							ID: fmt.Sprintf(
 								"race1-%d-%d",
 								iter,
@@ -2153,10 +2092,6 @@ func TestListen_BoundedRace_NOverCount(
 	}
 }
 
-// TestListen_BoundedRace_PostClosedGuard exercises branch #2: the closed.Load()
-// check inside sendMu. With count=5 there is a window where handlers with n<count
-// block on sendMu.Lock() while the count-th handler sets closed=true and releases
-// the lock; those handlers then enter the body and return early via the closed guard.
 func TestListen_BoundedRace_PostClosedGuard(
 	t *testing.T,
 ) {
@@ -2164,9 +2099,6 @@ func TestListen_BoundedRace_PostClosedGuard(
 		func() {
 			instance := newInstance(t)
 
-			// count=5 gives a wide window: 5 handlers can all pass received.Add
-			// before any takes the lock. Whichever takes the lock last finds
-			// closed==true (set by the count-th handler) and returns via branch #2.
 			const count = 5
 			ch, unsub, err := instance.Listen(
 				"OrderCreated",
@@ -2182,14 +2114,11 @@ func TestListen_BoundedRace_PostClosedGuard(
 
 			defer unsub()
 
-			// Drain in background.
 			go func() {
 				for range ch {
 				}
 			}()
 
-			// Burst more events than count so the n > count guard (branch #1) and
-			// the post-close guard (branch #2) both get exercised.
 			var wg sync.WaitGroup
 			for i := range 50 {
 				wg.Add(1)
@@ -2199,7 +2128,7 @@ func TestListen_BoundedRace_PostClosedGuard(
 					defer wg.Done()
 					instance.Send(
 						context.Background(),
-						mocks.CreateOrderCmd{ //nolint:errcheck
+						mocks.CreateOrderCmd{
 							ID: fmt.Sprintf(
 								"race2-%d-%d",
 								iter,
@@ -2223,10 +2152,6 @@ func TestListen_BoundedRace_PostClosedGuard(
 func TestListen_UnsubDuringHandler_BoundedReturnsCleanly(
 	t *testing.T,
 ) {
-	// Verifies the defensive `if closed.Load()` check inside sendMu.Lock() in
-	// bounded mode. The path triggers when unsub() flips `closed` after a
-	// handler has claimed an n via received.Add(1) but before it acquires sendMu.
-	// Stress with many iterations to ensure the timing window is hit.
 	for iter := 0; iter < 100; iter++ {
 		instance := newInstance(t)
 
@@ -2242,7 +2167,6 @@ func TestListen_UnsubDuringHandler_BoundedReturnsCleanly(
 			)
 		}
 
-		// Drain in background so sends don't block.
 		drained := make(chan struct{})
 		go func() {
 			for range ch {
@@ -2251,7 +2175,6 @@ func TestListen_UnsubDuringHandler_BoundedReturnsCleanly(
 			close(drained)
 		}()
 
-		// Fire several events concurrently, then immediately call unsub().
 		var wg sync.WaitGroup
 		for j := 0; j < 20; j++ {
 			wg.Add(1)
@@ -2271,18 +2194,13 @@ func TestListen_UnsubDuringHandler_BoundedReturnsCleanly(
 			}(j)
 		}
 
-		// Race unsub against the in-flight events. unsub() doesn't take sendMu,
-		// so it can flip `closed` between a handler's Add() and Lock().
 		unsub()
 		wg.Wait()
 
-		// Cleanup: ensure no goroutine is leaked.
 		<-drained
 		instance.Shutdown(context.Background())
 	}
 }
-
-// --- SubscribeWait ---
 
 func TestSubscribeWait_EmptyPattern(
 	t *testing.T,
@@ -2471,10 +2389,6 @@ func TestSubscribeWait_ConcurrentDifferentPatterns(
 func TestSubscribeWait_AutoUnsubscribes(
 	t *testing.T,
 ) {
-	// After SubscribeWait returns (event arrived), the subscription should be cleaned up.
-	// We verify this by sending a SECOND matching event and confirming it does not
-	// affect anything (no panic, no leak). Indirect — but the proper assertion is
-	// via leak-detection which is out of scope here.
 	instance := newInstance(t)
 
 	ctx, cancel := context.WithTimeout(
@@ -2500,7 +2414,6 @@ func TestSubscribeWait_AutoUnsubscribes(
 		)
 	}
 
-	// Second event after SubscribeWait returned — must not affect anything.
 	if _, err := instance.SendWait(
 		context.Background(),
 		mocks.CreateOrderCmd{ID: "auto-2", Total: 2.0},
@@ -2515,11 +2428,6 @@ func TestSubscribeWait_AutoUnsubscribes(
 func TestListen_BoundedSubID_NoLeakOnImmediateFire(
 	t *testing.T,
 ) {
-	// Stress: race the subID publication against the handler's auto-unsub.
-	// If the bug is present, repeated runs will leak subscriptions silently.
-	// We can't directly observe bus state from outside, but we can detect
-	// the leak via behavior: after Listen returns and we've consumed the one event,
-	// publishing more events on the same pattern must not invoke any "leftover" handler.
 	for iter := 0; iter < 50; iter++ {
 		instance := newInstance(t)
 
@@ -2535,7 +2443,6 @@ func TestListen_BoundedSubID_NoLeakOnImmediateFire(
 			)
 		}
 
-		// Fire immediately to race subID publication.
 		if _, err := instance.SendWait(
 			context.Background(),
 			mocks.CreateOrderCmd{ID: "leak-1", Total: 1.0},
@@ -2547,7 +2454,6 @@ func TestListen_BoundedSubID_NoLeakOnImmediateFire(
 			)
 		}
 
-		// Drain the one event.
 		select {
 		case <-ch:
 		case <-time.After(2 * time.Second):
@@ -2557,13 +2463,6 @@ func TestListen_BoundedSubID_NoLeakOnImmediateFire(
 			)
 		}
 
-		// Subscribe a *new* counting handler on the same pattern AFTER auto-unsub.
-		// If the original Listen subscription leaked, it would still be in the index;
-		// however we cannot detect that directly from the public API.
-		// Instead: confirm Listen's channel does NOT receive a second event.
-		// (The leaked subscription's handler would short-circuit on closed.Load(),
-		// so this test mostly stresses the race rather than asserting the leak —
-		// useful as a regression guard alongside the fix.)
 		if _, err := instance.SendWait(
 			context.Background(),
 			mocks.CreateOrderCmd{ID: "leak-2", Total: 1.0},
@@ -2585,7 +2484,6 @@ func TestListen_BoundedSubID_NoLeakOnImmediateFire(
 				)
 			}
 		case <-time.After(50 * time.Millisecond):
-			// Channel closed (good) or no extra send (also good)
 		}
 
 		unsub()
@@ -2596,8 +2494,6 @@ func TestListen_BoundedSubID_NoLeakOnImmediateFire(
 func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(
 	t *testing.T,
 ) {
-	// Verifies that in unbounded mode (count=0), a handler blocked on a full
-	// channel does not deadlock unsub().
 	instance := newInstance(t)
 
 	ch, unsub, err := instance.Listen(
@@ -2611,8 +2507,6 @@ func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(
 		)
 	}
 
-	// Fill the buffer (16) plus a few more events that will block in handlers.
-	// Use Send (async) so we don't block the test goroutine.
 	for i := range 25 {
 		cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf(
 			"fill-%d",
@@ -2636,7 +2530,6 @@ func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(
 		func() bool { return len(ch) == cap(ch) },
 	)
 
-	// unsub MUST return promptly even with handlers blocked.
 	done := make(chan struct{})
 	go func() {
 		unsub()
@@ -2645,12 +2538,10 @@ func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(
 
 	select {
 	case <-done:
-		// Good
 	case <-time.After(2 * time.Second):
 		t.Fatal("unsub deadlocked — handlers blocked on full channel")
 	}
 
-	// Drain whatever's in the channel — no panic, no hang.
 	drainTimeout := time.After(500 * time.Millisecond)
 	for {
 		select {
@@ -2664,11 +2555,6 @@ func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(
 func TestListen_BoundedConcurrent_DeliversAllCountEvents(
 	t *testing.T,
 ) {
-	// Regression test for close-race bug: with count > 1 and concurrent events,
-	// the n==count handler could acquire sendMu before n<count handlers and close
-	// the channel prematurely, dropping earlier events.
-	// Run multiple iterations to expose the race; the fix uses a `delivered`
-	// counter inside sendMu so close fires only after exactly `count` real sends.
 	for iter := 0; iter < 20; iter++ {
 		instance := newInstance(t)
 
@@ -2685,7 +2571,6 @@ func TestListen_BoundedConcurrent_DeliversAllCountEvents(
 			)
 		}
 
-		// Fire `count` events concurrently to maximize lock-acquisition reordering.
 		var wg sync.WaitGroup
 		for j := 0; j < count; j++ {
 			wg.Add(1)
@@ -2707,7 +2592,6 @@ func TestListen_BoundedConcurrent_DeliversAllCountEvents(
 
 		wg.Wait()
 
-		// Drain the channel — must receive exactly `count` events before close.
 		received := 0
 		drainCtx, cancel := context.WithTimeout(
 			context.Background(),
@@ -2749,25 +2633,13 @@ func TestListen_BoundedConcurrent_DeliversAllCountEvents(
 	}
 }
 
-// TestWaitPublish_NoRaceWithConcurrentDispatch reproduces the race where a pool
-// worker is still inside dispatcher.Dispatch() when WaitPublish() returns.
-//
-// The race: a goroutine enters Dispatch() and accesses d.mu/d.queues before
-// calling jobsWg.Add(1). If WaitIdle() checks idleness too early, it can
-// return while that goroutine is still inside Dispatch() accessing protected
-// fields, causing a data race.
-//
-// Run with: go test -race -run TestWaitPublish_NoRaceWithConcurrentDispatch ./...
 func TestWaitPublish_NoRaceWithConcurrentDispatch(
 	t *testing.T,
 ) {
-	// Run many iterations to catch the tight race window.
 	for iter := 0; iter < 100; iter++ {
 		func() {
 			instance := newInstance(t)
 
-			// Send many commands concurrently, waiting for all Send() calls to
-			// complete (i.e., all commands are enqueued to their pool shards).
 			const n = 50
 			var wg sync.WaitGroup
 			for i := 0; i < n; i++ {
@@ -2787,31 +2659,20 @@ func TestWaitPublish_NoRaceWithConcurrentDispatch(
 					instance.Send(
 						context.Background(),
 						cmd,
-					) //nolint:errcheck
+					)
 				}(i)
 			}
 
-			wg.Wait() // All Send() calls have returned; commands are enqueued
+			wg.Wait()
 
-			// Now some pool workers may still be inside executor.Execute() →
-			// dispatcher.Dispatch() even though Send() returned. WaitPublish()
-			// must wait for these workers to finish before returning.
-			// The race detector fires if a worker is still in Dispatch()
-			// accessing d.mu/d.queues when WaitPublish() returns.
 			waitPublish(
 				t,
 				instance,
 			)
-			// If we reach here without race detector firing, the bug is fixed.
 		}()
 	}
 }
 
-// TestWaitPublish_RaceWithAsyncReactionGoroutines reproduces the race where a
-// reaction handler spawns a goroutine that sends commands to asynx while
-// WaitPublish() is being called.
-//
-// Run with: go test -race -run TestWaitPublish_RaceWithAsyncReactionGoroutines ./...
 func TestWaitPublish_RaceWithAsyncReactionGoroutines(
 	t *testing.T,
 ) {
@@ -2819,7 +2680,6 @@ func TestWaitPublish_RaceWithAsyncReactionGoroutines(
 		func() {
 			instance := newInstance(t)
 
-			// Register a reaction that spawns a goroutine sending commands
 			var reactionStarted atomic.Int32
 			var reactionFinished atomic.Int32
 
@@ -2832,12 +2692,9 @@ func TestWaitPublish_RaceWithAsyncReactionGoroutines(
 					reactionStarted.Store(1)
 					defer func() { reactionFinished.Store(1) }()
 
-					// Spawn a goroutine that sends a command after a small delay
 					go func() {
-						// Small delay to ensure this happens while WaitPublish is being called
 						time.Sleep(1 * time.Millisecond)
 
-						// Send a new command from the reaction handler's goroutine
 						cmd := mocks.UpdateOrderCmd{
 							ID:       evt.AggregateID,
 							NewState: mocks.Order{ID: evt.AggregateID, Total: 999.0, Status: "Updated"},
@@ -2845,7 +2702,7 @@ func TestWaitPublish_RaceWithAsyncReactionGoroutines(
 						instance.Send(
 							ctx,
 							cmd,
-						) //nolint:errcheck
+						)
 					}()
 				},
 			)
@@ -2858,7 +2715,6 @@ func TestWaitPublish_RaceWithAsyncReactionGoroutines(
 
 			defer instance.Unsubscribe(handlerID)
 
-			// Send an initial command to trigger the reaction
 			cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf(
 				"race-reaction-%d",
 				iter,
@@ -2874,13 +2730,11 @@ func TestWaitPublish_RaceWithAsyncReactionGoroutines(
 				)
 			}
 
-			// Wait for publish - this is where the race should occur if unfixed
 			waitPublish(
 				t,
 				instance,
 			)
 
-			// Verify the reaction handler goroutine completed
 			if reactionStarted.Load() == 0 {
 				t.Logf(
 					"Iteration %d: reaction never started",
@@ -2958,8 +2812,6 @@ func equalVersions(
 	return true
 }
 
-// A restart after a shutdown that interrupted a retry must still deliver in
-// version order: v2 may not be delivered and acknowledged past a pending v1.
 func TestFailure_ShutdownDuringRetryKeepsVersionOrderAcrossRestart(
 	t *testing.T,
 ) {
@@ -3077,8 +2929,6 @@ func TestFailure_ShutdownDuringRetryKeepsVersionOrderAcrossRestart(
 	}
 }
 
-// One event whose handler always fails must not hold a shard worker, outlast
-// its caller's context, or keep the process from shutting down.
 func TestFailure_PoisonEventDoesNotBlockTheShardOrShutdown(
 	t *testing.T,
 ) {
@@ -3136,8 +2986,6 @@ func TestFailure_PoisonEventDoesNotBlockTheShardOrShutdown(
 		"poison attempt",
 	)
 
-	// SendWait for the poisoned aggregate waits behind the failing delivery but
-	// obeys its context.
 	wctx, cancelWait := context.WithCancel(ctx)
 	waited := make(
 		chan error,
@@ -3153,7 +3001,6 @@ func TestFailure_PoisonEventDoesNotBlockTheShardOrShutdown(
 		)
 		waited <- err
 	}()
-	// The command commits (the worker is free), then waits for its handlers.
 	eventually(
 		t,
 		"the second command to commit",
@@ -3190,7 +3037,6 @@ func TestFailure_PoisonEventDoesNotBlockTheShardOrShutdown(
 		)
 	}
 
-	// The single worker of the single shard is free for other aggregates.
 	if _, err := inst.SendWait(
 		ctx,
 		upd(
@@ -3204,8 +3050,6 @@ func TestFailure_PoisonEventDoesNotBlockTheShardOrShutdown(
 		)
 	}
 
-	// Forget of the poisoned aggregate goes through: its failing deliveries are
-	// abandoned, then the tombstone is delivered.
 	fctx, cancelForget := context.WithTimeout(
 		ctx,
 		5*time.Second,
@@ -3228,7 +3072,6 @@ func TestFailure_PoisonEventDoesNotBlockTheShardOrShutdown(
 		t.Fatal("poisoned aggregate survived Forget")
 	}
 
-	// Shutdown with another poison delivery in flight finishes.
 	if _, err := inst.Send(
 		ctx,
 		upd(
@@ -3344,8 +3187,6 @@ func TestFailure_RetriesStopAndTheAggregateIsParkedUntilResumed(
 		)
 	}
 
-	// A new event of the parked aggregate commits but is not delivered, and
-	// SendWait says so instead of reporting success.
 	if evt, err := inst.SendWait(
 		ctx,
 		upd(
@@ -3513,7 +3354,6 @@ func TestFailure_DeadLetterSkipsThePoisonEvent(
 	}
 }
 
-// Between the tombstone and the erase, no command may commit.
 func TestFailure_CommandsAreRejectedWhileForgetRuns(
 	t *testing.T,
 ) {
@@ -3532,8 +3372,6 @@ func TestFailure_CommandsAreRejectedWhileForgetRuns(
 		e models.Event[mocks.Order],
 	) {
 		close(entered)
-		// A reaction sending a command to the aggregate it is told was forgotten
-		// is refused, not deadlocked.
 		_, reaction = inst.Send(
 			c,
 			upd(
@@ -3588,7 +3426,6 @@ func TestFailure_CommandsAreRejectedWhileForgetRuns(
 		)
 	}
 
-	// Other aggregates are unaffected.
 	if _, err := inst.Send(
 		ctx,
 		upd(
@@ -3635,7 +3472,6 @@ func TestFailure_CommandsAreRejectedWhileForgetRuns(
 		)
 	}
 
-	// After the erase the aggregate can be created again, from version 1.
 	evt, err := inst.Send(
 		ctx,
 		upd(
@@ -3658,8 +3494,6 @@ func TestFailure_CommandsAreRejectedWhileForgetRuns(
 	}
 }
 
-// A subscriber that dedupes on (AggregateID, Version) needs the deletion marker
-// to know a re-created aggregate starts over.
 func TestFailure_DurableSubscribersReceiveTheDeletionMarker(
 	t *testing.T,
 ) {
@@ -3700,7 +3534,7 @@ func TestFailure_DurableSubscribersReceiveTheDeletionMarker(
 
 					k := key{e.AggregateID, e.Version}
 					if seen[k] {
-						return nil // duplicate delivery
+						return nil
 					}
 
 					seen[k] = true
@@ -3765,8 +3599,6 @@ func TestFailure_DurableSubscribersReceiveTheDeletionMarker(
 	}
 }
 
-// If a durable subscriber cannot process the deletion marker, the aggregate is
-// not erased: Forget fails and can be retried.
 func TestFailure_ForgetFailsWhenADurableSubscriberCannotTakeTheMarker(
 	t *testing.T,
 ) {
@@ -3821,8 +3653,6 @@ func TestFailure_ForgetFailsWhenADurableSubscriberCannotTakeTheMarker(
 		)
 	}
 
-	// Forget aborted before erasing; commands are accepted again, but the
-	// aggregate stays paused so their events wait behind the marker.
 	if _, err := inst.SendWait(
 		ctx,
 		upd(
@@ -3869,8 +3699,6 @@ func (failingLiveBus) PublishSync(
 	return errors.New("live bus down")
 }
 
-// A failing live bus must not make durable delivery skip an event, or the
-// aggregate's next event would be delivered past it.
 func TestFailure_LiveBusErrorDoesNotSkipDurableDelivery(
 	t *testing.T,
 ) {
@@ -3946,8 +3774,6 @@ func TestFailure_LiveBusErrorDoesNotSkipDurableDelivery(
 	)
 }
 
-// A failed Forget supersedes the aggregate's pending deliveries for good and
-// keeps later events behind the deletion marker until the aggregate is resumed.
 func TestFailure_FailedForgetDoesNotLetLaterEventsOvertakeTheMarker(
 	t *testing.T,
 ) {
@@ -4027,8 +3853,6 @@ func TestFailure_FailedForgetDoesNotLetLaterEventsOvertakeTheMarker(
 		)
 	}
 
-	// The tombstone's transaction dropped the superseded v1 entry, so a restart
-	// cannot deliver it after the marker, and left the marker (v2) pending.
 	if pending, _ := s.PendingDeliveries(
 		ctx,
 		10,
@@ -4096,7 +3920,6 @@ func TestFailure_FailedForgetDoesNotLetLaterEventsOvertakeTheMarker(
 	}
 }
 
-// Live-only events of a paused aggregate are not replayed when it resumes.
 func TestFailure_ResumeDoesNotReplayLiveSubscribers(
 	t *testing.T,
 ) {
@@ -4226,8 +4049,6 @@ func TestFailure_ResumeDoesNotReplayLiveSubscribers(
 	}
 }
 
-// A handler cannot forget the aggregate it is handling, but the failed attempt
-// leaves the aggregate usable and shutdown clean.
 func TestFailure_HandlerForgettingItsOwnAggregateFailsFast(
 	t *testing.T,
 ) {
@@ -4304,8 +4125,6 @@ func TestFailure_HandlerForgettingItsOwnAggregateFailsFast(
 	}
 }
 
-// A crash after a failed Forget must not deliver anything ahead of the marker:
-// the restart delivers the marker first, then what followed it.
 func TestFailure_RestartAfterAFailedForgetDeliversTheMarkerFirst(
 	t *testing.T,
 ) {
@@ -4420,10 +4239,6 @@ func TestFailure_RestartAfterAFailedForgetDeliversTheMarkerFirst(
 	}
 }
 
-// feedOrders sends a new order, and a follow-up command when given, every time
-// it can, until the returned stop is called. It stands in for traffic that
-// starts once a subscription exists, without guessing how long that takes: the
-// subscription sees the first order created after it registers.
 func feedOrders(
 	instance asynx.Asynx[mocks.Order],
 	prefix string,
@@ -4469,7 +4284,7 @@ func feedUntil(
 			instance.SendWait(
 				context.Background(),
 				followUp(id),
-			) //nolint:errcheck
+			)
 		}
 	}
 }
@@ -4485,7 +4300,6 @@ func isClosed(
 	}
 }
 
-// blockingSnapshots holds the first armed Put for one aggregate until released.
 type blockingSnapshots struct {
 	models.SnapshotStore
 	aggregate string
@@ -4517,9 +4331,6 @@ func (s *blockingSnapshots) Put(
 	)
 }
 
-// A Get that upcasts writes an auto-snapshot without holding the aggregate's
-// lock. It must not be able to land after a Forget's erase, which would bring
-// the erased state back and make the re-created aggregate start above v1.
 func TestGet_AutoSnapshotCannotResurrectAForgottenAggregate(
 	t *testing.T,
 ) {
@@ -4650,8 +4461,6 @@ func TestGet_AutoSnapshotCannotResurrectAForgottenAggregate(
 	}
 }
 
-// A retry of a command whose handlers are still running waits for them, as its
-// first attempt would have.
 func TestSendWait_RetryOfAnIdempotentCommandWaitsForTheOriginalHandlers(
 	t *testing.T,
 ) {
@@ -4745,9 +4554,6 @@ func TestSendWait_RetryOfAnIdempotentCommandWaitsForTheOriginalHandlers(
 	}
 }
 
-// A handler that Forgets its own aggregate with a context that is not its own
-// cannot be recognised, and the Forget waits for the very handler that called it.
-// Shutting down must still release it.
 func TestShutdown_ReleasesAHandlerWaitingOnItsOwnAggregatesForget(
 	t *testing.T,
 ) {
@@ -4840,8 +4646,6 @@ func TestShutdown_ReleasesAHandlerWaitingOnItsOwnAggregatesForget(
 	}
 }
 
-// When several durable subscribers fail, the dead-letter handler learns of each,
-// by name.
 func TestFailure_DeadLetterLearnsEverySubscriberThatFailed(
 	t *testing.T,
 ) {
@@ -4938,10 +4742,6 @@ func TestFailure_DeadLetterLearnsEverySubscriberThatFailed(
 	}
 }
 
-// A retry is told what its first attempt was told. The command whose own
-// handler failed until the aggregate parked ran a handler: success. A command
-// committed while the aggregate is parked, left undelivered, reports
-// ErrDeliveryParked, until the park lifts and its handler has run.
 func TestSendWait_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWasTold(
 	t *testing.T,
 ) {
@@ -5081,8 +4881,6 @@ func newBenchInstance(
 	return instance
 }
 
-// Throughput benchmarks
-
 func BenchmarkSend_SingleSerial(
 	b *testing.B,
 ) {
@@ -5149,8 +4947,6 @@ func BenchmarkSend_Parallel_SameAggregate(
 		}
 	})
 }
-
-// Latency benchmarks
 
 func BenchmarkGet_WarmPath(
 	b *testing.B,
@@ -5221,8 +5017,6 @@ func BenchmarkGet_WithSnapshot(
 		)
 	}
 }
-
-// Handler performance benchmarks
 
 func BenchmarkPublish_SingleHandler(
 	b *testing.B,
@@ -5323,8 +5117,6 @@ func BenchmarkPublish_HandlerWithTimeout(
 	}
 }
 
-// Shutdown benchmarks
-
 func BenchmarkShutdown_NoInFlight(
 	b *testing.B,
 ) {
@@ -5365,8 +5157,6 @@ func BenchmarkShutdown_WithInFlight(
 		instance.Shutdown(context.Background())
 	}
 }
-
-// Allocations benchmarks
 
 func BenchmarkAllocations_Send(
 	b *testing.B,
@@ -5429,10 +5219,6 @@ func BenchmarkAllocations_Get(
 	}
 }
 
-// countConcurrentCancelSuccesses seeds one order and fires `attempts` concurrent
-// cancels at it through the public API, returning how many returned nil (i.e.
-// how many cancel events were accepted). An order may be cancelled at most once,
-// so the correct answer is always 1 — regardless of workersPerShard.
 func countConcurrentCancelSuccesses(
 	t *testing.T,
 	workersPerShard int,
@@ -5492,9 +5278,6 @@ func countConcurrentCancelSuccesses(
 	return successes
 }
 
-// The write path enforces optimistic concurrency, so a burst of concurrent
-// cancels resolves to exactly one accepted cancel even with many workers per
-// shard — the losers get ErrPipelineFailed rather than silently double-committing.
 func TestConcurrentCancel_AcceptsExactlyOne(
 	t *testing.T,
 ) {

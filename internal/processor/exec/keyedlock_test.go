@@ -40,7 +40,7 @@ func TestKeyedLock_SameKeyIsMutuallyExclusive(
 			)
 			mu.Unlock()
 
-			runtime.Gosched() // widen the window for a second holder to show up
+			runtime.Gosched()
 
 			mu.Lock()
 			inside--
@@ -124,7 +124,6 @@ func TestKeyedLock_CancelledWaiterReturnsCtxErrAndLeavesNoEntry(
 		)
 		errCh <- err
 	}()
-	// Wait until the waiter has registered on the key.
 	for {
 		k.mu.Lock()
 		waiting := k.entries["agg"] != nil && k.entries["agg"].refs == 2
@@ -244,7 +243,6 @@ func TestKeyedLock_TryLockDoesNotJumpAWaiter(
 	release()
 }
 
-// refs reports how many holders and waiters the key has. For tests.
 func (k *KeyedLock) refs(
 	key string,
 ) int {

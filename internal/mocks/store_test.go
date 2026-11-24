@@ -8,8 +8,6 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-// --- Store (no-op) ---
-
 func TestStore_Append_ReturnsNil(
 	t *testing.T,
 ) {
@@ -66,8 +64,6 @@ func TestStore_ReadRange_ReturnsNilNil(
 		)
 	}
 }
-
-// --- ErrStore ---
 
 func TestErrStore_Append_ReturnsErr(
 	t *testing.T,
@@ -138,8 +134,6 @@ func TestErrStore_ImplementsStore(
 ) {
 	var _ asynxmd.Store = &ErrStore{}
 }
-
-// --- CorruptBlobStore ---
 
 func TestCorruptBlobStore_Append_ReturnsNil(
 	t *testing.T,
@@ -221,8 +215,6 @@ func TestCorruptBlobStore_ImplementsStore(
 	var _ asynxmd.Store = &CorruptBlobStore{}
 }
 
-// --- SnapshotStore (no-op) ---
-
 func TestSnapshotStore_Put_ReturnsNil(
 	t *testing.T,
 ) {
@@ -281,8 +273,6 @@ func TestSnapshotStore_ImplementsSnapshotStore(
 	var _ asynxmd.SnapshotStore = &SnapshotStore{}
 }
 
-// --- CountingSnapshotStore ---
-
 func TestCountingSnapshotStore_CountsGetCallsAndBytes(
 	t *testing.T,
 ) {
@@ -321,7 +311,6 @@ func TestCountingSnapshotStore_CountsGetCallsAndBytes(
 		)
 	}
 
-	// The no-op inner returns no data, so bytes stay 0 but the call is counted.
 	if c.GetCalls != 1 {
 		t.Errorf(
 			"GetCalls = %d, want 1",
@@ -390,8 +379,6 @@ func TestCountingSnapshotStore_ImplementsSnapshotStore(
 	var _ asynxmd.SnapshotStore = &CountingSnapshotStore{}
 }
 
-// recordingSnapshotStore is a minimal SnapshotStore whose Get returns a fixed
-// blob, so CountingSnapshotStore's byte tallying can be exercised.
 type recordingSnapshotStore struct{ blob []byte }
 
 func (r *recordingSnapshotStore) Put(
@@ -416,8 +403,6 @@ func (r *recordingSnapshotStore) Delete(
 ) error {
 	return nil
 }
-
-// --- transactional surface ---
 
 func TestMockStores_AtomicallyDelegatesAppendAndDelete(
 	t *testing.T,

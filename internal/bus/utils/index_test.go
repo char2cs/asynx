@@ -29,9 +29,6 @@ func newSub(
 	}
 }
 
-// --- IsExactPattern ---
-
-// 1. Plain string → true.
 func TestIsExactPattern_PlainString(
 	t *testing.T,
 ) {
@@ -45,7 +42,6 @@ func TestIsExactPattern_PlainString(
 	}
 }
 
-// 2. Regex metacharacters → false.
 func TestIsExactPattern_RegexChars(
 	t *testing.T,
 ) {
@@ -59,9 +55,6 @@ func TestIsExactPattern_RegexChars(
 	}
 }
 
-// --- IndexWith ---
-
-// 3. Exact pattern, empty index → creates new entry.
 func TestIndexWith_ExactNewEntry(
 	t *testing.T,
 ) {
@@ -84,7 +77,6 @@ func TestIndexWith_ExactNewEntry(
 	}
 }
 
-// 4. Exact, same key again → appended.
 func TestIndexWith_ExactSameKeyAppended(
 	t *testing.T,
 ) {
@@ -114,7 +106,6 @@ func TestIndexWith_ExactSameKeyAppended(
 	}
 }
 
-// 5. Regex pattern → added to RegexSubs.
 func TestIndexWith_Regex(
 	t *testing.T,
 ) {
@@ -139,7 +130,6 @@ func TestIndexWith_Regex(
 	}
 }
 
-// 6. COW — original PublishIndex unchanged.
 func TestIndexWith_COW(
 	t *testing.T,
 ) {
@@ -156,9 +146,6 @@ func TestIndexWith_COW(
 	}
 }
 
-// --- IndexWithout ---
-
-// 7. Exact, only sub → key deleted.
 func TestIndexWithout_ExactOnlySub(
 	t *testing.T,
 ) {
@@ -178,7 +165,6 @@ func TestIndexWithout_ExactOnlySub(
 	}
 }
 
-// 8. Exact, multiple subs → one removed, others remain.
 func TestIndexWithout_ExactMultipleSubs(
 	t *testing.T,
 ) {
@@ -211,7 +197,6 @@ func TestIndexWithout_ExactMultipleSubs(
 	}
 }
 
-// 9. Regex → removed from RegexSubs.
 func TestIndexWithout_Regex(
 	t *testing.T,
 ) {
@@ -242,7 +227,6 @@ func TestIndexWithout_Regex(
 	}
 }
 
-// 10. COW — original unchanged after IndexWithout.
 func TestIndexWithout_COW(
 	t *testing.T,
 ) {
@@ -262,7 +246,6 @@ func TestIndexWithout_COW(
 	}
 }
 
-// buildExactIndex returns a PublishIndex pre-populated with n exact-match subs.
 func buildExactIndex(
 	n int,
 ) *models.PublishIndex[string] {
@@ -288,7 +271,6 @@ func buildExactIndex(
 	return idx
 }
 
-// buildRegexIndex returns a PublishIndex pre-populated with n regex subs.
 func buildRegexIndex(
 	n int,
 ) (*models.PublishIndex[string], []*models.Subscription[string]) {
@@ -319,8 +301,6 @@ func buildRegexIndex(
 		subs
 }
 
-// BenchmarkIsExactPattern measures the regexp.QuoteMeta comparison used to
-// classify every pattern at Subscribe time.
 func BenchmarkIsExactPattern(
 	b *testing.B,
 ) {
@@ -346,9 +326,6 @@ func BenchmarkIsExactPattern(
 	)
 }
 
-// BenchmarkIndexWith_Exact measures COW cost of adding one exact-match sub to
-// an index of varying size. The maps.Copy inside is O(n), so this exposes how
-// Subscribe slows as the index grows.
 func BenchmarkIndexWith_Exact(
 	b *testing.B,
 ) {
@@ -383,8 +360,6 @@ func BenchmarkIndexWith_Exact(
 	}
 }
 
-// BenchmarkIndexWith_Regex measures COW cost of adding one regex sub. The regex
-// path copies a slice (O(n) in regex count) rather than a map.
 func BenchmarkIndexWith_Regex(
 	b *testing.B,
 ) {
@@ -419,7 +394,6 @@ func BenchmarkIndexWith_Regex(
 	}
 }
 
-// BenchmarkIndexWithout_Exact measures COW cost of removing one exact-match sub.
 func BenchmarkIndexWithout_Exact(
 	b *testing.B,
 ) {
@@ -447,7 +421,6 @@ func BenchmarkIndexWithout_Exact(
 	}
 }
 
-// BenchmarkIndexWithout_Regex measures COW cost of removing one regex sub.
 func BenchmarkIndexWithout_Regex(
 	b *testing.B,
 ) {

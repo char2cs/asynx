@@ -171,8 +171,6 @@ func ExecuteWithTimeout[T any](
 	)
 }
 
-// executeWithTimeout is ExecuteWithTimeout with the option to keep waiting for
-// the handler after the timeout has been reported.
 func executeWithTimeout[T any](
 	ctx context.Context,
 	handler asynxmd.ProjectionHandler[T],

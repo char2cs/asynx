@@ -43,7 +43,6 @@ func TestForget_ErasesStreamSnapshotAndPendingDeliveries(
 	}
 
 	d.WaitIdle()
-	// Leave a delivery pending for the aggregate, as if a crash prevented its ack.
 	s.Atomically(
 		ctx,
 		func(
@@ -326,8 +325,6 @@ func TestForget_ConcurrentWithUpdatesNeverLeavesAGappedStream(
 					return
 				}
 
-				// A command racing the Forget is either ordered before it, after it,
-				// or rejected while it runs.
 				_, err := ex.Execute(
 					ctx,
 					update(
@@ -351,8 +348,6 @@ func TestForget_ConcurrentWithUpdatesNeverLeavesAGappedStream(
 
 		wg.Wait()
 
-		// Whatever survives must be a contiguous history from version 1: an
-		// update never appends on top of erased history.
 		blobs, _ := s.ReadFrom(
 			ctx,
 			"events:agg",
@@ -588,8 +583,6 @@ func TestForget_AfterDispatcherClosedFailsPipeline(
 		)
 	}
 
-	// The marker is committed and pending, and nothing may be delivered ahead
-	// of it.
 	if got := parked(d); !slices.Equal(
 		got,
 		[]string{"agg"},
@@ -611,7 +604,6 @@ func TestForget_AfterDispatcherClosedFailsPipeline(
 	}
 }
 
-// Without durable delivery there is no delivery log to record the marker in.
 func TestForget_WithoutDurableDeliveryWritesNoMarkerEntry(
 	t *testing.T,
 ) {
@@ -653,8 +645,6 @@ func TestForget_WithoutDurableDeliveryWritesNoMarkerEntry(
 	}
 }
 
-// Once Forget has returned, no command may still be refused for it: the fence
-// is lifted before the lock is released.
 func TestForget_NoCommandIsRefusedAfterItReturns(
 	t *testing.T,
 ) {
@@ -775,8 +765,6 @@ func TestForget_SnapshotDeleteFailureReturnsErrForgetFailed(
 	}
 }
 
-// A reaction queued ahead of the tombstone may send commands back to the
-// aggregate; Forget must not hold the lock the reaction needs.
 func TestForget_DoesNotDeadlockWithAReactionToItsOwnAggregate(
 	t *testing.T,
 ) {
@@ -804,7 +792,7 @@ func TestForget_DoesNotDeadlockWithAReactionToItsOwnAggregate(
 					99,
 				),
 				false,
-			) // needs the aggregate lock
+			)
 		},
 	)
 
@@ -831,8 +819,6 @@ func TestForget_DoesNotDeadlockWithAReactionToItsOwnAggregate(
 			"agg",
 		)
 	}()
-	// The tombstone is queued behind the reaction once Forget has marked the
-	// aggregate and released its lock.
 	for !ex.isForgetting("agg") {
 		runtime.Gosched()
 	}
@@ -898,7 +884,6 @@ func TestForget_SnapshotIsDeletedBeforeTheStream(
 		t.Fatal(err)
 	}
 
-	// Snapshot delete fails first, so the stream is never touched.
 	if err := ex.Forget(
 		ctx,
 		"agg",
@@ -1089,7 +1074,6 @@ func TestForget_AbortsWhenTheCallerGivesUpWaitingForHandlers(
 
 	close(release)
 
-	// Nothing was erased, and the aggregate accepts commands again.
 	if n := streamLen(
 		t,
 		s,
@@ -1264,8 +1248,6 @@ func TestForget_DoesNotEraseWhenADurableSubscriberCannotTakeTheTombstone(
 		)
 	}
 
-	// The tombstone's transaction dropped the superseded delivery and left the
-	// marker itself pending, so a resume or a restart delivers it first.
 	pending, _ := ex.es.Store().PendingDeliveries(
 		ctx,
 		10,
@@ -1502,8 +1484,6 @@ func (t deliveryFailTx) EnqueueDelivery(
 	)
 }
 
-// The tombstone commits atomically with its bookkeeping in the delivery log: if
-// the log cannot be written, there is no tombstone at all.
 func TestForget_DeliveryLogFailureInTheTombstoneTransactionAbortsIt(
 	t *testing.T,
 ) {
@@ -1526,7 +1506,6 @@ func TestForget_DeliveryLogFailureInTheTombstoneTransactionAbortsIt(
 					}),
 				)
 				ctx := context.Background()
-				// Seed through the plain store: the executor's own writes go through the failing tx.
 				if _, err := eventstore.New[order](
 					s.Memory,
 					store.NewSnapshots(),
@@ -1576,9 +1555,6 @@ func TestForget_DeliveryLogFailureInTheTombstoneTransactionAbortsIt(
 	}
 }
 
-// A Forget stuck behind a handler that is waiting for it, which is only
-// recognised when the handler passes its own context on, must not hold a
-// shutdown open: shutting down releases it.
 func TestForget_GivesUpWhenShutdownBegins(
 	t *testing.T,
 ) {
@@ -1678,8 +1654,6 @@ func TestForget_GivesUpWhenShutdownBegins(
 	}
 }
 
-// A tombstone that was delivered counts even if shutdown begins at the same
-// moment.
 func TestAwaitTombstone_PrefersADeliveryThatFinished(
 	t *testing.T,
 ) {

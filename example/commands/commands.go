@@ -29,7 +29,7 @@ func (c CreateOrderCmd) Validate(
 	}
 
 	if current != nil {
-		return models.ErrValidation // Already exists
+		return models.ErrValidation
 	}
 
 	return nil

@@ -199,8 +199,6 @@ func TestProcessor_Recover_ReportsReadAndReplayFailures(
 	}
 }
 
-// One corrupt event must not stop the process from starting or the other
-// aggregates from being recovered: its aggregate is parked and reported.
 func TestProcessor_Recover_ParksAnAggregateWhoseEventCannotBeRebuilt(
 	t *testing.T,
 ) {
@@ -1104,8 +1102,6 @@ func TestProcessor_Resume_StopsWhenItsContextEnds(
 	}
 }
 
-// Two Resumes must not both redeliver: the second would queue the same entries
-// behind the first's and invert their order.
 func TestProcessor_Resume_ConcurrentCallsRedeliverOnce(
 	t *testing.T,
 ) {
@@ -1208,7 +1204,6 @@ func TestProcessor_Resume_ConcurrentCallsRedeliverOnce(
 	}
 }
 
-// rowCountingStore counts the event rows its reads return.
 type rowCountingStore struct {
 	store.Memory
 	rows atomic.Int64
@@ -1229,8 +1224,6 @@ func (s *rowCountingStore) ReadFrom(
 		err
 }
 
-// A long backlog of one aggregate costs one pass over its stream, not one pass
-// per entry: the work must grow linearly with the backlog.
 func TestProcessor_Recover_ReplaysAnAggregatesStreamOnce(
 	t *testing.T,
 ) {
@@ -1413,7 +1406,6 @@ func TestProcessor_Resume_ReplaysAnAggregatesStreamOnce(
 	}
 }
 
-// logCountingStore counts the delivery-log rows its reads return.
 type logCountingStore struct {
 	store.Memory
 	rows  atomic.Int64
@@ -1434,9 +1426,6 @@ func (s *logCountingStore) PendingDeliveries(
 		err
 }
 
-// Resuming many parked aggregates reads the delivery log once for all of them,
-// not once per aggregate and not once per group of them: an outage that parks
-// many chats must not make the recovery quadratic in them.
 func TestProcessor_Resume_ReadsTheDeliveryLogOnceForAllAggregates(
 	t *testing.T,
 ) {
@@ -1543,9 +1532,6 @@ func TestProcessor_Resume_ReadsTheDeliveryLogOnceForAllAggregates(
 	}
 }
 
-// A command on one aggregate may send to another from inside its validation. A
-// resume must not hold one aggregate's lock while waiting for another's, or the
-// two wait for each other forever.
 func TestProcessor_Resume_DoesNotDeadlockWithACommandSendingToAnotherAggregate(
 	t *testing.T,
 ) {
@@ -1694,7 +1680,6 @@ func (c validatingUpdate) Validate(
 	return c.validate()
 }
 
-// readHookStore reports every stream read.
 type readHookStore struct {
 	store.Memory
 	onRead func(
@@ -1715,8 +1700,6 @@ func (s *readHookStore) ReadFrom(
 	)
 }
 
-// staleLogStore returns the delivery log as it was before afterRead ran, which
-// commits more events: the read of the log predates them.
 type staleLogStore struct {
 	store.Memory
 	afterRead func()
@@ -1743,8 +1726,6 @@ func (s *staleLogStore) PendingDeliveries(
 		err
 }
 
-// An event committed while the delivery log is being read is on no scanned
-// entry; the resume must still deliver it, ahead of anything later.
 func TestProcessor_Resume_DeliversAnEventCommittedAfterItReadTheLog(
 	t *testing.T,
 ) {
@@ -1863,9 +1844,6 @@ func TestProcessor_Resume_DeliversAnEventCommittedAfterItReadTheLog(
 	}
 }
 
-// A resume that finds an aggregate already resumed by another leaves it alone:
-// redelivering what its own, stale, read of the log lists would deliver the same
-// events twice.
 func TestProcessor_Resume_SkipsAnAggregateAnotherResumeLiftedMeanwhile(
 	t *testing.T,
 ) {
@@ -1953,11 +1931,6 @@ func TestProcessor_Resume_SkipsAnAggregateAnotherResumeLiftedMeanwhile(
 	}
 }
 
-// A park lifted by another resume and imposed again before this one reaches the
-// aggregate is a different park: the log read this resume made describes the old
-// one. Redelivering from it would deliver an acknowledged event twice and miss
-// the one that parked the aggregate again, so the aggregate is left for the next
-// Resume.
 func TestProcessor_Resume_LeavesAParkImposedAgainSinceItReadTheLog(
 	t *testing.T,
 ) {
@@ -2086,8 +2059,6 @@ func TestProcessor_Resume_LeavesAParkImposedAgainSinceItReadTheLog(
 	}
 }
 
-// A Resume whose context ends part-way stops there instead of going on to the
-// aggregates it did not get to.
 func TestProcessor_Resume_StopsAtTheAggregateWhereItsContextEnds(
 	t *testing.T,
 ) {
@@ -2153,8 +2124,6 @@ type idemOrderUpdate struct {
 
 func (c idemOrderUpdate) CommandID() string { return c.Cmd }
 
-// failingReadsStore fails event-stream reads while fail is set: of every stream,
-// or only of stream when that is not empty.
 type failingReadsStore struct {
 	store.Memory
 	fail   atomic.Bool
@@ -2180,8 +2149,6 @@ func (s *failingReadsStore) ReadFrom(
 	)
 }
 
-// parkWithTwoCommands parks o1 on the failure of command c-1, whose handler ran
-// and failed, then commits c-2 behind the park, which no handler took.
 func parkWithTwoCommands(
 	t *testing.T,
 	f fixture,
@@ -2263,8 +2230,6 @@ func retryOutcomes(
 		neverTaken
 }
 
-// A resume that cannot read the delivery log changes nothing: the retry of an
-// event no handler took is still told so.
 func TestProcessor_Resume_AfterALogReadFailureRetriesStillReportTheParkedEvent(
 	t *testing.T,
 ) {
@@ -2313,8 +2278,6 @@ func TestProcessor_Resume_AfterALogReadFailureRetriesStillReportTheParkedEvent(
 	}
 }
 
-// A resume that fails to replay the stream leaves the aggregate parked with the
-// same account of what ran: the event whose handler failed stays "ran".
 func TestProcessor_Resume_AfterAReplayFailureRetriesKeepTheirAnswers(
 	t *testing.T,
 ) {
@@ -2371,7 +2334,6 @@ func TestProcessor_Resume_AfterAReplayFailureRetriesKeepTheirAnswers(
 	}
 }
 
-// ackSignalStore reports every acknowledged delivery.
 type ackSignalStore struct {
 	store.Memory
 	acked chan struct{}
@@ -2395,8 +2357,6 @@ func (s *ackSignalStore) AckDelivery(
 	return err
 }
 
-// One aggregate that cannot be redelivered does not hold the others back: they
-// are resumed, it stays parked, and the error names it.
 func TestProcessor_Resume_AnAggregateThatFailsDoesNotStopTheOthers(
 	t *testing.T,
 ) {
@@ -2470,10 +2430,6 @@ func TestProcessor_Resume_AnAggregateThatFailsDoesNotStopTheOthers(
 	}
 }
 
-// A recovery that gets through only part of an aggregate's backlog does not
-// claim that the events it delivered went undelivered. The third event's
-// upcaster fails once the first two have been handled and acknowledged, which
-// makes the recovery fail halfway, deterministically.
 func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(
 	t *testing.T,
 ) {
@@ -2629,8 +2585,6 @@ func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(
 	}
 }
 
-// Entries behind an event that cannot be rebuilt stay pending while the entries
-// before it are still delivered.
 func TestProcessor_Recover_DeliversWhatPrecedesAnUnreadableEvent(
 	t *testing.T,
 ) {

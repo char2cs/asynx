@@ -193,7 +193,6 @@ func (r *Reader[T]) load(
 		nil
 }
 
-// coldPath performs a full replay from event 1 using the zero value as seed.
 func (r *Reader[T]) coldPath(
 	ctx context.Context,
 	aggregateID string,
@@ -252,15 +251,6 @@ func (r *Reader[T]) coldPath(
 		nil
 }
 
-// saveUpcasted writes the auto-snapshot of an upcast state. It is best-effort:
-// the state is already durable in the event store, so a failure is dropped.
-//
-// A read that does not hold the aggregate's command lock must not let its
-// snapshot land after a Forget's erase, which would bring the erased state back
-// and make a re-created aggregate start above version 1. It therefore writes
-// under the snapshot guard (skipping the write if the aggregate is busy: the
-// next command snapshots anyway) and only if the event it was built from is
-// still the stream's event at that version.
 func (r *Reader[T]) saveUpcasted(
 	ctx context.Context,
 	aggregateID string,
@@ -302,9 +292,6 @@ func (r *Reader[T]) saveUpcasted(
 	)
 }
 
-// streamHolds reports whether the aggregate's event at version is still the
-// event with the given ID: the stream has not been erased, nor erased and
-// re-created, since the state was built from it.
 func (r *Reader[T]) streamHolds(
 	ctx context.Context,
 	aggregateID string,
@@ -330,7 +317,6 @@ func (r *Reader[T]) streamHolds(
 	return events[0].Version == version && events[0].ID == eventID
 }
 
-// writeAutoSnapshot packs a SnapshotBlob[T] and appends it to the snapshot store.
 func (r *Reader[T]) writeAutoSnapshot(
 	ctx context.Context,
 	aggregateID string,
@@ -399,7 +385,6 @@ func (r *Reader[T]) Preload(
 	return nil
 }
 
-// deserializeEvents unmarshals a slice of raw event blobs into InternalEvents.
 func deserializeEvents(
 	blobs [][]byte,
 ) ([]esmodels.InternalEvent, error) {

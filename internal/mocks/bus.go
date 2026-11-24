@@ -44,7 +44,6 @@ func (b *Bus[T]) Close(
 }
 
 func (b *Bus[T]) WaitForHandlers() {
-	// No-op for mock bus
 }
 
 // ErrBus is a Bus implementation that returns Err for Publish and PublishSync.

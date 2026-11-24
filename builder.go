@@ -517,8 +517,6 @@ func shutdownUnlessBuilt[T any](
 	_ = proc.Shutdown(sctx)
 }
 
-// closeAbandonedBus closes the bus of a Build that failed before a processor
-// existed to shut it down, within the same bound.
 func closeAbandonedBus[T any](
 	activeBus models.Bus[T],
 ) {
@@ -530,11 +528,8 @@ func closeAbandonedBus[T any](
 	_ = activeBus.Close(ctx)
 }
 
-// failedBuildShutdown bounds how long a failed Build waits for the instance it
-// abandons to shut down, so a hung recovered handler cannot hang Build too.
 const failedBuildShutdown = 30 * time.Second
 
-// recoveryBatch is how many pending deliveries Build redelivers per round.
 const recoveryBatch = 100
 
 func (b *Builder[T]) compileSyncProjections() ([]exec.SyncProjection[T], error) {
@@ -583,9 +578,6 @@ func compileSyncProjection[T any](
 		nil
 }
 
-// compileDurable validates the durable subscribers and returns them with a
-// predicate accepting the events at least one of them wants (nil when there are
-// none). Events nobody durable listens to get no delivery entry.
 func (b *Builder[T]) compileDurable() ([]models.DurableSub[T], func(string) bool, error) {
 	if len(b.subscribers) == 0 {
 		return nil,
@@ -687,8 +679,6 @@ func wantedBy[T any](
 	}
 }
 
-// matcher mirrors the bus's pattern rule: an exact event name, or an
-// (unanchored) regular expression when the pattern has metacharacters.
 func matcher(
 	pattern string,
 ) (func(string) bool, error) {

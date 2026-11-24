@@ -6,8 +6,6 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-// --- CreateOrderCmd ---
-
 func TestCreateOrderCmd_AggregateID(
 	t *testing.T,
 ) {
@@ -90,8 +88,6 @@ func TestCreateOrderCmd_EmitEvent_ReturnsPendingOrder(
 		)
 	}
 }
-
-// --- CancelOrderCmd ---
 
 func TestCancelOrderCmd_AggregateID(
 	t *testing.T,
@@ -183,8 +179,6 @@ func TestCancelOrderCmd_EmitEvent_SetsCancelledStatus(
 		)
 	}
 }
-
-// --- UpdateOrderCmd ---
 
 func TestUpdateOrderCmd_AggregateID(
 	t *testing.T,

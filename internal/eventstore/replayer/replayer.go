@@ -141,7 +141,6 @@ func (r *Replayer[T]) Replay(
 	toVersion int64,
 	fn asynxmd.ProjectionHandler[T],
 ) error {
-	// Always start from version 1 to populate previous state correctly
 	eventBlobs, err := r.eventStore.ReadFrom(
 		ctx,
 		"events:"+aggregateID,
@@ -196,7 +195,6 @@ func (r *Replayer[T]) Replay(
 			return err
 		}
 
-		// Only invoke fn if we're within the requested range
 		if currentVersion >= fromVersion &&
 			(toVersion == 0 ||
 				currentVersion <= toVersion) {
@@ -218,7 +216,6 @@ func (r *Replayer[T]) Replay(
 		previous = current
 		currentVersion++
 
-		// Stop if we've exceeded toVersion
 		if toVersion > 0 &&
 			currentVersion > toVersion {
 			break
@@ -228,12 +225,6 @@ func (r *Replayer[T]) Replay(
 	return nil
 }
 
-// upcastInternalEvent applies the registered upcaster chain to bring evt from
-// its SchemaVersion up to currentSchemaVersion. Each upcaster receives the
-// JSON-encoded RFC 6902 patch array and must return a compatible replacement.
-//
-// If an upcaster returns an error, the chain fails immediately (fail fast).
-// If an upcaster panics, the panic propagates to the caller.
 func (r *Replayer[T]) upcastInternalEvent(
 	ctx context.Context,
 	evt esmodels.InternalEvent,
@@ -266,8 +257,6 @@ func (r *Replayer[T]) upcastInternalEvent(
 		nil
 }
 
-// applyPatchesToJSON applies patches to raw JSON bytes and returns the patched bytes.
-// A nil, "null", or "[]" patch set is a no-op.
 func applyPatchesToJSON(
 	stateJSON []byte,
 	patches json.RawMessage,

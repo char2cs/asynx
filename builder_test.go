@@ -136,7 +136,7 @@ func TestBuilderWithCorruptionHook(
 		)
 	}
 
-	_ = called // hook is wired; invocation tested at integration level
+	_ = called
 }
 
 func TestBuilderWithPublishErrorHandler(
@@ -163,7 +163,7 @@ func TestBuilderWithPublishErrorHandler(
 		)
 	}
 
-	_ = called // handler is wired; invocation tested at the exec layer
+	_ = called
 }
 
 func TestShardingOptsZeroValue(
@@ -387,7 +387,6 @@ func eight(
 		WithShardingOpts(asynx.ShardingOpts{Shards: 1, WorkersPerShard: 8, QueueDepth: 1000})
 }
 
-// Review focus 1: same-aggregate flood at WorkersPerShard 8.
 func TestGuarantee_SameAggregateFloodWithManyWorkers(
 	t *testing.T,
 ) {
@@ -461,7 +460,6 @@ func TestGuarantee_SameAggregateFloodWithManyWorkers(
 	}
 }
 
-// Review focus 2: crash between commit and ack, restart on the same store.
 func TestGuarantee_DurableSubscriberRecoversAfterCrash(
 	t *testing.T,
 ) {
@@ -477,7 +475,7 @@ func TestGuarantee_DurableSubscriberRecoversAfterCrash(
 				context.Context,
 				models.Event[mocks.Order],
 			) error {
-				<-stuck // the "process" dies while handling v1
+				<-stuck
 				return nil
 			},
 		),
@@ -516,8 +514,6 @@ func TestGuarantee_DurableSubscriberRecoversAfterCrash(
 		),
 	)
 
-	// Recovery is queued before Build returns, so a command sent right away is
-	// delivered after the recovered events of its aggregate.
 	if _, err := second.Send(
 		ctx,
 		upd(
@@ -742,7 +738,6 @@ func TestGuarantee_NoDurableSubscribersWritesNoDeliveries(
 	}
 }
 
-// Review focus 3: a failing sync projection leaves nothing behind.
 func TestGuarantee_SyncProjectionFailureRollsEverythingBack(
 	t *testing.T,
 ) {
@@ -977,7 +972,6 @@ func TestGuarantee_BuildRejectsBadProjectionsAndSubscribers(
 	}
 }
 
-// Review focus 4 and 6 through the public API.
 func TestGuarantee_IdempotentCommands(
 	t *testing.T,
 ) {
@@ -1110,7 +1104,6 @@ func TestGuarantee_SnapshotFailureIsReportedNotFatal(
 	}
 }
 
-// Review focus 5: Forget racing commands, plus pending deliveries.
 func TestGuarantee_ForgetFencedAgainstCommands(
 	t *testing.T,
 ) {
@@ -1173,7 +1166,6 @@ func TestGuarantee_ForgetFencedAgainstCommands(
 		inst,
 	)
 
-	// Whatever exists now must be readable (contiguous from version 1).
 	if ok, _ := inst.Exists(
 		ctx,
 		"agg",
@@ -1234,7 +1226,6 @@ func TestGuarantee_FailedBuildShutsTheProcessorDown(
 ) {
 	before := runtime.NumGoroutine()
 	for range 5 {
-		// Recovery fails (the delivery log is unreadable) after the processor is running.
 		_, err := eight(nil).
 			WithEventStore(pendingErrStore{store.New()}).
 			WithSubscriber(
@@ -1261,8 +1252,6 @@ func TestGuarantee_FailedBuildShutsTheProcessorDown(
 	)
 }
 
-// Durable subscribers can fail: the delivery stays pending, retries, and holds
-// back the aggregate's later events.
 func TestGuarantee_DurableSubscriberFailureRetriesAndKeepsOrder(
 	t *testing.T,
 ) {
@@ -1425,7 +1414,7 @@ func TestGuarantee_BuildDoesNotHangOnAPoisonDelivery(
 				context.Context,
 				models.Event[mocks.Order],
 			) error {
-				<-dies // never finishes during the test: the "process" dies
+				<-dies
 				return nil
 			},
 		),
@@ -1581,8 +1570,6 @@ func TestGuarantee_DurablePanicIsAFailureNotADelivery(
 	}
 }
 
-// eventually polls cond until it holds, failing after a generous deadline. It is
-// for state with no event to wait on (store contents, goroutine counts).
 func eventually(
 	t *testing.T,
 	what string,
@@ -1616,8 +1603,6 @@ func (c gatedUpdate) Validate(
 	return nil
 }
 
-// A busy aggregate holds one worker, however many commands are queued behind
-// it: the others keep running, as WorkersPerShard promises.
 func TestShardingOpts_ABusyAggregateDoesNotStallItsShard(
 	t *testing.T,
 ) {
@@ -1712,9 +1697,6 @@ func sendHot(
 	}
 }
 
-// QueueDepth bounds the commands that may wait behind a running one, per
-// aggregate: a flood to one aggregate is refused with ErrQueueFull, and other
-// aggregates are unaffected.
 func TestShardingOpts_QueueDepthBoundsTheBacklogOfOneAggregate(
 	t *testing.T,
 ) {

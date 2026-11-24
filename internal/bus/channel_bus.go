@@ -1,14 +1,3 @@
-// ChannelBus is an in-process event bus that dispatches events to subscribers
-// via goroutines. It implements asynx.Bus[T].
-//
-// Hot path (Publish) is lock-free for index reads: it atomically loads an
-// immutable snapshot of subscriptions and iterates it without holding any mutex.
-// The only brief critical section in Publish is the closed-check + WaitGroup.Add,
-// which uses a separate RWMutex held for nanoseconds.
-//
-// Subscribe and Unsubscribe mutate the index under an exclusive mutex and store
-// a freshly-built PublishIndex atomically, so in-flight Publish calls reading
-// the old snapshot are never disturbed.
 package bus
 
 import (
@@ -54,24 +43,18 @@ func WithTimeoutHandler[T any](
 }
 
 type ChannelBus[T any] struct {
-	// Subscription management — exclusive, infrequent.
 	subMu         sync.Mutex
-	subscriptions map[string]*models.Subscription[T] // subID → sub (for Unsubscribe)
+	subscriptions map[string]*models.Subscription[T]
 	idx           atomic.Pointer[models.PublishIndex[T]]
 
-	// Publish / Close coordination.
-	// publishMu is held for RLock during the closed-check + Add phase of Publish,
-	// and for Lock by Close. This ensures Add is never called after Wait returns.
 	publishMu  sync.RWMutex
 	closed     bool
 	inFlightWg sync.WaitGroup
 
-	// Pattern compilation cache — separate lock, unrelated to subscriptions.
 	patternMu        sync.RWMutex
 	compiledPatterns map[string]*regexp.Regexp
-	patternErrors    map[string]error // Caches compilation errors to avoid recompilation
+	patternErrors    map[string]error
 
-	// Optional bus-level callback overrides passed to every HandlerJob.
 	onPanic   asynxmd.PanicHandler[T]
 	onTimeout asynxmd.TimeoutHandler[T]
 }
@@ -172,12 +155,10 @@ func (b *ChannelBus[T]) Publish(
 	ctx context.Context,
 	event asynxmd.Event[T],
 ) error {
-	// Early cancellation check — return immediately if ctx is already done.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	// Step 1 — lock-free: load immutable snapshot, find matching subscriptions.
 	idx := b.idx.Load()
 
 	exactMatches := idx.ExactSubs[event.EventName]
@@ -197,8 +178,6 @@ func (b *ChannelBus[T]) Publish(
 
 	total := len(exactMatches) + len(regexMatches)
 
-	// Step 2 — brief critical section: closed-check + WaitGroup.Add must be
-	// atomic with respect to Close, so that Add is never called after Wait returns.
 	b.publishMu.RLock()
 	if b.closed {
 		b.publishMu.RUnlock()
@@ -211,7 +190,6 @@ func (b *ChannelBus[T]) Publish(
 
 	b.publishMu.RUnlock()
 
-	// Step 3 — lock-free: spawn one goroutine per matching handler.
 	for _, sub := range exactMatches {
 		go exec.ExecuteHandler(
 			&b.inFlightWg,
@@ -319,8 +297,6 @@ func (b *ChannelBus[T]) PublishSync(
 func (b *ChannelBus[T]) Close(
 	ctx context.Context,
 ) error {
-	// Holding publishMu.Lock ensures all in-flight Publish calls that passed
-	// the closed-check have already called Add before we call Wait.
 	b.publishMu.Lock()
 	b.closed = true
 	b.publishMu.Unlock()

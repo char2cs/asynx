@@ -4,6 +4,6 @@ package models
 // Once stored via atomic.Pointer it is never modified; Subscribe and
 // Unsubscribe always build and store a brand-new instance (copy-on-write).
 type PublishIndex[T any] struct {
-	ExactSubs map[string][]*Subscription[T] // pattern → subs (exact-match index)
-	RegexSubs []*Subscription[T]            // subs whose pattern has metacharacters
+	ExactSubs map[string][]*Subscription[T]
+	RegexSubs []*Subscription[T]
 }

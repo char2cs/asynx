@@ -1,18 +1,3 @@
-// Package exec implements the command execution pipeline for Asynx.
-//
-// CommandExecutor[T] runs every command under a per-aggregate lock, so two
-// commands for one aggregate never overlap and their events are enqueued in
-// version order, whatever the worker count:
-//   - Lock     — Take the aggregate's lock (respects ctx)
-//   - Receipt  — For idempotent commands, answer a retry from its receipt
-//   - Write    — Load, Validate, then in ONE transaction: append the event, run
-//     synchronous projections, store the receipt, enqueue the durable delivery
-//   - Snapshot — Best-effort, after the commit; failure never blocks dispatch
-//   - Enqueue  — Hand the event to the Dispatcher (per-aggregate FIFO), then
-//     release the lock; SendWait waits for handlers after the release
-//
-// Validation errors short-circuit before anything is written. Storage and
-// projection errors wrap to ErrPipelineFailed.
 package exec
 
 import (
@@ -80,7 +65,7 @@ type CommandExecutor[T any] struct {
 	dispatcher      asynxmd.Dispatcher[T]
 	locks           KeyedLock
 	forgetMu        sync.Mutex
-	forgetting      map[string]struct{} // aggregates between tombstone and erase
+	forgetting      map[string]struct{}
 	syncs           []SyncProjection[T]
 	durableMatch    func(eventName string) bool
 	onSnapshotError func(context.Context, asynxmd.Event[T], error)
@@ -211,7 +196,6 @@ func (e *CommandExecutor[T]) WithLockIfFree(
 	return true
 }
 
-// run executes the pipeline. The caller holds the aggregate lock.
 func (e *CommandExecutor[T]) run(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
@@ -349,10 +333,6 @@ func (e *CommandExecutor[T]) snapshotIfDue(
 	}
 }
 
-// enqueue hands the event to the dispatcher. With durable delivery on, the
-// delivery entry is acked once its handlers finish. When the enqueue fails
-// after the commit the delivery entry is pending, so run parks the aggregate:
-// its later events must not be delivered ahead of it.
 func (e *CommandExecutor[T]) enqueue(
 	ctx context.Context,
 	event asynxmd.Event[T],
@@ -382,10 +362,6 @@ func (e *CommandExecutor[T]) enqueue(
 		nil
 }
 
-// waitForAnswered gives the retry of an idempotent command the same wait as the
-// original: for the handlers of the event the first attempt produced, if its
-// delivery is still under way. Once that is over, or when the answer is an
-// error, there is nothing to wait for.
 func (e *CommandExecutor[T]) waitForAnswered(
 	event asynxmd.Event[T],
 	answer error,
@@ -415,9 +391,6 @@ func (e *CommandExecutor[T]) waitForAnswered(
 	)
 }
 
-// unrunWait is the Wait of a retry whose event the dispatcher left undelivered
-// because its aggregate is parked: no handler took it, which the retry reports
-// as the first attempt did. It is nil when there is nothing to report.
 func unrunWait[T any](
 	unrun error,
 	event asynxmd.Event[T],
@@ -438,7 +411,6 @@ func unrunWait[T any](
 	}
 }
 
-// waitOn is the Wait for the handlers of the event ticket t tracks.
 func waitOn[T any](
 	t asynxmd.Ticket,
 	event asynxmd.Event[T],
@@ -462,7 +434,6 @@ func waitOn[T any](
 	}
 }
 
-// settledOutcome reports why a settled delivery ran no handler, if it did not.
 func settledOutcome[T any](
 	t asynxmd.Ticket,
 	event asynxmd.Event[T],
@@ -480,7 +451,6 @@ func settledOutcome[T any](
 	)
 }
 
-// isDurable reports whether the event gets a delivery entry.
 func (e *CommandExecutor[T]) isDurable(
 	eventName string,
 ) bool {
@@ -505,8 +475,6 @@ func (e *CommandExecutor[T]) ackFor(
 	}
 }
 
-// runSyncProjections runs, in order, the projections that match the event,
-// inside its transaction. A failure wraps ErrSyncProjection.
 func (e *CommandExecutor[T]) runSyncProjections(
 	ctx context.Context,
 	tx asynxmd.Tx,
@@ -539,8 +507,6 @@ func (e *CommandExecutor[T]) runSyncProjections(
 	return nil
 }
 
-// txHook returns the work that must commit atomically with the event, or nil
-// when there is none.
 func (e *CommandExecutor[T]) txHook(
 	commandID string,
 ) eventstore.TxHook[T] {
@@ -584,7 +550,6 @@ func (e *CommandExecutor[T]) txHook(
 	}
 }
 
-// putAcceptedReceipt records the command's receipt, unless it has no id.
 func putAcceptedReceipt[T any](
 	ctx context.Context,
 	tx asynxmd.Tx,

@@ -1,15 +1,3 @@
-// Package processor coordinates command routing and execution lifecycle for Asynx.
-//
-// Processor[T] routes incoming commands to shards via consistent hashing,
-// manages graceful shutdown, and exposes Send/SendWait/Shutdown interfaces.
-//   - router     — FNV-1a hash-based consistent shard selection
-//   - pool       — Shard-based worker pool for concurrent command execution
-//   - executor   — Passed to pool; executes Load->Validate->Write->Dispatch pipeline
-//
-// All command execution is non-blocking via channels. Send and SendWait block until either
-// the command completes, context cancels, or the queue is full. Send dispatches events
-// asynchronously; SendWait dispatches synchronously. Shutdown drains in-flight work,
-// closes the dispatcher, then closes the bus.
 package processor
 
 import (
@@ -39,14 +27,13 @@ type Processor[T any] struct {
 	onPublishErr  asynxmd.PublishErrorHandler[T]
 	bus           asynxmd.Bus[T]
 	shuttingDown  atomic.Bool
-	lifeMu        sync.Mutex     // orders Shutdown against Send and Forget calls starting
-	shutdown      shutdownState  // guarded by lifeMu
-	sends         sync.WaitGroup // Send and SendWait calls in flight
-	forgets       sync.WaitGroup // Forget calls in flight
+	lifeMu        sync.Mutex
+	shutdown      shutdownState
+	sends         sync.WaitGroup
+	forgets       sync.WaitGroup
 	onSendPending func()
 }
 
-// shutdownState lets a Shutdown that failed (its context ended) be retried.
 type shutdownState int
 
 const (
@@ -523,9 +510,6 @@ func (p *Processor[T]) isShuttingDown() bool {
 	return p.shuttingDown.Load()
 }
 
-// beginSend registers a Send or SendWait in flight, unless shutdown has begun.
-// Shutdown waits for the registered ones, so none is stranded in a queue the
-// pool has stopped reading.
 func (p *Processor[T]) beginSend() bool {
 	p.lifeMu.Lock()
 	defer p.lifeMu.Unlock()
@@ -665,7 +649,6 @@ func (p *Processor[T]) endShutdown(
 	p.shutdown = shutDown
 }
 
-// waitGroup waits for wg, or for ctx.
 func waitGroup(
 	ctx context.Context,
 	wg *sync.WaitGroup,

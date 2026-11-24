@@ -17,8 +17,6 @@ type order = mocks.Order
 
 var storageErr = errors.New("storage failure")
 
-// --- Helpers ---
-
 func newTestReplayer(
 	es asynxmd.Store,
 	upcasters map[int]asynxmd.Upcaster,
@@ -59,8 +57,6 @@ func makeEventBlob(
 
 	return b
 }
-
-// --- Hydrate ---
 
 func TestHydrate_BasicPatchApplication(
 	t *testing.T,
@@ -290,8 +286,6 @@ func TestHydrate_NoAutoSnapshot_WhenNoUpcasting(
 func TestHydrate_MarshalSeedError(
 	t *testing.T,
 ) {
-	// ErrMarshal.MarshalJSON always fails. With non-empty events, Hydrate
-	// marshals seedState first; that marshal fails immediately.
 	upcasters := map[int]asynxmd.Upcaster{
 		1: func(
 			_ context.Context,
@@ -327,8 +321,6 @@ func TestHydrate_MarshalSeedError(
 func TestHydrate_UnmarshalResultError(
 	t *testing.T,
 ) {
-	// BadUnmarshal.MarshalJSON succeeds ({}) so the seed marshals and patches
-	// apply, but final json.Unmarshal(stateJSON, &current) always fails.
 	r := New[mocks.BadUnmarshal](
 		store.New(),
 		make(map[int]asynxmd.Upcaster),
@@ -429,10 +421,8 @@ func TestHydrate_UpcasterPanic_Propagates(
 		"agg1",
 		order{},
 		events,
-	) //nolint:errcheck
+	)
 }
-
-// --- Replay ---
 
 func TestReplay_EmptyStore_ReturnsNil(
 	t *testing.T,
@@ -499,7 +489,7 @@ func TestReplay_AllEvents(
 			1,
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"Shipped"}]`),
 		),
-	) //nolint:errcheck
+	)
 
 	r := newTestReplayer(
 		es,
@@ -577,7 +567,7 @@ func TestReplay_WithVersionRange(
 			1,
 			json.RawMessage(`[]`),
 		),
-	) //nolint:errcheck
+	)
 	es.Append(
 		ctx,
 		"events:agg1",
@@ -590,7 +580,7 @@ func TestReplay_WithVersionRange(
 			1,
 			json.RawMessage(`[]`),
 		),
-	) //nolint:errcheck
+	)
 
 	r := newTestReplayer(
 		es,
@@ -632,12 +622,9 @@ func TestReplay_WithVersionRange(
 func TestReplay_PreviousAggregate_CorrectForMidStreamStart(
 	t *testing.T,
 ) {
-	// This test verifies the fix for the PreviousAggregate bug when replaying from a version > 1.
-	// Before the fix, PreviousAggregate would incorrectly be the zero value.
 	es := store.New()
 	ctx := context.Background()
 
-	// Create 3 events that modify state
 	es.Append(
 		ctx,
 		"events:agg1",
@@ -650,7 +637,7 @@ func TestReplay_PreviousAggregate_CorrectForMidStreamStart(
 			1,
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"Created"}]`),
 		),
-	) //nolint:errcheck
+	)
 	es.Append(
 		ctx,
 		"events:agg1",
@@ -663,7 +650,7 @@ func TestReplay_PreviousAggregate_CorrectForMidStreamStart(
 			1,
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"Updated"}]`),
 		),
-	) //nolint:errcheck
+	)
 	es.Append(
 		ctx,
 		"events:agg1",
@@ -676,7 +663,7 @@ func TestReplay_PreviousAggregate_CorrectForMidStreamStart(
 			1,
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"Shipped"}]`),
 		),
-	) //nolint:errcheck
+	)
 
 	r := newTestReplayer(
 		es,
@@ -684,7 +671,6 @@ func TestReplay_PreviousAggregate_CorrectForMidStreamStart(
 		1,
 	)
 
-	// Replay only events 3, which should have PreviousAggregate with Status="Updated" (from event 2)
 	var got []asynxmd.Event[order]
 	err := r.Replay(
 		ctx,
@@ -723,7 +709,6 @@ func TestReplay_PreviousAggregate_CorrectForMidStreamStart(
 		)
 	}
 
-	// The critical check: PreviousAggregate should be the state from event 2, not the zero value
 	if event.PreviousAggregate.Status != "Updated" {
 		t.Errorf(
 			"PreviousAggregate.Status = %q, want Updated (state from event 2)",
@@ -731,7 +716,6 @@ func TestReplay_PreviousAggregate_CorrectForMidStreamStart(
 		)
 	}
 
-	// The current aggregate should be the result after event 3
 	if event.Aggregate.Status != "Shipped" {
 		t.Errorf(
 			"Aggregate.Status = %q, want Shipped (state after event 3)",
@@ -853,7 +837,7 @@ func TestReplay_NoAutoSnapshot(
 			1,
 			json.RawMessage(`[]`),
 		),
-	) //nolint:errcheck
+	)
 
 	err := r.Replay(
 		context.Background(),
@@ -872,11 +856,7 @@ func TestReplay_NoAutoSnapshot(
 			err,
 		)
 	}
-	// Structural guarantee: Replayer has no SnapshotStore field, so Replay
-	// cannot write snapshots by construction.
 }
-
-// --- upcastInternalEvent ---
 
 func TestUpcast_ChainApplied(
 	t *testing.T,
@@ -1020,8 +1000,6 @@ func TestUpcast_ErrorWrapped(
 		)
 	}
 }
-
-// --- applyPatchesToJSON ---
 
 func TestApplyPatchesToJSON_Nil_NoOp(
 	t *testing.T,
@@ -1206,7 +1184,7 @@ func TestReplay_UpcasterError(
 			1,
 			json.RawMessage(`[]`),
 		),
-	) //nolint:errcheck
+	)
 
 	r := newTestReplayer(
 		es,
@@ -1254,7 +1232,7 @@ func TestReplay_PatchApplyError(
 			1,
 			json.RawMessage(`[{"op":"replace","path":"/NonExistent","value":"x"}]`),
 		),
-	) //nolint:errcheck
+	)
 
 	r := newTestReplayer(
 		es,
@@ -1281,8 +1259,6 @@ func TestReplay_PatchApplyError(
 func TestReplay_MarshalStateZeroValueError(
 	t *testing.T,
 ) {
-	// ErrMarshal.MarshalJSON always fails. With events in the store the
-	// short-circuit is skipped and json.Marshal(r.stateZeroValue) fails.
 	es := store.New()
 	ctx := context.Background()
 	es.Append(
@@ -1297,7 +1273,7 @@ func TestReplay_MarshalStateZeroValueError(
 			1,
 			json.RawMessage(`[]`),
 		),
-	) //nolint:errcheck
+	)
 
 	r := New[mocks.ErrMarshal](
 		es,
@@ -1325,8 +1301,6 @@ func TestReplay_MarshalStateZeroValueError(
 func TestReplay_UnmarshalCurrentError(
 	t *testing.T,
 ) {
-	// BadUnmarshal.MarshalJSON succeeds ({}) so the initial marshal passes,
-	// but json.Unmarshal(currentJSON, &current) always fails in the loop.
 	es := store.New()
 	ctx := context.Background()
 	es.Append(
@@ -1341,7 +1315,7 @@ func TestReplay_UnmarshalCurrentError(
 			1,
 			json.RawMessage(`[]`),
 		),
-	) //nolint:errcheck
+	)
 
 	r := New[mocks.BadUnmarshal](
 		es,

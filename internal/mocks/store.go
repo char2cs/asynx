@@ -6,8 +6,6 @@ import (
 	"github.com/char2cs/asynx/models"
 )
 
-// stubTx is the Tx handed out by the mock stores: Append and DeleteStream
-// delegate to the owning store, everything else succeeds without effect.
 type stubTx struct {
 	appendFn func(context.Context, string, int64, []byte) error
 	deleteFn func(context.Context, string) error

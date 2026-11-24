@@ -1,9 +1,3 @@
-// Package storetest is a conformance suite for models.Store implementations.
-// Run it from a test in the package that provides the store:
-//
-//	func TestConformance(t *testing.T) {
-//		storetest.Run(t, func(t *testing.T) models.Store { return newMyStore(t) })
-//	}
 package storetest
 
 import (
@@ -672,7 +666,6 @@ func ackUnknown(
 	}
 }
 
-// wantPending fails the test unless the pending deliveries are exactly want.
 func wantPending(
 	t testing.TB,
 	s models.Store,
@@ -697,7 +690,6 @@ func wantPending(
 	}
 }
 
-// enqueueIn runs fn on a transaction, failing the test if it does not commit.
 func enqueueIn(
 	t testing.TB,
 	s models.Store,
@@ -719,8 +711,6 @@ func enqueueIn(
 	)
 }
 
-// Forget drops an aggregate's entries and records its tombstone in one
-// transaction; the new entry must survive the drop and sort after the others.
 func dropThenEnqueue(
 	t testing.TB,
 	s models.Store,
@@ -823,7 +813,6 @@ func rollbackRestoresDrop(
 	)
 }
 
-// A forgotten aggregate starts again at version 1: its keys are reused.
 func reEnqueueAfterAckOrDrop(
 	t testing.TB,
 	s models.Store,
@@ -881,7 +870,6 @@ func reEnqueueAfterAckOrDrop(
 	)
 }
 
-// A delivery can be acknowledged after the erase dropped its entry.
 func ackAfterDrop(
 	t testing.TB,
 	s models.Store,
@@ -1049,7 +1037,6 @@ func committedVisible(
 	}
 }
 
-// Appends may arrive in any order; reads return the stream by version.
 func outOfOrderAppends(
 	t testing.TB,
 	s models.Store,
@@ -1125,8 +1112,6 @@ func outOfOrderAppends(
 	}
 }
 
-// Uniqueness of (stream, version) holds under contention: of many writers
-// racing for one version, exactly one commits and the rest conflict.
 func concurrentSameVersion(
 	t testing.TB,
 	s models.Store,
@@ -1189,7 +1174,6 @@ func concurrentSameVersion(
 	}
 }
 
-// Concurrent transactions that do not conflict all commit, and nothing is lost.
 func concurrentDistinctVersions(
 	t testing.TB,
 	s models.Store,
@@ -1270,7 +1254,6 @@ func concurrentDistinctVersions(
 	}
 }
 
-// A context that is already done fails the operation and changes nothing.
 func cancelledContext(
 	t testing.TB,
 	s models.Store,
@@ -1374,9 +1357,6 @@ func cancelledContext(
 	)
 }
 
-// Reads that run while a transaction is open must neither fail nor deadlock the
-// transaction (isolation level is the store's choice: they may see the writes
-// or block until the commit), and see them for good once it commits.
 func readsDuringOpenTransaction(
 	t testing.TB,
 	s models.Store,
@@ -1834,13 +1814,11 @@ func snapshotCancelled(
 	}
 }
 
-// scenario is one check of the suite, run against a store of type S.
 type scenario[S any] func(
 	t testing.TB,
 	s S,
 )
 
-// storeScenarios lists the scenarios of the suite, by name.
 func storeScenarios() map[string]scenario[models.Store] {
 	return map[string]scenario[models.Store]{
 		"AppendCommitsAndReadFromReturnsInOrder":       appendCommitsAndReads,
@@ -1868,7 +1846,6 @@ func storeScenarios() map[string]scenario[models.Store] {
 	}
 }
 
-// snapshotScenarios lists the scenarios of the suite, by name.
 func snapshotScenarios() map[string]scenario[models.SnapshotStore] {
 	return map[string]scenario[models.SnapshotStore]{
 		"GetOfUnknownAggregateIsNotFoundNotAnError": snapshotUnknown,

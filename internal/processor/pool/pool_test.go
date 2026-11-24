@@ -18,7 +18,6 @@ import (
 	"github.com/char2cs/asynx/store"
 )
 
-// blockingBus is a test bus whose PublishSync blocks until unblockCh is closed.
 type blockingBus[T any] struct {
 	unblockCh chan struct{}
 }
@@ -107,7 +106,6 @@ func TestPool_SingleCommandSuccess(
 		)
 	}
 
-	// Verify aggregate was written
 	agg, err := es.Get(
 		ctx,
 		"order1",
@@ -147,7 +145,6 @@ func TestPool_SerialOrderingSameAggregate(
 		d,
 	)
 
-	// Single shard to force serialization
 	p := pool.New(
 		executor,
 		1,
@@ -159,7 +156,6 @@ func TestPool_SerialOrderingSameAggregate(
 	ctx := context.Background()
 	shard := p.Shards()[0]
 
-	// Send 10 commands for the same aggregate
 	for i := 1; i <= 10; i++ {
 		envelope := &models.CommandEnvelope[order]{
 			Cmd: mocks.UpdateOrderCmd{
@@ -185,7 +181,6 @@ func TestPool_SerialOrderingSameAggregate(
 		}
 	}
 
-	// Verify final state
 	agg, err := es.Get(
 		ctx,
 		"order1",
@@ -274,7 +269,6 @@ func TestPool_ParallelDifferentAggregates(
 		}
 	}
 
-	// Verify all aggregates exist
 	for i := 0; i < 10; i++ {
 		id := "order" + string(rune(i))
 		agg, err := es.Get(
@@ -330,7 +324,6 @@ func TestPool_ValidationFailureNoWrite(
 	ctx := context.Background()
 	shard := p.Shards()[0]
 
-	// Try to cancel a non-existent order (validation failure)
 	envelope := &models.CommandEnvelope[order]{
 		Cmd: mocks.CancelOrderCmd{ID: "order1"},
 		Ctx: ctx,
@@ -350,7 +343,6 @@ func TestPool_ValidationFailureNoWrite(
 		)
 	}
 
-	// Verify aggregate was NOT written
 	_, err := es.Get(
 		ctx,
 		"order1",
@@ -428,7 +420,6 @@ func TestPool_DrainWaitsForInflight(
 
 	close(errs)
 
-	// Verify all commands were processed
 	for err := range errs {
 		if err != nil {
 			t.Errorf(
@@ -438,7 +429,6 @@ func TestPool_DrainWaitsForInflight(
 		}
 	}
 
-	// Verify all aggregates exist
 	for i := 0; i < 10; i++ {
 		id := "order" + string(rune(i))
 		_, err := es.Get(
@@ -488,7 +478,6 @@ func TestPool_DrainTimeout(
 	defer cancel()
 
 	err := p.Drain(ctx)
-	// Should timeout or complete quickly (implementation dependent)
 	if err != nil &&
 		err != context.DeadlineExceeded {
 		t.Logf(
@@ -517,7 +506,6 @@ func TestPool_QueueFullBlocksSender(
 		d,
 	)
 
-	// Single shard with queue depth 1
 	p := pool.New(
 		executor,
 		1,
@@ -529,7 +517,6 @@ func TestPool_QueueFullBlocksSender(
 	ctx := context.Background()
 	shard := p.Shards()[0]
 
-	// Create a command that blocks to fill the queue
 	blocked := make(chan struct{})
 	dispatched := make(
 		chan struct{},
@@ -546,7 +533,6 @@ func TestPool_QueueFullBlocksSender(
 
 	blockingCmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
 
-	// Start first send in background
 	done1 := make(
 		chan error,
 		1,
@@ -566,12 +552,9 @@ func TestPool_QueueFullBlocksSender(
 		done1 <- result.Err
 	}()
 
-	// Wait for first command to be queued
 	<-blocked
-	// Wait until dispatcher reads it (slot is now free)
 	<-dispatched
 
-	// Send should timeout or block quickly (showing queue is full)
 	normalEnvelope := &models.CommandEnvelope[order]{
 		Cmd: mocks.CreateOrderCmd{ID: "order2", Total: 100.0},
 		Ctx: ctx,
@@ -581,7 +564,6 @@ func TestPool_QueueFullBlocksSender(
 		),
 	}
 
-	// Use a timeout to detect if send would block
 	sendDone := make(chan struct{})
 	go func() {
 		shard.CommandChan() <- normalEnvelope
@@ -592,10 +574,8 @@ func TestPool_QueueFullBlocksSender(
 	case <-sendDone:
 		t.Logf("send completed (queue not full or processor fast)")
 	case <-time.After(100 * time.Millisecond):
-		// Expected: queue full, send blocks
 	}
 
-	// Cleanup
 	close(unblock)
 	<-done1
 	p.Drain(context.Background())
@@ -625,7 +605,7 @@ func TestPool_MultipleWorkers(
 		4,
 		0,
 		4,
-	) // 4 workers per shard
+	)
 	defer p.Drain(context.Background())
 
 	ctx := context.Background()
@@ -636,7 +616,6 @@ func TestPool_MultipleWorkers(
 		100,
 	)
 
-	// Send 100 commands across 4 shards with 4 workers each
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func(
@@ -693,7 +672,6 @@ func TestPool_ValidationErrorDecrementVersionSingleWorker(
 		d,
 	)
 
-	// Single worker per shard (workersPerShard=1) enables correction
 	p := pool.New(
 		executor,
 		1,
@@ -705,7 +683,6 @@ func TestPool_ValidationErrorDecrementVersionSingleWorker(
 	ctx := context.Background()
 	shard := p.Shards()[0]
 
-	// First, create an order successfully
 	envelope1 := &models.CommandEnvelope[order]{
 		Cmd: mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
 		Ctx: ctx,
@@ -723,7 +700,6 @@ func TestPool_ValidationErrorDecrementVersionSingleWorker(
 		)
 	}
 
-	// Now try to cancel it (validation succeeds)
 	envelope2 := &models.CommandEnvelope[order]{
 		Cmd: mocks.CancelOrderCmd{ID: "order1"},
 		Ctx: ctx,
@@ -741,7 +717,6 @@ func TestPool_ValidationErrorDecrementVersionSingleWorker(
 		)
 	}
 
-	// Try to cancel a non-existent order (validation error)
 	envelope3 := &models.CommandEnvelope[order]{
 		Cmd: mocks.CancelOrderCmd{ID: "order2"},
 		Ctx: ctx,
@@ -759,7 +734,6 @@ func TestPool_ValidationErrorDecrementVersionSingleWorker(
 		)
 	}
 
-	// Send another valid command to ensure version was corrected
 	envelope4 := &models.CommandEnvelope[order]{
 		Cmd: mocks.CreateOrderCmd{ID: "order3", Total: 200.0},
 		Ctx: ctx,
@@ -819,13 +793,10 @@ func TestPool_ContextCancelledDuringExecution(
 
 	shard.CommandChan() <- envelope
 
-	// Cancel context quickly
 	cancel()
 
-	// Result channel should still receive (either success or context cancelled)
 	select {
 	case <-envelope.ResultChan:
-		// OK either way
 	case <-time.After(2 * time.Second):
 		t.Fatalf("result not received within timeout")
 	}
@@ -857,7 +828,6 @@ func TestPool_DrainWithNoCommands(
 		2,
 	)
 
-	// Drain immediately without sending any commands
 	err := p.Drain(context.Background())
 	if err != nil {
 		t.Fatalf(
@@ -893,7 +863,6 @@ func TestPool_DrainTimeoutBothPhases(
 		1,
 	)
 
-	// Use an already-expired deadline so there is no race with the clock.
 	ctx, cancel := context.WithDeadline(
 		context.Background(),
 		time.Now().Add(-time.Second),
@@ -901,7 +870,6 @@ func TestPool_DrainTimeoutBothPhases(
 	defer cancel()
 
 	err := p.Drain(ctx)
-	// Should timeout during drain
 	if err != context.DeadlineExceeded &&
 		err != nil {
 		t.Logf(
@@ -930,7 +898,6 @@ func TestPool_DispatcherMultipleCorrections(
 		d,
 	)
 
-	// Multiple workers - corrections not sent
 	p := pool.New(
 		executor,
 		1,
@@ -942,7 +909,6 @@ func TestPool_DispatcherMultipleCorrections(
 	ctx := context.Background()
 	shard := p.Shards()[0]
 
-	// Create an order
 	envelope1 := &models.CommandEnvelope[order]{
 		Cmd: mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
 		Ctx: ctx,
@@ -954,7 +920,6 @@ func TestPool_DispatcherMultipleCorrections(
 	shard.CommandChan() <- envelope1
 	<-envelope1.ResultChan
 
-	// Try validation error with multiple workers (no correction)
 	envelope2 := &models.CommandEnvelope[order]{
 		Cmd: mocks.CancelOrderCmd{ID: "order2"},
 		Ctx: ctx,
@@ -972,7 +937,6 @@ func TestPool_DispatcherMultipleCorrections(
 		)
 	}
 
-	// Next command should work (no version gap since no correction sent)
 	envelope3 := &models.CommandEnvelope[order]{
 		Cmd: mocks.CreateOrderCmd{ID: "order3", Total: 100.0},
 		Ctx: ctx,
@@ -991,13 +955,10 @@ func TestPool_DispatcherMultipleCorrections(
 	}
 }
 
-// TestPool_WaitWorkers_ContextCancelledAfterDispatch verifies the ctx.Done branch
-// in waitWorkers: context expires while workers are still executing a long-running job.
 func TestPool_WaitWorkers_ContextCancelledAfterDispatch(
 	t *testing.T,
 ) {
 	s := store.New()
-	// Use a blocking bus so the worker blocks during PublishSync (WaitHandlers=true).
 	unblockCh := make(chan struct{})
 	bb := &blockingBus[order]{unblockCh: unblockCh}
 	es := eventstore.New[order](
@@ -1024,7 +985,6 @@ func TestPool_WaitWorkers_ContextCancelledAfterDispatch(
 	ctx := context.Background()
 	shard := p.Shards()[0]
 
-	// Send a command with WaitHandlers=true so the worker blocks in PublishSync.
 	envelope := &models.CommandEnvelope[order]{
 		Cmd: mocks.CreateOrderCmd{ID: "blocking-order", Total: 10.0},
 		Ctx: ctx,
@@ -1036,8 +996,6 @@ func TestPool_WaitWorkers_ContextCancelledAfterDispatch(
 	}
 	shard.CommandChan() <- envelope
 
-	// Signal stop so the dispatcher exits (waitDispatchers phase will complete).
-	// Use a short-lived context for Drain to expire during waitWorkers.
 	drainCtx, cancel := context.WithTimeout(
 		context.Background(),
 		30*time.Millisecond,
@@ -1046,7 +1004,6 @@ func TestPool_WaitWorkers_ContextCancelledAfterDispatch(
 
 	err := p.Drain(drainCtx)
 	if err == nil {
-		// Unblock the bus so the test doesn't leak goroutines.
 		close(unblockCh)
 		t.Skip("Drain completed before timeout — worker was too fast; skipping")
 	}
@@ -1059,7 +1016,6 @@ func TestPool_WaitWorkers_ContextCancelledAfterDispatch(
 		)
 	}
 
-	// Unblock the worker so it can exit cleanly and avoid goroutine leak.
 	close(unblockCh)
 }
 

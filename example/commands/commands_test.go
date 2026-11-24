@@ -7,10 +7,6 @@ import (
 	"github.com/char2cs/asynx/models"
 )
 
-// ============================================================================
-// CreateOrderCmd Tests
-// ============================================================================
-
 func TestCreateOrderCmd_AggregateID(
 	t *testing.T,
 ) {
@@ -220,10 +216,6 @@ func TestCreateOrderCmd_EmitEvent(
 	}
 }
 
-// ============================================================================
-// ConfirmOrderCmd Tests
-// ============================================================================
-
 func TestConfirmOrderCmd_AggregateID(
 	t *testing.T,
 ) {
@@ -390,10 +382,6 @@ func TestConfirmOrderCmd_EmitEvent(
 		)
 	}
 }
-
-// ============================================================================
-// ShipOrderCmd Tests
-// ============================================================================
 
 func TestShipOrderCmd_AggregateID(
 	t *testing.T,

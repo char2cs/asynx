@@ -1,15 +1,3 @@
-// Package dispatcher is asynx's default, in-memory models.Dispatcher: it
-// delivers committed events to the live subscribers (the bus) and to the
-// durable subscribers, in per-aggregate order, on one worker goroutine per
-// aggregate with work.
-//
-// The implementation is split into subsystems under internal/: jobs (the unit
-// of work), aggregates (the one registry, under the one mutex, of every
-// aggregate's queue, halt channel and park), tracker (the deliveries in
-// flight, for WaitIdle and TicketFor), reporter (the error and panic
-// handlers), delivery (the durable attempt loop) and workers (the
-// per-aggregate goroutines). This package wires them together and owns the
-// lifecycle: Close, Interrupt and WaitIdle.
 package dispatcher
 
 import (

@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// --- ErrMarshal ---
-
 func TestErrMarshal_MarshalJSON_ReturnsError(
 	t *testing.T,
 ) {
@@ -15,8 +13,6 @@ func TestErrMarshal_MarshalJSON_ReturnsError(
 		t.Fatal("expected marshal error, got nil")
 	}
 }
-
-// --- BadUnmarshal ---
 
 func TestBadUnmarshal_MarshalJSON_Succeeds(
 	t *testing.T,
@@ -49,8 +45,6 @@ func TestBadUnmarshal_UnmarshalJSON_ReturnsError(
 	}
 }
 
-// --- CountedMarshal ---
-
 func TestCountedMarshal_SucceedsBeforeFailAt(
 	t *testing.T,
 ) {
@@ -81,9 +75,9 @@ func TestCountedMarshal_FailsAtFailAt(
 ) {
 	cm := &CountedMarshal{FailAt: 2}
 
-	json.Marshal(cm) //nolint:errcheck — call 1, expected success
+	json.Marshal(cm)
 
-	_, err := json.Marshal(cm) // call 2, expected failure
+	_, err := json.Marshal(cm)
 	if err == nil {
 		t.Fatal("expected marshal error on call FailAt, got nil")
 	}
@@ -94,9 +88,9 @@ func TestCountedMarshal_SucceedsAfterFailAt(
 ) {
 	cm := &CountedMarshal{FailAt: 1}
 
-	json.Marshal(cm) //nolint:errcheck — call 1, expected failure
+	json.Marshal(cm)
 
-	_, err := json.Marshal(cm) // call 2, expected success
+	_, err := json.Marshal(cm)
 	if err != nil {
 		t.Errorf(
 			"call after FailAt: %v (want nil)",
@@ -110,7 +104,7 @@ func TestCountedMarshal_NCountsAllCalls(
 ) {
 	cm := &CountedMarshal{FailAt: 99}
 	for range 5 {
-		json.Marshal(cm) //nolint:errcheck
+		json.Marshal(cm)
 	}
 
 	if cm.N != 5 {

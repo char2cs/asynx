@@ -46,7 +46,6 @@ func TestMakeJob_AllFieldsMapped(
 		nil,
 	)
 
-	// Return type must be *exec.HandlerJob[string].
 	var _ *exec.HandlerJob[string] = job
 
 	if job.Event.EventName != "OrderPlaced" {
@@ -71,7 +70,6 @@ func TestMakeJob_AllFieldsMapped(
 		)
 	}
 
-	// Verify Handler and FallbackHandler are not swapped.
 	job.Handler(
 		context.Background(),
 		event,

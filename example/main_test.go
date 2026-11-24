@@ -24,6 +24,5 @@ func TestRun_WithCancelledContext(
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	// Should handle cancelled context gracefully
 	_ = run(ctx)
 }

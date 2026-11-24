@@ -1,21 +1,3 @@
-// Package pool implements shard-based concurrent command execution.
-//
-// Shard[T] encapsulates dispatcher and worker coordination for a subset of aggregates.
-// The dispatcher (dispatchCommands) reads envelopes off commandChan and hands
-// them to the worker pool via jobQueue. Workers (workerLoop) execute commands.
-//   - executeJob   — Called by workers; runs the command and sends the result
-//   - sendResult   — Non-blocking result send; drops if receiver gone
-//
-// Consistent hashing at the router routes each aggregate to a fixed shard and
-// dispatcher. With more than one worker per shard, commands run in parallel
-// across the shard's worker pool. A worker that picks a command for an
-// aggregate another worker is already running does not wait for it: the command
-// joins that aggregate's mailbox and the running worker takes it next, so one
-// aggregate occupies at most one worker however many commands it has queued
-// and the others keep serving the rest of the shard. The executor's
-// per-aggregate lock still guards against the callers outside the pool (Forget,
-// ResumeDeliveries). The event version is assigned by the event store on write
-// (optimistic concurrency), not by the shard.
 package pool
 
 import (
@@ -37,7 +19,7 @@ type Shard[T any] struct {
 
 	mailboxLimit int
 	mailboxMu    sync.Mutex
-	mailboxes    map[string][]*models.CommandJob[T] // aggregates a worker is running
+	mailboxes    map[string][]*models.CommandJob[T]
 }
 
 func newShard[T any](
@@ -105,8 +87,6 @@ func (s *Shard[T]) handleDispatch() bool {
 	return false
 }
 
-// failQueued answers the envelopes still waiting when the shard stops, so their
-// senders are released instead of waiting for a result nobody will produce.
 func (s *Shard[T]) failQueued() {
 	for {
 		select {
@@ -153,9 +133,6 @@ func (s *Shard[T]) workerLoop(
 	}
 }
 
-// serve runs job, then every command that queued behind it for the same
-// aggregate, unless another worker is already running that aggregate: then job
-// joins its mailbox and this worker is free for the next one.
 func (s *Shard[T]) serve(
 	executor *exec.CommandExecutor[T],
 	job *models.CommandJob[T],
@@ -177,9 +154,6 @@ func (s *Shard[T]) serve(
 	}
 }
 
-// claim reports whether the caller now runs the aggregate. When another worker
-// does, job is left in its mailbox, or answered with ErrQueueFull if the
-// mailbox already holds as many commands as the queue depth allows.
 func (s *Shard[T]) claim(
 	aggregateID string,
 	job *models.CommandJob[T],
@@ -212,8 +186,6 @@ func (s *Shard[T]) claim(
 	return false
 }
 
-// next pops the aggregate's next queued command, or releases the aggregate when
-// its mailbox is empty.
 func (s *Shard[T]) next(
 	aggregateID string,
 ) *models.CommandJob[T] {

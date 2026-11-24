@@ -279,9 +279,6 @@ func (i *asynxImpl[T]) Listen(
 		nil
 }
 
-// listener feeds a Listen channel. In bounded mode (count > 0) the channel has
-// capacity count, so a send never blocks once sendMu is held, and ch is closed
-// under sendMu so no handler can send on a closed channel.
 type listener[T any] struct {
 	bus   models.Bus[T]
 	ch    chan models.Event[T]
@@ -359,7 +356,6 @@ func (l *listener[T]) sendBounded(
 	go l.unsubscribeWhenPublished()
 }
 
-// deliver sends evt and reports whether it was the last one the listener takes.
 func (l *listener[T]) deliver(
 	evt models.Event[T],
 ) (isLast bool) {
@@ -386,7 +382,6 @@ func (l *listener[T]) unsubscribeWhenPublished() {
 	_ = l.bus.Unsubscribe(l.subID)
 }
 
-// closeChLocked closes ch exactly once. The caller holds sendMu.
 func (l *listener[T]) closeChLocked() {
 	if l.chClosed {
 		return

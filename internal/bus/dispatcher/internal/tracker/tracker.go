@@ -1,4 +1,3 @@
-// Package tracker follows the jobs whose delivery is under way.
 package tracker
 
 import (

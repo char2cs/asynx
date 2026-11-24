@@ -9,10 +9,6 @@ import (
 	"github.com/char2cs/asynx/models"
 )
 
-// ============================================================================
-// OrderReporter Tests
-// ============================================================================
-
 func TestOrderReporter_Handle_OrderCreated(
 	t *testing.T,
 ) {
@@ -30,7 +26,6 @@ func TestOrderReporter_Handle_OrderCreated(
 		PreviousAggregate: domain.Order{},
 	}
 
-	// Should not panic
 	reporter.Handle(
 		ctx,
 		event,
@@ -102,7 +97,6 @@ func TestOrderReporter_Handle_Concurrent(
 	ctx := context.Background()
 	wg := sync.WaitGroup{}
 
-	// Simulate concurrent event handling
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func(
@@ -125,10 +119,6 @@ func TestOrderReporter_Handle_Concurrent(
 
 	wg.Wait()
 }
-
-// ============================================================================
-// OrderNotifier Tests
-// ============================================================================
 
 func TestOrderNotifier_Handle_OrderCreated(
 	t *testing.T,
@@ -314,7 +304,6 @@ func TestOrderNotifier_Handle_Concurrent(
 	ctx := context.Background()
 	wg := sync.WaitGroup{}
 
-	// Simulate concurrent event handling
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func(

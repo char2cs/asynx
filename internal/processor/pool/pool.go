@@ -1,18 +1,3 @@
-// Package pool implements shard-based concurrent command execution.
-//
-// ShardPool[T] spawns one dispatcher and workersPerShard workers per shard. With
-// more than one worker a shard drains its queue in parallel; the executor's
-// per-aggregate lock keeps commands on one aggregate serial and ordered, so
-// workersPerShard only tunes throughput.
-//   - Shard.dispatchCommands — Reads envelopes off commandChan and hands them
-//     to the worker pool via jobQueue
-//   - Shard.workerLoop       — Executes commands; sends results on completion
-//
-// The event version is assigned by the event store on write (optimistic
-// concurrency), not by the pool.
-//
-// Shutdown is two-phase: signal all dispatchers to stop, drain jobQueues until
-// workers finish, then close all channels. Uses sync.WaitGroup for coordination.
 package pool
 
 import (

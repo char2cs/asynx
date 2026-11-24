@@ -1,11 +1,3 @@
-// Package models defines data structures shared across processor sub-packages.
-//
-// CommandEnvelope[T] and CommandJob[T] are simple wrappers with no embedded logic.
-//   - CommandEnvelope[T] — Command + context + result channel; sender creates, waits on result
-//   - CommandJob[T]      — Wraps an envelope for the worker pool; dispatcher creates, worker consumes
-//
-// ResultChan is buffered size 1 to ensure non-blocking sends; slow readers are ignored.
-// All fields are immutable after creation.
 package models
 
 import (

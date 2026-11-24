@@ -391,9 +391,6 @@ func TestShard_ResultUsesCommandResult(
 	}
 }
 
-// TestShard_NilEnvelopeClosesJobQueue verifies that sending nil on commandChan
-// triggers the defensive nil-guard in handleDispatch, which closes the jobQueue
-// and exits the dispatcher loop gracefully.
 func TestShard_NilEnvelopeClosesJobQueue(
 	t *testing.T,
 ) {
@@ -422,11 +419,8 @@ func TestShard_NilEnvelopeClosesJobQueue(
 
 	shard := p.Shards()[0]
 
-	// Send nil envelope — triggers handleDispatch's nil guard, closes jobQueue,
-	// and causes the dispatcher and workers to exit.
 	shard.CommandChan() <- nil
 
-	// Drain should complete quickly since the dispatcher and workers have exited.
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
 		2*time.Second,
@@ -478,7 +472,7 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(
 		1,
 		0,
 		1,
-	) // one shard, one worker
+	)
 	defer p.Drain(context.Background())
 
 	send := func(
@@ -526,7 +520,6 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(
 		t.Fatal("worker is held by a blocked handler: first result never arrived")
 	}
 
-	// The single worker is free: another aggregate commits while the handler blocks.
 	second := send("order2")
 	select {
 	case res := <-second.ResultChan:
@@ -540,7 +533,6 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(
 	close(release)
 }
 
-// Envelopes still queued when the pool stops are answered, not abandoned.
 func TestPool_Drain_AnswersEnvelopesLeftInTheQueue(
 	t *testing.T,
 ) {
@@ -633,8 +625,6 @@ func (c gatedUpdate) Validate(
 	return nil
 }
 
-// A command waiting for a busy aggregate must not hold a worker: the rest of the
-// shard keeps running while that aggregate is blocked.
 func TestShard_ABusyAggregateLeavesTheOtherWorkersFree(
 	t *testing.T,
 ) {
@@ -707,10 +697,6 @@ func TestShard_ABusyAggregateLeavesTheOtherWorkersFree(
 	}
 }
 
-// gateReleasedOnCleanup returns a gate and the function that opens it. The gate
-// is also opened when the test ends, before any cleanup registered earlier (such
-// as a Drain) runs, so a test that fails with a command still held does not
-// leave that Drain waiting for it.
 func gateReleasedOnCleanup(
 	t *testing.T,
 ) (gate chan struct{}, release func()) {
@@ -741,7 +727,6 @@ func resultWithin(
 	}
 }
 
-// The commands queued behind a busy aggregate run in the order they arrived.
 func TestShard_AMailboxKeepsTheOrderOfItsCommands(
 	t *testing.T,
 ) {
@@ -821,8 +806,6 @@ func TestShard_AMailboxKeepsTheOrderOfItsCommands(
 	}
 }
 
-// One aggregate cannot queue more commands than the queue depth allows: the
-// overflow is refused at once, and other aggregates are unaffected.
 func TestShard_AMailboxRefusesWhatExceedsTheQueueDepth(
 	t *testing.T,
 ) {
@@ -907,7 +890,6 @@ func TestShard_AMailboxRefusesWhatExceedsTheQueueDepth(
 	}
 }
 
-// A command whose caller has already given up is not executed.
 func TestShard_SkipsACommandWhoseContextEnded(
 	t *testing.T,
 ) {
@@ -975,7 +957,6 @@ func (c gatedCreate) Validate(
 	return c.CreateOrderCmd.Validate(current)
 }
 
-// waitForBacklog returns once the shard holds n commands behind a running one.
 func waitForBacklog[T any](
 	t *testing.T,
 	s *pool.Shard[T],

@@ -8,8 +8,6 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-// writeFailed classifies a WriteTx error. handled is true when the outcome is
-// final for the caller (a retry answer); otherwise err is the error to return.
 func (e *CommandExecutor[T]) writeFailed(
 	ctx context.Context,
 	commandID string,
@@ -70,8 +68,6 @@ func (e *CommandExecutor[T]) writeFailed(
 	}
 }
 
-// validationFailed makes a rejection final before it is reported: it is
-// recorded, or answered from the receipt someone else recorded first.
 func (e *CommandExecutor[T]) validationFailed(
 	ctx context.Context,
 	commandID string,
@@ -118,10 +114,6 @@ func (e *CommandExecutor[T]) validationFailed(
 		)
 }
 
-// recordRejection stores a rejected receipt so a retry of the same command id
-// stays rejected. Failing to store it fails the command with ErrPipelineFailed
-// instead of reporting a rejection that could later be overturned; the caller
-// retries and re-validates.
 func (e *CommandExecutor[T]) recordRejection(
 	ctx context.Context,
 	commandID string,
@@ -141,9 +133,6 @@ func (e *CommandExecutor[T]) recordRejection(
 	)
 }
 
-// answerFromReceipt answers a retry of an already-decided command. The stored
-// event is matched by ID as well as version, so an aggregate re-created after a
-// Forget, whose versions coincide, is never mistaken for the original.
 func (e *CommandExecutor[T]) answerFromReceipt(
 	ctx context.Context,
 	commandID string,

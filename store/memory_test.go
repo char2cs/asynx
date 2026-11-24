@@ -9,8 +9,6 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
-// --- SetError ---
-
 func TestSetError_CausesNextAppendToFail(
 	t *testing.T,
 ) {
@@ -56,7 +54,7 @@ func TestSetError_IsOneShot_SubsequentAppendSucceeds(
 		"agg1",
 		1,
 		[]byte("x"),
-	) //nolint:errcheck — expected to fail
+	)
 
 	if err := s.Append(
 		ctx,
@@ -95,8 +93,6 @@ func TestSetError_OnlyAffectsTargetAggregate(
 	}
 }
 
-// --- New ---
-
 func TestNew_ReturnsEmptyStore(
 	t *testing.T,
 ) {
@@ -120,8 +116,6 @@ func TestNew_ReturnsEmptyStore(
 		)
 	}
 }
-
-// --- Append ---
 
 func TestAppend_StoresBlob(
 	t *testing.T,
@@ -166,7 +160,7 @@ func TestAppend_DuplicateVersion_ReturnsErrPipelineFailed(
 		"agg1",
 		1,
 		[]byte("first"),
-	) //nolint:errcheck
+	)
 
 	err := s.Append(
 		ctx,
@@ -250,8 +244,6 @@ func TestAppend_VersionsAreIndependentPerAggregate(
 	}
 }
 
-// --- ReadFrom ---
-
 func TestReadFrom_ReturnsAllBlobsFromVersion(
 	t *testing.T,
 ) {
@@ -263,19 +255,19 @@ func TestReadFrom_ReturnsAllBlobsFromVersion(
 		"agg1",
 		1,
 		[]byte("v1"),
-	) //nolint:errcheck
+	)
 	s.Append(
 		ctx,
 		"agg1",
 		2,
 		[]byte("v2"),
-	) //nolint:errcheck
+	)
 	s.Append(
 		ctx,
 		"agg1",
 		3,
 		[]byte("v3"),
-	) //nolint:errcheck
+	)
 
 	blobs, err := s.ReadFrom(
 		ctx,
@@ -316,13 +308,13 @@ func TestReadFrom_FromZero_ReturnsAll(
 		"agg1",
 		1,
 		[]byte("v1"),
-	) //nolint:errcheck
+	)
 	s.Append(
 		ctx,
 		"agg1",
 		2,
 		[]byte("v2"),
-	) //nolint:errcheck
+	)
 
 	blobs, _ := s.ReadFrom(
 		ctx,
@@ -372,7 +364,7 @@ func TestReadFrom_VersionBeyondAll_ReturnsEmpty(
 		"agg1",
 		1,
 		[]byte("v1"),
-	) //nolint:errcheck
+	)
 
 	blobs, _ := s.ReadFrom(
 		ctx,
@@ -387,8 +379,6 @@ func TestReadFrom_VersionBeyondAll_ReturnsEmpty(
 	}
 }
 
-// --- ReadRange ---
-
 func TestReadRange_ReturnsUpToCount(
 	t *testing.T,
 ) {
@@ -400,19 +390,19 @@ func TestReadRange_ReturnsUpToCount(
 		"agg1",
 		1,
 		[]byte("v1"),
-	) //nolint:errcheck
+	)
 	s.Append(
 		ctx,
 		"agg1",
 		2,
 		[]byte("v2"),
-	) //nolint:errcheck
+	)
 	s.Append(
 		ctx,
 		"agg1",
 		3,
 		[]byte("v3"),
-	) //nolint:errcheck
+	)
 
 	blobs, err := s.ReadRange(
 		ctx,
@@ -454,13 +444,13 @@ func TestReadRange_CountExceedsAvailable_ReturnsAll(
 		"agg1",
 		1,
 		[]byte("v1"),
-	) //nolint:errcheck
+	)
 	s.Append(
 		ctx,
 		"agg1",
 		2,
 		[]byte("v2"),
-	) //nolint:errcheck
+	)
 
 	blobs, err := s.ReadRange(
 		ctx,
@@ -494,19 +484,19 @@ func TestReadRange_FromMidRange(
 		"agg1",
 		1,
 		[]byte("v1"),
-	) //nolint:errcheck
+	)
 	s.Append(
 		ctx,
 		"agg1",
 		2,
 		[]byte("v2"),
-	) //nolint:errcheck
+	)
 	s.Append(
 		ctx,
 		"agg1",
 		3,
 		[]byte("v3"),
-	) //nolint:errcheck
+	)
 
 	blobs, _ := s.ReadRange(
 		ctx,
@@ -565,7 +555,7 @@ func TestReadRange_CountZero_ReturnsEmpty(
 		"agg1",
 		1,
 		[]byte("v1"),
-	) //nolint:errcheck
+	)
 
 	blobs, err := s.ReadRange(
 		ctx,
@@ -588,33 +578,30 @@ func TestReadRange_CountZero_ReturnsEmpty(
 	}
 }
 
-// --- Out-of-order appends ---
-
 func TestAppend_OutOfOrder_ReadsInVersionOrder(
 	t *testing.T,
 ) {
 	s := New()
 	ctx := context.Background()
 
-	// Append out of order.
 	s.Append(
 		ctx,
 		"agg1",
 		3,
 		[]byte("v3"),
-	) //nolint:errcheck
+	)
 	s.Append(
 		ctx,
 		"agg1",
 		1,
 		[]byte("v1"),
-	) //nolint:errcheck
+	)
 	s.Append(
 		ctx,
 		"agg1",
 		2,
 		[]byte("v2"),
-	) //nolint:errcheck
+	)
 
 	blobs, err := s.ReadFrom(
 		ctx,
@@ -644,8 +631,6 @@ func TestAppend_OutOfOrder_ReadsInVersionOrder(
 		)
 	}
 }
-
-// --- Context cancellation ---
 
 func TestAppend_CancelledContext_ReturnsError(
 	t *testing.T,
@@ -700,8 +685,6 @@ func TestReadRange_CancelledContext_ReturnsError(
 	}
 }
 
-// --- Concurrent access ---
-
 func TestConcurrentAppend_UniqueVersions_AllSucceed(
 	t *testing.T,
 ) {
@@ -720,7 +703,7 @@ func TestConcurrentAppend_UniqueVersions_AllSucceed(
 				"agg1",
 				int64(v),
 				[]byte("data"),
-			) //nolint:errcheck
+			)
 		}(i)
 	}
 
@@ -786,8 +769,6 @@ func TestConcurrentAppend_SameVersion_ExactlyOneSucceeds(
 	}
 }
 
-// --- Delete ---
-
 func TestDelete_RemovesAllEntries(
 	t *testing.T,
 ) {
@@ -799,13 +780,13 @@ func TestDelete_RemovesAllEntries(
 		"agg1",
 		1,
 		[]byte("v1"),
-	) //nolint:errcheck
+	)
 	s.Append(
 		ctx,
 		"agg1",
 		2,
 		[]byte("v2"),
-	) //nolint:errcheck
+	)
 
 	if err := s.Delete(
 		ctx,
@@ -863,18 +844,18 @@ func TestDelete_DoesNotAffectOtherAggregates(
 		"agg1",
 		1,
 		[]byte("v1"),
-	) //nolint:errcheck
+	)
 	s.Append(
 		ctx,
 		"agg2",
 		1,
 		[]byte("v2"),
-	) //nolint:errcheck
+	)
 
 	s.Delete(
 		ctx,
 		"agg1",
-	) //nolint:errcheck
+	)
 
 	blobs, err := s.ReadFrom(
 		ctx,
@@ -910,8 +891,6 @@ func TestDelete_CancelledContext_ReturnsError(
 		t.Error("expected error for cancelled context, got nil")
 	}
 }
-
-// --- transactions ---
 
 func TestAtomically_NativeIsNilForMemory(
 	t *testing.T,
@@ -1193,7 +1172,6 @@ func TestAtomically_PanicRollsBackAndRepanics(
 		)
 	}
 
-	// The store stays usable afterwards (the transaction lock was released).
 	if err := s.Append(
 		ctx,
 		"s1",

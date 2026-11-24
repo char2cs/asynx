@@ -17,8 +17,6 @@ type order = mocks.Order
 
 var storageErr = errors.New("storage failure")
 
-// --- Helpers ---
-
 func newTestWriter(
 	es asynxmd.Store,
 	ss asynxmd.SnapshotStore,
@@ -29,8 +27,6 @@ func newTestWriter(
 		1,
 	)
 }
-
-// --- Write ---
 
 func TestWrite_AppendsEventAndReturnsPublicEvent(
 	t *testing.T,
@@ -206,8 +202,6 @@ func TestWrite_AppendsAtExpectedVersionPlusOne(
 	)
 	ctx := context.Background()
 
-	// The writer no longer derives the version from storage; it appends at
-	// expectedVersion+1. Deriving the loaded version is the reader's job.
 	evt, err := w.Write(
 		ctx,
 		"agg1",
@@ -464,8 +458,6 @@ func TestWrite_MarshalNewStateError(
 func TestWriteSnapshot_MarshalStateError(
 	t *testing.T,
 ) {
-	// call 1+2: jsondiff.Compare marshals previousState and newState internally.
-	// call 3: json.Marshal(SnapshotBlob[T]{State: newState}) inside writeSnapshot.
 	w := New[*mocks.CountedMarshal](
 		store.New(),
 		store.NewSnapshots(),
@@ -517,8 +509,6 @@ func TestWriter_SnapshotStore_ReturnsBacking(
 	}
 }
 
-// --- SnapshotStore: upsert semantics, version recovery ---
-
 func TestWriter_SnapshotIsUpsertedNotAccumulated(
 	t *testing.T,
 ) {
@@ -534,8 +524,6 @@ func TestWriter_SnapshotIsUpsertedNotAccumulated(
 	prev := order{}
 	for i := range 20 {
 		next := order{ID: "agg-1", Total: float64(i), Status: "Pending"}
-		// expectedVersion is the version the state was loaded at; iteration i
-		// writes version i+1, so it validated against version i.
 		if _, err := w.Write(
 			ctx,
 			"agg-1",

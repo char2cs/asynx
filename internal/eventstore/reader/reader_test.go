@@ -19,8 +19,6 @@ type order = mocks.Order
 
 var storageErr = errors.New("storage failure")
 
-// --- Helpers ---
-
 func newTestReader(
 	es asynxmd.Store,
 	ss asynxmd.SnapshotStore,
@@ -92,8 +90,6 @@ func makeSnapshotBlob(
 	return b
 }
 
-// --- Get — cold path ---
-
 func TestGet_ColdPath_ReturnsHydratedState(
 	t *testing.T,
 ) {
@@ -112,7 +108,7 @@ func TestGet_ColdPath_ReturnsHydratedState(
 			1,
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"Pending"}]`),
 		),
-	) //nolint:errcheck
+	)
 	es.Append(
 		ctx,
 		"events:agg1",
@@ -125,7 +121,7 @@ func TestGet_ColdPath_ReturnsHydratedState(
 			1,
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"Shipped"}]`),
 		),
-	) //nolint:errcheck
+	)
 
 	r := newTestReader(
 		es,
@@ -200,8 +196,6 @@ func TestGet_ColdPath_StorageError(
 func TestGet_ColdPath_DeserializeError(
 	t *testing.T,
 ) {
-	// CorruptBlobStore returns a non-empty corrupt blob slice, so coldPath
-	// skips ErrNotFound and calls deserializeEvents which fails.
 	r := newTestReader(
 		&mocks.CorruptBlobStore{},
 		store.NewSnapshots(),
@@ -215,8 +209,6 @@ func TestGet_ColdPath_DeserializeError(
 		t.Fatal("expected deserialize error on corrupt event blobs")
 	}
 }
-
-// --- Get — warm path ---
 
 func TestGet_WarmPath_SnapshotPlusDelta(
 	t *testing.T,
@@ -235,7 +227,7 @@ func TestGet_WarmPath_SnapshotPlusDelta(
 			1,
 			order{ID: "1", Status: "Pending", Total: 50},
 		),
-	) //nolint:errcheck
+	)
 	es.Append(
 		ctx,
 		"events:agg1",
@@ -248,7 +240,7 @@ func TestGet_WarmPath_SnapshotPlusDelta(
 			1,
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"Shipped"}]`),
 		),
-	) //nolint:errcheck
+	)
 
 	r := newTestReader(
 		es,
@@ -297,7 +289,7 @@ func TestGet_WarmPath_NoDelta_ReturnsSnapshot(
 			1,
 			order{Status: "Pending"},
 		),
-	) //nolint:errcheck
+	)
 
 	r := newTestReader(
 		store.New(),
@@ -330,13 +322,12 @@ func TestGet_WarmPath_CorruptSnapshot_FallsBackToCold(
 	ss := store.NewSnapshots()
 	ctx := context.Background()
 
-	// Outer blob is completely invalid JSON.
 	ss.Put(
 		ctx,
 		"agg1",
 		1,
 		[]byte(`not-valid-json`),
-	) //nolint:errcheck
+	)
 	es.Append(
 		ctx,
 		"events:agg1",
@@ -349,7 +340,7 @@ func TestGet_WarmPath_CorruptSnapshot_FallsBackToCold(
 			1,
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"Pending"}]`),
 		),
-	) //nolint:errcheck
+	)
 
 	r := newTestReader(
 		es,
@@ -382,13 +373,12 @@ func TestGet_WarmPath_CorruptSnapshot_CallsOnCorruption(
 	ss := store.NewSnapshots()
 	ctx := context.Background()
 
-	// state field is a JSON string — cannot unmarshal into order struct.
 	ss.Put(
 		ctx,
 		"agg1",
 		1,
 		[]byte(`{"version":1,"schema_version":1,"state":"not an order object"}`),
-	) //nolint:errcheck
+	)
 	es.Append(
 		ctx,
 		"events:agg1",
@@ -401,7 +391,7 @@ func TestGet_WarmPath_CorruptSnapshot_CallsOnCorruption(
 			1,
 			json.RawMessage(`[]`),
 		),
-	) //nolint:errcheck
+	)
 
 	var hookErr error
 	rep := replayer.New[order](
@@ -439,14 +429,12 @@ func TestGet_WarmPath_CorruptStateInSnapshot_FallsBackToCold(
 	ss := store.NewSnapshots()
 	ctx := context.Background()
 
-	// state field is a JSON string — cannot unmarshal into order struct,
-	// so the single json.Unmarshal(&SnapshotBlob[T]) call fails → cold path.
 	ss.Put(
 		ctx,
 		"agg1",
 		1,
 		[]byte(`{"version":1,"schema_version":1,"state":"not an order object"}`),
-	) //nolint:errcheck
+	)
 	es.Append(
 		ctx,
 		"events:agg1",
@@ -459,7 +447,7 @@ func TestGet_WarmPath_CorruptStateInSnapshot_FallsBackToCold(
 			1,
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"Shipped"}]`),
 		),
-	) //nolint:errcheck
+	)
 
 	r := newTestReader(
 		es,
@@ -501,7 +489,7 @@ func TestGet_WarmPath_DeltaDeserializeError(
 			1,
 			order{Status: "Pending"},
 		),
-	) //nolint:errcheck
+	)
 
 	r := newTestReader(
 		&mocks.CorruptBlobStore{},
@@ -533,7 +521,7 @@ func TestGet_WarmPath_DeltaStorageError(
 			1,
 			order{Status: "Pending"},
 		),
-	) //nolint:errcheck
+	)
 
 	r := newTestReader(
 		&mocks.ErrStore{Err: storageErr},
@@ -578,13 +566,9 @@ func TestGet_SnapshotStorageError(
 	}
 }
 
-// --- Get — auto-snapshot on upcasting (moved from replayer_test) ---
-
 func TestGet_AutoSnapshotFail_ReturnsState(
 	t *testing.T,
 ) {
-	// This test verifies the fix: auto-snapshot failures should not prevent
-	// returning valid state. The state is already durable in the event store.
 	es := store.New()
 	ss := store.NewSnapshots()
 	ctx := context.Background()
@@ -626,9 +610,8 @@ func TestGet_AutoSnapshotFail_ReturnsState(
 			1,
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"Shipped"}]`),
 		),
-	) //nolint:errcheck
+	)
 
-	// Make snapshot store fail on the auto-snapshot write.
 	ss.SetError(
 		"agg1",
 		storageErr,
@@ -697,7 +680,7 @@ func TestGet_AutoSnapshot_WrittenAfterUpcasting(
 			1,
 			json.RawMessage(`[]`),
 		),
-	) //nolint:errcheck
+	)
 
 	_, err := r.Get(
 		ctx,
@@ -719,8 +702,6 @@ func TestGet_AutoSnapshot_WrittenAfterUpcasting(
 	}
 }
 
-// --- Exists ---
-
 func TestExists_ReturnsTrueWhenEventExists(
 	t *testing.T,
 ) {
@@ -739,7 +720,7 @@ func TestExists_ReturnsTrueWhenEventExists(
 			1,
 			json.RawMessage(`[]`),
 		),
-	) //nolint:errcheck
+	)
 
 	r := newTestReader(
 		es,
@@ -809,8 +790,6 @@ func TestExists_StorageError(
 	}
 }
 
-// --- Preload ---
-
 func TestPreload_NoError_WhenAggregateExists(
 	t *testing.T,
 ) {
@@ -829,7 +808,7 @@ func TestPreload_NoError_WhenAggregateExists(
 			1,
 			json.RawMessage(`[]`),
 		),
-	) //nolint:errcheck
+	)
 
 	r := newTestReader(
 		es,
@@ -889,20 +868,13 @@ func TestPreload_PropagatesStorageError(
 	}
 }
 
-// --- Auto-snapshot error handling ---
-
 func TestGet_WarmPath_AutoSnapshotError_ReturnsStateNotError(
 	t *testing.T,
 ) {
-	// This test verifies the fix for auto-snapshot error handling.
-	// When a snapshot write fails during upcasting in the warm path,
-	// the state should still be returned (not an error) because the state
-	// is already durable in the event store.
 	es := store.New()
 	ss := store.NewSnapshots()
 	ctx := context.Background()
 
-	// Create a snapshot at version 1
 	ss.Put(
 		ctx,
 		"agg1",
@@ -913,9 +885,8 @@ func TestGet_WarmPath_AutoSnapshotError_ReturnsStateNotError(
 			1,
 			order{Status: "Old"},
 		),
-	) //nolint:errcheck
+	)
 
-	// Create an event at version 2 that will trigger upcasting
 	es.Append(
 		ctx,
 		"events:agg1",
@@ -928,9 +899,8 @@ func TestGet_WarmPath_AutoSnapshotError_ReturnsStateNotError(
 			1,
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"New"}]`),
 		),
-	) //nolint:errcheck
+	)
 
-	// Create a reader with upcasters to trigger DidUpcast
 	upcasters := map[int]asynxmd.Upcaster{
 		1: func(
 			_ context.Context,
@@ -956,13 +926,11 @@ func TestGet_WarmPath_AutoSnapshotError_ReturnsStateNotError(
 		nil,
 	)
 
-	// Make snapshot store return an error on the next write (for auto-snapshot)
 	ss.SetError(
 		"agg1",
 		storageErr,
 	)
 
-	// Get should still return the state even though auto-snapshot write fails
 	state, err := r.Get(
 		ctx,
 		"agg1",
@@ -985,12 +953,10 @@ func TestGet_WarmPath_AutoSnapshotError_ReturnsStateNotError(
 func TestGet_ColdPath_AutoSnapshotError_ReturnsStateNotError(
 	t *testing.T,
 ) {
-	// Similar to warm path: auto-snapshot errors should not prevent returning valid state.
 	es := store.New()
 	ss := store.NewSnapshots()
 	ctx := context.Background()
 
-	// Create events that trigger upcasting
 	es.Append(
 		ctx,
 		"events:agg1",
@@ -1003,7 +969,7 @@ func TestGet_ColdPath_AutoSnapshotError_ReturnsStateNotError(
 			1,
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"Pending"}]`),
 		),
-	) //nolint:errcheck
+	)
 
 	upcasters := map[int]asynxmd.Upcaster{
 		1: func(
@@ -1030,13 +996,11 @@ func TestGet_ColdPath_AutoSnapshotError_ReturnsStateNotError(
 		nil,
 	)
 
-	// Make snapshot store return an error on write (for auto-snapshot)
 	ss.SetError(
 		"agg1",
 		storageErr,
 	)
 
-	// Get should still return the state even though auto-snapshot write fails
 	state, err := r.Get(
 		ctx,
 		"agg1",
@@ -1075,7 +1039,7 @@ func TestGet_ColdPath_HydrateError_ReturnsError(
 			1,
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"Pending"}]`),
 		),
-	) //nolint:errcheck
+	)
 
 	sentinel := errors.New("upcaster failed")
 	upcasters := map[int]asynxmd.Upcaster{
@@ -1118,10 +1082,6 @@ func TestGet_ColdPath_HydrateError_ReturnsError(
 	}
 }
 
-// --- SnapshotStore: read exactly once, cold path on miss/corruption ---
-
-// writeEvent appends a single event for aggregateID directly to a
-// models.Store, computing the RFC 6902 patch from the zero value to state.
 func writeEvent(
 	t *testing.T,
 	s store.Memory,
@@ -1418,7 +1378,6 @@ func TestReader_StaleSnapshotStillHydratesCorrectState(
 		nil,
 	)
 
-	// Write events 1..5, each advancing Total and the last advancing Status.
 	writeEvent(
 		t,
 		events,
@@ -1455,10 +1414,6 @@ func TestReader_StaleSnapshotStillHydratesCorrectState(
 		order{ID: "agg-1", Total: 5, Status: "Shipped"},
 	)
 
-	// Simulate last-write-wins landing a STALE snapshot (v2) after newer
-	// events already exist — impossible under the old append-only Store
-	// design (reading all and taking the last always got the highest
-	// version), but explicitly tolerated by models.SnapshotStore.Put.
 	stale := makeSnapshotBlob(
 		t,
 		2,
@@ -1488,8 +1443,6 @@ func TestReader_StaleSnapshotStillHydratesCorrectState(
 		)
 	}
 
-	// The reader must replay events 3, 4, 5 on top of the stale v2 snapshot
-	// state to reach the CURRENT state, not return the stale v2 state.
 	want := order{ID: "agg-1", Total: 5, Status: "Shipped"}
 	if got != want {
 		t.Errorf(
@@ -1500,7 +1453,6 @@ func TestReader_StaleSnapshotStillHydratesCorrectState(
 	}
 }
 
-// failingSnapshots returns err from Get.
 type failingSnapshots struct{ err error }
 
 func (f *failingSnapshots) Put(
@@ -1526,10 +1478,6 @@ func (f *failingSnapshots) Delete(
 	return f.err
 }
 
-// --- Get — auto-snapshot of a lock-free read ---
-
-// afterReadStore runs hook once, right after the first ReadFrom returns: the
-// moment a lock-free Get holds a stream it has read but not yet snapshotted.
 type afterReadStore struct {
 	asynxmd.Store
 	hook func()
@@ -1602,14 +1550,14 @@ func TestGet_AutoSnapshot_NotWrittenOverAStreamErasedMeanwhile(
 			1,
 			json.RawMessage(`[]`),
 		),
-	) //nolint:errcheck
+	)
 
 	es := &afterReadStore{Store: mem, hook: func() {
 		mem.Delete(
 			ctx,
 			"events:agg1",
 		)
-	}} //nolint:errcheck
+	}}
 	if _, err := upcastingReader(
 		es,
 		ss,
@@ -1649,13 +1597,13 @@ func TestGet_AutoSnapshot_NotWrittenOverAStreamRecreatedMeanwhile(
 			1,
 			json.RawMessage(`[]`),
 		),
-	) //nolint:errcheck
+	)
 
 	recreate := func() {
 		mem.Delete(
 			ctx,
 			"events:agg1",
-		) //nolint:errcheck
+		)
 		mem.Append(
 			ctx,
 			"events:agg1",
@@ -1668,7 +1616,7 @@ func TestGet_AutoSnapshot_NotWrittenOverAStreamRecreatedMeanwhile(
 				2,
 				json.RawMessage(`[]`),
 			),
-		) //nolint:errcheck
+		)
 	}
 	es := &afterReadStore{Store: mem, hook: recreate}
 	if _, err := upcastingReader(
@@ -1710,7 +1658,7 @@ func TestGet_AutoSnapshot_NotWrittenWhenTheStreamCannotBeReChecked(
 			1,
 			json.RawMessage(`[]`),
 		),
-	) //nolint:errcheck
+	)
 
 	es := &readRangeFailsStore{Store: mem}
 	if _, err := upcastingReader(
@@ -1738,7 +1686,7 @@ func TestGet_AutoSnapshot_NotWrittenWhenTheStreamCannotBeReChecked(
 		"events:agg2",
 		1,
 		[]byte("not json"),
-	) //nolint:errcheck
+	)
 	r := upcastingReader(
 		mem,
 		ss,
@@ -1783,7 +1731,7 @@ func TestGet_AutoSnapshot_IsWrittenUnderTheGuard(
 			1,
 			json.RawMessage(`[]`),
 		),
-	) //nolint:errcheck
+	)
 
 	r := upcastingReader(
 		mem,
@@ -1853,7 +1801,7 @@ func TestGet_AutoSnapshot_SkippedWhenTheGuardRefuses(
 			1,
 			json.RawMessage(`[]`),
 		),
-	) //nolint:errcheck
+	)
 
 	r := upcastingReader(
 		mem,
@@ -1884,8 +1832,6 @@ func TestGet_AutoSnapshot_SkippedWhenTheGuardRefuses(
 	}
 }
 
-// Load runs under the aggregate's command lock, so it must not ask for the
-// guard (which takes that same lock).
 func TestLoad_AutoSnapshot_DoesNotUseTheGuard(
 	t *testing.T,
 ) {
@@ -1904,7 +1850,7 @@ func TestLoad_AutoSnapshot_DoesNotUseTheGuard(
 			1,
 			json.RawMessage(`[]`),
 		),
-	) //nolint:errcheck
+	)
 
 	r := upcastingReader(
 		mem,
@@ -1935,10 +1881,6 @@ func TestLoad_AutoSnapshot_DoesNotUseTheGuard(
 		t.Fatal("Load did not write the auto-snapshot")
 	}
 }
-
-// Load returns the state together with the version it was built at. That
-// version is what makes optimistic-concurrency writes correct, so it gets its
-// own coverage across the new/cold/warm paths.
 
 func TestLoad_NewAggregate_ReturnsNotFoundAndZero(
 	t *testing.T,
@@ -2135,11 +2077,6 @@ func TestLoad_WarmPath_SnapshotWithNoDeltas_ReturnsSnapshotVersion(
 	}
 }
 
-// TestLoad_CorruptSnapshot_ReturnsColdPathVersion preserves the concern the
-// writer used to own before optimistic concurrency moved version derivation
-// here: a snapshot that cannot be deserialized must not produce a wrong
-// version. Load falls back to a full replay and reports the last event's
-// version, so the expected version handed to Write stays correct.
 func TestLoad_CorruptSnapshot_ReturnsColdPathVersion(
 	t *testing.T,
 ) {

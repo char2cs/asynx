@@ -19,7 +19,6 @@ func (e *CommandExecutor[T]) isForgetting(
 	return ok
 }
 
-// setForgetting marks id as being forgotten; false if it already was.
 func (e *CommandExecutor[T]) setForgetting(
 	id string,
 ) bool {
@@ -124,12 +123,6 @@ func (e *CommandExecutor[T]) Forget(
 	)
 }
 
-// erase deletes the aggregate under its lock. On success it lifts the fence
-// before releasing the lock, so no command is refused after the erase has
-// completed; on failure the fence stays until Forget has parked the aggregate.
-// The snapshot goes first: if the stream erase then fails the aggregate is
-// intact and readable by cold replay, whereas the other order could leave a
-// stale snapshot that resurrects erased state.
 func (e *CommandExecutor[T]) erase(
 	ctx context.Context,
 	aggregateID string,
@@ -189,10 +182,6 @@ func (e *CommandExecutor[T]) erase(
 	return nil
 }
 
-// awaitTombstone waits for the marker to reach every subscriber. It gives up
-// when ctx ends or the processor starts shutting down, so a Forget stuck behind
-// a handler that is itself waiting for it (see ErrForgetFromHandler, which is
-// only detected through the handler's context) cannot hold the shutdown open.
 func (e *CommandExecutor[T]) awaitTombstone(
 	ctx context.Context,
 	t asynxmd.Ticket,
@@ -254,9 +243,6 @@ func interruptedWait(
 	}
 }
 
-// writeTombstone marks the aggregate as being forgotten, commits the tombstone
-// and enqueues it for delivery, under the aggregate's lock. On success the mark
-// stays until Forget clears it; on error it is cleared here.
 func (e *CommandExecutor[T]) writeTombstone(
 	ctx context.Context,
 	aggregateID string,
@@ -383,10 +369,6 @@ func (e *CommandExecutor[T]) commitTombstone(
 		nil
 }
 
-// tombstoneHook runs synchronous projections for the tombstone, drops the
-// aggregate's pending deliveries, which the deletion supersedes, and records the
-// tombstone itself as pending, so that a failed Forget leaves the marker ahead
-// of anything that follows it.
 func (e *CommandExecutor[T]) tombstoneHook() eventstore.TxHook[T] {
 	return func(
 		ctx context.Context,
@@ -426,8 +408,6 @@ func (e *CommandExecutor[T]) supersedeDeliveriesIfLogged(
 	)
 }
 
-// supersedeDeliveries drops the aggregate's pending deliveries and records the
-// tombstone as the only one.
 func supersedeDeliveries[T any](
 	ctx context.Context,
 	tx asynxmd.Tx,
