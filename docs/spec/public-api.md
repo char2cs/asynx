@@ -402,7 +402,7 @@ err = ax.Shutdown(ctx)
 
 ## Error Types
 
-All errors are sentinel values in the `models` package; match with `errors.Is`. See [models/errors.go](../../models/errors.go) for the authoritative list.
+All errors are sentinel values in the `models` package; match with `errors.Is`. See [models/errors.go](https://github.com/char2cs/asynx/blob/develop/models/errors.go) for the authoritative list.
 
 **Where the common ones come from:**
 - `ErrValidation` — from `cmd.Validate()` failure, or `Forget` on a missing aggregate

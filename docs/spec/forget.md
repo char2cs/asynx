@@ -136,7 +136,7 @@ ax, err := asynx.New[Order]().
 
 ## `models.ForgetHandler[T]`
 
-New named type in `models/handlers.go`, following the existing `*Handler[T]` convention:
+New named type in `models/forget_handler.go`, following the existing `*Handler[T]` convention:
 
 ```go
 // ForgetHandler is called when an aggregate is forgotten.
@@ -245,7 +245,7 @@ return fmt.Errorf("%w: %w", models.ErrForgetFailed, err)
 
 - `Send` followed immediately by `Forget` on the same aggregate: shard serialization guarantees `Send` completes before the tombstone is written
 
-### Store Tests (`store/memory_test.go`)
+### Store Tests (`store/memory_store_test.go`)
 
 - `Delete` removes all events and snapshots for the aggregate
 - `Delete` on a non-existent aggregate is a no-op (returns nil)
