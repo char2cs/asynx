@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="Asynx" width="510">
+</p>
+
 # asynx
 
 **Validate early, commit confidently.** Event sourcing + CQRS for Go with command-first validation and automatic event diffs.
