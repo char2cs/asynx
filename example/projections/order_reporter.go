@@ -13,6 +13,7 @@ type OrderReporter struct {
 	mu sync.Mutex
 }
 
+// Handle folds the event into the report.
 func (r *OrderReporter) Handle(
 	ctx context.Context,
 	event models.Event[domain.Order],

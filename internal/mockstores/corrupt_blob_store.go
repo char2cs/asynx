@@ -12,6 +12,7 @@ type CorruptBlobStore struct{}
 
 func (c *CorruptBlobStore) tx() models.Tx { return stubTx{appendFn: c.Append, deleteFn: c.Delete} }
 
+// Atomically runs fn against a transaction that discards every write.
 func (c *CorruptBlobStore) Atomically(
 	_ context.Context,
 	fn func(models.Tx) error,
@@ -19,6 +20,7 @@ func (c *CorruptBlobStore) Atomically(
 	return fn(c.tx())
 }
 
+// GetReceipt reports that no receipt exists.
 func (c *CorruptBlobStore) GetReceipt(
 	context.Context,
 	string,
@@ -28,6 +30,7 @@ func (c *CorruptBlobStore) GetReceipt(
 		nil
 }
 
+// PendingDeliveries returns no pending deliveries.
 func (c *CorruptBlobStore) PendingDeliveries(
 	context.Context,
 	int,
@@ -36,6 +39,7 @@ func (c *CorruptBlobStore) PendingDeliveries(
 		nil
 }
 
+// AckDelivery does nothing and succeeds.
 func (c *CorruptBlobStore) AckDelivery(
 	context.Context,
 	string,
@@ -44,6 +48,7 @@ func (c *CorruptBlobStore) AckDelivery(
 	return nil
 }
 
+// Append discards the data and succeeds.
 func (c *CorruptBlobStore) Append(
 	_ context.Context,
 	_ string,
@@ -53,6 +58,7 @@ func (c *CorruptBlobStore) Append(
 	return nil
 }
 
+// ReadFrom returns a single unparseable blob.
 func (c *CorruptBlobStore) ReadFrom(
 	_ context.Context,
 	_ string,
@@ -62,6 +68,7 @@ func (c *CorruptBlobStore) ReadFrom(
 		nil
 }
 
+// ReadRange returns a single unparseable blob.
 func (c *CorruptBlobStore) ReadRange(
 	_ context.Context,
 	_ string,
@@ -72,6 +79,7 @@ func (c *CorruptBlobStore) ReadRange(
 		nil
 }
 
+// Delete does nothing and succeeds.
 func (c *CorruptBlobStore) Delete(
 	_ context.Context,
 	_ string,

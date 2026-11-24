@@ -26,28 +26,42 @@ func seedPending(
 	ids ...string,
 ) {
 	t.Helper()
-	ctx := context.Background()
 	for _, id := range ids {
-		if _, err := es.Write(
-			ctx,
-			mocks.CreateOrderCmd{ID: id, Total: 1},
-		); err != nil {
-			t.Fatal(err)
-		}
-
-		s.Atomically(
-			ctx,
-			func(
-				tx asynxmd.Tx,
-			) error {
-				return tx.EnqueueDelivery(
-					ctx,
-					id,
-					1,
-				)
-			},
+		seedOne(
+			t,
+			s,
+			es,
+			id,
 		)
 	}
+}
+
+func seedOne(
+	t *testing.T,
+	s store.Memory,
+	es eventstore.EventStore[order],
+	id string,
+) {
+	t.Helper()
+	ctx := context.Background()
+	mustWrite(
+		t,
+		es,
+		mocks.CreateOrderCmd{ID: id, Total: 1},
+	)
+	enqueue := func(
+		tx asynxmd.Tx,
+	) error {
+		return tx.EnqueueDelivery(
+			ctx,
+			id,
+			1,
+		)
+	}
+	s.Atomically(
+		ctx,
+		enqueue,
+	)
 }
 
 func seedUnrebuildable(
@@ -115,6 +129,7 @@ func assertDeliveredTo(
 
 type ackErrStore struct{ store.Memory }
 
+// AckDelivery is the test double implementation for the code under test.
 func (ackErrStore) AckDelivery(
 	context.Context,
 	string,
@@ -136,33 +151,18 @@ func TestProcessor_Resume_RedeliversParkedAggregatesInOrder(
 		store.New(),
 		parkingOpts(
 			&healthy,
-			models.WithDeliveryErrorHandler(func(
-				_ context.Context,
-				_ asynxmd.Event[order],
-				err error,
-				_ int,
-			) {
-				if errors.Is(
-					err,
-					asynxmd.ErrDeliveryParked,
-				) {
-					parked <- struct{}{}
-				}
-			}),
+			parkedSignal(parked),
 		)...,
 	)
 	ctx := context.Background()
 
 	for i := range 2 {
-		if _, err := f.p.Send(
-			ctx,
-			updateCmd(
-				"o1",
-				float64(i+1),
-			),
-		); err != nil {
-			t.Fatal(err)
-		}
+		mustSendUpdate(
+			t,
+			f.p,
+			"o1",
+			float64(i+1),
+		)
 	}
 
 	<-parked
@@ -241,6 +241,7 @@ type flakyPendingStore struct {
 	fail atomic.Bool
 }
 
+// PendingDeliveries is the test double implementation for the code under test.
 func (s *flakyPendingStore) PendingDeliveries(
 	ctx context.Context,
 	limit int,
@@ -270,31 +271,16 @@ func TestProcessor_Resume_ReportsAFailureReadingTheLogAndStaysParked(
 		s,
 		parkingOpts(
 			&healthy,
-			models.WithDeliveryErrorHandler(func(
-				_ context.Context,
-				_ asynxmd.Event[order],
-				err error,
-				_ int,
-			) {
-				if errors.Is(
-					err,
-					asynxmd.ErrDeliveryParked,
-				) {
-					parked <- struct{}{}
-				}
-			}),
+			parkedSignal(parked),
 		)...,
 	)
 	ctx := context.Background()
-	if _, err := f.p.Send(
-		ctx,
-		updateCmd(
-			"o1",
-			1,
-		),
-	); err != nil {
-		t.Fatal(err)
-	}
+	mustSendUpdate(
+		t,
+		f.p,
+		"o1",
+		1,
+	)
 
 	<-parked
 
@@ -330,19 +316,7 @@ func TestProcessor_Paused_ListsParkedAggregatesAndSendWaitSaysSo(
 		store.New(),
 		parkingOpts(
 			&healthy,
-			models.WithDeliveryErrorHandler(func(
-				_ context.Context,
-				_ asynxmd.Event[order],
-				err error,
-				_ int,
-			) {
-				if errors.Is(
-					err,
-					asynxmd.ErrDeliveryParked,
-				) {
-					parked <- struct{}{}
-				}
-			}),
+			parkedSignal(parked),
 		)...,
 	)
 	ctx := context.Background()
@@ -353,15 +327,12 @@ func TestProcessor_Paused_ListsParkedAggregatesAndSendWaitSaysSo(
 		)
 	}
 
-	if _, err := f.p.Send(
-		ctx,
-		updateCmd(
-			"o1",
-			1,
-		),
-	); err != nil {
-		t.Fatal(err)
-	}
+	mustSendUpdate(
+		t,
+		f.p,
+		"o1",
+		1,
+	)
 
 	<-parked
 	if got := f.p.Paused(); len(got) != 1 ||
@@ -429,31 +400,16 @@ func TestProcessor_Resume_StopsWhenItsContextEnds(
 		store.New(),
 		parkingOpts(
 			&healthy,
-			models.WithDeliveryErrorHandler(func(
-				_ context.Context,
-				_ asynxmd.Event[order],
-				err error,
-				_ int,
-			) {
-				if errors.Is(
-					err,
-					asynxmd.ErrDeliveryParked,
-				) {
-					parked <- struct{}{}
-				}
-			}),
+			parkedSignal(parked),
 		)...,
 	)
 	for _, id := range []string{"o1", "o2"} {
-		if _, err := f.p.Send(
-			context.Background(),
-			updateCmd(
-				id,
-				1,
-			),
-		); err != nil {
-			t.Fatal(err)
-		}
+		mustSendUpdate(
+			t,
+			f.p,
+			id,
+			1,
+		)
 
 		<-parked
 	}
@@ -500,61 +456,28 @@ func TestProcessor_Resume_ConcurrentCallsRedeliverOnce(
 	f := newFixture(
 		t,
 		store.New(),
-		models.WithDurableDelivery[order](func(
-			name string,
-		) bool {
-			return name == "OrderUpdated"
-		}),
-		models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-			Match: always,
-			Handler: func(
-				_ context.Context,
-				e asynxmd.Event[order],
-			) error {
-				if !healthy.Load() {
-					return errors.New("down")
-				}
-
-				<-release
-				mu.Lock()
-				delivered = append(
-					delivered,
-					e.Version,
-				)
-				mu.Unlock()
-				return nil
-			},
-		}}),
+		models.WithDurableDelivery[order](isOrderUpdated),
+		gatedVersionSubs(
+			&healthy,
+			release,
+			&mu,
+			&delivered,
+		),
 		models.WithDeliveryRetry[order](
 			time.Millisecond,
 			2*time.Millisecond,
 		),
 		models.WithDeliveryMaxAttempts[order](2),
-		models.WithDeliveryErrorHandler(func(
-			_ context.Context,
-			_ asynxmd.Event[order],
-			err error,
-			_ int,
-		) {
-			if errors.Is(
-				err,
-				asynxmd.ErrDeliveryParked,
-			) {
-				parked <- struct{}{}
-			}
-		}),
+		parkedSignal(parked),
 	)
 	ctx := context.Background()
 	for i := range 3 {
-		if _, err := f.p.Send(
-			ctx,
-			updateCmd(
-				"o1",
-				float64(i+1),
-			),
-		); err != nil {
-			t.Fatal(err)
-		}
+		mustSendUpdate(
+			t,
+			f.p,
+			"o1",
+			float64(i+1),
+		)
 	}
 
 	<-parked
@@ -563,13 +486,11 @@ func TestProcessor_Resume_ConcurrentCallsRedeliverOnce(
 	var wg sync.WaitGroup
 	for range 4 {
 		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			f.p.Resume(
-				ctx,
-				10,
-			)
-		}()
+		go resumeAndDone(
+			ctx,
+			f.p,
+			&wg,
+		)
 	}
 
 	wg.Wait()
@@ -593,6 +514,7 @@ type rowCountingStore struct {
 	rows atomic.Int64
 }
 
+// ReadFrom is the test double implementation for the code under test.
 func (s *rowCountingStore) ReadFrom(
 	ctx context.Context,
 	streamID string,
@@ -623,32 +545,17 @@ func TestProcessor_Resume_ReplaysAnAggregatesStreamOnce(
 		s,
 		parkingOpts(
 			&healthy,
-			models.WithDeliveryErrorHandler(func(
-				_ context.Context,
-				_ asynxmd.Event[order],
-				err error,
-				_ int,
-			) {
-				if errors.Is(
-					err,
-					asynxmd.ErrDeliveryParked,
-				) {
-					parked <- struct{}{}
-				}
-			}),
+			parkedSignal(parked),
 		)...,
 	)
 	ctx := context.Background()
 	for i := range events {
-		if _, err := f.p.Send(
-			ctx,
-			updateCmd(
-				"o1",
-				float64(i+1),
-			),
-		); err != nil {
-			t.Fatal(err)
-		}
+		mustSendUpdate(
+			t,
+			f.p,
+			"o1",
+			float64(i+1),
+		)
 	}
 
 	<-parked
@@ -692,6 +599,7 @@ type logCountingStore struct {
 	reads atomic.Int64
 }
 
+// PendingDeliveries is the test double implementation for the code under test.
 func (s *logCountingStore) PendingDeliveries(
 	ctx context.Context,
 	limit int,
@@ -721,47 +629,29 @@ func TestProcessor_Resume_ReadsTheDeliveryLogOnceForAllAggregates(
 		s,
 		parkingOpts(
 			&healthy,
-			models.WithDeliveryErrorHandler(func(
-				_ context.Context,
-				_ asynxmd.Event[order],
-				err error,
-				_ int,
-			) {
-				if errors.Is(
-					err,
-					asynxmd.ErrDeliveryParked,
-				) {
-					parked <- struct{}{}
-				}
-			}),
+			parkedSignal(parked),
 		)...,
 	)
 	ctx := context.Background()
 	for i := range aggregates {
-		if _, err := f.p.Send(
-			ctx,
-			updateCmd(
-				fmt.Sprintf(
-					"o%03d",
-					i,
-				),
-				1,
+		mustSendUpdate(
+			t,
+			f.p,
+			fmt.Sprintf(
+				"o%03d",
+				i,
 			),
-		); err != nil {
-			t.Fatal(err)
-		}
+			1,
+		)
 	}
 
 	for range aggregates {
-		select {
-		case <-parked:
-		case <-time.After(10 * time.Second):
-			t.Fatalf(
-				"%d of %d aggregates parked",
-				len(f.p.Paused()),
-				aggregates,
-			)
-		}
+		awaitParked(
+			t,
+			f.p,
+			parked,
+			aggregates,
+		)
 	}
 
 	healthy.Store(true)
@@ -822,44 +712,32 @@ func TestProcessor_Resume_DoesNotDeadlockWithACommandSendingToAnotherAggregate(
 	)
 	var readA sync.Once
 	redelivering := make(chan struct{})
-	s := &readHookStore{Memory: store.New(), onRead: func(
+	onRead := func(
 		streamID string,
 	) {
-		if streamID == "events:a" {
-			readA.Do(func() { close(redelivering) })
-		}
-	}}
+		signalOnStream(
+			streamID,
+			&readA,
+			redelivering,
+		)
+	}
+	s := &readHookStore{Memory: store.New(), onRead: onRead}
 	f := newFixture(
 		t,
 		s,
 		parkingOpts(
 			&healthy,
-			models.WithDeliveryErrorHandler(func(
-				_ context.Context,
-				_ asynxmd.Event[order],
-				err error,
-				_ int,
-			) {
-				if errors.Is(
-					err,
-					asynxmd.ErrDeliveryParked,
-				) {
-					parked <- struct{}{}
-				}
-			}),
+			parkedSignal(parked),
 		)...,
 	)
 	ctx := context.Background()
 	for _, id := range []string{"a", "b"} {
-		if _, err := f.p.Send(
-			ctx,
-			updateCmd(
-				id,
-				1,
-			),
-		); err != nil {
-			t.Fatal(err)
-		}
+		mustSendUpdate(
+			t,
+			f.p,
+			id,
+			1,
+		)
 
 		<-parked
 	}
@@ -867,30 +745,18 @@ func TestProcessor_Resume_DoesNotDeadlockWithACommandSendingToAnotherAggregate(
 	healthy.Store(true)
 
 	validating := make(chan struct{})
+	validate := func() error {
+		close(validating)
+		return sendToAAfter(
+			ctx,
+			f.p,
+			redelivering,
+		)
+	}
 	cmd := validatingUpdate{UpdateOrderCmd: updateCmd(
 		"b",
 		2,
-	), validate: func() error {
-		close(validating)
-		select {
-		case <-redelivering:
-		case <-time.After(3 * time.Second):
-		}
-
-		sendCtx, cancel := context.WithTimeout(
-			ctx,
-			3*time.Second,
-		)
-		defer cancel()
-		_, err := f.p.Send(
-			sendCtx,
-			updateCmd(
-				"a",
-				3,
-			),
-		)
-		return err
-	}}
+	), validate: validate}
 	sent := make(
 		chan error,
 		1,
@@ -934,13 +800,11 @@ func requireFinishes(
 	t.Helper()
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatalf(
-				"%s: %v",
-				name,
-				err,
-			)
-		}
+		requireNoErrorNamed(
+			t,
+			name,
+			err,
+		)
 	case <-time.After(10 * time.Second):
 		t.Fatalf(
 			"%s is deadlocked",
@@ -949,11 +813,64 @@ func requireFinishes(
 	}
 }
 
+func requireNoErrorNamed(
+	t *testing.T,
+	name string,
+	err error,
+) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf(
+			"%s: %v",
+			name,
+			err,
+		)
+	}
+}
+
+func signalOnStream(
+	streamID string,
+	once *sync.Once,
+	redelivering chan struct{},
+) {
+	if streamID != "events:a" {
+		return
+	}
+
+	once.Do(func() { close(redelivering) })
+}
+
+func sendToAAfter(
+	ctx context.Context,
+	p *Processor[order],
+	redelivering <-chan struct{},
+) error {
+	select {
+	case <-redelivering:
+	case <-time.After(3 * time.Second):
+	}
+
+	sendCtx, cancel := context.WithTimeout(
+		ctx,
+		3*time.Second,
+	)
+	defer cancel()
+	_, err := p.Send(
+		sendCtx,
+		updateCmd(
+			"a",
+			3,
+		),
+	)
+	return err
+}
+
 type validatingUpdate struct {
 	mocks.UpdateOrderCmd
 	validate func() error
 }
 
+// Validate is the test double implementation for the code under test.
 func (c validatingUpdate) Validate(
 	*order,
 ) error {
@@ -967,6 +884,7 @@ type readHookStore struct {
 	)
 }
 
+// ReadFrom is the test double implementation for the code under test.
 func (s *readHookStore) ReadFrom(
 	ctx context.Context,
 	streamID string,
@@ -987,6 +905,7 @@ type staleLogStore struct {
 	sender    *Processor[order]
 }
 
+// PendingDeliveries is the test double implementation for the code under test.
 func (s *staleLogStore) PendingDeliveries(
 	ctx context.Context,
 	limit int,
@@ -1017,75 +936,34 @@ func TestProcessor_Resume_DeliversAnEventCommittedAfterItReadTheLog(
 	var mu sync.Mutex
 	var delivered []int64
 	var s *staleLogStore
-	s = &staleLogStore{Memory: store.New(), afterRead: func() {
-		sendCtx, cancel := context.WithTimeout(
-			context.Background(),
-			3*time.Second,
+	afterRead := func() {
+		sendDuringResume(
+			t,
+			s,
 		)
-		defer cancel()
-		if _, err := s.sender.Send(
-			sendCtx,
-			updateCmd(
-				"o1",
-				2,
-			),
-		); err != nil {
-			t.Errorf(
-				"a command during the resume: %v",
-				err,
-			)
-		}
-	}}
+	}
+	s = &staleLogStore{Memory: store.New(), afterRead: afterRead}
 	f := newFixture(
 		t,
 		s,
 		parkingOpts(
 			&healthy,
-			models.WithDeliveryErrorHandler(func(
-				_ context.Context,
-				_ asynxmd.Event[order],
-				err error,
-				_ int,
-			) {
-				if errors.Is(
-					err,
-					asynxmd.ErrDeliveryParked,
-				) {
-					parked <- struct{}{}
-				}
-			}),
-			models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-				Match: always,
-				Handler: func(
-					_ context.Context,
-					e asynxmd.Event[order],
-				) error {
-					if !healthy.Load() {
-						return errors.New("down")
-					}
-
-					mu.Lock()
-					delivered = append(
-						delivered,
-						e.Version,
-					)
-					mu.Unlock()
-					return nil
-				},
-			}}),
+			parkedSignal(parked),
+			gatedSubs(
+				&healthy,
+				&mu,
+				&delivered,
+			),
 		)...,
 	)
 	s.sender = f.p
 	ctx := context.Background()
-	if _, err := f.p.Send(
-		ctx,
-		updateCmd(
-			"o1",
-			1,
-		),
-	); err != nil {
-		t.Fatal(err)
-	}
+	mustSendUpdate(
+		t,
+		f.p,
+		"o1",
+		1,
+	)
 
 	<-parked
 
@@ -1135,54 +1013,33 @@ func TestProcessor_Resume_SkipsAnAggregateAnotherResumeLiftedMeanwhile(
 	var mu sync.Mutex
 	var delivered []int64
 	var s *staleLogStore
-	s = &staleLogStore{Memory: store.New(), afterRead: func() {
-		if err := s.sender.Resume(
-			context.Background(),
-			10,
-		); err != nil {
-			t.Errorf(
-				"the second Resume: %v",
-				err,
-			)
-		}
-	}}
+	afterRead := func() {
+		resumeDuringResume(
+			t,
+			s,
+		)
+	}
+	s = &staleLogStore{Memory: store.New(), afterRead: afterRead}
 	f := newFixture(
 		t,
 		s,
 		parkingOpts(
 			&healthy,
 			parkedSignal(parked),
-			models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-				Match: always,
-				Handler: func(
-					_ context.Context,
-					e asynxmd.Event[order],
-				) error {
-					if !healthy.Load() {
-						return errors.New("down")
-					}
-
-					mu.Lock()
-					delivered = append(
-						delivered,
-						e.Version,
-					)
-					mu.Unlock()
-					return nil
-				},
-			}}),
+			gatedSubs(
+				&healthy,
+				&mu,
+				&delivered,
+			),
 		)...,
 	)
 	s.sender = f.p
-	if _, err := f.p.Send(
-		context.Background(),
-		updateCmd(
-			"o1",
-			1,
-		),
-	); err != nil {
-		t.Fatal(err)
-	}
+	mustSendUpdate(
+		t,
+		f.p,
+		"o1",
+		1,
+	)
 
 	<-parked
 
@@ -1222,74 +1079,36 @@ func TestProcessor_Resume_LeavesAParkImposedAgainSinceItReadTheLog(
 	var mu sync.Mutex
 	var delivered []int64
 	var s *staleLogStore
-	s = &staleLogStore{Memory: store.New(), afterRead: func() {
-		ctx := context.Background()
-		if err := s.sender.Resume(
-			ctx,
-			10,
-		); err != nil {
-			t.Errorf(
-				"the inner Resume: %v",
-				err,
-			)
-		}
-
-		s.sender.WaitPublish()
-		healthy.Store(false)
-		if _, err := s.sender.Send(
-			ctx,
-			updateCmd(
-				"o1",
-				2,
-			),
-		); err != nil {
-			t.Errorf(
-				"the command that parks again: %v",
-				err,
-			)
-		}
-
-		<-parked
-		healthy.Store(true)
-	}}
+	afterRead := func() {
+		parkAgainDuringResume(
+			t,
+			s,
+			&healthy,
+			parked,
+		)
+	}
+	s = &staleLogStore{Memory: store.New(), afterRead: afterRead}
 	f := newFixture(
 		t,
 		s,
 		parkingOpts(
 			&healthy,
 			parkedSignal(parked),
-			models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-				Match: always,
-				Handler: func(
-					_ context.Context,
-					e asynxmd.Event[order],
-				) error {
-					if !healthy.Load() {
-						return errors.New("down")
-					}
-
-					mu.Lock()
-					delivered = append(
-						delivered,
-						e.Version,
-					)
-					mu.Unlock()
-					return nil
-				},
-			}}),
+			gatedSubs(
+				&healthy,
+				&mu,
+				&delivered,
+			),
 		)...,
 	)
 	s.sender = f.p
 	ctx := context.Background()
-	if _, err := f.p.Send(
-		ctx,
-		updateCmd(
-			"o1",
-			1,
-		),
-	); err != nil {
-		t.Fatal(err)
-	}
+	mustSendUpdate(
+		t,
+		f.p,
+		"o1",
+		1,
+	)
 
 	<-parked
 
@@ -1363,15 +1182,12 @@ func TestProcessor_Resume_StopsAtTheAggregateWhereItsContextEnds(
 		)...,
 	)
 	for _, id := range []string{"o1", "o2", "o3"} {
-		if _, err := f.p.Send(
-			context.Background(),
-			updateCmd(
-				id,
-				1,
-			),
-		); err != nil {
-			t.Fatal(err)
-		}
+		mustSendUpdate(
+			t,
+			f.p,
+			id,
+			1,
+		)
 
 		<-parked
 	}
@@ -1402,6 +1218,7 @@ type idemOrderUpdate struct {
 	Cmd string
 }
 
+// CommandID is the test double implementation for the code under test.
 func (c idemOrderUpdate) CommandID() string { return c.Cmd }
 
 type failingReadsStore struct {
@@ -1410,6 +1227,7 @@ type failingReadsStore struct {
 	stream string
 }
 
+// ReadFrom is the test double implementation for the code under test.
 func (s *failingReadsStore) ReadFrom(
 	ctx context.Context,
 	streamID string,
@@ -1468,22 +1286,53 @@ func parkWithTwoCommands(
 func parkedSignal(
 	parked chan<- struct{},
 ) models.Opt[order] {
-	return models.WithDeliveryErrorHandler(func(
+	handle := func(
 		_ context.Context,
 		_ asynxmd.Event[order],
 		err error,
 		_ int,
 	) {
-		if errors.Is(
+		signalIfParked(
+			parked,
 			err,
-			asynxmd.ErrDeliveryParked,
-		) {
-			select {
-			case parked <- struct{}{}:
-			default:
-			}
-		}
-	})
+		)
+	}
+	return models.WithDeliveryErrorHandler(handle)
+}
+
+func signalIfParked(
+	parked chan<- struct{},
+	err error,
+) {
+	if !errors.Is(
+		err,
+		asynxmd.ErrDeliveryParked,
+	) {
+		return
+	}
+
+	select {
+	case parked <- struct{}{}:
+	default:
+	}
+}
+
+func mustSendUpdate(
+	t *testing.T,
+	p *Processor[order],
+	id string,
+	total float64,
+) {
+	t.Helper()
+	if _, err := p.Send(
+		context.Background(),
+		updateCmd(
+			id,
+			total,
+		),
+	); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func retryOutcomes(
@@ -1619,6 +1468,7 @@ type ackSignalStore struct {
 	acked chan struct{}
 }
 
+// AckDelivery is the test double implementation for the code under test.
 func (s *ackSignalStore) AckDelivery(
 	ctx context.Context,
 	aggregateID string,
@@ -1656,15 +1506,12 @@ func TestProcessor_Resume_AnAggregateThatFailsDoesNotStopTheOthers(
 	)
 	ctx := context.Background()
 	for _, id := range []string{"o1", "o2"} {
-		if _, err := f.p.Send(
-			ctx,
-			updateCmd(
-				id,
-				1,
-			),
-		); err != nil {
-			t.Fatal(err)
-		}
+		mustSendUpdate(
+			t,
+			f.p,
+			id,
+			1,
+		)
 
 		<-parked
 	}
@@ -1716,17 +1563,24 @@ func enqueueUpTo(
 	aggregateID string,
 	last int64,
 ) error {
+	versions := make(
+		[]int64,
+		0,
+		last,
+	)
 	for v := int64(1); v <= last; v++ {
-		if err := tx.EnqueueDelivery(
-			ctx,
-			aggregateID,
+		versions = append(
+			versions,
 			v,
-		); err != nil {
-			return err
-		}
+		)
 	}
 
-	return nil
+	return enqueueVersions(
+		ctx,
+		tx,
+		aggregateID,
+		versions...,
+	)
 }
 
 func TestProcessor_Inspect_FailedResumeKeepsTheCauseAndUndelivered(
@@ -1840,21 +1694,8 @@ func TestProcessor_Inspect_FailedRecoverParksWithTheRedeliveryError(
 		t,
 		es,
 		bus.New[order](),
-		models.WithPublishErrorHandler(func(
-			context.Context,
-			asynxmd.Event[order],
-			error,
-		) {
-		}),
-		models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-			Match: always,
-			Handler: func(
-				context.Context,
-				asynxmd.Event[order],
-			) error {
-				return nil
-			},
-		}}),
+		ignoringReporter(),
+		okSubs(),
 	)
 	t.Cleanup(func() { p.Shutdown(ctx) })
 
@@ -1900,4 +1741,178 @@ func TestProcessor_Inspect_WithoutDispatcherIsTheZeroStatus(
 			got,
 		)
 	}
+}
+
+func gatedVersionSubs(
+	healthy *atomic.Bool,
+	release chan struct{},
+	mu *sync.Mutex,
+	delivered *[]int64,
+) models.Opt[order] {
+	handle := func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) error {
+		return deliverWhenHealthy(
+			healthy,
+			release,
+			mu,
+			delivered,
+			e,
+		)
+	}
+	return durableSubs(handle)
+}
+
+func deliverWhenHealthy(
+	healthy *atomic.Bool,
+	release chan struct{},
+	mu *sync.Mutex,
+	delivered *[]int64,
+	e asynxmd.Event[order],
+) error {
+	if !healthy.Load() {
+		return errors.New("down")
+	}
+
+	<-release
+	mu.Lock()
+	*delivered = append(
+		*delivered,
+		e.Version,
+	)
+	mu.Unlock()
+	return nil
+}
+
+func ignoringReporter() models.Opt[order] {
+	handle := func(
+		context.Context,
+		asynxmd.Event[order],
+		error,
+	) {
+	}
+	return models.WithPublishErrorHandler(handle)
+}
+
+func resumeAndDone(
+	ctx context.Context,
+	p *Processor[order],
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
+	p.Resume(
+		ctx,
+		10,
+	)
+}
+
+func awaitParked(
+	t *testing.T,
+	p *Processor[order],
+	parked <-chan struct{},
+	aggregates int,
+) {
+	t.Helper()
+	select {
+	case <-parked:
+	case <-time.After(10 * time.Second):
+		t.Fatalf(
+			"%d of %d aggregates parked",
+			len(p.Paused()),
+			aggregates,
+		)
+	}
+}
+
+func gatedSubs(
+	healthy *atomic.Bool,
+	mu *sync.Mutex,
+	delivered *[]int64,
+) models.Opt[order] {
+	released := make(chan struct{})
+	close(released)
+	return gatedVersionSubs(
+		healthy,
+		released,
+		mu,
+		delivered,
+	)
+}
+
+func sendDuringResume(
+	t *testing.T,
+	s *staleLogStore,
+) {
+	t.Helper()
+	sendCtx, cancel := context.WithTimeout(
+		context.Background(),
+		3*time.Second,
+	)
+	defer cancel()
+	if _, err := s.sender.Send(
+		sendCtx,
+		updateCmd(
+			"o1",
+			2,
+		),
+	); err != nil {
+		t.Errorf(
+			"a command during the resume: %v",
+			err,
+		)
+	}
+}
+
+func resumeDuringResume(
+	t *testing.T,
+	s *staleLogStore,
+) {
+	t.Helper()
+	if err := s.sender.Resume(
+		context.Background(),
+		10,
+	); err != nil {
+		t.Errorf(
+			"the second Resume: %v",
+			err,
+		)
+	}
+}
+
+func parkAgainDuringResume(
+	t *testing.T,
+	s *staleLogStore,
+	healthy *atomic.Bool,
+	parked <-chan struct{},
+) {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.sender.Resume(
+		ctx,
+		10,
+	); err != nil {
+		t.Errorf(
+			"the inner Resume: %v",
+			err,
+		)
+	}
+
+	s.sender.WaitPublish()
+	healthy.Store(false)
+	if _, err := s.sender.Send(
+		ctx,
+		updateCmd(
+			"o1",
+			2,
+		),
+	); err != nil {
+		t.Errorf(
+			"the command that parks again: %v",
+			err,
+		)
+	}
+
+	<-parked
+	healthy.Store(true)
 }

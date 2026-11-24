@@ -8,63 +8,29 @@ import (
 	"time"
 )
 
-func mustAtomically(
-	t testing.TB,
-	s models.Store,
-	fn func(models.Tx) error,
-) {
-	t.Helper()
-	if err := s.Atomically(
-		context.Background(),
-		fn,
-	); err != nil {
-		t.Fatalf(
-			"Atomically: %v",
-			err,
-		)
-	}
-}
-
 func duplicateVersionRollsBack(
 	t testing.TB,
 	s models.Store,
 ) {
-	ctx := context.Background()
-	mustAtomically(
+	commit(
 		t,
 		s,
-		func(
-			tx models.Tx,
-		) error {
-			return tx.Append(
-				ctx,
-				"s1",
-				1,
-				[]byte("first"),
-			)
-		},
+		opAppend(
+			"s1",
+			1,
+			[]byte("first"),
+		),
 	)
-
 	err := s.Atomically(
-		ctx,
-		func(
-			tx models.Tx,
-		) error {
-			if err := tx.EnqueueDelivery(
-				ctx,
-				"s1",
-				99,
-			); err != nil {
-				return err
-			}
-
-			return tx.Append(
-				ctx,
+		context.Background(),
+		runOps(
+			opEnqueue(models.Delivery{AggregateID: "s1", Version: conflictVersion}),
+			opAppend(
 				"s1",
 				1,
 				[]byte("second"),
-			)
-		},
+			),
+		),
 	)
 	if !errors.Is(
 		err,
@@ -76,8 +42,19 @@ func duplicateVersionRollsBack(
 		)
 	}
 
-	blobs, _ := s.ReadFrom(
-		ctx,
+	wantFirstOnly(
+		t,
+		s,
+	)
+}
+
+func wantFirstOnly(
+	t testing.TB,
+	s models.Store,
+) {
+	blobs := blobsOrFatal(
+		t,
+		s,
 		"s1",
 		1,
 	)
@@ -89,9 +66,10 @@ func duplicateVersionRollsBack(
 		)
 	}
 
-	pending, _ := s.PendingDeliveries(
-		ctx,
-		10,
+	pending := pendingOrFatal(
+		t,
+		s,
+		listLimit,
 	)
 	if len(pending) != 0 {
 		t.Fatalf(
@@ -105,30 +83,21 @@ func errorRollsBackEverything(
 	t testing.TB,
 	s models.Store,
 ) {
-	ctx := context.Background()
 	err := s.Atomically(
-		ctx,
-		func(
-			tx models.Tx,
-		) error {
-			_ = tx.Append(
-				ctx,
+		context.Background(),
+		runOps(
+			opAppend(
 				"s1",
 				1,
 				[]byte("x"),
-			)
-			_ = tx.PutReceipt(
-				ctx,
+			),
+			opReceipt(
 				"cmd-1",
 				models.Receipt{Accepted: true, EventID: "e1", Version: 1},
-			)
-			_ = tx.EnqueueDelivery(
-				ctx,
-				"s1",
-				1,
-			)
-			return errBoom
-		},
+			),
+			opEnqueue(models.Delivery{AggregateID: "s1", Version: 1}),
+			opFail(errBoom),
+		),
 	)
 	if !errors.Is(
 		err,
@@ -140,28 +109,43 @@ func errorRollsBackEverything(
 		)
 	}
 
-	if blobs, _ := s.ReadFrom(
-		ctx,
+	wantNothingSurvived(
+		t,
+		s,
+	)
+}
+
+func wantNothingSurvived(
+	t testing.TB,
+	s models.Store,
+) {
+	blobs := blobsOrFatal(
+		t,
+		s,
 		"s1",
 		1,
-	); len(blobs) != 0 {
+	)
+	if len(blobs) != 0 {
 		t.Errorf(
 			"append survived rollback: %q",
 			blobs,
 		)
 	}
 
-	if _, found, _ := s.GetReceipt(
-		ctx,
+	if receiptOrFatal(
+		t,
+		s,
 		"cmd-1",
-	); found {
+	) {
 		t.Error("receipt survived rollback")
 	}
 
-	if pending, _ := s.PendingDeliveries(
-		ctx,
-		10,
-	); len(pending) != 0 {
+	pending := pendingOrFatal(
+		t,
+		s,
+		listLimit,
+	)
+	if len(pending) != 0 {
 		t.Errorf(
 			"delivery survived rollback: %v",
 			pending,
@@ -173,33 +157,17 @@ func rollbackRestoresDrop(
 	t testing.TB,
 	s models.Store,
 ) {
-	enqueueIn(
+	commit(
 		t,
 		s,
-		func(
-			ctx context.Context,
-			tx models.Tx,
-		) error {
-			return tx.EnqueueDelivery(
-				ctx,
-				"a",
-				1,
-			)
-		},
+		opEnqueue(models.Delivery{AggregateID: "a", Version: 1}),
 	)
 	err := s.Atomically(
 		context.Background(),
-		func(
-			tx models.Tx,
-		) error {
-			return errors.Join(
-				tx.DropDeliveries(
-					context.Background(),
-					"a",
-				),
-				errBoom,
-			)
-		},
+		runOps(
+			opDrop("a"),
+			opFail(errBoom),
+		),
 	)
 	if !errors.Is(
 		err,
@@ -225,105 +193,69 @@ func nativeCallable(
 	mustAtomically(
 		t,
 		s,
-		func(
-			tx models.Tx,
-		) error {
-			_ = tx.Native()
-			return nil
-		},
+		callNative,
 	)
+}
+
+func callNative(
+	tx models.Tx,
+) error {
+	_ = tx.Native()
+	return nil
 }
 
 func cancelledContext(
 	t testing.TB,
 	s models.Store,
 ) {
-	live := context.Background()
-	mustAtomically(
+	commit(
 		t,
 		s,
-		func(
-			tx models.Tx,
-		) error {
-			return errors.Join(
-				tx.Append(
-					live,
-					"s1",
-					1,
-					[]byte("a"),
-				),
-				tx.EnqueueDelivery(
-					live,
-					"s1",
-					1,
-				),
-			)
-		},
+		opAppend(
+			"s1",
+			1,
+			[]byte("a"),
+		),
+		opEnqueue(models.Delivery{AggregateID: "s1", Version: 1}),
 	)
 
-	done, cancel := context.WithCancel(live)
+	done, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := s.Atomically(
-		done,
-		func(
-			tx models.Tx,
-		) error {
-			return tx.Append(
-				live,
+	wantCancelled(
+		t,
+		"Atomically",
+		s.Atomically(
+			done,
+			runOps(opAppend(
 				"s1",
-				2,
+				versionTwo,
 				[]byte("b"),
-			)
-		},
-	); err == nil {
-		t.Error("Atomically succeeded on a cancelled context")
-	}
-
-	if _, err := s.ReadFrom(
+			)),
+		),
+	)
+	cancelledOps(
 		done,
+		t,
+		s,
+	)
+	wantOnlyCommitted(
+		t,
+		s,
+	)
+}
+
+func wantOnlyCommitted(
+	t testing.TB,
+	s models.Store,
+) {
+	blobs := blobsOrFatal(
+		t,
+		s,
 		"s1",
 		1,
-	); err == nil {
-		t.Error("ReadFrom succeeded on a cancelled context")
-	}
-
-	if _, err := s.ReadRange(
-		done,
-		"s1",
-		1,
-		1,
-	); err == nil {
-		t.Error("ReadRange succeeded on a cancelled context")
-	}
-
-	if _, _, err := s.GetReceipt(
-		done,
-		"cmd",
-	); err == nil {
-		t.Error("GetReceipt succeeded on a cancelled context")
-	}
-
-	if _, err := s.PendingDeliveries(
-		done,
-		10,
-	); err == nil {
-		t.Error("PendingDeliveries succeeded on a cancelled context")
-	}
-
-	if err := s.AckDelivery(
-		done,
-		"s1",
-		1,
-	); err == nil {
-		t.Error("AckDelivery succeeded on a cancelled context")
-	}
-
-	if blobs, _ := s.ReadFrom(
-		live,
-		"s1",
-		1,
-	); len(blobs) != 1 {
+	)
+	if len(blobs) != 1 {
 		t.Errorf(
 			"stream holds %d records, want only the committed one",
 			len(blobs),
@@ -337,32 +269,78 @@ func cancelledContext(
 	)
 }
 
-func readsDuringOpenTransaction(
+func holdingOp(
+	appended chan<- struct{},
+	release <-chan struct{},
+) func(models.Tx) error {
+	return func(
+		tx models.Tx,
+	) error {
+		return appendAndHold(
+			context.Background(),
+			tx,
+			appended,
+			release,
+		)
+	}
+}
+
+func holdTx(
+	s models.Store,
+	appended chan<- struct{},
+	release <-chan struct{},
+	committed chan<- error,
+) {
+	committed <- s.Atomically(
+		context.Background(),
+		holdingOp(
+			appended,
+			release,
+		),
+	)
+}
+
+func readOnce(
+	s models.Store,
+	out chan<- error,
+) {
+	_, err := s.ReadFrom(
+		context.Background(),
+		"s1",
+		1,
+	)
+	out <- err
+}
+
+func awaitRead(
+	read <-chan error,
+) (readErr error, waiting <-chan error) {
+	select {
+	case readErr = <-read:
+		return readErr,
+			nil
+	case <-time.After(readWait):
+		return nil,
+			read
+	}
+}
+
+func openHeldTx(
 	t testing.TB,
 	s models.Store,
-) {
-	ctx := context.Background()
+) (release chan struct{}, committed chan error) {
 	appended := make(chan struct{})
-	release := make(chan struct{})
-	committed := make(
+	release = make(chan struct{})
+	committed = make(
 		chan error,
 		1,
 	)
-	go func() {
-		committed <- s.Atomically(
-			ctx,
-			func(
-				tx models.Tx,
-			) error {
-				return appendAndHold(
-					ctx,
-					tx,
-					appended,
-					release,
-				)
-			},
-		)
-	}()
+	go holdTx(
+		s,
+		appended,
+		release,
+		committed,
+	)
 	select {
 	case <-appended:
 	case err := <-committed:
@@ -372,35 +350,34 @@ func readsDuringOpenTransaction(
 		)
 	}
 
+	return release,
+		committed
+}
+
+func readsDuringOpenTransaction(
+	t testing.TB,
+	s models.Store,
+) {
+	release, committed := openHeldTx(
+		t,
+		s,
+	)
 	read := make(
 		chan error,
 		1,
 	)
-	go func() {
-		_, err := s.ReadFrom(
-			ctx,
-			"s1",
-			1,
-		)
-		read <- err
-	}()
-	var readErr error
-	select {
-	case readErr = <-read:
-		read = nil
-	case <-time.After(100 * time.Millisecond):
-	}
-
+	go readOnce(
+		s,
+		read,
+	)
+	readErr, waiting := awaitRead(read)
 	close(release)
-	if err := <-committed; err != nil {
-		t.Fatalf(
-			"the open transaction failed to commit: %v",
-			err,
-		)
-	}
-
-	if read != nil {
-		readErr = <-read
+	wantCommitted(
+		t,
+		committed,
+	)
+	if waiting != nil {
+		readErr = <-waiting
 	}
 
 	if readErr != nil {
@@ -410,16 +387,38 @@ func readsDuringOpenTransaction(
 		)
 	}
 
-	if blobs, err := s.ReadFrom(
-		ctx,
+	wantRecordAfterCommit(
+		t,
+		s,
+	)
+}
+
+func wantCommitted(
+	t testing.TB,
+	committed <-chan error,
+) {
+	if err := <-committed; err != nil {
+		t.Fatalf(
+			"the open transaction failed to commit: %v",
+			err,
+		)
+	}
+}
+
+func wantRecordAfterCommit(
+	t testing.TB,
+	s models.Store,
+) {
+	blobs := blobsOrFatal(
+		t,
+		s,
 		"s1",
 		1,
-	); err != nil ||
-		len(blobs) != 1 {
+	)
+	if len(blobs) != 1 {
 		t.Fatalf(
-			"after the commit ReadFrom = %q, %v; want the record",
+			"after the commit ReadFrom = %q; want the record",
 			blobs,
-			err,
 		)
 	}
 }

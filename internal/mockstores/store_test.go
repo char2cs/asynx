@@ -64,6 +64,7 @@ func TestStore_ReadRange_ReturnsNilNil(
 
 type recordingSnapshotStore struct{ blob []byte }
 
+// Put records the snapshot blob.
 func (r *recordingSnapshotStore) Put(
 	context.Context,
 	string,
@@ -73,6 +74,7 @@ func (r *recordingSnapshotStore) Put(
 	return nil
 }
 
+// Get returns the recorded blob.
 func (r *recordingSnapshotStore) Get(
 	context.Context,
 	string,
@@ -82,6 +84,7 @@ func (r *recordingSnapshotStore) Get(
 		nil
 }
 
+// Delete clears the recorded blob.
 func (r *recordingSnapshotStore) Delete(
 	context.Context,
 	string,

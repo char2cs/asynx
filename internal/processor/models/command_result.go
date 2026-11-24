@@ -5,6 +5,7 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
+// CommandResult is the outcome of a command a shard worker ran.
 type CommandResult[T any] struct {
 	Event asynxmd.Event[T]
 	Err   error

@@ -5,6 +5,7 @@ import (
 	"errors"
 	asynxmd "github.com/char2cs/asynx/models"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -215,20 +216,11 @@ func TestAppend_VersionsAreIndependentPerAggregate(
 	s := New()
 	ctx := context.Background()
 
-	for i := int64(1); i <= 3; i++ {
-		if err := s.Append(
-			ctx,
-			"agg1",
-			i,
-			[]byte("x"),
-		); err != nil {
-			t.Fatalf(
-				"Append agg1 v%d: %v",
-				i,
-				err,
-			)
-		}
-	}
+	appendVersions(
+		t,
+		s,
+		3,
+	)
 
 	blobs, _ := s.ReadFrom(
 		ctx,
@@ -693,17 +685,11 @@ func TestConcurrentAppend_UniqueVersions_AllSucceed(
 	var wg sync.WaitGroup
 	for i := 1; i <= n; i++ {
 		wg.Add(1)
-		go func(
-			v int,
-		) {
-			defer wg.Done()
-			s.Append(
-				context.Background(),
-				"agg1",
-				int64(v),
-				[]byte("data"),
-			)
-		}(i)
+		go appendAsync(
+			&wg,
+			s,
+			int64(i),
+		)
 	}
 
 	wg.Wait()
@@ -729,6 +715,80 @@ func TestConcurrentAppend_UniqueVersions_AllSucceed(
 	}
 }
 
+func appendVersions(
+	t *testing.T,
+	s Memory,
+	n int64,
+) {
+	t.Helper()
+
+	for i := int64(1); i <= n; i++ {
+		appendVersion(
+			t,
+			s,
+			i,
+		)
+	}
+}
+
+func appendVersion(
+	t *testing.T,
+	s Memory,
+	i int64,
+) {
+	t.Helper()
+
+	err := s.Append(
+		context.Background(),
+		"agg1",
+		i,
+		[]byte("x"),
+	)
+	if err != nil {
+		t.Fatalf(
+			"Append agg1 v%d: %v",
+			i,
+			err,
+		)
+	}
+}
+
+func appendAsync(
+	wg *sync.WaitGroup,
+	s Memory,
+	version int64,
+) {
+	defer wg.Done()
+
+	err := s.Append(
+		context.Background(),
+		"agg1",
+		version,
+		[]byte("data"),
+	)
+	if err != nil {
+		return
+	}
+}
+
+func countAppendSuccess(
+	wg *sync.WaitGroup,
+	success *atomic.Int64,
+	s Memory,
+) {
+	defer wg.Done()
+
+	err := s.Append(
+		context.Background(),
+		"agg1",
+		1,
+		[]byte("data"),
+	)
+	if err == nil {
+		success.Add(1)
+	}
+}
+
 func TestConcurrentAppend_SameVersion_ExactlyOneSucceeds(
 	t *testing.T,
 ) {
@@ -737,33 +797,23 @@ func TestConcurrentAppend_SameVersion_ExactlyOneSucceeds(
 
 	var (
 		wg      sync.WaitGroup
-		mu      sync.Mutex
-		success int
+		success atomic.Int64
 	)
 	for range n {
 		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			err := s.Append(
-				context.Background(),
-				"agg1",
-				1,
-				[]byte("data"),
-			)
-			if err == nil {
-				mu.Lock()
-				success++
-				mu.Unlock()
-			}
-		}()
+		go countAppendSuccess(
+			&wg,
+			&success,
+			s,
+		)
 	}
 
 	wg.Wait()
 
-	if success != 1 {
+	if success.Load() != 1 {
 		t.Errorf(
 			"expected exactly 1 success, got %d",
-			success,
+			success.Load(),
 		)
 	}
 }
@@ -1005,17 +1055,18 @@ func TestGetReceipt_ReturnsWhatWasStored(
 ) {
 	ctx := context.Background()
 	s := New()
+	put := func(
+		tx asynxmd.Tx,
+	) error {
+		return tx.PutReceipt(
+			ctx,
+			"c1",
+			asynxmd.Receipt{Accepted: true},
+		)
+	}
 	err := s.Atomically(
 		ctx,
-		func(
-			tx asynxmd.Tx,
-		) error {
-			return tx.PutReceipt(
-				ctx,
-				"c1",
-				asynxmd.Receipt{Accepted: true},
-			)
-		},
+		put,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1049,24 +1100,25 @@ func TestAckDelivery_RemovesOnlyTheNamedEntry(
 ) {
 	ctx := context.Background()
 	s := New()
+	enqueue := func(
+		tx asynxmd.Tx,
+	) error {
+		return errors.Join(
+			tx.EnqueueDelivery(
+				ctx,
+				"a",
+				1,
+			),
+			tx.EnqueueDelivery(
+				ctx,
+				"a",
+				2,
+			),
+		)
+	}
 	err := s.Atomically(
 		ctx,
-		func(
-			tx asynxmd.Tx,
-		) error {
-			return errors.Join(
-				tx.EnqueueDelivery(
-					ctx,
-					"a",
-					1,
-				),
-				tx.EnqueueDelivery(
-					ctx,
-					"a",
-					2,
-				),
-			)
-		},
+		enqueue,
 	)
 	if err != nil {
 		t.Fatal(err)

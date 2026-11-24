@@ -7,6 +7,7 @@ import (
 	"github.com/char2cs/asynx/internal/processor/models"
 )
 
+// ShardPool owns the shards and the goroutines that serve them.
 type ShardPool[T any] struct {
 	shards           []*Shard[T]
 	numShards        int
@@ -15,6 +16,7 @@ type ShardPool[T any] struct {
 	dispatcherDoneWg sync.WaitGroup
 }
 
+// New starts a pool of numShards shards served by workersPerShard workers each.
 func New[T any](
 	executor models.Executor[T],
 	numShards int,
@@ -43,6 +45,7 @@ func New[T any](
 	return pool
 }
 
+// Shards returns the pool shards.
 func (p *ShardPool[T]) Shards() []*Shard[T] {
 	return p.shards
 }
@@ -51,21 +54,32 @@ func (p *ShardPool[T]) start(
 	executor models.Executor[T],
 ) {
 	for _, shard := range p.shards {
-		p.dispatcherDoneWg.Add(1)
-		go shard.dispatchCommands(
-			&p.dispatcherDoneWg,
+		p.startShard(
+			shard,
+			executor,
 		)
-
-		for range p.workersPerShard {
-			p.doneWg.Add(1)
-			go shard.workerLoop(
-				executor,
-				&p.doneWg,
-			)
-		}
 	}
 }
 
+func (p *ShardPool[T]) startShard(
+	shard *Shard[T],
+	executor models.Executor[T],
+) {
+	p.dispatcherDoneWg.Add(1)
+	go shard.dispatchCommands(
+		&p.dispatcherDoneWg,
+	)
+
+	for range p.workersPerShard {
+		p.doneWg.Add(1)
+		go shard.workerLoop(
+			executor,
+			&p.doneWg,
+		)
+	}
+}
+
+// Drain stops the shards and waits for their dispatchers and workers to end.
 func (p *ShardPool[T]) Drain(
 	ctx context.Context,
 ) error {

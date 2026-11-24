@@ -27,6 +27,7 @@ func New() Memory {
 	}
 }
 
+// SetError schedules a one-shot error for the next Append on streamID.
 func (s *memoryStore) SetError(
 	streamID string,
 	err error,
@@ -36,44 +37,51 @@ func (s *memoryStore) SetError(
 	s.errOn[streamID] = err
 }
 
+// Append writes one blob in its own transaction.
 func (s *memoryStore) Append(
 	ctx context.Context,
 	streamID string,
 	version int64,
 	data []byte,
 ) error {
+	write := func(
+		tx models.Tx,
+	) error {
+		return tx.Append(
+			ctx,
+			streamID,
+			version,
+			data,
+		)
+	}
+
 	return s.Atomically(
 		ctx,
-		func(
-			tx models.Tx,
-		) error {
-			return tx.Append(
-				ctx,
-				streamID,
-				version,
-				data,
-			)
-		},
+		write,
 	)
 }
 
+// Delete removes streamID in its own transaction.
 func (s *memoryStore) Delete(
 	ctx context.Context,
 	streamID string,
 ) error {
+	remove := func(
+		tx models.Tx,
+	) error {
+		return tx.DeleteStream(
+			ctx,
+			streamID,
+		)
+	}
+
 	return s.Atomically(
 		ctx,
-		func(
-			tx models.Tx,
-		) error {
-			return tx.DeleteStream(
-				ctx,
-				streamID,
-			)
-		},
+		remove,
 	)
 }
 
+// Atomically runs fn in a serialized transaction, rolling back on error.
 func (s *memoryStore) Atomically(
 	ctx context.Context,
 	fn func(tx models.Tx) error,
@@ -87,11 +95,7 @@ func (s *memoryStore) Atomically(
 
 	tx := &memoryTx{s: s}
 	committed := false
-	defer func() {
-		if !committed {
-			tx.rollback()
-		}
-	}()
+	defer tx.rollbackUnless(&committed)
 
 	if err := fn(tx); err != nil {
 		return err
@@ -101,6 +105,7 @@ func (s *memoryStore) Atomically(
 	return nil
 }
 
+// ReadFrom returns the blobs of streamID from fromVersion on.
 func (s *memoryStore) ReadFrom(
 	ctx context.Context,
 	streamID string,
@@ -121,6 +126,7 @@ func (s *memoryStore) ReadFrom(
 		nil
 }
 
+// ReadRange returns at most count blobs of streamID from fromVersion on.
 func (s *memoryStore) ReadRange(
 	ctx context.Context,
 	streamID string,
@@ -147,6 +153,7 @@ func (s *memoryStore) ReadRange(
 		nil
 }
 
+// GetReceipt returns the receipt for commandID, if any.
 func (s *memoryStore) GetReceipt(
 	ctx context.Context,
 	commandID string,
@@ -166,6 +173,7 @@ func (s *memoryStore) GetReceipt(
 		nil
 }
 
+// PendingDeliveries returns up to limit unacknowledged deliveries.
 func (s *memoryStore) PendingDeliveries(
 	ctx context.Context,
 	limit int,
@@ -186,6 +194,7 @@ func (s *memoryStore) PendingDeliveries(
 		nil
 }
 
+// AckDelivery removes the delivery if it exists.
 func (s *memoryStore) AckDelivery(
 	ctx context.Context,
 	aggregateID string,
@@ -227,17 +236,19 @@ func (s *memoryStore) entriesFrom(
 	startIdx, _ := slices.BinarySearchFunc(
 		entries,
 		fromVersion,
-		func(
-			e entry,
-			v int64,
-		) int {
-			return cmp.Compare(
-				e.version,
-				v,
-			)
-		},
+		compareEntryVersion,
 	)
 	return entries[startIdx:]
+}
+
+func compareEntryVersion(
+	e entry,
+	v int64,
+) int {
+	return cmp.Compare(
+		e.version,
+		v,
+	)
 }
 
 func toBlobs(
@@ -262,15 +273,7 @@ func (s *memoryStore) removeEntry(
 	i, found := slices.BinarySearchFunc(
 		cur,
 		version,
-		func(
-			e entry,
-			v int64,
-		) int {
-			return cmp.Compare(
-				e.version,
-				v,
-			)
-		},
+		compareEntryVersion,
 	)
 	if !found {
 		return

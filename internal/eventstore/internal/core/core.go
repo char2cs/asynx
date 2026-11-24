@@ -130,14 +130,18 @@ func (es *EventStore[T]) Write(
 			err
 	}
 
-	if cmd.ShouldSnapshot() {
-		if err := es.Snapshot(
-			ctx,
-			evt,
-		); err != nil {
-			return asynxmd.Event[T]{},
-				err
-		}
+	if !cmd.ShouldSnapshot() {
+		return evt,
+			nil
+	}
+
+	err = es.Snapshot(
+		ctx,
+		evt,
+	)
+	if err != nil {
+		return asynxmd.Event[T]{},
+			err
 	}
 
 	return evt,
@@ -152,63 +156,29 @@ func (es *EventStore[T]) WriteTx(
 	cmd asynxmd.Command[T],
 	hook esmodels.TxHook[T],
 ) (asynxmd.Event[T], error) {
-	current, loadedVersion, err := es.reader.Load(
+	currentPtr, loadedVersion, err := es.loadCurrent(
 		ctx,
 		cmd.AggregateID(),
 	)
-	if err != nil &&
-		err != asynxmd.ErrNotFound {
+	if err != nil {
 		return asynxmd.Event[T]{},
 			err
 	}
 
-	var currentPtr *T
-	if err != asynxmd.ErrNotFound {
-		currentPtr = &current
-	}
-
-	if err := cmd.Validate(currentPtr); err != nil {
+	err = cmd.Validate(currentPtr)
+	if err != nil {
 		return asynxmd.Event[T]{},
 			err
 	}
 
 	newState := cmd.EmitEvent(currentPtr)
-
-	var previousState T
-	if currentPtr != nil {
-		previousState = *currentPtr
-	}
-
-	var evt asynxmd.Event[T]
-	err = es.writer.EventStore().Atomically(
+	evt, err := es.appendAtomically(
 		ctx,
-		func(
-			tx asynxmd.Tx,
-		) error {
-			var err error
-			evt, err = es.writer.AppendTx(
-				ctx,
-				tx,
-				cmd.AggregateID(),
-				cmd.EventName(),
-				loadedVersion,
-				previousState,
-				newState,
-			)
-			if err != nil {
-				return err
-			}
-
-			if hook != nil {
-				return hook(
-					ctx,
-					tx,
-					evt,
-				)
-			}
-
-			return nil
-		},
+		cmd,
+		hook,
+		loadedVersion,
+		valueOrZero(currentPtr),
+		newState,
 	)
 	if err != nil {
 		return asynxmd.Event[T]{},
@@ -217,6 +187,113 @@ func (es *EventStore[T]) WriteTx(
 
 	return evt,
 		nil
+}
+
+func (es *EventStore[T]) loadCurrent(
+	ctx context.Context,
+	aggregateID string,
+) (current *T, version int64, err error) {
+	state, version, err := es.reader.Load(
+		ctx,
+		aggregateID,
+	)
+	if err == asynxmd.ErrNotFound {
+		return nil,
+			version,
+			nil
+	}
+
+	if err != nil {
+		return nil,
+			0,
+			err
+	}
+
+	return &state,
+		version,
+		nil
+}
+
+func valueOrZero[T any](
+	ptr *T,
+) (value T) {
+	if ptr == nil {
+		return value
+	}
+
+	return *ptr
+}
+
+func (es *EventStore[T]) appendAtomically(
+	ctx context.Context,
+	cmd asynxmd.Command[T],
+	hook esmodels.TxHook[T],
+	loadedVersion int64,
+	previousState T,
+	newState T,
+) (evt asynxmd.Event[T], err error) {
+	appendInTx := func(
+		tx asynxmd.Tx,
+	) (txErr error) {
+		evt, txErr = es.appendWithHook(
+			ctx,
+			tx,
+			cmd,
+			hook,
+			loadedVersion,
+			previousState,
+			newState,
+		)
+		return txErr
+	}
+
+	err = es.writer.EventStore().Atomically(
+		ctx,
+		appendInTx,
+	)
+	if err != nil {
+		return asynxmd.Event[T]{},
+			err
+	}
+
+	return evt,
+		nil
+}
+
+func (es *EventStore[T]) appendWithHook(
+	ctx context.Context,
+	tx asynxmd.Tx,
+	cmd asynxmd.Command[T],
+	hook esmodels.TxHook[T],
+	loadedVersion int64,
+	previousState T,
+	newState T,
+) (asynxmd.Event[T], error) {
+	evt, err := es.writer.AppendTx(
+		ctx,
+		tx,
+		cmd.AggregateID(),
+		cmd.EventName(),
+		loadedVersion,
+		previousState,
+		newState,
+	)
+	if err != nil {
+		return evt,
+			err
+	}
+
+	if hook == nil {
+		return evt,
+			nil
+	}
+
+	return evt,
+		hook(
+			ctx,
+			tx,
+			evt,
+		)
 }
 
 // Snapshot upserts the snapshot for evt.Aggregate at evt.Version.
@@ -252,16 +329,18 @@ func (es *EventStore[T]) Delete(
 	ctx context.Context,
 	aggregateID string,
 ) error {
+	deleteStream := func(
+		tx asynxmd.Tx,
+	) error {
+		return tx.DeleteStream(
+			ctx,
+			"events:"+aggregateID,
+		)
+	}
+
 	err := es.writer.EventStore().Atomically(
 		ctx,
-		func(
-			tx asynxmd.Tx,
-		) error {
-			return tx.DeleteStream(
-				ctx,
-				"events:"+aggregateID,
-			)
-		},
+		deleteStream,
 	)
 	if err != nil {
 		return err

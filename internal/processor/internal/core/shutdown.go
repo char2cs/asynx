@@ -13,9 +13,14 @@ import (
 func (p *Processor[T]) Shutdown(
 	ctx context.Context,
 ) error {
-	if !p.beginShutdown() {
+	p.lifeMu.Lock()
+	if p.shutdownStarted() {
+		p.lifeMu.Unlock()
 		return asynxmd.ErrAlreadyShuttingDown
 	}
+
+	p.markShuttingDown()
+	p.lifeMu.Unlock()
 
 	err := p.runShutdown(ctx)
 	p.endShutdown(err)
@@ -54,17 +59,14 @@ func (p *Processor[T]) runShutdown(
 	return p.closeBus(ctx)
 }
 
-func (p *Processor[T]) beginShutdown() bool {
-	p.lifeMu.Lock()
-	defer p.lifeMu.Unlock()
-	if p.shutdown == shuttingDownNow ||
-		p.shutdown == shutDown {
-		return false
-	}
+func (p *Processor[T]) shutdownStarted() bool {
+	return p.shutdown == shuttingDownNow ||
+		p.shutdown == shutDown
+}
 
+func (p *Processor[T]) markShuttingDown() {
 	p.shutdown = shuttingDownNow
 	p.shuttingDown.Store(true)
-	return true
 }
 
 func (p *Processor[T]) endShutdown(
@@ -85,7 +87,10 @@ func waitGroup(
 	wg *sync.WaitGroup,
 ) error {
 	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
 	select {
 	case <-done:
 		return nil

@@ -85,6 +85,22 @@ func TestTopic_MiddleWildcard_RejectsExtraDots(
 	}
 }
 
+func checkValidRegex(
+	t *testing.T,
+	p string,
+) {
+	result := asynx.Topic(p)
+	_, err := regexp.Compile(result)
+	if err != nil {
+		t.Errorf(
+			"Topic(%q) = %q is not valid regex: %v",
+			p,
+			result,
+			err,
+		)
+	}
+}
+
 func TestTopic_AllOutputsAreValidRegex(
 	t *testing.T,
 ) {
@@ -97,15 +113,10 @@ func TestTopic_AllOutputsAreValidRegex(
 		"*",
 	}
 	for _, p := range patterns {
-		result := asynx.Topic(p)
-		if _, err := regexp.Compile(result); err != nil {
-			t.Errorf(
-				"Topic(%q) = %q is not valid regex: %v",
-				p,
-				result,
-				err,
-			)
-		}
+		checkValidRegex(
+			t,
+			p,
+		)
 	}
 }
 

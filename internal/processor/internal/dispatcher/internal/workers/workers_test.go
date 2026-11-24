@@ -45,16 +45,17 @@ func TestPool_PublishesLiveThenDeliversThenAcks(
 		t,
 		time.Second,
 	)
+	ack := func(
+		context.Context,
+	) error {
+		f.journal.add("ack")
+		return nil
+	}
 	ticket := f.enqueue(
 		t,
 		event(
 			1,
-			func(
-				context.Context,
-			) error {
-				f.journal.add("ack")
-				return nil
-			},
+			ack,
 		),
 	)
 
@@ -93,16 +94,17 @@ func TestPool_NeverAcksADeliveryThatDidNotSucceed(
 		return down
 	}
 	var acks atomic.Int32
+	ack2 := func(
+		context.Context,
+	) error {
+		acks.Add(1)
+		return nil
+	}
 	ticket := f.enqueue(
 		t,
 		event(
 			1,
-			func(
-				context.Context,
-			) error {
-				acks.Add(1)
-				return nil
-			},
+			ack2,
 		),
 	)
 
@@ -132,15 +134,16 @@ func TestPool_AnAckFailureParksBeforeItIsReported(
 		time.Second,
 	)
 	storeDown := errors.New("store down")
+	ack3 := func(
+		context.Context,
+	) error {
+		return storeDown
+	}
 	ticket := f.enqueue(
 		t,
 		event(
 			1,
-			func(
-				context.Context,
-			) error {
-				return storeDown
-			},
+			ack3,
 		),
 	)
 
@@ -253,13 +256,14 @@ func TestPool_ARedeliverySkipsTheLiveSubscribers(
 		t,
 		time.Second,
 	)
+	ack4 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	request := event(
 		1,
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack4,
 	)
 	request.Kind = asynxmd.DispatchRedelivery
 	ticket := f.enqueue(
@@ -300,15 +304,16 @@ func TestPool_ABusPanicIsReportedAndTheDeliveryGoesOn(
 	) error {
 		panic("bus exploded")
 	}
+	ack5 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	ticket := f.enqueue(
 		t,
 		event(
 			1,
-			func(
-				context.Context,
-			) error {
-				return nil
-			},
+			ack5,
 		),
 	)
 
@@ -357,15 +362,16 @@ func TestPool_ADispatcherPanicIsReportedAndEndsTheJob(
 	) error {
 		panic("dispatcher bug")
 	}
+	ack6 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	ticket := f.enqueue(
 		t,
 		event(
 			1,
-			func(
-				context.Context,
-			) error {
-				return nil
-			},
+			ack6,
 		),
 	)
 
@@ -413,15 +419,16 @@ func TestPool_AParkedAckedJobRunsNothing(
 		time.Second,
 	)
 	ctx, cancel := context.WithCancel(context.Background())
+	ack7 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	job := jobs.New(
 		ctx,
 		event(
 			1,
-			func(
-				context.Context,
-			) error {
-				return nil
-			},
+			ack7,
 		),
 		cancel,
 	)
@@ -714,6 +721,7 @@ type fakeBus struct {
 	publish func(event asynxmd.Event[int]) error
 }
 
+// PublishSync satisfies the interface that fakeBus fakes.
 func (b *fakeBus) PublishSync(
 	_ context.Context,
 	event asynxmd.Event[int],
@@ -726,6 +734,7 @@ func (b *fakeBus) PublishSync(
 	return b.publish(event)
 }
 
+// Publish satisfies the interface that fakeBus fakes.
 func (b *fakeBus) Publish(
 	context.Context,
 	asynxmd.Event[int],
@@ -733,6 +742,7 @@ func (b *fakeBus) Publish(
 	return nil
 }
 
+// Subscribe satisfies the interface that fakeBus fakes.
 func (b *fakeBus) Subscribe(
 	string,
 	asynxmd.ProjectionHandler[int],
@@ -742,18 +752,21 @@ func (b *fakeBus) Subscribe(
 		nil
 }
 
+// Unsubscribe satisfies the interface that fakeBus fakes.
 func (b *fakeBus) Unsubscribe(
 	string,
 ) error {
 	return nil
 }
 
+// Close satisfies the interface that fakeBus fakes.
 func (b *fakeBus) Close(
 	context.Context,
 ) error {
 	return nil
 }
 
+// WaitForHandlers satisfies the interface that fakeBus fakes.
 func (b *fakeBus) WaitForHandlers() {
 }
 
@@ -763,6 +776,7 @@ type fakeDeliverer struct {
 	deliver  func(job jobs.Job[int]) error
 }
 
+// Deliver satisfies the interface that fakeDeliverer fakes.
 func (d *fakeDeliverer) Deliver(
 	_ string,
 	_ <-chan struct{},
@@ -776,6 +790,7 @@ func (d *fakeDeliverer) Deliver(
 	return d.deliver(job)
 }
 
+// ParkThenReport satisfies the interface that fakeDeliverer fakes.
 func (d *fakeDeliverer) ParkThenReport(
 	aggregateID string,
 	halt <-chan struct{},
@@ -784,12 +799,14 @@ func (d *fakeDeliverer) ParkThenReport(
 	report func(),
 ) {
 	d.journal.add("park")
-	d.registry.ParkIfCurrent(
-		aggregateID,
-		halt,
-		job.Acked(),
-		cause,
-	)
+	if job.Acked() {
+		d.registry.ParkIfCurrent(
+			aggregateID,
+			halt,
+			cause,
+		)
+	}
+
 	report()
 }
 
@@ -799,6 +816,7 @@ type fakeReporter struct {
 	errs    []error
 }
 
+// PublishError satisfies the interface that fakeReporter fakes.
 func (r *fakeReporter) PublishError(
 	_ jobs.Job[int],
 	err error,
@@ -812,6 +830,7 @@ func (r *fakeReporter) PublishError(
 	)
 }
 
+// DeliveryError satisfies the interface that fakeReporter fakes.
 func (r *fakeReporter) DeliveryError(
 	jobs.Job[int],
 	error,
@@ -819,6 +838,7 @@ func (r *fakeReporter) DeliveryError(
 ) {
 }
 
+// Panic satisfies the interface that fakeReporter fakes.
 func (r *fakeReporter) Panic(
 	jobs.Job[int],
 	any,

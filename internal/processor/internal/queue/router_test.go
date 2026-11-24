@@ -7,7 +7,10 @@ import (
 func TestRoute_SameAggregate_AlwaysSameShard(
 	t *testing.T,
 ) {
-	r := New(8)
+	r := mustRouter(
+		t,
+		8,
+	)
 
 	shard1 := r.Route("agg1")
 	shard2 := r.Route("agg1")
@@ -26,47 +29,90 @@ func TestRoute_SameAggregate_AlwaysSameShard(
 func TestRoute_ValidRange(
 	t *testing.T,
 ) {
-	r := New(8)
+	r := mustRouter(
+		t,
+		8,
+	)
 
 	for i := 0; i < 100; i++ {
-		id := "agg" + string(rune(i))
-		shard := r.Route(id)
-		if shard < 0 ||
-			shard >= 8 {
-			t.Errorf(
-				"invalid shard %d for aggregate %s",
-				shard,
-				id,
-			)
-		}
+		checkInRange(
+			t,
+			r,
+			"agg"+string(rune(i)),
+		)
+	}
+}
+
+func checkInRange(
+	t *testing.T,
+	r *Router,
+	id string,
+) {
+	t.Helper()
+	shard := r.Route(id)
+	if shard < 0 ||
+		shard >= 8 {
+		t.Errorf(
+			"invalid shard %d for aggregate %s",
+			shard,
+			id,
+		)
 	}
 }
 
 func TestRoute_SingleShard_AlwaysZero(
 	t *testing.T,
 ) {
-	r := New(1)
+	r := mustRouter(
+		t,
+		1,
+	)
 
 	for i := 0; i < 50; i++ {
-		id := "agg" + string(rune(i))
-		shard := r.Route(id)
-		if shard != 0 {
-			t.Errorf(
-				"single shard router should always return 0, got %d",
-				shard,
-			)
-		}
+		checkZero(
+			t,
+			r,
+			"agg"+string(rune(i)),
+		)
 	}
 }
 
-func TestNew_PanicsOnZeroShards(
+func checkZero(
+	t *testing.T,
+	r *Router,
+	id string,
+) {
+	t.Helper()
+	shard := r.Route(id)
+	if shard != 0 {
+		t.Errorf(
+			"single shard router should always return 0, got %d",
+			shard,
+		)
+	}
+}
+
+func TestNew_ErrorsOnZeroShards(
 	t *testing.T,
 ) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Errorf("expected panic on numShards=0")
-		}
-	}()
+	if _, err := New(0); err == nil {
+		t.Errorf("expected an error on numShards=0")
+	}
+}
 
-	New(0)
+func mustRouter(
+	t *testing.T,
+	numShards int,
+) *Router {
+	t.Helper()
+	r, err := New(numShards)
+	if err != nil {
+		t.Fatalf(
+			"New(%d): %v",
+			numShards,
+			err,
+		)
+	}
+
+	return r
 }

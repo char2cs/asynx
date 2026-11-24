@@ -19,6 +19,7 @@ func NewSnapshots() SnapshotMemory {
 	}
 }
 
+// SetError schedules a one-shot error for the next Put on aggregateID.
 func (s *memorySnapshots) SetError(
 	aggregateID string,
 	err error,
@@ -56,6 +57,7 @@ func (s *memorySnapshots) Put(
 	return nil
 }
 
+// Get returns the snapshot for aggregateID, if any.
 func (s *memorySnapshots) Get(
 	ctx context.Context,
 	aggregateID string,
@@ -81,6 +83,7 @@ func (s *memorySnapshots) Get(
 		nil
 }
 
+// Delete removes the snapshot for aggregateID.
 func (s *memorySnapshots) Delete(
 	ctx context.Context,
 	aggregateID string,

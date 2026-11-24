@@ -10,6 +10,7 @@ type ErrStore struct{ Err error }
 
 func (e *ErrStore) tx() models.Tx { return stubTx{appendFn: e.Append, deleteFn: e.Delete} }
 
+// Atomically runs fn against a transaction whose writes return Err.
 func (e *ErrStore) Atomically(
 	_ context.Context,
 	fn func(models.Tx) error,
@@ -17,6 +18,7 @@ func (e *ErrStore) Atomically(
 	return fn(e.tx())
 }
 
+// GetReceipt returns Err.
 func (e *ErrStore) GetReceipt(
 	context.Context,
 	string,
@@ -26,6 +28,7 @@ func (e *ErrStore) GetReceipt(
 		e.Err
 }
 
+// PendingDeliveries returns Err.
 func (e *ErrStore) PendingDeliveries(
 	context.Context,
 	int,
@@ -34,6 +37,7 @@ func (e *ErrStore) PendingDeliveries(
 		e.Err
 }
 
+// AckDelivery returns Err.
 func (e *ErrStore) AckDelivery(
 	context.Context,
 	string,
@@ -42,6 +46,7 @@ func (e *ErrStore) AckDelivery(
 	return e.Err
 }
 
+// Append returns Err.
 func (e *ErrStore) Append(
 	_ context.Context,
 	_ string,
@@ -51,6 +56,7 @@ func (e *ErrStore) Append(
 	return e.Err
 }
 
+// ReadFrom returns Err.
 func (e *ErrStore) ReadFrom(
 	_ context.Context,
 	_ string,
@@ -60,6 +66,7 @@ func (e *ErrStore) ReadFrom(
 		e.Err
 }
 
+// ReadRange returns Err.
 func (e *ErrStore) ReadRange(
 	_ context.Context,
 	_ string,
@@ -70,6 +77,7 @@ func (e *ErrStore) ReadRange(
 		e.Err
 }
 
+// Delete returns Err.
 func (e *ErrStore) Delete(
 	_ context.Context,
 	_ string,

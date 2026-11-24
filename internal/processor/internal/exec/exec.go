@@ -47,6 +47,8 @@ func WithSnapshotErrorHandler[T any](
 	}
 }
 
+// New builds a CommandExecutor over the event store and the dispatcher, which
+// may be nil, applying opts.
 func New[T any](
 	es eventstore.EventStore[T],
 	d asynxmd.Dispatcher[T],
@@ -60,13 +62,25 @@ func New[T any](
 	return e
 }
 
-// Execute runs the pipeline. With waitHandlers it also waits for the event's
-// handlers to run once, giving up when ctx is done: the event is committed by
-// then, so it is returned with an error wrapping ErrContextCancelled.
+// Execute runs the pipeline and returns once the event is committed and queued.
 func (e *CommandExecutor[T]) Execute(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
-	waitHandlers bool,
+) (asynxmd.Event[T], error) {
+	event, _, err := e.ExecuteAsync(
+		ctx,
+		cmd,
+	)
+	return event,
+		err
+}
+
+// ExecuteWait runs the pipeline and also waits for the event's handlers to run
+// once, giving up when ctx is done: the event is committed by then, so it is
+// returned with an error wrapping ErrContextCancelled.
+func (e *CommandExecutor[T]) ExecuteWait(
+	ctx context.Context,
+	cmd asynxmd.Command[T],
 ) (asynxmd.Event[T], error) {
 	event, wait, err := e.ExecuteAsync(
 		ctx,
@@ -77,8 +91,7 @@ func (e *CommandExecutor[T]) Execute(
 			err
 	}
 
-	if waitHandlers &&
-		wait != nil {
+	if wait != nil {
 		return event,
 			wait(ctx)
 	}
@@ -195,6 +208,18 @@ func (e *CommandExecutor[T]) run(
 		)
 	}
 
+	return e.publish(
+		ctx,
+		cmd,
+		event,
+	)
+}
+
+func (e *CommandExecutor[T]) publish(
+	ctx context.Context,
+	cmd asynxmd.Command[T],
+	event asynxmd.Event[T],
+) (asynxmd.Event[T], func(context.Context) error, error) {
 	e.snapshotIfDue(
 		ctx,
 		cmd,
@@ -212,11 +237,7 @@ func (e *CommandExecutor[T]) run(
 		)
 		return event,
 			nil,
-			fmt.Errorf(
-				"%w: %w",
-				asynxmd.ErrPipelineFailed,
-				err,
-			)
+			pipelineFailed(err)
 	}
 
 	return event,
@@ -354,6 +375,7 @@ func (e *CommandExecutor[T]) ackFor(
 	}
 }
 
+// CommandExecutor runs commands through the write pipeline under per-aggregate locks.
 type CommandExecutor[T any] struct {
 	es              eventstore.EventStore[T]
 	dispatcher      asynxmd.Dispatcher[T]

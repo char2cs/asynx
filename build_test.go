@@ -239,6 +239,79 @@ func TestBuilder_SnapshotStoreSatisfiesBuild(
 	}
 }
 
+type floodLog struct {
+	mu   sync.Mutex
+	seen []int64
+}
+
+func (l *floodLog) handle(
+	_ context.Context,
+	e models.Event[mocks.Order],
+) {
+	time.Sleep(100 * time.Microsecond)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.seen = append(
+		l.seen,
+		e.Version,
+	)
+}
+
+func (l *floodLog) snapshot() []int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return slices.Clone(l.seen)
+}
+
+func sendFlood(
+	t *testing.T,
+	inst asynx.Asynx[mocks.Order],
+	wg *sync.WaitGroup,
+	i int,
+) {
+	defer wg.Done()
+
+	_, err := inst.Send(
+		context.Background(),
+		upd(
+			"agg",
+			float64(i+1),
+		),
+	)
+	if err != nil {
+		t.Errorf(
+			"Send: %v",
+			err,
+		)
+	}
+}
+
+func requireInVersionOrder(
+	t *testing.T,
+	seen []int64,
+) {
+	t.Helper()
+
+	want := make(
+		[]int64,
+		len(seen),
+	)
+	for i := range want {
+		want[i] = int64(i + 1)
+	}
+
+	if !slices.Equal(
+		seen,
+		want,
+	) {
+		t.Fatalf(
+			"out-of-order delivery: %v",
+			seen,
+		)
+	}
+}
+
 func TestGuarantee_SameAggregateFloodWithManyWorkers(
 	t *testing.T,
 ) {
@@ -247,43 +320,22 @@ func TestGuarantee_SameAggregateFloodWithManyWorkers(
 		eight(store.New()),
 	)
 
-	var mu sync.Mutex
-	var seen []int64
+	log := &floodLog{}
 	inst.Subscribe(
 		"OrderUpdated",
-		func(
-			_ context.Context,
-			e models.Event[mocks.Order],
-		) {
-			time.Sleep(100 * time.Microsecond)
-			mu.Lock()
-			seen = append(
-				seen,
-				e.Version,
-			)
-			mu.Unlock()
-		},
+		log.handle,
 	)
 
 	const n = 100
 	var wg sync.WaitGroup
 	for i := range n {
 		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if _, err := inst.Send(
-				context.Background(),
-				upd(
-					"agg",
-					float64(i+1),
-				),
-			); err != nil {
-				t.Errorf(
-					"Send: %v",
-					err,
-				)
-			}
-		}()
+		go sendFlood(
+			t,
+			inst,
+			&wg,
+			i,
+		)
 	}
 
 	wg.Wait()
@@ -292,8 +344,7 @@ func TestGuarantee_SameAggregateFloodWithManyWorkers(
 		inst,
 	)
 
-	mu.Lock()
-	defer mu.Unlock()
+	seen := log.snapshot()
 	if len(seen) != n {
 		t.Fatalf(
 			"handler saw %d events, want %d",
@@ -302,13 +353,47 @@ func TestGuarantee_SameAggregateFloodWithManyWorkers(
 		)
 	}
 
-	for i, v := range seen {
-		if v != int64(i+1) {
-			t.Fatalf(
-				"out-of-order delivery: %v",
-				seen,
-			)
-		}
+	requireInVersionOrder(
+		t,
+		seen,
+	)
+}
+
+type versionLog struct {
+	mu       sync.Mutex
+	versions []int64
+}
+
+func (l *versionLog) handle(
+	_ context.Context,
+	e models.Event[mocks.Order],
+) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.versions = append(
+		l.versions,
+		e.Version,
+	)
+
+	return nil
+}
+
+func (l *versionLog) snapshot() []int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return slices.Clone(l.versions)
+}
+
+func blockUntil(
+	release <-chan struct{},
+) func(context.Context, models.Event[mocks.Order]) error {
+	return func(
+		context.Context,
+		models.Event[mocks.Order],
+	) error {
+		<-release
+		return nil
 	}
 }
 
@@ -323,71 +408,42 @@ func TestGuarantee_DurableSubscriberRecoversAfterCrash(
 		t,
 		eight(s).WithSubscriber(
 			"OrderUpdated",
-			func(
-				context.Context,
-				models.Event[mocks.Order],
-			) error {
-				<-stuck
-				return nil
-			},
+			blockUntil(stuck),
 		),
 	)
 	t.Cleanup(func() { close(stuck) })
 	for i := range 3 {
-		if _, err := first.Send(
-			ctx,
-			upd(
-				"agg",
-				float64(i+1),
-			),
-		); err != nil {
-			t.Fatal(err)
-		}
+		sendUpdate(
+			t,
+			first,
+			float64(i+1),
+		)
 	}
 
-	var mu sync.Mutex
-	var versions []int64
+	log := &versionLog{}
 	second := build(
 		t,
 		eight(s).WithSubscriber(
 			"OrderUpdated",
-			func(
-				_ context.Context,
-				e models.Event[mocks.Order],
-			) error {
-				mu.Lock()
-				versions = append(
-					versions,
-					e.Version,
-				)
-				mu.Unlock()
-				return nil
-			},
+			log.handle,
 		),
 	)
 
-	if _, err := second.Send(
-		ctx,
-		upd(
-			"agg",
-			4,
-		),
-	); err != nil {
-		t.Fatal(err)
-	}
-
+	sendUpdate(
+		t,
+		second,
+		4,
+	)
 	waitPublish(
 		t,
 		second,
 	)
 
-	mu.Lock()
-	defer mu.Unlock()
-	if len(versions) != 4 ||
-		versions[0] != 1 ||
-		versions[1] != 2 ||
-		versions[2] != 3 ||
-		versions[3] != 4 {
+	versions := log.snapshot()
+	if !slices.Equal(
+		versions,
+		[]int64{1, 2, 3, 4},
+	) {
 		t.Fatalf(
 			"delivered versions = %v, want [1 2 3 4]",
 			versions,
@@ -405,22 +461,54 @@ func TestGuarantee_DurableSubscriberRecoversAfterCrash(
 	}
 }
 
+func sendUpdate(
+	t *testing.T,
+	inst asynx.Asynx[mocks.Order],
+	total float64,
+) {
+	t.Helper()
+
+	_, err := inst.Send(
+		context.Background(),
+		upd(
+			"agg",
+			total,
+		),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func countingSubscriber(
+	calls *atomic.Int32,
+) func(context.Context, models.Event[mocks.Order]) error {
+	return func(
+		context.Context,
+		models.Event[mocks.Order],
+	) error {
+		calls.Add(1)
+		return nil
+	}
+}
+
 func TestGuarantee_RecoverySkipsDeliveriesWhoseEventIsGone(
 	t *testing.T,
 ) {
 	s := store.New()
 	ctx := context.Background()
+	enqueueGhost := func(
+		tx models.Tx,
+	) error {
+		return tx.EnqueueDelivery(
+			ctx,
+			"ghost",
+			1,
+		)
+	}
 	s.Atomically(
 		ctx,
-		func(
-			tx models.Tx,
-		) error {
-			return tx.EnqueueDelivery(
-				ctx,
-				"ghost",
-				1,
-			)
-		},
+		enqueueGhost,
 	)
 
 	var calls atomic.Int32
@@ -428,13 +516,7 @@ func TestGuarantee_RecoverySkipsDeliveriesWhoseEventIsGone(
 		t,
 		eight(s).WithSubscriber(
 			"OrderUpdated",
-			func(
-				context.Context,
-				models.Event[mocks.Order],
-			) error {
-				calls.Add(1)
-				return nil
-			},
+			countingSubscriber(&calls),
 		),
 	)
 
@@ -462,25 +544,21 @@ func TestGuarantee_AckFailuresAreReportedAndTheDeliveryStaysPending(
 	s := store.New()
 	ctx := context.Background()
 	var reported atomic.Int32
+	countReport := func(
+		context.Context,
+		models.Event[mocks.Order],
+		error,
+	) {
+		reported.Add(1)
+	}
 	inst := build(
 		t,
 		eight(nil).
 			WithEventStore(ackErrStore{s}).
-			WithPublishErrorHandler(func(
-				context.Context,
-				models.Event[mocks.Order],
-				error,
-			) {
-				reported.Add(1)
-			}).
+			WithPublishErrorHandler(countReport).
 			WithSubscriber(
 				"OrderUpdated",
-				func(
-					context.Context,
-					models.Event[mocks.Order],
-				) error {
-					return nil
-				},
+				noopSubscriber,
 			),
 	)
 
@@ -524,12 +602,7 @@ func TestGuarantee_RecoveryReadFailureFailsBuild(
 		WithEventStore(pendingErrStore{store.New()}).
 		WithSubscriber(
 			"OrderUpdated",
-			func(
-				context.Context,
-				models.Event[mocks.Order],
-			) error {
-				return nil
-			},
+			noopSubscriber,
 		).
 		Build()
 	if err == nil {
@@ -570,6 +643,14 @@ func TestGuarantee_NoDurableSubscribersWritesNoDeliveries(
 	}
 }
 
+func failingSyncProjection(
+	context.Context,
+	models.Tx,
+	models.Event[mocks.Order],
+) error {
+	return errors.New("read model write failed")
+}
+
 func TestGuarantee_SyncProjectionFailureRollsEverythingBack(
 	t *testing.T,
 ) {
@@ -580,23 +661,11 @@ func TestGuarantee_SyncProjectionFailureRollsEverythingBack(
 		eight(s).
 			WithSyncProjection(
 				"OrderUpdated",
-				func(
-					context.Context,
-					models.Tx,
-					models.Event[mocks.Order],
-				) error {
-					return errors.New("read model write failed")
-				},
+				failingSyncProjection,
 			).
 			WithSubscriber(
 				"OrderUpdated",
-				func(
-					context.Context,
-					models.Event[mocks.Order],
-				) error {
-					calls.Add(1)
-					return nil
-				},
+				countingSubscriber(&calls),
 			),
 	)
 
@@ -751,18 +820,19 @@ func TestGuarantee_SnapshotFailureIsReportedNotFatal(
 ) {
 	ss := store.NewSnapshots()
 	var reported atomic.Int32
+	countReport := func(
+		context.Context,
+		models.Event[mocks.Order],
+		error,
+	) {
+		reported.Add(1)
+	}
 	inst := build(
 		t,
 		asynx.New[mocks.Order]().
 			WithEventStore(store.New()).
 			WithSnapshotStore(ss).
-			WithSnapshotErrorHandler(func(
-				context.Context,
-				models.Event[mocks.Order],
-				error,
-			) {
-				reported.Add(1)
-			}),
+			WithSnapshotErrorHandler(countReport),
 	)
 
 	ss.SetError(
@@ -790,6 +860,65 @@ func TestGuarantee_SnapshotFailureIsReportedNotFatal(
 	}
 }
 
+func forgetOrSend(
+	t *testing.T,
+	inst asynx.Asynx[mocks.Order],
+	wg *sync.WaitGroup,
+	i int,
+) {
+	defer wg.Done()
+
+	ctx := context.Background()
+	if i != 15 {
+		inst.Send(
+			ctx,
+			upd(
+				"agg",
+				float64(i),
+			),
+		)
+		return
+	}
+
+	err := inst.Forget(
+		ctx,
+		"agg",
+	)
+	if err != nil {
+		t.Errorf(
+			"Forget: %v",
+			err,
+		)
+	}
+}
+
+func requireReadableIfPresent(
+	t *testing.T,
+	inst asynx.Asynx[mocks.Order],
+) {
+	t.Helper()
+
+	ctx := context.Background()
+	ok, _ := inst.Exists(
+		ctx,
+		"agg",
+	)
+	if !ok {
+		return
+	}
+
+	_, err := inst.Get(
+		ctx,
+		"agg",
+	)
+	if err != nil {
+		t.Fatalf(
+			"surviving aggregate is unreadable: %v",
+			err,
+		)
+	}
+}
+
 func TestGuarantee_ForgetFencedAgainstCommands(
 	t *testing.T,
 ) {
@@ -798,12 +927,7 @@ func TestGuarantee_ForgetFencedAgainstCommands(
 		t,
 		eight(s).WithSubscriber(
 			"OrderUpdated",
-			func(
-				context.Context,
-				models.Event[mocks.Order],
-			) error {
-				return nil
-			},
+			noopSubscriber,
 		),
 	)
 	ctx := context.Background()
@@ -820,30 +944,12 @@ func TestGuarantee_ForgetFencedAgainstCommands(
 	var wg sync.WaitGroup
 	for i := range 30 {
 		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if i == 15 {
-				if err := inst.Forget(
-					ctx,
-					"agg",
-				); err != nil {
-					t.Errorf(
-						"Forget: %v",
-						err,
-					)
-				}
-
-				return
-			}
-
-			inst.Send(
-				ctx,
-				upd(
-					"agg",
-					float64(i),
-				),
-			)
-		}()
+		go forgetOrSend(
+			t,
+			inst,
+			&wg,
+			i,
+		)
 	}
 
 	wg.Wait()
@@ -852,20 +958,10 @@ func TestGuarantee_ForgetFencedAgainstCommands(
 		inst,
 	)
 
-	if ok, _ := inst.Exists(
-		ctx,
-		"agg",
-	); ok {
-		if _, err := inst.Get(
-			ctx,
-			"agg",
-		); err != nil {
-			t.Fatalf(
-				"surviving aggregate is unreadable: %v",
-				err,
-			)
-		}
-	}
+	requireReadableIfPresent(
+		t,
+		inst,
+	)
 }
 
 func TestGuarantee_EventsNoDurableSubscriberWantsGetNoDeliveryEntry(
@@ -877,13 +973,7 @@ func TestGuarantee_EventsNoDurableSubscriberWantsGetNoDeliveryEntry(
 		t,
 		eight(s).WithSubscriber(
 			"OrderUpdated",
-			func(
-				context.Context,
-				models.Event[mocks.Order],
-			) error {
-				<-release
-				return nil
-			},
+			blockUntil(release),
 		),
 	)
 	t.Cleanup(func() { close(release) })
@@ -907,34 +997,58 @@ func TestGuarantee_EventsNoDurableSubscriberWantsGetNoDeliveryEntry(
 	}
 }
 
+func requireFailedBuild(
+	t *testing.T,
+) {
+	t.Helper()
+
+	_, err := eight(nil).
+		WithEventStore(pendingErrStore{store.New()}).
+		WithSubscriber(
+			"OrderUpdated",
+			noopSubscriber,
+		).
+		Build()
+	if err == nil {
+		t.Fatal("Build should fail")
+	}
+}
+
 func TestGuarantee_FailedBuildShutsTheProcessorDown(
 	t *testing.T,
 ) {
 	before := runtime.NumGoroutine()
 	for range 5 {
-		_, err := eight(nil).
-			WithEventStore(pendingErrStore{store.New()}).
-			WithSubscriber(
-				"OrderUpdated",
-				func(
-					context.Context,
-					models.Event[mocks.Order],
-				) error {
-					return nil
-				},
-			).
-			Build()
-		if err == nil {
-			t.Fatal("Build should fail")
-		}
+		requireFailedBuild(t)
 	}
 
+	settled := func() bool {
+		return runtime.NumGoroutine() <= before+5
+	}
 	eventually(
 		t,
 		"goroutines to settle after failed builds",
-		func() bool {
-			return runtime.NumGoroutine() <= before+5
-		},
+		settled,
+	)
+}
+
+type retryLog struct {
+	versionLog
+	failures atomic.Int32
+}
+
+func (l *retryLog) handleFlaky(
+	ctx context.Context,
+	e models.Event[mocks.Order],
+) error {
+	if e.Version == 1 &&
+		l.failures.Add(1) <= 2 {
+		return errors.New("read model unavailable")
+	}
+
+	return l.handle(
+		ctx,
+		e,
 	)
 }
 
@@ -944,10 +1058,16 @@ func TestGuarantee_DurableSubscriberFailureRetriesAndKeepsOrder(
 	s := store.New()
 	ctx := context.Background()
 
-	var mu sync.Mutex
-	var seen []int64
-	var failures atomic.Int32
+	log := &retryLog{}
 	var reported atomic.Int32
+	countDelivery := func(
+		context.Context,
+		models.Event[mocks.Order],
+		error,
+		int,
+	) {
+		reported.Add(1)
+	}
 	inst := build(
 		t,
 		eight(s).
@@ -955,66 +1075,39 @@ func TestGuarantee_DurableSubscriberFailureRetriesAndKeepsOrder(
 				time.Millisecond,
 				5*time.Millisecond,
 			).
-			WithDeliveryErrorHandler(func(
-				context.Context,
-				models.Event[mocks.Order],
-				error,
-				int,
-			) {
-				reported.Add(1)
-			}).
+			WithDeliveryErrorHandler(countDelivery).
 			WithSubscriber(
 				"OrderUpdated",
-				func(
-					_ context.Context,
-					e models.Event[mocks.Order],
-				) error {
-					if e.Version == 1 &&
-						failures.Add(1) <= 2 {
-						return errors.New("read model unavailable")
-					}
-
-					mu.Lock()
-					seen = append(
-						seen,
-						e.Version,
-					)
-					mu.Unlock()
-					return nil
-				},
+				log.handleFlaky,
 			),
 	)
 
 	for i := range 3 {
-		if _, err := inst.Send(
-			ctx,
-			upd(
-				"agg",
-				float64(i+1),
-			),
-		); err != nil {
-			t.Fatal(err)
-		}
+		sendUpdate(
+			t,
+			inst,
+			float64(i+1),
+		)
 	}
 
+	drained := func() bool {
+		pending, _ := s.PendingDeliveries(
+			ctx,
+			10,
+		)
+		return len(pending) == 0
+	}
 	eventually(
 		t,
 		"deliveries to complete",
-		func() bool {
-			pending, _ := s.PendingDeliveries(
-				ctx,
-				10,
-			)
-			return len(pending) == 0
-		},
+		drained,
 	)
 
-	mu.Lock()
-	defer mu.Unlock()
-	if len(seen) != 3 ||
-		seen[0] != 1 ||
-		seen[1] != 2 ||
-		seen[2] != 3 {
+	seen := log.snapshot()
+	if !slices.Equal(
+		seen,
+		[]int64{1, 2, 3},
+	) {
 		t.Fatalf(
 			"delivered versions = %v, want [1 2 3] (v2 must wait for v1)",
 			seen,
@@ -1025,6 +1118,49 @@ func TestGuarantee_DurableSubscriberFailureRetriesAndKeepsOrder(
 		t.Fatalf(
 			"failures reported = %d, want 2",
 			reported.Load(),
+		)
+	}
+}
+
+func failingCounter(
+	attempts *atomic.Int32,
+	msg string,
+) func(context.Context, models.Event[mocks.Order]) error {
+	return func(
+		context.Context,
+		models.Event[mocks.Order],
+	) error {
+		attempts.Add(1)
+		return errors.New(msg)
+	}
+}
+
+func sendWaitInto(
+	inst asynx.Asynx[mocks.Order],
+	done chan<- error,
+) {
+	_, err := inst.SendWait(
+		context.Background(),
+		upd(
+			"agg",
+			1,
+		),
+	)
+	done <- err
+}
+
+func requireNoError(
+	t *testing.T,
+	what string,
+	err error,
+) {
+	t.Helper()
+
+	if err != nil {
+		t.Fatalf(
+			"%s: %v",
+			what,
+			err,
 		)
 	}
 }
@@ -1042,13 +1178,10 @@ func TestGuarantee_SendWaitReturnsAfterTheFirstAttemptEvenIfTheHandlerFails(
 			).
 			WithSubscriber(
 				"OrderUpdated",
-				func(
-					context.Context,
-					models.Event[mocks.Order],
-				) error {
-					attempts.Add(1)
-					return errors.New("down")
-				},
+				failingCounter(
+					&attempts,
+					"down",
+				),
 			),
 	)
 
@@ -1056,24 +1189,17 @@ func TestGuarantee_SendWaitReturnsAfterTheFirstAttemptEvenIfTheHandlerFails(
 		chan error,
 		1,
 	)
-	go func() {
-		_, err := inst.SendWait(
-			context.Background(),
-			upd(
-				"agg",
-				1,
-			),
-		)
-		done <- err
-	}()
+	go sendWaitInto(
+		inst,
+		done,
+	)
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatalf(
-				"SendWait: %v",
-				err,
-			)
-		}
+		requireNoError(
+			t,
+			"SendWait",
+			err,
+		)
 	case <-time.After(2 * time.Second):
 		t.Fatal("SendWait blocked on a failing durable handler's retries")
 	}
@@ -1086,6 +1212,18 @@ func TestGuarantee_SendWaitReturnsAfterTheFirstAttemptEvenIfTheHandlerFails(
 	}
 }
 
+func buildAndSignal(
+	t *testing.T,
+	b *asynx.Builder[mocks.Order],
+	built chan<- struct{},
+) {
+	build(
+		t,
+		b,
+	)
+	close(built)
+}
+
 func TestGuarantee_BuildDoesNotHangOnAPoisonDelivery(
 	t *testing.T,
 ) {
@@ -1096,13 +1234,7 @@ func TestGuarantee_BuildDoesNotHangOnAPoisonDelivery(
 		t,
 		eight(s).WithSubscriber(
 			"OrderUpdated",
-			func(
-				context.Context,
-				models.Event[mocks.Order],
-			) error {
-				<-dies
-				return nil
-			},
+			blockUntil(dies),
 		),
 	)
 	t.Cleanup(func() { close(dies) })
@@ -1118,27 +1250,22 @@ func TestGuarantee_BuildDoesNotHangOnAPoisonDelivery(
 
 	var attempts atomic.Int32
 	built := make(chan struct{})
-	go func() {
-		build(
-			t,
-			eight(s).
-				WithDeliveryRetry(
-					time.Hour,
-					time.Hour,
-				).
-				WithSubscriber(
-					"OrderUpdated",
-					func(
-						context.Context,
-						models.Event[mocks.Order],
-					) error {
-						attempts.Add(1)
-						return errors.New("poison")
-					},
+	go buildAndSignal(
+		t,
+		eight(s).
+			WithDeliveryRetry(
+				time.Hour,
+				time.Hour,
+			).
+			WithSubscriber(
+				"OrderUpdated",
+				failingCounter(
+					&attempts,
+					"poison",
 				),
-		)
-		close(built)
-	}()
+			),
+		built,
+	)
 	select {
 	case <-built:
 	case <-time.After(3 * time.Second):
@@ -1161,11 +1288,33 @@ func TestGuarantee_BuildDoesNotHangOnAPoisonDelivery(
 	}
 }
 
+type panicOnce struct {
+	attempts atomic.Int32
+}
+
+func (p *panicOnce) handle(
+	context.Context,
+	models.Event[mocks.Order],
+) error {
+	if p.attempts.Add(1) == 1 {
+		panic("boom")
+	}
+
+	return nil
+}
+
 func TestGuarantee_DurablePanicIsAFailureNotADelivery(
 	t *testing.T,
 ) {
-	var attempts atomic.Int32
+	flaky := &panicOnce{}
 	var panics atomic.Int32
+	countPanic := func(
+		context.Context,
+		models.Event[mocks.Order],
+		any,
+	) {
+		panics.Add(1)
+	}
 	s := store.New()
 	inst := build(
 		t,
@@ -1174,25 +1323,10 @@ func TestGuarantee_DurablePanicIsAFailureNotADelivery(
 				time.Millisecond,
 				2*time.Millisecond,
 			).
-			WithPanicHandler(func(
-				context.Context,
-				models.Event[mocks.Order],
-				any,
-			) {
-				panics.Add(1)
-			}).
+			WithPanicHandler(countPanic).
 			WithSubscriber(
 				"OrderUpdated",
-				func(
-					context.Context,
-					models.Event[mocks.Order],
-				) error {
-					if attempts.Add(1) == 1 {
-						panic("boom")
-					}
-
-					return nil
-				},
+				flaky.handle,
 				models.WithHandlerTimeout[mocks.Order](time.Second),
 			),
 	)
@@ -1207,21 +1341,67 @@ func TestGuarantee_DurablePanicIsAFailureNotADelivery(
 		t.Fatal(err)
 	}
 
+	completed := func() bool {
+		p, _ := s.PendingDeliveries(
+			context.Background(),
+			1,
+		)
+		return flaky.attempts.Load() >= 2 && len(p) == 0
+	}
 	eventually(
 		t,
 		"the delivery to complete after the panic",
-		func() bool {
-			p, _ := s.PendingDeliveries(
-				context.Background(),
-				1,
-			)
-			return attempts.Load() >= 2 && len(p) == 0
-		},
+		completed,
 	)
 	if panics.Load() != 1 {
 		t.Fatalf(
 			"panic handler calls = %d, want 1",
 			panics.Load(),
+		)
+	}
+}
+
+func floodHot(
+	ctx context.Context,
+	inst asynx.Asynx[mocks.Order],
+	flooding *sync.WaitGroup,
+	i int,
+) {
+	flooding.Done()
+	inst.Send(
+		ctx,
+		upd(
+			"hot",
+			float64(i+3),
+		),
+	)
+}
+
+func probeCold(
+	t *testing.T,
+	inst asynx.Asynx[mocks.Order],
+	i int,
+) {
+	t.Helper()
+
+	cold, cancel := context.WithTimeout(
+		context.Background(),
+		2*time.Second,
+	)
+	defer cancel()
+
+	_, err := inst.SendWait(
+		cold,
+		mocks.CreateOrderCmd{ID: fmt.Sprintf(
+			"cold-%d",
+			i,
+		), Total: 1},
+	)
+	if err != nil {
+		t.Fatalf(
+			"an unrelated aggregate on the same shard, probe %d: %v",
+			i,
+			err,
 		)
 	}
 }
@@ -1263,40 +1443,22 @@ func TestShardingOpts_ABusyAggregateDoesNotStallItsShard(
 	var flooding sync.WaitGroup
 	for i := range 20 {
 		flooding.Add(1)
-		go func() {
-			flooding.Done()
-			inst.Send(
-				ctx,
-				upd(
-					"hot",
-					float64(i+3),
-				),
-			)
-		}()
+		go floodHot(
+			ctx,
+			inst,
+			&flooding,
+			i,
+		)
 	}
 
 	flooding.Wait()
 
 	for i := range 50 {
-		cold, cancel := context.WithTimeout(
-			ctx,
-			2*time.Second,
+		probeCold(
+			t,
+			inst,
+			i,
 		)
-		_, err := inst.SendWait(
-			cold,
-			mocks.CreateOrderCmd{ID: fmt.Sprintf(
-				"cold-%d",
-				i,
-			), Total: 1},
-		)
-		cancel()
-		if err != nil {
-			t.Fatalf(
-				"an unrelated aggregate on the same shard, probe %d: %v",
-				i,
-				err,
-			)
-		}
 	}
 }
 
@@ -1442,13 +1604,7 @@ func TestBuild_RecoverEnqueuesRedeliveries(
 		t,
 		eight(s).WithSubscriber(
 			"OrderUpdated",
-			func(
-				context.Context,
-				models.Event[mocks.Order],
-			) error {
-				<-stuck
-				return nil
-			},
+			blockUntil(stuck),
 		),
 	)
 	t.Cleanup(func() { close(stuck) })
@@ -1583,6 +1739,12 @@ func TestBuild_ADispatcherFactoryErrorFailsBuild(
 	}
 }
 
+func isNotShutdownCall(
+	call string,
+) bool {
+	return call != "Interrupt" && call != "Close"
+}
+
 func TestShutdown_InterruptsThenClosesTheDispatcher(
 	t *testing.T,
 ) {
@@ -1598,11 +1760,7 @@ func TestShutdown_InterruptsThenClosesTheDispatcher(
 
 	got := slices.DeleteFunc(
 		fake.Calls(),
-		func(
-			call string,
-		) bool {
-			return call != "Interrupt" && call != "Close"
-		},
+		isNotShutdownCall,
 	)
 	if !slices.Equal(
 		got,
@@ -1667,16 +1825,29 @@ func TestSend_AnEnqueueFailureAfterCommitParksThroughTheSuppliedDispatcher(
 	}
 }
 
+type defaultsCase struct {
+	name     string
+	retry    [2]time.Duration
+	attempts int
+	want     models.DispatcherConfig[mocks.Order]
+}
+
+func (c defaultsCase) run(
+	t *testing.T,
+) {
+	assertFactoryConfig(
+		t,
+		c.retry,
+		c.attempts,
+		c.want,
+	)
+}
+
 func TestBuild_DefaultsAreAppliedBeforeTheFactoryRuns(
 	t *testing.T,
 ) {
 	defaults := models.DispatcherConfig[mocks.Order]{MaxAttempts: 20, RetryInitial: 100 * time.Millisecond, RetryMax: 30 * time.Second}
-	tests := []struct {
-		name     string
-		retry    [2]time.Duration
-		attempts int
-		want     models.DispatcherConfig[mocks.Order]
-	}{
+	tests := []defaultsCase{
 		{
 			name:     "non-positive builder values are ignored",
 			retry:    [2]time.Duration{-1, 0},
@@ -1697,16 +1868,7 @@ func TestBuild_DefaultsAreAppliedBeforeTheFactoryRuns(
 	for _, tt := range tests {
 		t.Run(
 			tt.name,
-			func(
-				t *testing.T,
-			) {
-				assertFactoryConfig(
-					t,
-					tt.retry,
-					tt.attempts,
-					tt.want,
-				)
-			},
+			tt.run,
 		)
 	}
 }
@@ -1716,8 +1878,8 @@ func TestBuild_ATypedNilDispatcherFailsBuild(
 ) {
 	factory := func(
 		models.DispatcherConfig[mocks.Order],
-	) (models.Dispatcher[mocks.Order], error) {
-		var d *mockbuses.Dispatcher[mocks.Order]
+	) (d models.Dispatcher[mocks.Order], err error) {
+		d = (*mockbuses.Dispatcher[mocks.Order])(nil)
 		return d,
 			nil
 	}

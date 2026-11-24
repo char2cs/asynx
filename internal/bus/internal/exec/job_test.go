@@ -20,27 +20,30 @@ func TestMakeJob_AllFieldsMapped(
 		chan string,
 		2,
 	)
+	handler := func(
+		_ context.Context,
+		_ asynxmd.Event[string],
+	) {
+		marker <- "handler"
+	}
+	fallbackHandler := func(
+		_ context.Context,
+		_ asynxmd.Event[string],
+	) {
+		marker <- "fallback"
+	}
 	sub := &models.Subscription[string]{
 		Pattern: "OrderPlaced",
-		Handler: func(
-			_ context.Context,
-			_ asynxmd.Event[string],
-		) {
-			marker <- "handler"
-		},
-		FallbackHandler: func(
-			_ context.Context,
-			_ asynxmd.Event[string],
-		) {
-			marker <- "fallback"
-		},
+		Handler: handler,
+
+		FallbackHandler: fallbackHandler,
+
 		Timeout: timeout,
 	}
 
 	job := exec.MakeJob(
 		sub,
 		event,
-		context.Background(),
 		nil,
 		nil,
 	)
@@ -106,7 +109,6 @@ func TestMakeJob_NilFallbackPreserved(
 	job := exec.MakeJob(
 		sub,
 		asynxmd.Event[string]{EventName: "e"},
-		context.Background(),
 		nil,
 		nil,
 	)
@@ -125,7 +127,6 @@ func TestMakeJob_CallbacksPopulated(
 		) {
 		},
 	}
-	ctx := context.Background()
 	onPanic := func(
 		_ context.Context,
 		_ asynxmd.Event[string],
@@ -142,14 +143,9 @@ func TestMakeJob_CallbacksPopulated(
 	job := exec.MakeJob(
 		sub,
 		asynxmd.Event[string]{},
-		ctx,
 		onPanic,
 		onTimeout,
 	)
-	if job.Ctx != ctx {
-		t.Error("Ctx not mapped")
-	}
-
 	if job.OnPanic == nil {
 		t.Error("OnPanic should not be nil")
 	}
@@ -172,7 +168,6 @@ func TestMakeJob_NilCallbacksPreserved(
 	job := exec.MakeJob(
 		sub,
 		asynxmd.Event[string]{},
-		context.Background(),
 		nil,
 		nil,
 	)

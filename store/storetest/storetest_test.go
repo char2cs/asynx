@@ -14,14 +14,40 @@ import (
 func TestRun_PassesOnTheMemoryStore(
 	t *testing.T,
 ) {
+	newStore := func(
+		*testing.T,
+	) models.Store {
+		return store.New()
+	}
 	Run(
 		t,
-		func(
-			*testing.T,
-		) models.Store {
-			return store.New()
-		},
+		newStore,
 	)
+}
+
+func runOnMemoryStore(
+	t *testing.T,
+	scenarios map[string]scenario[models.Store],
+) {
+	for name, sc := range scenarios {
+		t.Run(
+			name,
+			memoryCase(sc),
+		)
+	}
+}
+
+func memoryCase(
+	sc scenario[models.Store],
+) func(*testing.T) {
+	return func(
+		t *testing.T,
+	) {
+		sc(
+			t,
+			store.New(),
+		)
+	}
 }
 
 type recorder struct {
@@ -29,8 +55,10 @@ type recorder struct {
 	failed atomic.Bool
 }
 
+// Helper is a no-op so failures point at the scenario.
 func (r *recorder) Helper() {}
 
+// Errorf records a failure.
 func (r *recorder) Errorf(
 	string,
 	...any,
@@ -38,12 +66,14 @@ func (r *recorder) Errorf(
 	r.failed.Store(true)
 }
 
+// Error records a failure.
 func (r *recorder) Error(
 	...any,
 ) {
 	r.failed.Store(true)
 }
 
+// Fatalf records a failure and stops the scenario.
 func (r *recorder) Fatalf(
 	string,
 	...any,
@@ -52,6 +82,7 @@ func (r *recorder) Fatalf(
 	runtime.Goexit()
 }
 
+// Fatal records a failure and stops the scenario.
 func (r *recorder) Fatal(
 	...any,
 ) {
@@ -68,20 +99,36 @@ func failures[S any](
 	var wg sync.WaitGroup
 	for name, check := range scenarios {
 		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			didFail := runScenario(
-				check,
-				subject,
-			)
-			mu.Lock()
-			failed[name] = didFail
-			mu.Unlock()
-		}()
+		go recordScenario(
+			&wg,
+			&mu,
+			failed,
+			name,
+			check,
+			subject,
+		)
 	}
 
 	wg.Wait()
 	return failed
+}
+
+func recordScenario[S any](
+	wg *sync.WaitGroup,
+	mu *sync.Mutex,
+	failed map[string]bool,
+	name string,
+	check scenario[S],
+	subject S,
+) {
+	defer wg.Done()
+	didFail := runScenario(
+		check,
+		subject,
+	)
+	mu.Lock()
+	failed[name] = didFail
+	mu.Unlock()
 }
 
 func runScenario[S any](
@@ -101,14 +148,22 @@ func runScenario[S any](
 	return r.failed.Load()
 }
 
+func flagValue(
+	f bool,
+) int {
+	if f {
+		return 1
+	}
+
+	return 0
+}
+
 func countFailed(
 	failed map[string]bool,
 ) int {
 	n := 0
 	for _, f := range failed {
-		if f {
-			n++
-		}
+		n += flagValue(f)
 	}
 
 	return n
@@ -116,6 +171,7 @@ func countFailed(
 
 type hollowStore struct{ models.Store }
 
+// Atomically reports success without running fn.
 func (hollowStore) Atomically(
 	context.Context,
 	func(models.Tx) error,
@@ -127,6 +183,7 @@ type brokenStore struct{ models.Store }
 
 var errBroken = errors.New("broken")
 
+// Atomically always fails.
 func (brokenStore) Atomically(
 	context.Context,
 	func(models.Tx) error,
@@ -134,6 +191,7 @@ func (brokenStore) Atomically(
 	return errBroken
 }
 
+// ReadFrom always fails.
 func (brokenStore) ReadFrom(
 	context.Context,
 	string,
@@ -143,6 +201,7 @@ func (brokenStore) ReadFrom(
 		errBroken
 }
 
+// ReadRange always fails.
 func (brokenStore) ReadRange(
 	context.Context,
 	string,
@@ -153,6 +212,7 @@ func (brokenStore) ReadRange(
 		errBroken
 }
 
+// GetReceipt always fails.
 func (brokenStore) GetReceipt(
 	context.Context,
 	string,
@@ -162,6 +222,7 @@ func (brokenStore) GetReceipt(
 		errBroken
 }
 
+// PendingDeliveries always fails.
 func (brokenStore) PendingDeliveries(
 	context.Context,
 	int,
@@ -170,6 +231,7 @@ func (brokenStore) PendingDeliveries(
 		errBroken
 }
 
+// AckDelivery always fails.
 func (brokenStore) AckDelivery(
 	context.Context,
 	string,
@@ -218,6 +280,7 @@ func TestSuite_FlagsStoresThatFail(
 
 type forgetfulSnapshots struct{ models.SnapshotStore }
 
+// Put reports success without storing anything.
 func (forgetfulSnapshots) Put(
 	context.Context,
 	string,
@@ -229,6 +292,7 @@ func (forgetfulSnapshots) Put(
 
 type failingSnapshots struct{ models.SnapshotStore }
 
+// Put always fails.
 func (failingSnapshots) Put(
 	context.Context,
 	string,
@@ -238,6 +302,7 @@ func (failingSnapshots) Put(
 	return errBroken
 }
 
+// Get always fails.
 func (failingSnapshots) Get(
 	context.Context,
 	string,
@@ -247,6 +312,7 @@ func (failingSnapshots) Get(
 		errBroken
 }
 
+// Delete always fails.
 func (failingSnapshots) Delete(
 	context.Context,
 	string,

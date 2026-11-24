@@ -26,21 +26,9 @@ func (k *KeyedLock) Lock(
 	}
 
 	k.mu.Lock()
-	if k.entries == nil {
-		k.entries = make(map[string]*lockEntry)
-	}
-
-	e, ok := k.entries[key]
-	if !ok {
-		e = &lockEntry{ch: make(
-			chan struct{},
-			1,
-		)}
-		e.ch <- struct{}{}
-		k.entries[key] = e
-	}
-
-	e.refs++
+	k.ensure(key)
+	e := k.entries[key]
+	retain(e)
 	k.mu.Unlock()
 
 	select {
@@ -68,23 +56,11 @@ func (k *KeyedLock) TryLock(
 ) (unlock func(), ok bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if k.entries == nil {
-		k.entries = make(map[string]*lockEntry)
-	}
-
-	e, exists := k.entries[key]
-	if !exists {
-		e = &lockEntry{ch: make(
-			chan struct{},
-			1,
-		)}
-		e.ch <- struct{}{}
-		k.entries[key] = e
-	}
-
+	k.ensure(key)
+	e := k.entries[key]
 	select {
 	case <-e.ch:
-		e.refs++
+		retain(e)
 		return k.unlocker(
 				key,
 				e,
@@ -96,19 +72,45 @@ func (k *KeyedLock) TryLock(
 	}
 }
 
+func (k *KeyedLock) ensure(
+	key string,
+) {
+	if k.entries == nil {
+		k.entries = make(map[string]*lockEntry)
+	}
+
+	if _, exists := k.entries[key]; exists {
+		return
+	}
+
+	e := &lockEntry{ch: make(
+		chan struct{},
+		1,
+	)}
+	e.ch <- struct{}{}
+	k.entries[key] = e
+}
+
+func retain(
+	e *lockEntry,
+) {
+	e.refs++
+}
+
 func (k *KeyedLock) unlocker(
 	key string,
 	e *lockEntry,
 ) func() {
 	var once sync.Once
+	free := func() {
+		e.ch <- struct{}{}
+		k.release(
+			key,
+			e,
+		)
+	}
 	return func() {
-		once.Do(func() {
-			e.ch <- struct{}{}
-			k.release(
-				key,
-				e,
-			)
-		})
+		once.Do(free)
 	}
 }
 

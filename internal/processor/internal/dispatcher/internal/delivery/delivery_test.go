@@ -67,14 +67,15 @@ func TestParkThenReport_ParksTheAggregateBeforeReporting(
 	)
 
 	var parkedWhenTold []string
+	report2 := func() {
+		parkedWhenTold = slices.Sorted(maps.Keys(f.registry.Parks()))
+	}
 	f.deliverer.ParkThenReport(
 		"a",
 		halt,
 		job,
 		errStopped,
-		func() {
-			parkedWhenTold = slices.Sorted(maps.Keys(f.registry.Parks()))
-		},
+		report2,
 	)
 
 	if !slices.Equal(
@@ -236,19 +237,21 @@ func TestDeliver_AnAckedJobUnderAClosedHaltRunsNothing(
 	t *testing.T,
 ) {
 	var runs atomic.Int32
+	match := func(
+		string,
+	) bool {
+		return true
+	}
+	handler := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		runs.Add(1)
+		return nil
+	}
 	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
-		Match: func(
-			string,
-		) bool {
-			return true
-		},
-		Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			runs.Add(1)
-			return nil
-		},
+		Match:   match,
+		Handler: handler,
 	}}})
 	job, halt := f.pop(
 		t,
@@ -282,25 +285,27 @@ func TestDeliver_ATombstoneIsNeverDeadLettered(
 	t *testing.T,
 ) {
 	var dead atomic.Int32
+	deadLetter := func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+	) error {
+		dead.Add(1)
+		return nil
+	}
 	f := newFixture(asynxmd.DispatcherConfig[int]{
 		DurableSubs: []asynxmd.DurableSub[int]{failing(errors.New("cannot forget"))},
 		MaxAttempts: 1,
-		DeadLetter: func(
-			context.Context,
-			asynxmd.Event[int],
-			error,
-		) error {
-			dead.Add(1)
-			return nil
-		},
+		DeadLetter:  deadLetter,
 	})
+	ack := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	job, halt := f.pop(
 		t,
-		tombstone(func(
-			context.Context,
-		) error {
-			return nil
-		}),
+		tombstone(ack),
 	)
 
 	if err := f.deliverer.Deliver(
@@ -329,17 +334,18 @@ func TestDeliver_AJobWithoutAnAckIsNeverDeadLetteredNorParked(
 	t *testing.T,
 ) {
 	var dead atomic.Int32
+	deadLetter2 := func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+	) error {
+		dead.Add(1)
+		return nil
+	}
 	f := newFixture(asynxmd.DispatcherConfig[int]{
 		DurableSubs: []asynxmd.DurableSub[int]{failing(errors.New("down"))},
 		MaxAttempts: 1,
-		DeadLetter: func(
-			context.Context,
-			asynxmd.Event[int],
-			error,
-		) error {
-			dead.Add(1)
-			return nil
-		},
+		DeadLetter:  deadLetter2,
 	})
 	job, halt := f.pop(
 		t,
@@ -374,19 +380,21 @@ func TestDeliver_ATombstoneReachesEverySubscriber(
 	t *testing.T,
 ) {
 	var runs atomic.Int32
+	match2 := func(
+		string,
+	) bool {
+		return false
+	}
+	handler2 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		runs.Add(1)
+		return nil
+	}
 	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
-		Match: func(
-			string,
-		) bool {
-			return false
-		},
-		Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			runs.Add(1)
-			return nil
-		},
+		Match:   match2,
+		Handler: handler2,
 	}}})
 	job, halt := f.pop(
 		t,
@@ -501,16 +509,17 @@ func TestDeliver_AParkDuringTheBackoffEndsTheDelivery(
 func TestDeliver_ADeadLetterHandlerPanicParksTheAggregate(
 	t *testing.T,
 ) {
+	deadLetter3 := func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+	) error {
+		panic("dead-letter store down")
+	}
 	f := newFixture(asynxmd.DispatcherConfig[int]{
 		DurableSubs: []asynxmd.DurableSub[int]{failing(errors.New("down"))},
 		MaxAttempts: 1,
-		DeadLetter: func(
-			context.Context,
-			asynxmd.Event[int],
-			error,
-		) error {
-			panic("dead-letter store down")
-		},
+		DeadLetter:  deadLetter3,
 	})
 	job, halt := f.pop(
 		t,
@@ -548,22 +557,14 @@ func TestDeliver_AHandlerPanicIsReportedAndRetried(
 	t *testing.T,
 ) {
 	var runs atomic.Int32
+	match3 := func(
+		string,
+	) bool {
+		return true
+	}
 	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
-		Match: func(
-			string,
-		) bool {
-			return true
-		},
-		Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			if runs.Add(1) == 1 {
-				panic("boom")
-			}
-
-			return nil
-		},
+		Match:   match3,
+		Handler: makeHandler(&runs),
 	}}})
 	job, halt := f.pop(
 		t,
@@ -595,21 +596,23 @@ func TestDeliver_ATimedOutHandlerIsReportedAndWaitedFor(
 	t *testing.T,
 ) {
 	release := make(chan struct{})
+	match4 := func(
+		string,
+	) bool {
+		return true
+	}
+	handler3 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		<-release
+		return nil
+	}
 	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
-		Name: "slow",
-		Match: func(
-			string,
-		) bool {
-			return true
-		},
+		Name:    "slow",
+		Match:   match4,
 		Timeout: time.Millisecond,
-		Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			<-release
-			return nil
-		},
+		Handler: handler3,
 	}}})
 	job, halt := f.pop(
 		t,
@@ -743,13 +746,14 @@ func (f *fixture) pop(
 func acked(
 	name string,
 ) asynxmd.DispatchRequest[int] {
+	ack2 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	return asynxmd.DispatchRequest[int]{
 		Event: asynxmd.Event[int]{AggregateID: "a", Version: 1, EventName: name},
-		Ack: func(
-			context.Context,
-		) error {
-			return nil
-		},
+		Ack:   ack2,
 	}
 }
 
@@ -766,19 +770,21 @@ func tombstone(
 func failing(
 	err error,
 ) asynxmd.DurableSub[int] {
+	match5 := func(
+		string,
+	) bool {
+		return true
+	}
+	handler4 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return err
+	}
 	return asynxmd.DurableSub[int]{
-		Name: "failing",
-		Match: func(
-			string,
-		) bool {
-			return true
-		},
-		Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			return err
-		},
+		Name:    "failing",
+		Match:   match5,
+		Handler: handler4,
 	}
 }
 
@@ -802,6 +808,7 @@ func (r *recordingReporter) record(
 	)
 }
 
+// PublishError satisfies the interface that recordingReporter fakes.
 func (r *recordingReporter) PublishError(
 	_ jobs.Job[int],
 	err error,
@@ -812,6 +819,7 @@ func (r *recordingReporter) PublishError(
 	)
 }
 
+// DeliveryError satisfies the interface that recordingReporter fakes.
 func (r *recordingReporter) DeliveryError(
 	_ jobs.Job[int],
 	err error,
@@ -823,6 +831,7 @@ func (r *recordingReporter) DeliveryError(
 	)
 }
 
+// Panic satisfies the interface that recordingReporter fakes.
 func (r *recordingReporter) Panic(
 	_ jobs.Job[int],
 	recovered any,
@@ -845,4 +854,31 @@ type report struct {
 	kind   string
 	err    error
 	parked []string
+}
+
+func makeHandler(
+	runs *atomic.Int32,
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler(
+			runs,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler(
+	runs *atomic.Int32,
+	_ context.Context,
+	_ asynxmd.Event[int],
+) error {
+	if (*runs).Add(1) == 1 {
+		panic("boom")
+	}
+
+	return nil
 }

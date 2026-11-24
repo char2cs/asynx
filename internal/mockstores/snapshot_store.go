@@ -10,6 +10,7 @@ import (
 // required but its behavior is irrelevant to the test.
 type SnapshotStore struct{}
 
+// Put discards the snapshot and succeeds.
 func (s *SnapshotStore) Put(
 	_ context.Context,
 	_ string,
@@ -19,6 +20,7 @@ func (s *SnapshotStore) Put(
 	return nil
 }
 
+// Get reports that no snapshot exists.
 func (s *SnapshotStore) Get(
 	_ context.Context,
 	_ string,
@@ -28,6 +30,7 @@ func (s *SnapshotStore) Get(
 		nil
 }
 
+// Delete does nothing and succeeds.
 func (s *SnapshotStore) Delete(
 	_ context.Context,
 	_ string,

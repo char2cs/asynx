@@ -89,6 +89,24 @@ func TestOrderReporter_Handle_OrderShipped(
 	)
 }
 
+func reportCreated(
+	ctx context.Context,
+	reporter *OrderReporter,
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
+	reporter.Handle(
+		ctx,
+		models.Event[domain.Order]{
+			EventName: "OrderCreated",
+			Aggregate: domain.Order{
+				ID:     "ORD-001",
+				Status: domain.OrderPending,
+			},
+		},
+	)
+}
+
 func TestOrderReporter_Handle_Concurrent(
 	t *testing.T,
 ) {
@@ -96,24 +114,13 @@ func TestOrderReporter_Handle_Concurrent(
 	ctx := context.Background()
 	wg := sync.WaitGroup{}
 
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		wg.Add(1)
-		go func(
-			index int,
-		) {
-			defer wg.Done()
-			event := models.Event[domain.Order]{
-				EventName: "OrderCreated",
-				Aggregate: domain.Order{
-					ID:     "ORD-001",
-					Status: domain.OrderPending,
-				},
-			}
-			reporter.Handle(
-				ctx,
-				event,
-			)
-		}(i)
+		go reportCreated(
+			ctx,
+			reporter,
+			&wg,
+		)
 	}
 
 	wg.Wait()

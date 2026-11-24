@@ -34,33 +34,35 @@ func (p *Processor[T]) Recover(
 	}
 
 	if batch <= 0 {
-		batch = 100
+		batch = defaultRecoverBatch
 	}
 
+	all := func(
+		string,
+	) bool {
+		return true
+	}
 	backlogs, order, err := p.pendingByAggregate(
 		ctx,
 		batch,
-		func(
-			string,
-		) bool {
-			return true
-		},
+		all,
 	)
 	if err != nil {
 		return err
 	}
 
+	recoverOne := func(
+		agg string,
+	) error {
+		return p.recoverAggregate(
+			ctx,
+			agg,
+			backlogs[agg],
+		)
+	}
 	return firsterror.Of(
 		order,
-		func(
-			agg string,
-		) error {
-			return p.recoverAggregate(
-				ctx,
-				agg,
-				backlogs[agg],
-			)
-		},
+		recoverOne,
 	)
 }
 
@@ -103,6 +105,11 @@ func (p *Processor[T]) recoverAggregate(
 	)
 	return nil
 }
+
+const (
+	defaultRecoverBatch = 100
+	scanGrowthFactor    = 2
+)
 
 func recoveryMustStop(
 	ctx context.Context,
@@ -166,7 +173,7 @@ func (p *Processor[T]) scanFrom(
 
 	return p.scanFrom(
 		ctx,
-		limit*2,
+		limit*scanGrowthFactor,
 		seen,
 		visit,
 	)
@@ -177,15 +184,16 @@ func visitUnseen(
 	seen map[asynxmd.Delivery]struct{},
 	visit func(asynxmd.Delivery) error,
 ) error {
+	isSeen := func(
+		d asynxmd.Delivery,
+	) bool {
+		_, again := seen[d]
+		seen[d] = struct{}{}
+		return again
+	}
 	unseen := slices.DeleteFunc(
 		slices.Clone(pending),
-		func(
-			d asynxmd.Delivery,
-		) bool {
-			_, again := seen[d]
-			seen[d] = struct{}{}
-			return again
-		},
+		isSeen,
 	)
 	return firsterror.Of(
 		unseen,
@@ -199,33 +207,49 @@ func (p *Processor[T]) pendingByAggregate(
 	want func(aggregateID string) bool,
 ) (backlogs map[string][]asynxmd.Delivery, order []string, err error) {
 	backlogs = make(map[string][]asynxmd.Delivery)
+	collect := func(
+		d asynxmd.Delivery,
+	) error {
+		order = indexDelivery(
+			backlogs,
+			order,
+			d,
+			want,
+		)
+		return nil
+	}
 	err = p.scanPending(
 		ctx,
 		batch,
-		func(
-			d asynxmd.Delivery,
-		) error {
-			if !want(d.AggregateID) {
-				return nil
-			}
-
-			if _, known := backlogs[d.AggregateID]; !known {
-				order = append(
-					order,
-					d.AggregateID,
-				)
-			}
-
-			backlogs[d.AggregateID] = append(
-				backlogs[d.AggregateID],
-				d,
-			)
-			return nil
-		},
+		collect,
 	)
 	return backlogs,
 		order,
 		err
+}
+
+func indexDelivery(
+	backlogs map[string][]asynxmd.Delivery,
+	order []string,
+	d asynxmd.Delivery,
+	want func(aggregateID string) bool,
+) []string {
+	if !want(d.AggregateID) {
+		return order
+	}
+
+	if _, known := backlogs[d.AggregateID]; !known {
+		order = append(
+			order,
+			d.AggregateID,
+		)
+	}
+
+	backlogs[d.AggregateID] = append(
+		backlogs[d.AggregateID],
+		d,
+	)
+	return order
 }
 
 func (p *Processor[T]) redeliver(
@@ -262,42 +286,28 @@ func (p *Processor[T]) enqueueBacklog(
 	agg string,
 	backlog []asynxmd.Delivery,
 ) (vanished map[int64]struct{}, err error) {
-	vanished = make(
-		map[int64]struct{},
-		len(backlog),
-	)
-	lowest, highest := backlog[0].Version, backlog[0].Version
-	for _, d := range backlog {
-		vanished[d.Version] = struct{}{}
-		lowest, highest = min(
-			lowest,
-			d.Version,
-		), max(
-			highest,
-			d.Version,
-		)
-	}
-
+	vanished, lowest, highest := versionBounds(backlog)
 	enqueuer := &backlogEnqueuer[T]{
 		dispatcher: p.dispatcher,
 		store:      p.es.Store(),
 		aggregate:  agg,
 		vanished:   vanished,
 	}
+	enqueue := func(
+		_ context.Context,
+		evt asynxmd.Event[T],
+	) {
+		enqueuer.enqueue(
+			ctx,
+			evt,
+		)
+	}
 	replayErr := p.es.Replay(
 		ctx,
 		agg,
 		lowest,
 		highest,
-		func(
-			_ context.Context,
-			evt asynxmd.Event[T],
-		) {
-			enqueuer.enqueue(
-				ctx,
-				evt,
-			)
-		},
+		enqueue,
 	)
 	return vanished,
 		errors.Join(
@@ -306,26 +316,66 @@ func (p *Processor[T]) enqueueBacklog(
 		)
 }
 
+func versionBounds(
+	backlog []asynxmd.Delivery,
+) (versions map[int64]struct{}, lowest, highest int64) {
+	versions = make(
+		map[int64]struct{},
+		len(backlog),
+	)
+	lowest, highest = backlog[0].Version, backlog[0].Version
+	for _, d := range backlog {
+		versions[d.Version] = struct{}{}
+		lowest = min(
+			lowest,
+			d.Version,
+		)
+		highest = max(
+			highest,
+			d.Version,
+		)
+	}
+
+	return versions,
+		lowest,
+		highest
+}
+
 func (p *Processor[T]) ackVanished(
 	ctx context.Context,
 	agg string,
 	backlog []asynxmd.Delivery,
 	vanished map[int64]struct{},
 ) error {
+	ack := func(
+		d asynxmd.Delivery,
+	) error {
+		return p.ackIfVanished(
+			ctx,
+			agg,
+			d,
+			vanished,
+		)
+	}
 	return firsterror.Of(
 		backlog,
-		func(
-			d asynxmd.Delivery,
-		) error {
-			if _, isVanished := vanished[d.Version]; !isVanished {
-				return nil
-			}
+		ack,
+	)
+}
 
-			return p.es.Store().AckDelivery(
-				ctx,
-				agg,
-				d.Version,
-			)
-		},
+func (p *Processor[T]) ackIfVanished(
+	ctx context.Context,
+	agg string,
+	d asynxmd.Delivery,
+	vanished map[int64]struct{},
+) error {
+	if _, isVanished := vanished[d.Version]; !isVanished {
+		return nil
+	}
+
+	return p.es.Store().AckDelivery(
+		ctx,
+		agg,
+		d.Version,
 	)
 }

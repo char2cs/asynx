@@ -113,14 +113,65 @@ func TestProcessor_SerialOrdering10Increments(
 			ctx,
 			cmd,
 		)
-		if err != nil {
-			t.Fatalf(
-				"Send failed at iteration %d: %v",
-				i,
-				err,
-			)
-		}
+		requireNoErrorf(
+			t,
+			err,
+			"Send failed at iteration %d",
+			i,
+		)
 	}
+}
+
+func requireNoErrorf(
+	t *testing.T,
+	err error,
+	format string,
+	args ...any,
+) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf(
+			format+": %v",
+			append(
+				args,
+				err,
+			)...,
+		)
+	}
+}
+
+func expectNoErrorf(
+	t *testing.T,
+	err error,
+	format string,
+	args ...any,
+) {
+	t.Helper()
+	if err != nil {
+		t.Errorf(
+			format+": %v",
+			append(
+				args,
+				err,
+			)...,
+		)
+	}
+}
+
+func sendCreate(
+	ctx context.Context,
+	p *Processor[order],
+	idx int,
+	wg *sync.WaitGroup,
+	errs chan<- error,
+) {
+	defer wg.Done()
+	cmd := mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0}
+	_, err := p.Send(
+		ctx,
+		cmd,
+	)
+	errs <- err
 }
 
 func TestProcessor_ParallelAggregates8Goroutines(
@@ -141,29 +192,24 @@ func TestProcessor_ParallelAggregates8Goroutines(
 
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
-		go func(
-			idx int,
-		) {
-			defer wg.Done()
-			cmd := mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0}
-			_, _err := p.Send(
-				ctx,
-				cmd,
-			)
-			errs <- _err
-		}(i)
+		go sendCreate(
+			ctx,
+			p,
+			i,
+			&wg,
+			errs,
+		)
 	}
 
 	wg.Wait()
 	close(errs)
 
 	for err := range errs {
-		if err != nil {
-			t.Errorf(
-				"Send failed: %v",
-				err,
-			)
-		}
+		expectNoErrorf(
+			t,
+			err,
+			"Send failed",
+		)
 	}
 }
 
@@ -193,14 +239,15 @@ func TestProcessor_EventPublishedToRealBus(
 		chan asynxmd.Event[order],
 		1,
 	)
+	forward := func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
+		eventReceived <- e
+	}
 	channelBus.Subscribe(
 		"OrderCreated",
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) {
-			eventReceived <- e
-		},
+		forward,
 	)
 
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
@@ -217,14 +264,25 @@ func TestProcessor_EventPublishedToRealBus(
 
 	select {
 	case event := <-eventReceived:
-		if event.EventName != "OrderCreated" {
-			t.Errorf(
-				"unexpected event name: %s",
-				event.EventName,
-			)
-		}
+		expectEventName(
+			t,
+			event.EventName,
+		)
 	case <-time.After(1 * time.Second):
 		t.Fatalf("event not published within timeout")
+	}
+}
+
+func expectEventName(
+	t *testing.T,
+	name string,
+) {
+	t.Helper()
+	if name != "OrderCreated" {
+		t.Errorf(
+			"unexpected event name: %s",
+			name,
+		)
 	}
 }
 
@@ -254,14 +312,15 @@ func TestProcessor_PublishUsesDetachedContext(
 		chan context.Context,
 		1,
 	)
+	forwardCtx := func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
+		contextReceived <- ctx
+	}
 	channelBus.Subscribe(
 		"OrderCreated",
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) {
-			contextReceived <- ctx
-		},
+		forwardCtx,
 	)
 
 	cmd := mocks.CreateOrderCmd{ID: "order1", Total: 100.0}
@@ -454,6 +513,7 @@ type blockingTestBus[T any] struct {
 	unblockCh chan struct{}
 }
 
+// Publish is the test double implementation for the code under test.
 func (b *blockingTestBus[T]) Publish(
 	_ context.Context,
 	_ asynxmd.Event[T],
@@ -461,6 +521,7 @@ func (b *blockingTestBus[T]) Publish(
 	return nil
 }
 
+// PublishSync is the test double implementation for the code under test.
 func (b *blockingTestBus[T]) PublishSync(
 	_ context.Context,
 	_ asynxmd.Event[T],
@@ -469,6 +530,7 @@ func (b *blockingTestBus[T]) PublishSync(
 	return nil
 }
 
+// Subscribe is the test double implementation for the code under test.
 func (b *blockingTestBus[T]) Subscribe(
 	_ string,
 	_ asynxmd.ProjectionHandler[T],
@@ -478,18 +540,21 @@ func (b *blockingTestBus[T]) Subscribe(
 		nil
 }
 
+// Unsubscribe is the test double implementation for the code under test.
 func (b *blockingTestBus[T]) Unsubscribe(
 	_ string,
 ) error {
 	return nil
 }
 
+// Close is the test double implementation for the code under test.
 func (b *blockingTestBus[T]) Close(
 	_ context.Context,
 ) error {
 	return nil
 }
 
+// WaitForHandlers is the test double implementation for the code under test.
 func (b *blockingTestBus[T]) WaitForHandlers() {}
 
 type fixture struct {
@@ -531,36 +596,46 @@ func updateCmd(
 	return mocks.UpdateOrderCmd{ID: id, NewState: order{ID: id, Total: total}}
 }
 
+func downUnlessHealthy(
+	healthy *atomic.Bool,
+) error {
+	if healthy.Load() {
+		return nil
+	}
+
+	return errors.New("down")
+}
+
 func parkingOpts(
 	healthy *atomic.Bool,
 	extra ...models.Opt[order],
 ) []models.Opt[order] {
+	isUpdated := func(
+		name string,
+	) bool {
+		return name == "OrderUpdated"
+	}
+	handler := func(
+		context.Context,
+		asynxmd.Event[order],
+	) error {
+		return downUnlessHealthy(healthy)
+	}
+	subs := []asynxmd.DurableSub[order]{{
+		Match:   always,
+		Handler: handler,
+	}}
+	base := []models.Opt[order]{
+		models.WithDurableDelivery[order](isUpdated),
+		models.WithDurableSubscribers(subs),
+		models.WithDeliveryRetry[order](
+			time.Millisecond,
+			2*time.Millisecond,
+		),
+		models.WithDeliveryMaxAttempts[order](2),
+	}
 	return append(
-		[]models.Opt[order]{
-			models.WithDurableDelivery[order](func(
-				name string,
-			) bool {
-				return name == "OrderUpdated"
-			}),
-			models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-				Match: always,
-				Handler: func(
-					context.Context,
-					asynxmd.Event[order],
-				) error {
-					if healthy.Load() {
-						return nil
-					}
-
-					return errors.New("down")
-				},
-			}}),
-			models.WithDeliveryRetry[order](
-				time.Millisecond,
-				2*time.Millisecond,
-			),
-			models.WithDeliveryMaxAttempts[order](2),
-		},
+		base,
 		extra...,
 	)
 }
@@ -570,36 +645,30 @@ func TestProcessor_Options_SyncProjectionsDurableDeliverySnapshotErrors(
 ) {
 	var projected, snapErrs atomic.Int32
 	s := store.New()
+	project := func(
+		context.Context,
+		asynxmd.Tx,
+		asynxmd.Event[order],
+	) error {
+		projected.Add(1)
+		return nil
+	}
+	countSnapErr := func(
+		context.Context,
+		asynxmd.Event[order],
+		error,
+	) {
+		snapErrs.Add(1)
+	}
 	f := newFixture(
 		t,
 		s,
 		models.WithSyncProjections([]models.SyncProjection[order]{{
-			Match: func(
-				string,
-			) bool {
-				return true
-			},
-			Fn: func(
-				context.Context,
-				asynxmd.Tx,
-				asynxmd.Event[order],
-			) error {
-				projected.Add(1)
-				return nil
-			},
+			Match: always,
+			Fn:    project,
 		}}),
-		models.WithDurableDelivery[order](func(
-			string,
-		) bool {
-			return true
-		}),
-		models.WithSnapshotErrorHandler(func(
-			context.Context,
-			asynxmd.Event[order],
-			error,
-		) {
-			snapErrs.Add(1)
-		}),
+		models.WithDurableDelivery[order](always),
+		models.WithSnapshotErrorHandler(countSnapErr),
 	)
 	f.snap.SetError(
 		"o1",
@@ -637,54 +706,60 @@ func TestProcessor_Options_SyncProjectionsDurableDeliverySnapshotErrors(
 	}
 }
 
+func flakyHandler(
+	attempts *atomic.Int32,
+) error {
+	switch attempts.Add(1) {
+	case 1:
+		return errors.New("transient")
+	case 2:
+		panic("boom")
+	}
+
+	return nil
+}
+
 func TestProcessor_DurableDeliveryOptions_RetryReportAndPanicHandling(
 	t *testing.T,
 ) {
 	var attempts, reports, panics atomic.Int32
 	s := store.New()
+	isUpdated := func(
+		name string,
+	) bool {
+		return name == "OrderUpdated"
+	}
+	handler := func(
+		context.Context,
+		asynxmd.Event[order],
+	) error {
+		return flakyHandler(&attempts)
+	}
+	countReport := func(
+		context.Context,
+		asynxmd.Event[order],
+		error,
+		int,
+	) {
+		reports.Add(1)
+	}
+	countPanic := func(
+		context.Context,
+		asynxmd.Event[order],
+		any,
+	) {
+		panics.Add(1)
+	}
 	f := newFixture(
 		t,
 		s,
-		models.WithDurableDelivery[order](func(
-			name string,
-		) bool {
-			return name == "OrderUpdated"
-		}),
+		models.WithDurableDelivery[order](isUpdated),
 		models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-			Match: func(
-				string,
-			) bool {
-				return true
-			},
-			Handler: func(
-				context.Context,
-				asynxmd.Event[order],
-			) error {
-				switch attempts.Add(1) {
-				case 1:
-					return errors.New("transient")
-				case 2:
-					panic("boom")
-				}
-
-				return nil
-			},
+			Match:   always,
+			Handler: handler,
 		}}),
-		models.WithDeliveryErrorHandler(func(
-			context.Context,
-			asynxmd.Event[order],
-			error,
-			int,
-		) {
-			reports.Add(1)
-		}),
-		models.WithDeliveryPanicHandler(func(
-			context.Context,
-			asynxmd.Event[order],
-			any,
-		) {
-			panics.Add(1)
-		}),
+		models.WithDeliveryErrorHandler(countReport),
+		models.WithDeliveryPanicHandler(countPanic),
 		models.WithDeliveryRetry[order](
 			time.Millisecond,
 			2*time.Millisecond,
@@ -729,6 +804,19 @@ func always(
 	return true
 }
 
+func requireVersionOne(
+	t *testing.T,
+	v int64,
+) {
+	t.Helper()
+	if v != 1 {
+		t.Fatalf(
+			"dead-lettered v%d",
+			v,
+		)
+	}
+}
+
 func TestProcessor_Options_DeadLetter(
 	t *testing.T,
 ) {
@@ -737,19 +825,20 @@ func TestProcessor_Options_DeadLetter(
 		chan int64,
 		4,
 	)
+	record := func(
+		_ context.Context,
+		e asynxmd.Event[order],
+		_ error,
+	) error {
+		dead <- e.Version
+		return nil
+	}
 	f := newFixture(
 		t,
 		store.New(),
 		parkingOpts(
 			&healthy,
-			models.WithDeadLetterHandler(func(
-				_ context.Context,
-				e asynxmd.Event[order],
-				_ error,
-			) error {
-				dead <- e.Version
-				return nil
-			}),
+			models.WithDeadLetterHandler(record),
 		)...,
 	)
 	if _, err := f.p.Send(
@@ -764,12 +853,10 @@ func TestProcessor_Options_DeadLetter(
 
 	select {
 	case v := <-dead:
-		if v != 1 {
-			t.Fatalf(
-				"dead-lettered v%d",
-				v,
-			)
-		}
+		requireVersionOne(
+			t,
+			v,
+		)
 	case <-time.After(5 * time.Second):
 		t.Fatal("dead-letter handler never called")
 	}
@@ -783,6 +870,7 @@ type gatedCmd struct {
 	gate    <-chan struct{}
 }
 
+// Validate is the test double implementation for the code under test.
 func (c gatedCmd) Validate(
 	o *order,
 ) error {
@@ -802,11 +890,22 @@ func awaitSendResults(
 ) {
 	t.Helper()
 	for range n {
-		select {
-		case <-results:
-		case <-time.After(5 * time.Second):
-			t.Fatal("a Send was stranded by Shutdown")
-		}
+		awaitOneResult(
+			t,
+			results,
+		)
+	}
+}
+
+func awaitOneResult(
+	t *testing.T,
+	results chan error,
+) {
+	t.Helper()
+	select {
+	case <-results:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a Send was stranded by Shutdown")
 	}
 }
 
@@ -836,25 +935,26 @@ func TestProcessor_HandlerMayWaitOnAnotherInstanceUnderTheSameID(
 		chan error,
 		2,
 	)
+	waitOther := func(
+		hctx context.Context,
+		e asynxmd.Event[order],
+	) {
+		_, err := b.p.SendWait(
+			hctx,
+			updateCmd(
+				e.AggregateID,
+				2,
+			),
+		)
+		got <- err
+		got <- b.p.Forget(
+			hctx,
+			e.AggregateID,
+		)
+	}
 	a.b.Subscribe(
 		"OrderUpdated",
-		func(
-			hctx context.Context,
-			e asynxmd.Event[order],
-		) {
-			_, err := b.p.SendWait(
-				hctx,
-				updateCmd(
-					e.AggregateID,
-					2,
-				),
-			)
-			got <- err
-			got <- b.p.Forget(
-				hctx,
-				e.AggregateID,
-			)
-		},
+		waitOther,
 	)
 	if _, err := a.p.Send(
 		ctx,
@@ -867,21 +967,33 @@ func TestProcessor_HandlerMayWaitOnAnotherInstanceUnderTheSameID(
 	}
 
 	for _, what := range []string{"SendWait", "Forget"} {
-		select {
-		case err := <-got:
-			if err != nil {
-				t.Fatalf(
-					"%s on the other instance from a handler: %v",
-					what,
-					err,
-				)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf(
-				"%s on the other instance from a handler hung",
-				what,
-			)
-		}
+		awaitOtherInstance(
+			t,
+			got,
+			what,
+		)
+	}
+}
+
+func awaitOtherInstance(
+	t *testing.T,
+	got chan error,
+	what string,
+) {
+	t.Helper()
+	select {
+	case err := <-got:
+		requireNoErrorf(
+			t,
+			err,
+			"%s on the other instance from a handler",
+			what,
+		)
+	case <-time.After(5 * time.Second):
+		t.Fatalf(
+			"%s on the other instance from a handler hung",
+			what,
+		)
 	}
 }
 
@@ -1043,13 +1155,7 @@ func TestNew_AFactoryIsCalledEvenWithoutABus(
 func TestNew_TheFactoryReceivesTheConfigWithDefaultsApplied(
 	t *testing.T,
 ) {
-	tests := []struct {
-		name     string
-		opts     []models.Opt[order]
-		attempts int
-		initial  time.Duration
-		max      time.Duration
-	}{
+	tests := []factoryCase{
 		{
 			name:     "no options keeps the defaults",
 			attempts: 20,
@@ -1084,21 +1190,40 @@ func TestNew_TheFactoryReceivesTheConfigWithDefaultsApplied(
 		},
 	}
 	for _, tt := range tests {
-		t.Run(
-			tt.name,
-			func(
-				t *testing.T,
-			) {
-				assertFactoryConfig(
-					t,
-					tt.opts,
-					tt.attempts,
-					tt.initial,
-					tt.max,
-				)
-			},
+		runFactoryCase(
+			t,
+			tt,
 		)
 	}
+}
+
+type factoryCase struct {
+	name     string
+	opts     []models.Opt[order]
+	attempts int
+	initial  time.Duration
+	max      time.Duration
+}
+
+func runFactoryCase(
+	t *testing.T,
+	tt factoryCase,
+) {
+	check := func(
+		t *testing.T,
+	) {
+		assertFactoryConfig(
+			t,
+			tt.opts,
+			tt.attempts,
+			tt.initial,
+			tt.max,
+		)
+	}
+	t.Run(
+		tt.name,
+		check,
+	)
 }
 
 func assertFactoryConfig(
@@ -1157,8 +1282,7 @@ func TestNew_ATypedNilDispatcherWithoutAnErrorFails(
 	factory := func(
 		asynxmd.DispatcherConfig[order],
 	) (asynxmd.Dispatcher[order], error) {
-		var d *mockbuses.Dispatcher[order]
-		return d,
+		return (*mockbuses.Dispatcher[order])(nil),
 			nil
 	}
 
@@ -1179,6 +1303,16 @@ func TestNew_ATypedNilDispatcherWithoutAnErrorFails(
 			err,
 		)
 	}
+}
+
+func succeeded(
+	err error,
+) int {
+	if err == nil {
+		return 1
+	}
+
+	return 0
 }
 
 func TestProcessor_IntegrationHighThroughput(
@@ -1212,12 +1346,11 @@ func TestProcessor_IntegrationHighThroughput(
 			ID:    "order" + string(rune(i%26+'a')),
 			Total: 100.0,
 		}
-		if _, err := p.Send(
+		_, err := p.Send(
 			ctx,
 			cmd,
-		); err == nil {
-			successCount++
-		}
+		)
+		successCount += succeeded(err)
 	}
 
 	if successCount < 190 {
@@ -1258,17 +1391,18 @@ func TestProcessor_IntegrationOrderPreservation(
 	aggregateID := "order1"
 
 	var eventCount int32
+	countEvent := func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
+		atomic.AddInt32(
+			&eventCount,
+			1,
+		)
+	}
 	channelBus.Subscribe(
 		"OrderUpdated",
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) {
-			atomic.AddInt32(
-				&eventCount,
-				1,
-			)
-		},
+		countEvent,
 	)
 
 	for i := 1; i <= 50; i++ {
@@ -1280,16 +1414,16 @@ func TestProcessor_IntegrationOrderPreservation(
 				Status: "Pending",
 			},
 		}
-		if _, err := p.Send(
+		_, err := p.Send(
 			ctx,
 			cmd,
-		); err != nil {
-			t.Fatalf(
-				"Send failed at iteration %d: %v",
-				i,
-				err,
-			)
-		}
+		)
+		requireNoErrorf(
+			t,
+			err,
+			"Send failed at iteration %d",
+			i,
+		)
 	}
 
 	p.WaitPublish()
@@ -1356,6 +1490,43 @@ func TestProcessor_IntegrationCancelDuringBurst(
 	t.Log("Integration: cancellation handling verified")
 }
 
+func sendValidOrInvalid(
+	ctx context.Context,
+	p *Processor[order],
+	idx int,
+	wg *sync.WaitGroup,
+	validCount *int32,
+	invalidCount *int32,
+) {
+	defer wg.Done()
+	total := 100.0
+	if idx%2 != 0 {
+		total = -100.0
+	}
+
+	_, err := p.Send(
+		ctx,
+		mocks.CreateOrderCmd{
+			ID:    "order" + string(rune(idx)),
+			Total: total,
+		},
+	)
+	if err == asynxmd.ErrValidation {
+		atomic.AddInt32(
+			invalidCount,
+			1,
+		)
+		return
+	}
+
+	if err == nil {
+		atomic.AddInt32(
+			validCount,
+			1,
+		)
+	}
+}
+
 func TestProcessor_IntegrationWithValidationErrors(
 	t *testing.T,
 ) {
@@ -1384,40 +1555,14 @@ func TestProcessor_IntegrationWithValidationErrors(
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
-		go func(
-			idx int,
-		) {
-			defer wg.Done()
-			var cmd asynxmd.Command[order]
-
-			if idx%2 == 0 {
-				cmd = mocks.CreateOrderCmd{
-					ID:    "order" + string(rune(idx)),
-					Total: 100.0,
-				}
-			} else {
-				cmd = mocks.CreateOrderCmd{
-					ID:    "order" + string(rune(idx)),
-					Total: -100.0,
-				}
-			}
-
-			_, err := p.Send(
-				ctx,
-				cmd,
-			)
-			if err == asynxmd.ErrValidation {
-				atomic.AddInt32(
-					&invalidCount,
-					1,
-				)
-			} else if err == nil {
-				atomic.AddInt32(
-					&validCount,
-					1,
-				)
-			}
-		}(i)
+		go sendValidOrInvalid(
+			ctx,
+			p,
+			i,
+			&wg,
+			&validCount,
+			&invalidCount,
+		)
 	}
 
 	wg.Wait()
@@ -1438,6 +1583,50 @@ func TestProcessor_IntegrationWithValidationErrors(
 		validVal,
 		invalidVal,
 	)
+}
+
+func runBatch(
+	ctx context.Context,
+	t *testing.T,
+	p *Processor[order],
+	batch int,
+) {
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go sendLogged(
+			ctx,
+			t,
+			p,
+			"order"+string(rune((i+batch*100)%26+'a')),
+			&wg,
+		)
+	}
+
+	wg.Wait()
+}
+
+func sendLogged(
+	ctx context.Context,
+	t *testing.T,
+	p *Processor[order],
+	id string,
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
+	_, err := p.Send(
+		ctx,
+		mocks.CreateOrderCmd{
+			ID:    id,
+			Total: 100.0,
+		},
+	)
+	if err != nil {
+		t.Logf(
+			"Send failed: %v",
+			err,
+		)
+	}
 }
 
 func TestProcessor_IntegrationMemoryStability(
@@ -1470,25 +1659,12 @@ func TestProcessor_IntegrationMemoryStability(
 	ctx := context.Background()
 
 	for batch := 0; batch < 10; batch++ {
-		var wg sync.WaitGroup
-		for i := 0; i < 100; i++ {
-			wg.Add(1)
-			go func(
-				idx int,
-			) {
-				defer wg.Done()
-				cmd := mocks.CreateOrderCmd{
-					ID:    "order" + string(rune((idx+batch*100)%26+'a')),
-					Total: 100.0,
-				}
-				p.Send(
-					ctx,
-					cmd,
-				)
-			}(i)
-		}
-
-		wg.Wait()
+		runBatch(
+			ctx,
+			t,
+			p,
+			batch,
+		)
 	}
 
 	t.Log("Integration: memory stability test completed without panic")
@@ -1521,18 +1697,19 @@ func TestProcessor_IntegrationEventPublishingReliability(
 		100,
 	)
 
+	buffer := func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
+		bufferOrDrop(
+			t,
+			eventsChan,
+			e,
+		)
+	}
 	channelBus.Subscribe(
 		"OrderCreated",
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) {
-			select {
-			case eventsChan <- e:
-			default:
-				t.Logf("Event buffer full, dropped event")
-			}
-		},
+		buffer,
 	)
 
 	commandCount := 20
@@ -1541,38 +1718,86 @@ func TestProcessor_IntegrationEventPublishingReliability(
 			ID:    "order" + string(rune('a'+i%26)),
 			Total: 100.0,
 		}
-		if _, err := p.Send(
+		_, err := p.Send(
 			ctx,
 			cmd,
-		); err != nil {
-			t.Logf(
-				"Send failed: %v",
-				err,
-			)
-		}
+		)
+		logError(
+			t,
+			err,
+		)
 	}
 
 	p.WaitPublish()
 
-	receivedCount := 0
-	timeout := time.After(1 * time.Second)
-	for {
-		select {
-		case <-eventsChan:
-			receivedCount++
-		case <-timeout:
-			goto done
-		}
-	}
-
-done:
+	receivedCount := countUntil(
+		eventsChan,
+		time.After(1*time.Second),
+	)
 	if receivedCount == 0 {
 		t.Logf("Warning: no events received (may be timing issue)")
-	} else {
+		return
+	}
+
+	t.Logf(
+		"Integration: %d events published out of %d commands",
+		receivedCount,
+		commandCount,
+	)
+}
+
+func bufferOrDrop(
+	t *testing.T,
+	eventsChan chan asynxmd.Event[order],
+	e asynxmd.Event[order],
+) {
+	select {
+	case eventsChan <- e:
+	default:
+		t.Logf("Event buffer full, dropped event")
+	}
+}
+
+func countUntil(
+	eventsChan chan asynxmd.Event[order],
+	timeout <-chan time.Time,
+) int {
+	received := 0
+	more := true
+	for more {
+		var got int
+		got, more = pollEvent(
+			eventsChan,
+			timeout,
+		)
+		received += got
+	}
+
+	return received
+}
+
+func pollEvent(
+	eventsChan chan asynxmd.Event[order],
+	timeout <-chan time.Time,
+) (got int, more bool) {
+	select {
+	case <-eventsChan:
+		return 1,
+			true
+	case <-timeout:
+		return 0,
+			false
+	}
+}
+
+func logError(
+	t *testing.T,
+	err error,
+) {
+	if err != nil {
 		t.Logf(
-			"Integration: %d events published out of %d commands",
-			receivedCount,
-			commandCount,
+			"Send failed: %v",
+			err,
 		)
 	}
 }
@@ -1580,11 +1805,7 @@ done:
 func TestProcessor_IntegrationDefaultQueueDepthScaling(
 	t *testing.T,
 ) {
-	tests := []struct {
-		name          string
-		workers       int
-		expectedMinQD int
-	}{
+	tests := []queueDepthCase{
 		{"1 worker", 1, 1},
 		{"4 workers", 4, 4},
 		{"8 workers", 8, 8},
@@ -1592,52 +1813,78 @@ func TestProcessor_IntegrationDefaultQueueDepthScaling(
 	}
 
 	for _, tt := range tests {
-		t.Run(
-			tt.name,
-			func(
-				t *testing.T,
-			) {
-				memStore := store.New()
-				channelBus := bus.New[order]()
-				es := eventstore.New[order](
-					memStore,
-					store.NewSnapshots(),
-					nil,
-					1,
-					nil,
-				)
+		runQueueDepthCase(
+			t,
+			tt,
+		)
+	}
+}
 
-				p := mustNew(
-					t,
-					es,
-					channelBus,
-					models.WithWorkersPerShard[order](tt.workers),
-				)
-				defer p.Shutdown(context.Background())
+type queueDepthCase struct {
+	name          string
+	workers       int
+	expectedMinQD int
+}
 
-				ctx := context.Background()
-				successCount := 0
-				for i := 0; i < tt.expectedMinQD*2; i++ {
-					cmd := mocks.CreateOrderCmd{
-						ID:    "order" + string(rune(i%8)),
-						Total: 100.0,
-					}
-					if _, err := p.Send(
-						ctx,
-						cmd,
-					); err == nil {
-						successCount++
-					}
-				}
+func runQueueDepthCase(
+	t *testing.T,
+	tt queueDepthCase,
+) {
+	check := func(
+		t *testing.T,
+	) {
+		checkQueueDepth(
+			t,
+			tt,
+		)
+	}
+	t.Run(
+		tt.name,
+		check,
+	)
+}
 
-				if successCount < tt.expectedMinQD {
-					t.Logf(
-						"Warning: expected at least %d successes, got %d",
-						tt.expectedMinQD,
-						successCount,
-					)
-				}
-			},
+func checkQueueDepth(
+	t *testing.T,
+	tt queueDepthCase,
+) {
+	memStore := store.New()
+	channelBus := bus.New[order]()
+	es := eventstore.New[order](
+		memStore,
+		store.NewSnapshots(),
+		nil,
+		1,
+		nil,
+	)
+
+	p := mustNew(
+		t,
+		es,
+		channelBus,
+		models.WithWorkersPerShard[order](tt.workers),
+	)
+	defer p.Shutdown(context.Background())
+
+	ctx := context.Background()
+	successCount := 0
+	for i := 0; i < tt.expectedMinQD*2; i++ {
+		cmd := mocks.CreateOrderCmd{
+			ID:    "order" + string(rune(i%8)),
+			Total: 100.0,
+		}
+		_, err := p.Send(
+			ctx,
+			cmd,
+		)
+		successCount += succeeded(err)
+	}
+
+	if successCount < tt.expectedMinQD {
+		t.Logf(
+			"Warning: expected at least %d successes, got %d",
+			tt.expectedMinQD,
+			successCount,
 		)
 	}
 }

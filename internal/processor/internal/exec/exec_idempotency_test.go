@@ -20,6 +20,7 @@ type idemUpdate struct {
 	Cmd string
 }
 
+// CommandID is the test double implementation for the code under test.
 func (c idemUpdate) CommandID() string { return c.Cmd }
 
 type idemCreate struct {
@@ -27,6 +28,7 @@ type idemCreate struct {
 	Cmd string
 }
 
+// CommandID is the test double implementation for the code under test.
 func (c idemCreate) CommandID() string { return c.Cmd }
 
 func TestExecute_Idempotent_AcceptedRetryIsNoOpReturningOriginalEvent(
@@ -41,7 +43,6 @@ func TestExecute_Idempotent_AcceptedRetryIsNoOpReturningOriginalEvent(
 	first, err := ex.Execute(
 		context.Background(),
 		cmd,
-		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +51,6 @@ func TestExecute_Idempotent_AcceptedRetryIsNoOpReturningOriginalEvent(
 	second, err := ex.Execute(
 		context.Background(),
 		cmd,
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -90,7 +90,6 @@ func TestExecute_Idempotent_RejectedRetryStaysRejected(
 	_, err := ex.Execute(
 		context.Background(),
 		bad,
-		false,
 	)
 	if !errors.Is(
 		err,
@@ -106,7 +105,6 @@ func TestExecute_Idempotent_RejectedRetryStaysRejected(
 	_, err = ex.Execute(
 		context.Background(),
 		good,
-		false,
 	)
 	if !errors.Is(
 		err,
@@ -146,7 +144,6 @@ func TestExecute_Idempotent_StorageFailureLeavesNoReceiptSoRetryRuns(
 	if _, err := ex.Execute(
 		context.Background(),
 		cmd,
-		false,
 	); !errors.Is(
 		err,
 		asynxmd.ErrPipelineFailed,
@@ -167,7 +164,6 @@ func TestExecute_Idempotent_StorageFailureLeavesNoReceiptSoRetryRuns(
 	evt, err := ex.Execute(
 		context.Background(),
 		cmd,
-		false,
 	)
 	if err != nil ||
 		evt.Version != 1 {
@@ -183,19 +179,16 @@ func TestExecute_Idempotent_SyncProjectionFailureLeavesNoReceipt(
 	t *testing.T,
 ) {
 	fail := true
+	projection := func(
+		context.Context,
+		asynxmd.Tx,
+		asynxmd.Event[order],
+	) error {
+		return readModelState(fail)
+	}
 	ex, s, _, _, _ := newEnv(
 		t,
-		syncAll(func(
-			context.Context,
-			asynxmd.Tx,
-			asynxmd.Event[order],
-		) error {
-			if fail {
-				return errors.New("projection down")
-			}
-
-			return nil
-		}),
+		syncAll(projection),
 	)
 	cmd := idemUpdate{UpdateOrderCmd: update(
 		"agg",
@@ -205,7 +198,6 @@ func TestExecute_Idempotent_SyncProjectionFailureLeavesNoReceipt(
 	if _, err := ex.Execute(
 		context.Background(),
 		cmd,
-		false,
 	); err == nil {
 		t.Fatal("expected failure")
 	}
@@ -221,7 +213,6 @@ func TestExecute_Idempotent_SyncProjectionFailureLeavesNoReceipt(
 	if _, err := ex.Execute(
 		context.Background(),
 		cmd,
-		false,
 	); err != nil {
 		t.Fatalf(
 			"retry failed: %v",
@@ -241,7 +232,6 @@ func TestExecute_Idempotent_SameIDOnAnotherAggregateAnswersFromReceipt(
 			"agg-a",
 			1,
 		), Cmd: "cmd-1"},
-		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -253,7 +243,6 @@ func TestExecute_Idempotent_SameIDOnAnotherAggregateAnswersFromReceipt(
 			"agg-b",
 			2,
 		), Cmd: "cmd-1"},
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -282,6 +271,20 @@ func TestExecute_Idempotent_SameIDOnAnotherAggregateAnswersFromReceipt(
 	}
 }
 
+func requireExecuted(
+	t *testing.T,
+	ex *CommandExecutor[order],
+	cmd asynxmd.Command[order],
+) {
+	t.Helper()
+	if _, err := ex.Execute(
+		context.Background(),
+		cmd,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestExecute_EmptyCommandIDIsNotIdempotent(
 	t *testing.T,
 ) {
@@ -292,13 +295,11 @@ func TestExecute_EmptyCommandIDIsNotIdempotent(
 	), Cmd: ""}
 
 	for range 2 {
-		if _, err := ex.Execute(
-			context.Background(),
+		requireExecuted(
+			t,
+			ex,
 			cmd,
-			false,
-		); err != nil {
-			t.Fatal(err)
-		}
+		)
 	}
 
 	if n := streamLen(
@@ -327,7 +328,6 @@ func TestExecute_Idempotent_ReceiptReadErrorFailsPipeline(
 	_, err := ex.Execute(
 		context.Background(),
 		cmd,
-		false,
 	)
 	if !errors.Is(
 		err,
@@ -346,6 +346,7 @@ func TestExecute_Idempotent_ReceiptReadErrorFailsPipeline(
 
 type getReceiptErrStore struct{ store.Memory }
 
+// GetReceipt is the test double implementation for the code under test.
 func (getReceiptErrStore) GetReceipt(
 	context.Context,
 	string,
@@ -357,22 +358,25 @@ func (getReceiptErrStore) GetReceipt(
 
 type phantomDuplicateStore struct{ store.Memory }
 
+// Atomically is the test double implementation for the code under test.
 func (s phantomDuplicateStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
 ) error {
+	wrap := func(
+		tx asynxmd.Tx,
+	) error {
+		return fn(phantomTx{tx})
+	}
 	return s.Memory.Atomically(
 		ctx,
-		func(
-			tx asynxmd.Tx,
-		) error {
-			return fn(phantomTx{tx})
-		},
+		wrap,
 	)
 }
 
 type phantomTx struct{ asynxmd.Tx }
 
+// PutReceipt is the test double implementation for the code under test.
 func (phantomTx) PutReceipt(
 	context.Context,
 	string,
@@ -394,7 +398,6 @@ func TestExecute_Idempotent_UnresolvableDuplicateReceiptFailsPipeline(
 			"agg",
 			1,
 		), Cmd: "c1"},
-		false,
 	)
 	if !errors.Is(
 		err,
@@ -423,7 +426,6 @@ func TestExecute_Idempotent_AcceptedReceiptForErasedAggregateStillAnswers(
 	first, err := ex.Execute(
 		ctx,
 		cmd,
-		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -439,7 +441,6 @@ func TestExecute_Idempotent_AcceptedReceiptForErasedAggregateStillAnswers(
 	retry, err := ex.Execute(
 		ctx,
 		cmd,
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -463,6 +464,7 @@ type raceLostStore struct {
 	reads int
 }
 
+// GetReceipt is the test double implementation for the code under test.
 func (s *raceLostStore) GetReceipt(
 	ctx context.Context,
 	id string,
@@ -479,17 +481,19 @@ func (s *raceLostStore) GetReceipt(
 		nil
 }
 
+// Atomically is the test double implementation for the code under test.
 func (s *raceLostStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
 ) error {
+	wrap := func(
+		tx asynxmd.Tx,
+	) error {
+		return fn(phantomTx{tx})
+	}
 	return s.Memory.Atomically(
 		ctx,
-		func(
-			tx asynxmd.Tx,
-		) error {
-			return fn(phantomTx{tx})
-		},
+		wrap,
 	)
 }
 
@@ -506,7 +510,6 @@ func TestExecute_Idempotent_LosingTheReceiptRaceAnswersWithTheWinner(
 			"agg",
 			1,
 		), Cmd: "c1"},
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -527,22 +530,25 @@ func TestExecute_Idempotent_LosingTheReceiptRaceAnswersWithTheWinner(
 
 type putReceiptFailStore struct{ store.Memory }
 
+// Atomically is the test double implementation for the code under test.
 func (s putReceiptFailStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
 ) error {
+	wrap := func(
+		tx asynxmd.Tx,
+	) error {
+		return fn(failingReceiptTx{tx})
+	}
 	return s.Memory.Atomically(
 		ctx,
-		func(
-			tx asynxmd.Tx,
-		) error {
-			return fn(failingReceiptTx{tx})
-		},
+		wrap,
 	)
 }
 
 type failingReceiptTx struct{ asynxmd.Tx }
 
+// PutReceipt is the test double implementation for the code under test.
 func (failingReceiptTx) PutReceipt(
 	context.Context,
 	string,
@@ -563,7 +569,6 @@ func TestExecute_Idempotent_UnrecordableRejectionFailsThePipeline(
 	_, err := ex.Execute(
 		context.Background(),
 		bad,
-		false,
 	)
 	if !errors.Is(
 		err,
@@ -585,6 +590,7 @@ type rejectionRaceStore struct {
 	reads int
 }
 
+// GetReceipt is the test double implementation for the code under test.
 func (s *rejectionRaceStore) GetReceipt(
 	context.Context,
 	string,
@@ -601,17 +607,19 @@ func (s *rejectionRaceStore) GetReceipt(
 		nil
 }
 
+// Atomically is the test double implementation for the code under test.
 func (s *rejectionRaceStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
 ) error {
+	wrap := func(
+		tx asynxmd.Tx,
+	) error {
+		return fn(phantomTx{tx})
+	}
 	return s.Memory.Atomically(
 		ctx,
-		func(
-			tx asynxmd.Tx,
-		) error {
-			return fn(phantomTx{tx})
-		},
+		wrap,
 	)
 }
 
@@ -627,7 +635,6 @@ func TestExecute_Idempotent_RejectionRaceAnswersFromTheExistingReceipt(
 	_, err := ex.Execute(
 		context.Background(),
 		bad,
-		false,
 	)
 	if !errors.Is(
 		err,
@@ -655,7 +662,6 @@ func TestExecute_Idempotent_RetryAfterForgetAndRecreateDoesNotReturnTheNewAggreg
 			"agg",
 			5,
 		), Cmd: "cmd-1"},
-		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -674,7 +680,6 @@ func TestExecute_Idempotent_RetryAfterForgetAndRecreateDoesNotReturnTheNewAggreg
 			"agg",
 			99,
 		),
-		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -686,7 +691,6 @@ func TestExecute_Idempotent_RetryAfterForgetAndRecreateDoesNotReturnTheNewAggreg
 			"agg",
 			5,
 		), Cmd: "cmd-1"},
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -715,6 +719,7 @@ type readFailStore struct {
 	fail atomic.Bool
 }
 
+// ReadFrom is the test double implementation for the code under test.
 func (s *readFailStore) ReadFrom(
 	ctx context.Context,
 	streamID string,
@@ -747,7 +752,6 @@ func TestExecute_Idempotent_RetryFailsWhenTheOriginalEventCannotBeRead(
 	if _, err := ex.Execute(
 		context.Background(),
 		cmd,
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -756,7 +760,6 @@ func TestExecute_Idempotent_RetryFailsWhenTheOriginalEventCannotBeRead(
 	evt, err := ex.Execute(
 		context.Background(),
 		cmd,
-		false,
 	)
 	if !errors.Is(
 		err,
@@ -773,7 +776,6 @@ func TestExecute_Idempotent_RetryFailsWhenTheOriginalEventCannotBeRead(
 	if evt, err := ex.Execute(
 		context.Background(),
 		cmd,
-		false,
 	); err != nil ||
 		evt.Aggregate.Total != 5 {
 		t.Fatalf(
@@ -795,15 +797,16 @@ func TestExecute_Idempotent_RetryWaitsForTheOriginalEventsHandlers(
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	hold := func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		entered <- struct{}{}
+		<-release
+	}
 	if _, err := b.Subscribe(
 		"OrderUpdated",
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) {
-			entered <- struct{}{}
-			<-release
-		},
+		hold,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -951,14 +954,15 @@ func TestExecute_Idempotent_RetryWithoutADispatcherHasNothingToWaitOn(
 func TestExecute_Idempotent_RetryOnAParkedAggregateRepeatsWhatTheFirstAttemptWasTold(
 	t *testing.T,
 ) {
+	acceptAll := func(
+		context.Context,
+		asynxmd.Event[order],
+	) error {
+		return nil
+	}
 	ex := durableEnv(
 		t,
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) error {
-			return nil
-		},
+		acceptAll,
 	)
 	ctx := context.Background()
 	delivered := idemUpdate{UpdateOrderCmd: update(
@@ -1028,35 +1032,50 @@ func awaitNothingToWaitOn(
 	cmd asynxmd.Command[order],
 ) {
 	t.Helper()
-	ctx := context.Background()
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		_, wait, err := ex.ExecuteAsync(
-			ctx,
+	done := false
+	for !done && time.Now().Before(deadline) {
+		done = retryFinished(
+			t,
+			ex,
 			cmd,
 		)
-		if err != nil {
-			t.Fatalf(
-				"retry of a delivered command: err = %v",
-				err,
-			)
-		}
-
-		if wait == nil {
-			return
-		}
-
-		if err := wait(ctx); err != nil {
-			t.Fatalf(
-				"a retry that still finds the finished delivery must not wait: %v",
-				err,
-			)
-		}
-
-		if time.Now().After(deadline) {
-			t.Fatal("retry of a delivered command: still something to wait on after 5s; want nothing")
-		}
-
-		time.Sleep(time.Millisecond)
 	}
+
+	if !done {
+		t.Fatal("retry of a delivered command: still something to wait on after 5s; want nothing")
+	}
+}
+
+func retryFinished(
+	t *testing.T,
+	ex *CommandExecutor[order],
+	cmd asynxmd.Command[order],
+) bool {
+	t.Helper()
+	ctx := context.Background()
+	_, wait, err := ex.ExecuteAsync(
+		ctx,
+		cmd,
+	)
+	if err != nil {
+		t.Fatalf(
+			"retry of a delivered command: err = %v",
+			err,
+		)
+	}
+
+	if wait == nil {
+		return true
+	}
+
+	if err := wait(ctx); err != nil {
+		t.Fatalf(
+			"a retry that still finds the finished delivery must not wait: %v",
+			err,
+		)
+	}
+
+	time.Sleep(time.Millisecond)
+	return false
 }

@@ -73,7 +73,7 @@ func (r *Reader[T]) Get(
 	state, _, err := r.load(
 		ctx,
 		aggregateID,
-		false,
+		lockNotHeld,
 	)
 	return state,
 		err
@@ -92,16 +92,16 @@ func (r *Reader[T]) Load(
 	return r.load(
 		ctx,
 		aggregateID,
-		true,
+		lockHeld,
 	)
 }
 
 func (r *Reader[T]) load(
 	ctx context.Context,
 	aggregateID string,
-	lockHeld bool,
+	mode lockMode,
 ) (T, int64, error) {
-	snapBlob, found, err := r.snapshotStore.Get(
+	snap, usable, err := r.readSnapshot(
 		ctx,
 		aggregateID,
 	)
@@ -111,33 +111,72 @@ func (r *Reader[T]) load(
 			err
 	}
 
-	if !found {
+	if !usable {
 		return r.coldPath(
 			ctx,
 			aggregateID,
-			lockHeld,
+			mode,
 		)
 	}
 
-	var snap esmodels.SnapshotBlob[T]
-	if err := json.Unmarshal(
+	return r.warmPath(
+		ctx,
+		aggregateID,
+		mode,
+		snap,
+	)
+}
+
+func (r *Reader[T]) readSnapshot(
+	ctx context.Context,
+	aggregateID string,
+) (snap esmodels.SnapshotBlob[T], usable bool, err error) {
+	snapBlob, found, err := r.snapshotStore.Get(
+		ctx,
+		aggregateID,
+	)
+	if err != nil ||
+		!found {
+		return snap,
+			false,
+			err
+	}
+
+	err = json.Unmarshal(
 		snapBlob,
 		&snap,
-	); err != nil {
-		if r.onCorruption != nil {
-			r.onCorruption(err)
-		}
-
-		return r.coldPath(
-			ctx,
-			aggregateID,
-			lockHeld,
-		)
+	)
+	if err != nil {
+		r.reportCorruption(err)
+		return esmodels.SnapshotBlob[T]{},
+			false,
+			nil
 	}
 
-	eventBlobs, err := r.eventStore.ReadFrom(
+	return snap,
+		true,
+		nil
+}
+
+func (r *Reader[T]) reportCorruption(
+	err error,
+) {
+	if r.onCorruption == nil {
+		return
+	}
+
+	r.onCorruption(err)
+}
+
+func (r *Reader[T]) warmPath(
+	ctx context.Context,
+	aggregateID string,
+	mode lockMode,
+	snap esmodels.SnapshotBlob[T],
+) (T, int64, error) {
+	events, err := r.readEvents(
 		ctx,
-		"events:"+aggregateID,
+		aggregateID,
 		snap.Version+1,
 	)
 	if err != nil {
@@ -146,53 +185,24 @@ func (r *Reader[T]) load(
 			err
 	}
 
-	events, err := deserializeEvents(eventBlobs)
-	if err != nil {
-		return r.stateZeroValue,
-			0,
-			err
-	}
-
-	result, err := r.replayer.Hydrate(
+	return r.hydrate(
 		ctx,
 		aggregateID,
+		mode,
 		snap.State,
+		snap.Version,
 		events,
 	)
-	if err != nil {
-		return r.stateZeroValue,
-			0,
-			err
-	}
-
-	loadedVersion := snap.Version
-	if len(events) > 0 {
-		loadedVersion = events[len(events)-1].Version
-	}
-
-	if result.DidUpcast {
-		r.saveUpcasted(
-			ctx,
-			aggregateID,
-			lockHeld,
-			result,
-			events[len(events)-1].ID,
-		)
-	}
-
-	return result.State,
-		loadedVersion,
-		nil
 }
 
 func (r *Reader[T]) coldPath(
 	ctx context.Context,
 	aggregateID string,
-	lockHeld bool,
+	mode lockMode,
 ) (T, int64, error) {
-	eventBlobs, err := r.eventStore.ReadFrom(
+	events, err := r.readEvents(
 		ctx,
-		"events:"+aggregateID,
+		aggregateID,
 		1,
 	)
 	if err != nil {
@@ -201,23 +211,52 @@ func (r *Reader[T]) coldPath(
 			err
 	}
 
-	if len(eventBlobs) == 0 {
+	if len(events) == 0 {
 		return r.stateZeroValue,
 			0,
 			asynxmd.ErrNotFound
 	}
 
-	events, err := deserializeEvents(eventBlobs)
+	return r.hydrate(
+		ctx,
+		aggregateID,
+		mode,
+		r.stateZeroValue,
+		0,
+		events,
+	)
+}
+
+func (r *Reader[T]) readEvents(
+	ctx context.Context,
+	aggregateID string,
+	fromVersion int64,
+) ([]esmodels.InternalEvent, error) {
+	eventBlobs, err := r.eventStore.ReadFrom(
+		ctx,
+		"events:"+aggregateID,
+		fromVersion,
+	)
 	if err != nil {
-		return r.stateZeroValue,
-			0,
+		return nil,
 			err
 	}
 
+	return deserializeEvents(eventBlobs)
+}
+
+func (r *Reader[T]) hydrate(
+	ctx context.Context,
+	aggregateID string,
+	mode lockMode,
+	seed T,
+	seedVersion int64,
+	events []esmodels.InternalEvent,
+) (T, int64, error) {
 	result, err := r.replayer.Hydrate(
 		ctx,
 		aggregateID,
-		r.stateZeroValue,
+		seed,
 		events,
 	)
 	if err != nil {
@@ -226,13 +265,16 @@ func (r *Reader[T]) coldPath(
 			err
 	}
 
-	loadedVersion := events[len(events)-1].Version
+	loadedVersion := seedVersion
+	if len(events) > 0 {
+		loadedVersion = events[len(events)-1].Version
+	}
 
 	if result.DidUpcast {
 		r.saveUpcasted(
 			ctx,
 			aggregateID,
-			lockHeld,
+			mode,
 			result,
 			events[len(events)-1].ID,
 		)
@@ -246,32 +288,26 @@ func (r *Reader[T]) coldPath(
 func (r *Reader[T]) saveUpcasted(
 	ctx context.Context,
 	aggregateID string,
-	lockHeld bool,
+	mode lockMode,
 	result replayer.HydrateResult[T],
 	lastEventID string,
 ) {
-	save := func() {
-		_ = r.writeAutoSnapshot(
+	if mode == lockHeld {
+		r.saveBestEffort(
 			ctx,
 			aggregateID,
-			result.LastVersion,
-			result.State,
+			result,
 		)
-	}
-	if lockHeld {
-		save()
 		return
 	}
 
 	saveIfStreamUnchanged := func() {
-		if r.streamHolds(
+		r.saveIfStreamHolds(
 			ctx,
 			aggregateID,
-			result.LastVersion,
+			result,
 			lastEventID,
-		) {
-			save()
-		}
+		)
 	}
 	if r.guard == nil {
 		saveIfStreamUnchanged()
@@ -282,6 +318,44 @@ func (r *Reader[T]) saveUpcasted(
 		aggregateID,
 		saveIfStreamUnchanged,
 	)
+}
+
+func (r *Reader[T]) saveIfStreamHolds(
+	ctx context.Context,
+	aggregateID string,
+	result replayer.HydrateResult[T],
+	lastEventID string,
+) {
+	if !r.streamHolds(
+		ctx,
+		aggregateID,
+		result.LastVersion,
+		lastEventID,
+	) {
+		return
+	}
+
+	r.saveBestEffort(
+		ctx,
+		aggregateID,
+		result,
+	)
+}
+
+func (r *Reader[T]) saveBestEffort(
+	ctx context.Context,
+	aggregateID string,
+	result replayer.HydrateResult[T],
+) {
+	err := r.writeAutoSnapshot(
+		ctx,
+		aggregateID,
+		result.LastVersion,
+		result.State,
+	)
+	if err != nil {
+		return
+	}
 }
 
 func (r *Reader[T]) streamHolds(
@@ -379,26 +453,22 @@ func (r *Reader[T]) Preload(
 
 func deserializeEvents(
 	blobs [][]byte,
-) ([]esmodels.InternalEvent, error) {
-	events := make(
+) (events []esmodels.InternalEvent, err error) {
+	events = make(
 		[]esmodels.InternalEvent,
-		0,
 		len(blobs),
 	)
-	for _, blob := range blobs {
-		var evt esmodels.InternalEvent
-		if err := json.Unmarshal(
-			blob,
-			&evt,
-		); err != nil {
-			return nil,
-				err
-		}
-
-		events = append(
-			events,
-			evt,
+	for i := 0; i < len(blobs) &&
+		err == nil; i++ {
+		err = json.Unmarshal(
+			blobs[i],
+			&events[i],
 		)
+	}
+
+	if err != nil {
+		return nil,
+			err
 	}
 
 	return events,

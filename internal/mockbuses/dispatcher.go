@@ -44,13 +44,7 @@ func (d *Dispatcher[T]) Factory() models.DispatcherFactory[T] {
 	return func(
 		config models.DispatcherConfig[T],
 	) (models.Dispatcher[T], error) {
-		d.mu.Lock()
-		defer d.mu.Unlock()
-		d.config = config
-		d.calls = append(
-			d.calls,
-			"Factory",
-		)
+		d.configure(config)
 		return d,
 			nil
 	}
@@ -109,19 +103,13 @@ func (d *Dispatcher[T]) Enqueue(
 ) (models.Ticket, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.calls = append(
-		d.calls,
-		"Enqueue",
-	)
+	d.recordLocked("Enqueue")
 	if d.enqueueErr != nil {
 		return models.Ticket{},
 			d.enqueueErr
 	}
 
-	d.requests = append(
-		d.requests,
-		request,
-	)
+	d.addRequestLocked(request)
 	return settledTicket(),
 		nil
 }
@@ -153,10 +141,7 @@ func (d *Dispatcher[T]) Park(
 ) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.calls = append(
-		d.calls,
-		"Park",
-	)
+	d.recordLocked("Park")
 	d.parkCalls = append(
 		d.parkCalls,
 		ParkCall{AggregateID: aggregateID, Cause: cause, Undelivered: undelivered},
@@ -181,10 +166,7 @@ func (d *Dispatcher[T]) Inspect(
 ) models.DeliveryStatus {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.calls = append(
-		d.calls,
-		"Inspect",
-	)
+	d.recordLocked("Inspect")
 	generation, parked := d.parks[aggregateID]
 	if !parked {
 		return models.DeliveryStatus{}
@@ -199,28 +181,15 @@ func (d *Dispatcher[T]) Supersede(
 ) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.calls = append(
-		d.calls,
-		"Supersede",
-	)
-	delete(
-		d.parks,
-		aggregateID,
-	)
-	delete(
-		d.causes,
-		aggregateID,
-	)
+	d.recordLocked("Supersede")
+	d.liftLocked(aggregateID)
 }
 
 // Parks records the call and returns the parked aggregates with their generations.
 func (d *Dispatcher[T]) Parks() map[string]uint64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.calls = append(
-		d.calls,
-		"Parks",
-	)
+	d.recordLocked("Parks")
 	return maps.Clone(d.parks)
 }
 
@@ -231,23 +200,13 @@ func (d *Dispatcher[T]) ResumeUndelivered(
 ) (bool, []int64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.calls = append(
-		d.calls,
-		"ResumeUndelivered",
-	)
+	d.recordLocked("ResumeUndelivered")
 	if d.parks[aggregateID] != generation {
 		return false,
 			nil
 	}
 
-	delete(
-		d.parks,
-		aggregateID,
-	)
-	delete(
-		d.causes,
-		aggregateID,
-	)
+	d.liftLocked(aggregateID)
 	return true,
 		nil
 }
@@ -292,9 +251,46 @@ func (d *Dispatcher[T]) record(
 ) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.recordLocked(call)
+}
+
+func (d *Dispatcher[T]) recordLocked(
+	call string,
+) {
 	d.calls = append(
 		d.calls,
 		call,
+	)
+}
+
+func (d *Dispatcher[T]) configure(
+	config models.DispatcherConfig[T],
+) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.config = config
+	d.recordLocked("Factory")
+}
+
+func (d *Dispatcher[T]) addRequestLocked(
+	request models.DispatchRequest[T],
+) {
+	d.requests = append(
+		d.requests,
+		request,
+	)
+}
+
+func (d *Dispatcher[T]) liftLocked(
+	aggregateID string,
+) {
+	delete(
+		d.parks,
+		aggregateID,
+	)
+	delete(
+		d.causes,
+		aggregateID,
 	)
 }
 

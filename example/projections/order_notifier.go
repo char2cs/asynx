@@ -14,6 +14,7 @@ type OrderNotifier struct {
 	outbox []string
 }
 
+// Handle records a notification for the event.
 func (n *OrderNotifier) Handle(
 	ctx context.Context,
 	event models.Event[domain.Order],
@@ -49,6 +50,7 @@ func (n *OrderNotifier) Handle(
 	}
 }
 
+// GetOutbox returns a copy of the notifications recorded so far.
 func (n *OrderNotifier) GetOutbox() []string {
 	n.mu.Lock()
 	defer n.mu.Unlock()

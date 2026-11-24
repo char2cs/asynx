@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+const topicSegments = 3
+
 // Topic converts a human-readable event pattern into an anchored Go regex string.
 //
 // Pattern format: {{aggregate}}.{{action}}.{{id}}
@@ -23,14 +25,14 @@ func Topic(
 	parts := strings.SplitN(
 		pattern,
 		".",
-		3,
+		topicSegments,
 	)
-	for i, p := range parts {
-		parts[i] = segmentPattern(
-			p,
-			i == len(parts)-1,
-		)
+	last := len(parts) - 1
+	for i, p := range parts[:last] {
+		parts[i] = innerSegmentPattern(p)
 	}
+
+	parts[last] = lastSegmentPattern(parts[last])
 
 	return "^" + strings.Join(
 		parts,
@@ -38,17 +40,22 @@ func Topic(
 	) + "$"
 }
 
-func segmentPattern(
+func innerSegmentPattern(
 	segment string,
-	isLast bool,
 ) string {
 	if segment != "*" {
 		return regexp.QuoteMeta(segment)
 	}
 
-	if isLast {
-		return ".*"
+	return "[^.]+"
+}
+
+func lastSegmentPattern(
+	segment string,
+) string {
+	if segment != "*" {
+		return regexp.QuoteMeta(segment)
 	}
 
-	return "[^.]+"
+	return ".*"
 }

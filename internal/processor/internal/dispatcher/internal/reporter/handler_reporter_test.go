@@ -35,14 +35,15 @@ func TestReporter_PublishErrorCallsHandler(
 	var gotEvent asynxmd.Event[string]
 	var gotCtx context.Context
 	want := errors.New("boom")
+	onPublishError := func(
+		ctx context.Context,
+		e asynxmd.Event[string],
+		err error,
+	) {
+		gotCtx, gotEvent, gotErr = ctx, e, err
+	}
 	rep := reporter.New(
-		func(
-			ctx context.Context,
-			e asynxmd.Event[string],
-			err error,
-		) {
-			gotCtx, gotEvent, gotErr = ctx, e, err
-		},
+		onPublishError,
 		nil,
 		nil,
 	)
@@ -75,16 +76,17 @@ func TestReporter_DeliveryErrorCallsHandler(
 	var gotErr error
 	var gotAttempt int
 	want := errors.New("boom")
+	onDeliveryError := func(
+		_ context.Context,
+		_ asynxmd.Event[string],
+		err error,
+		attempt int,
+	) {
+		gotErr, gotAttempt = err, attempt
+	}
 	rep := reporter.New(
 		nil,
-		func(
-			_ context.Context,
-			_ asynxmd.Event[string],
-			err error,
-			attempt int,
-		) {
-			gotErr, gotAttempt = err, attempt
-		},
+		onDeliveryError,
 		nil,
 	)
 
@@ -111,16 +113,17 @@ func TestReporter_PanicCallsHandler(
 	t *testing.T,
 ) {
 	var got any
+	onPanic := func(
+		_ context.Context,
+		_ asynxmd.Event[string],
+		recovered any,
+	) {
+		got = recovered
+	}
 	rep := reporter.New(
 		nil,
 		nil,
-		func(
-			_ context.Context,
-			_ asynxmd.Event[string],
-			recovered any,
-		) {
-			got = recovered
-		},
+		onPanic,
 	)
 
 	rep.Panic(
@@ -164,29 +167,32 @@ func TestReporter_NilHandlersAreNoOps(
 func TestReporter_SwallowsHandlerPanics(
 	t *testing.T,
 ) {
+	onPublishError2 := func(
+		context.Context,
+		asynxmd.Event[string],
+		error,
+	) {
+		panic("publish")
+	}
+	onDeliveryError2 := func(
+		context.Context,
+		asynxmd.Event[string],
+		error,
+		int,
+	) {
+		panic("delivery")
+	}
+	onPanic2 := func(
+		context.Context,
+		asynxmd.Event[string],
+		any,
+	) {
+		panic("panic")
+	}
 	rep := reporter.New(
-		func(
-			context.Context,
-			asynxmd.Event[string],
-			error,
-		) {
-			panic("publish")
-		},
-		func(
-			context.Context,
-			asynxmd.Event[string],
-			error,
-			int,
-		) {
-			panic("delivery")
-		},
-		func(
-			context.Context,
-			asynxmd.Event[string],
-			any,
-		) {
-			panic("panic")
-		},
+		onPublishError2,
+		onDeliveryError2,
+		onPanic2,
 	)
 	job := newJob()
 

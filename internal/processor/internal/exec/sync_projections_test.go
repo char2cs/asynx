@@ -15,25 +15,27 @@ func TestExecute_SyncProjectionErrorRollsBackAndDispatchesNothing(
 	t *testing.T,
 ) {
 	boom := errors.New("read model write failed")
+	failing := func(
+		context.Context,
+		asynxmd.Tx,
+		asynxmd.Event[order],
+	) error {
+		return boom
+	}
 	ex, s, _, d, b := newEnv(
 		t,
-		syncAll(func(
-			context.Context,
-			asynxmd.Tx,
-			asynxmd.Event[order],
-		) error {
-			return boom
-		}),
+		syncAll(failing),
 	)
 	var delivered atomic.Int32
+	count := func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		delivered.Add(1)
+	}
 	b.Subscribe(
 		"OrderUpdated",
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) {
-			delivered.Add(1)
-		},
+		count,
 	)
 
 	_, err := ex.Execute(
@@ -42,7 +44,6 @@ func TestExecute_SyncProjectionErrorRollsBackAndDispatchesNothing(
 			"agg",
 			1,
 		),
-		false,
 	)
 	d.WaitIdle()
 
@@ -83,37 +84,53 @@ func TestExecute_SyncProjectionErrorRollsBackAndDispatchesNothing(
 	}
 }
 
+func appendSeen(
+	got []string,
+	tx asynxmd.Tx,
+	e asynxmd.Event[order],
+) ([]string, error) {
+	if tx == nil {
+		return got,
+			errors.New("nil tx")
+	}
+
+	return append(
+			got,
+			fmt.Sprintf(
+				"%s@%d",
+				e.AggregateID,
+				e.Version,
+			),
+		),
+		nil
+}
+
 func TestExecute_SyncProjectionSeesTxAndEvent_OnlyForMatchingEvents(
 	t *testing.T,
 ) {
 	var got []string
+	match := func(
+		name string,
+	) bool {
+		return name == "OrderUpdated"
+	}
+	record := func(
+		_ context.Context,
+		tx asynxmd.Tx,
+		e asynxmd.Event[order],
+	) (err error) {
+		got, err = appendSeen(
+			got,
+			tx,
+			e,
+		)
+		return err
+	}
 	ex, _, _, _, _ := newEnv(
 		t,
 		WithSyncProjections[order]([]models.SyncProjection[order]{{
-			Match: func(
-				name string,
-			) bool {
-				return name == "OrderUpdated"
-			},
-			Fn: func(
-				_ context.Context,
-				tx asynxmd.Tx,
-				e asynxmd.Event[order],
-			) error {
-				if tx == nil {
-					return errors.New("nil tx")
-				}
-
-				got = append(
-					got,
-					fmt.Sprintf(
-						"%s@%d",
-						e.AggregateID,
-						e.Version,
-					),
-				)
-				return nil
-			},
+			Match: match,
+			Fn:    record,
 		}}),
 	)
 
@@ -123,7 +140,6 @@ func TestExecute_SyncProjectionSeesTxAndEvent_OnlyForMatchingEvents(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +147,6 @@ func TestExecute_SyncProjectionSeesTxAndEvent_OnlyForMatchingEvents(
 	if _, err := ex.Execute(
 		context.Background(),
 		mocks.CreateOrderCmd{ID: "other", Total: 1},
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}

@@ -5,24 +5,38 @@ import (
 	"testing"
 )
 
+type failingTry struct {
+	failOn int
+	err    error
+	calls  int
+}
+
+func (f *failingTry) try(
+	n int,
+) error {
+	f.calls++
+	if n == f.failOn {
+		return f.err
+	}
+
+	return nil
+}
+
+func succeed(
+	int,
+) error {
+	return nil
+}
+
 func TestFirstError_StopsAtTheFirstFailure(
 	t *testing.T,
 ) {
 	boom := errors.New("boom")
-	calls := 0
+	f := &failingTry{failOn: 2, err: boom}
 
 	err := Of(
 		[]int{1, 2, 3},
-		func(
-			n int,
-		) error {
-			calls++
-			if n == 2 {
-				return boom
-			}
-
-			return nil
-		},
+		f.try,
 	)
 	if !errors.Is(
 		err,
@@ -35,10 +49,10 @@ func TestFirstError_StopsAtTheFirstFailure(
 		)
 	}
 
-	if calls != 2 {
+	if f.calls != 2 {
 		t.Fatalf(
 			"try ran %d times, want 2",
-			calls,
+			f.calls,
 		)
 	}
 }
@@ -48,11 +62,7 @@ func TestFirstError_ReturnsNilWhenEveryCallSucceeds(
 ) {
 	err := Of(
 		[]int{1, 2, 3},
-		func(
-			int,
-		) error {
-			return nil
-		},
+		succeed,
 	)
 	if err != nil {
 		t.Fatalf(

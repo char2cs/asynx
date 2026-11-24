@@ -10,29 +10,51 @@ import (
 )
 
 func (b *Builder[T]) compileSyncProjections() ([]procmodels.SyncProjection[T], error) {
-	out := make(
-		[]procmodels.SyncProjection[T],
+	return compileFrom(
+		b.syncProjections,
 		0,
-		len(b.syncProjections),
+		make(
+			[]procmodels.SyncProjection[T],
+			0,
+			len(b.syncProjections),
+		),
+		compileSyncProjection[T],
 	)
-	for _, def := range b.syncProjections {
-		sp, err := compileSyncProjection(def)
-		if err != nil {
-			return nil,
-				err
-		}
+}
 
-		out = append(
-			out,
-			sp,
-		)
+func compileFrom[D any, R any](
+	defs []D,
+	start int,
+	out []R,
+	compile func(int, D) (R, error),
+) ([]R, error) {
+	if start == len(defs) {
+		return out,
+			nil
 	}
 
-	return out,
-		nil
+	compiled, err := compile(
+		start,
+		defs[start],
+	)
+	if err != nil {
+		return nil,
+			err
+	}
+
+	return compileFrom(
+		defs,
+		start+1,
+		append(
+			out,
+			compiled,
+		),
+		compile,
+	)
 }
 
 func compileSyncProjection[T any](
+	_ int,
 	def syncProjectionDef[T],
 ) (procmodels.SyncProjection[T], error) {
 	if def.pattern == "" {
@@ -75,29 +97,16 @@ func (b *Builder[T]) compileDurable() ([]models.DurableSub[T], func(string) bool
 }
 
 func (b *Builder[T]) compileSubscribers() ([]models.DurableSub[T], error) {
-	subs := make(
-		[]models.DurableSub[T],
+	return compileFrom(
+		b.subscribers,
 		0,
-		len(b.subscribers),
+		make(
+			[]models.DurableSub[T],
+			0,
+			len(b.subscribers),
+		),
+		compileSubscriber[T],
 	)
-	for i, def := range b.subscribers {
-		sub, err := compileSubscriber(
-			i,
-			def,
-		)
-		if err != nil {
-			return nil,
-				err
-		}
-
-		subs = append(
-			subs,
-			sub,
-		)
-	}
-
-	return subs,
-		nil
 }
 
 func compileSubscriber[T any](
@@ -147,12 +156,28 @@ func wantedBy[T any](
 	) bool {
 		return slices.ContainsFunc(
 			subs,
-			func(
-				sub models.DurableSub[T],
-			) bool {
-				return sub.Match(name)
-			},
+			matchesName[T](name),
 		)
+	}
+}
+
+func matchesName[T any](
+	name string,
+) func(models.DurableSub[T]) bool {
+	return func(
+		sub models.DurableSub[T],
+	) bool {
+		return sub.Match(name)
+	}
+}
+
+func exactMatcher(
+	pattern string,
+) func(string) bool {
+	return func(
+		name string,
+	) bool {
+		return name == pattern
 	}
 }
 
@@ -160,11 +185,7 @@ func matcher(
 	pattern string,
 ) (func(string) bool, error) {
 	if bus.IsExactPattern(pattern) {
-		return func(
-				name string,
-			) bool {
-				return name == pattern
-			},
+		return exactMatcher(pattern),
 			nil
 	}
 

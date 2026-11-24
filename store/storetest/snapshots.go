@@ -7,6 +7,13 @@ import (
 	"testing"
 )
 
+const (
+	roundTripVersion = 7
+	oldVersion       = 5
+	newerVersion     = 2
+	snapshotWriters  = 16
+)
+
 // RunSnapshots executes the conformance suite for models.SnapshotStore
 // implementations built by newStore.
 func RunSnapshots(
@@ -20,30 +27,26 @@ func RunSnapshots(
 	for name, fn := range tests {
 		t.Run(
 			name,
-			func(
-				t *testing.T,
-			) {
-				fn(
-					t,
-					newStore(t),
-				)
-			},
+			snapshotCase(
+				fn,
+				newStore,
+			),
 		)
 	}
 }
 
-func asStrings(
-	blobs [][]byte,
-) []string {
-	out := make(
-		[]string,
-		len(blobs),
-	)
-	for i, b := range blobs {
-		out[i] = string(b)
+func snapshotCase(
+	fn scenario[models.SnapshotStore],
+	newStore SnapshotFactory,
+) func(*testing.T) {
+	return func(
+		t *testing.T,
+	) {
+		fn(
+			t,
+			newStore(t),
+		)
 	}
-
-	return out
 }
 
 func snapshotUnknown(
@@ -66,18 +69,84 @@ func snapshotUnknown(
 	}
 }
 
+func mustPut(
+	t testing.TB,
+	s models.SnapshotStore,
+	aggregateID string,
+	version int64,
+	data string,
+) {
+	t.Helper()
+	err := s.Put(
+		context.Background(),
+		aggregateID,
+		version,
+		[]byte(data),
+	)
+	if err != nil {
+		t.Fatalf(
+			"Put %s v%d: %v",
+			aggregateID,
+			version,
+			err,
+		)
+	}
+}
+
+func mustDelete(
+	t testing.TB,
+	s models.SnapshotStore,
+	aggregateID string,
+) {
+	t.Helper()
+	err := s.Delete(
+		context.Background(),
+		aggregateID,
+	)
+	if err != nil {
+		t.Fatalf(
+			"Delete %s: %v",
+			aggregateID,
+			err,
+		)
+	}
+}
+
+func mustGet(
+	t testing.TB,
+	s models.SnapshotStore,
+	aggregateID string,
+) (data []byte, found bool) {
+	t.Helper()
+	data, found, err := s.Get(
+		context.Background(),
+		aggregateID,
+	)
+	if err != nil {
+		t.Fatalf(
+			"Get %s: %v",
+			aggregateID,
+			err,
+		)
+	}
+
+	return data,
+		found
+}
+
 func snapshotRoundTrip(
 	t testing.TB,
 	s models.SnapshotStore,
 ) {
 	ctx := context.Background()
 	want := []byte{0, 1, 2, 255, '{', '}'}
-	if err := s.Put(
+	err := s.Put(
 		ctx,
 		"a",
-		7,
+		roundTripVersion,
 		want,
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf(
 			"Put: %v",
 			err,
@@ -108,24 +177,18 @@ func snapshotReplaced(
 	t testing.TB,
 	s models.SnapshotStore,
 ) {
-	ctx := context.Background()
 	for v, data := range []string{"one", "two", "three"} {
-		if err := s.Put(
-			ctx,
+		mustPut(
+			t,
+			s,
 			"a",
 			int64(v+1),
-			[]byte(data),
-		); err != nil {
-			t.Fatalf(
-				"Put v%d: %v",
-				v+1,
-				err,
-			)
-		}
+			data,
+		)
 	}
 
 	got, found, err := s.Get(
-		ctx,
+		context.Background(),
 		"a",
 	)
 	isNewest := found && string(got) == "three"
@@ -144,30 +207,32 @@ func snapshotsIndependent(
 	t testing.TB,
 	s models.SnapshotStore,
 ) {
-	ctx := context.Background()
-	s.Put(
-		ctx,
+	mustPut(
+		t,
+		s,
 		"a",
 		1,
-		[]byte("A"),
+		"A",
 	)
-	s.Put(
-		ctx,
+	mustPut(
+		t,
+		s,
 		"b",
 		1,
-		[]byte("B"),
+		"B",
 	)
-	if err := s.Delete(
-		ctx,
+	mustDelete(
+		t,
+		s,
 		"a",
-	); err != nil {
-		t.Fatal(err)
-	}
+	)
 
-	if got, found, _ := s.Get(
-		ctx,
+	got, found := mustGet(
+		t,
+		s,
 		"b",
-	); !found ||
+	)
+	if !found ||
 		string(got) != "B" {
 		t.Fatalf(
 			"deleting a's snapshot changed b's: %q, %v",
@@ -181,82 +246,70 @@ func snapshotDeleted(
 	t testing.TB,
 	s models.SnapshotStore,
 ) {
-	ctx := context.Background()
-	s.Put(
-		ctx,
+	mustPut(
+		t,
+		s,
 		"a",
 		1,
-		[]byte("A"),
+		"A",
 	)
-	if err := s.Delete(
-		ctx,
+	mustDelete(
+		t,
+		s,
 		"a",
-	); err != nil {
-		t.Fatalf(
-			"Delete: %v",
-			err,
-		)
-	}
+	)
 
-	if _, found, _ := s.Get(
-		ctx,
+	_, found := mustGet(
+		t,
+		s,
 		"a",
-	); found {
+	)
+	if found {
 		t.Fatal("snapshot survived Delete")
 	}
 
-	if err := s.Delete(
-		ctx,
+	mustDelete(
+		t,
+		s,
 		"a",
-	); err != nil {
-		t.Fatalf(
-			"second Delete = %v, want nil",
-			err,
-		)
-	}
-
-	if err := s.Delete(
-		ctx,
+	)
+	mustDelete(
+		t,
+		s,
 		"never-existed",
-	); err != nil {
-		t.Fatalf(
-			"Delete(unknown) = %v, want nil",
-			err,
-		)
-	}
+	)
 }
 
 func snapshotPutAfterDelete(
 	t testing.TB,
 	s models.SnapshotStore,
 ) {
-	ctx := context.Background()
-	s.Put(
-		ctx,
+	mustPut(
+		t,
+		s,
 		"a",
-		5,
-		[]byte("old"),
+		oldVersion,
+		"old",
 	)
-	s.Delete(
-		ctx,
+	mustDelete(
+		t,
+		s,
 		"a",
 	)
-	if err := s.Put(
-		ctx,
+	mustPut(
+		t,
+		s,
 		"a",
 		1,
-		[]byte("fresh"),
-	); err != nil {
-		t.Fatalf(
-			"Put after Delete: %v",
-			err,
-		)
-	}
+		"fresh",
+	)
 
-	if got, found, _ := s.Get(
-		ctx,
+	got, found := mustGet(
+		t,
+		s,
 		"a",
-	); !found ||
+	)
+	if !found ||
 		string(got) != "fresh" {
 		t.Fatalf(
 			"Get = %q, %v; want the snapshot written after the delete",
@@ -266,44 +319,84 @@ func snapshotPutAfterDelete(
 	}
 }
 
+func writerPayload(
+	i int,
+) []byte {
+	return []byte{'v', byte('a' + i)}
+}
+
+func putAsWriter(
+	ctx context.Context,
+	s models.SnapshotStore,
+) func(int) error {
+	return func(
+		i int,
+	) error {
+		return s.Put(
+			ctx,
+			"a",
+			int64(i+1),
+			writerPayload(i),
+		)
+	}
+}
+
+func writerCandidates() map[string]struct{} {
+	candidates := map[string]struct{}{}
+	for i := range snapshotWriters {
+		candidates[string(writerPayload(i))] = struct{}{}
+	}
+
+	return candidates
+}
+
+func reportPutErrors(
+	t testing.TB,
+	results []error,
+) {
+	t.Helper()
+	for i, err := range results {
+		reportPutError(
+			t,
+			i,
+			err,
+		)
+	}
+}
+
+func reportPutError(
+	t testing.TB,
+	i int,
+	err error,
+) {
+	t.Helper()
+	if err == nil {
+		return
+	}
+
+	t.Errorf(
+		"Put v%d: %v",
+		i+1,
+		err,
+	)
+}
+
 func snapshotConcurrentPuts(
 	t testing.TB,
 	s models.SnapshotStore,
 ) {
-	const writers = 16
 	ctx := context.Background()
-	payload := func(
-		i int,
-	) []byte {
-		return []byte{'v', byte('a' + i)}
-	}
-	candidates := map[string]struct{}{}
-	for i := range writers {
-		candidates[string(payload(i))] = struct{}{}
-	}
-
 	results := raceAll(
-		writers,
-		func(
-			i int,
-		) error {
-			return s.Put(
-				ctx,
-				"a",
-				int64(i+1),
-				payload(i),
-			)
-		},
+		snapshotWriters,
+		putAsWriter(
+			ctx,
+			s,
+		),
 	)
-	for i, err := range results {
-		if err != nil {
-			t.Errorf(
-				"Put v%d: %v",
-				i+1,
-				err,
-			)
-		}
-	}
+	reportPutErrors(
+		t,
+		results,
+	)
 
 	got, found, err := s.Get(
 		ctx,
@@ -319,7 +412,7 @@ func snapshotConcurrentPuts(
 		)
 	}
 
-	if _, ok := candidates[string(got)]; !ok {
+	if _, ok := writerCandidates()[string(got)]; !ok {
 		t.Fatalf(
 			"Get = %q, which no writer wrote (torn write)",
 			got,
@@ -331,20 +424,46 @@ func snapshotCancelled(
 	t testing.TB,
 	s models.SnapshotStore,
 ) {
-	live := context.Background()
-	s.Put(
-		live,
+	mustPut(
+		t,
+		s,
 		"a",
 		1,
-		[]byte("A"),
+		"A",
 	)
-	done, cancel := context.WithCancel(live)
+	done, cancel := context.WithCancel(context.Background())
 	cancel()
+	failsOnCancelled(
+		done,
+		t,
+		s,
+	)
 
+	got, found := mustGet(
+		t,
+		s,
+		"a",
+	)
+	if !found ||
+		string(got) != "A" {
+		t.Errorf(
+			"the snapshot changed after failed operations: %q, %v",
+			got,
+			found,
+		)
+	}
+}
+
+func failsOnCancelled(
+	done context.Context,
+	t testing.TB,
+	s models.SnapshotStore,
+) {
+	t.Helper()
 	if err := s.Put(
 		done,
 		"a",
-		2,
+		newerVersion,
 		[]byte("B"),
 	); err == nil {
 		t.Error("Put succeeded on a cancelled context")
@@ -362,18 +481,6 @@ func snapshotCancelled(
 		"a",
 	); err == nil {
 		t.Error("Delete succeeded on a cancelled context")
-	}
-
-	if got, found, _ := s.Get(
-		live,
-		"a",
-	); !found ||
-		string(got) != "A" {
-		t.Errorf(
-			"the snapshot changed after failed operations: %q, %v",
-			got,
-			found,
-		)
 	}
 }
 

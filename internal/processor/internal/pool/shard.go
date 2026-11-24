@@ -7,6 +7,7 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
+// Shard is a queue of commands served by a dispatcher and a set of workers.
 type Shard[T any] struct {
 	id           int
 	commandChan  chan *models.CommandEnvelope[T]
@@ -48,6 +49,7 @@ func newShard[T any](
 	}
 }
 
+// CommandChan returns the channel commands are submitted on.
 func (s *Shard[T]) CommandChan() chan *models.CommandEnvelope[T] {
 	return s.commandChan
 }
@@ -57,10 +59,9 @@ func (s *Shard[T]) dispatchCommands(
 ) {
 	defer dispatcherDoneWg.Done()
 
-	for {
-		if s.handleDispatch() {
-			return
-		}
+	stopped := false
+	for !stopped {
+		stopped = s.handleDispatch()
 	}
 }
 
@@ -72,28 +73,40 @@ func (s *Shard[T]) handleDispatch() bool {
 		return true
 
 	case envelope := <-s.commandChan:
-		if envelope == nil {
-			close(s.jobQueue)
-			return true
-		}
+		return s.accept(envelope)
+	}
+}
 
-		s.dispatchJob(envelope)
-		if s.onDispatched != nil {
-			s.onDispatched()
-		}
+func (s *Shard[T]) accept(
+	envelope *models.CommandEnvelope[T],
+) bool {
+	if envelope == nil {
+		close(s.jobQueue)
+		return true
+	}
+
+	s.dispatchJob(envelope)
+	if s.onDispatched != nil {
+		s.onDispatched()
 	}
 
 	return false
 }
 
 func (s *Shard[T]) failQueued() {
-	for {
-		select {
-		case envelope := <-s.commandChan:
-			s.failEnvelope(envelope)
-		default:
-			return
-		}
+	more := true
+	for more {
+		more = s.failNext()
+	}
+}
+
+func (s *Shard[T]) failNext() bool {
+	select {
+	case envelope := <-s.commandChan:
+		s.failEnvelope(envelope)
+		return true
+	default:
+		return false
 	}
 }
 

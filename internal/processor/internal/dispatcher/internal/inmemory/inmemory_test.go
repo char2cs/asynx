@@ -318,26 +318,12 @@ func TestEnqueue_NeverBlocksBehindASlowHandler(
 
 	const n = 200
 	enqueued := make(chan struct{})
-	go func() {
-		for i := int64(1); i <= n; i++ {
-			if _, err := enqueueEvent(
-				context.Background(),
-				d,
-				makeEvent(
-					"a",
-					i,
-				),
-				nil,
-			); err != nil {
-				t.Errorf(
-					"Enqueue: %v",
-					err,
-				)
-			}
-		}
-
-		close(enqueued)
-	}()
+	go enqueueRange(
+		t,
+		d,
+		n,
+		enqueued,
+	)
 
 	select {
 	case <-enqueued:
@@ -363,6 +349,45 @@ func TestEnqueue_NeverBlocksBehindASlowHandler(
 			t,
 			i,
 			v,
+		)
+	}
+}
+
+func enqueueRange(
+	t *testing.T,
+	d *dispatcher[int],
+	count int64,
+	enqueued chan<- struct{},
+) {
+	for i := int64(1); i <= count; i++ {
+		enqueueOrReport(
+			t,
+			d,
+			i,
+		)
+	}
+
+	close(enqueued)
+}
+
+func enqueueOrReport(
+	t *testing.T,
+	d *dispatcher[int],
+	version int64,
+) {
+	_, err := enqueueEvent(
+		context.Background(),
+		d,
+		makeEvent(
+			"a",
+			version,
+		),
+		nil,
+	)
+	if err != nil {
+		t.Errorf(
+			"Enqueue: %v",
+			err,
 		)
 	}
 }
@@ -490,36 +515,43 @@ func TestTicketFor_FindsAnEventWhileItsDeliveryIsUnderWay(
 
 	close(bus.release)
 	<-ticket.Final
+	cond := func() bool {
+		_, found := d.TicketFor(
+			"a",
+			1,
+		)
+		return !found
+	}
 	waitFor(
 		t,
 		"TicketFor kept an event whose delivery is over",
-		func() bool {
-			_, found := d.TicketFor(
-				"a",
-				1,
-			)
-			return !found
-		},
+		cond,
 	)
 }
 
 func TestTicketFor_ForgetsEventsLeftBehindByAPark(
 	t *testing.T,
 ) {
+	handler := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return nil
+	}
 	d := newDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: always, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			return nil
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: always, Handler: handler}},
 	)
 	d.Park(
 		"a",
 		errParkCause,
 	)
 
+	ack := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	ticket, err := enqueueTicket(
 		context.Background(),
 		d,
@@ -527,47 +559,50 @@ func TestTicketFor_ForgetsEventsLeftBehindByAPark(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	<-ticket.Final
+	cond2 := func() bool {
+		_, found := d.TicketFor(
+			"a",
+			1,
+		)
+		return !found
+	}
 	waitFor(
 		t,
 		"TicketFor kept an event that was never queued because its aggregate is parked",
-		func() bool {
-			_, found := d.TicketFor(
-				"a",
-				1,
-			)
-			return !found
-		},
+		cond2,
 	)
 }
 
 func TestUnrun_RemembersEventsLeftUndeliveredByAPark(
 	t *testing.T,
 ) {
+	handler2 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return nil
+	}
 	d := newDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: always, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			return nil
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: always, Handler: handler2}},
 	)
 	d.Park(
 		"a",
 		errParkCause,
 	)
 
+	ack2 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	ticket, err := enqueueTicket(
 		context.Background(),
 		d,
@@ -575,11 +610,7 @@ func TestUnrun_RemembersEventsLeftUndeliveredByAPark(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack2,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -764,17 +795,23 @@ func TestParkUndelivered_RemembersTheNamedVersionsUntilTheParkLifts(
 func TestUnrun_DoesNotCountAnEventWhoseHandlersRanAndFailed(
 	t *testing.T,
 ) {
+	handler3 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return errors.New("down")
+	}
 	d := newDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: always, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			return errors.New("down")
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: always, Handler: handler3}},
 		withMaxAttempts[int](1),
 	)
 
+	ack3 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	ticket, err := enqueueTicket(
 		context.Background(),
 		d,
@@ -782,11 +819,7 @@ func TestUnrun_DoesNotCountAnEventWhoseHandlersRanAndFailed(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack3,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -856,16 +889,17 @@ func TestTicketFor_ForgetsQueuedEventsWhenTheyAreParked(
 		errParkCause,
 	)
 	<-queued.Final
+	cond3 := func() bool {
+		_, found := d.TicketFor(
+			"a",
+			2,
+		)
+		return !found
+	}
 	waitFor(
 		t,
 		"TicketFor kept a queued event that parking took out of memory",
-		func() bool {
-			_, found := d.TicketFor(
-				"a",
-				2,
-			)
-			return !found
-		},
+		cond3,
 	)
 	close(bus.release)
 }
@@ -941,15 +975,16 @@ func TestInterrupt_ReleasesWaitersWithoutClosingTheDispatcher(
 		chan struct{},
 		8,
 	)
+	handler4 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		attempted <- struct{}{}
+		return errors.New("poison")
+	}
 	d := newTestDispatcher[int](
 		&recordingBus{},
-		withDurableSubs([]asynxmd.DurableSub[int]{{Match: always, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			attempted <- struct{}{}
-			return errors.New("poison")
-		}}}),
+		withDurableSubs([]asynxmd.DurableSub[int]{{Match: always, Handler: handler4}}),
 		withRetryBackoff[int](
 			time.Hour,
 			time.Hour,
@@ -957,6 +992,11 @@ func TestInterrupt_ReleasesWaitersWithoutClosingTheDispatcher(
 	)
 	defer d.Close(context.Background())
 
+	ack4 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	tk, err := enqueueTicket(
 		context.Background(),
 		d,
@@ -964,11 +1004,7 @@ func TestInterrupt_ReleasesWaitersWithoutClosingTheDispatcher(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack4,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1023,17 +1059,23 @@ func TestClose_CalledAgainStillWaitsForTheWorkers(
 ) {
 	release := make(chan struct{})
 	started := make(chan struct{})
+	handler5 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		close(started)
+		<-release
+		return nil
+	}
 	d := newDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: always, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			close(started)
-			<-release
-			return nil
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: always, Handler: handler5}},
 	)
+	ack5 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	enqueueTicket(
 		context.Background(),
 		d,
@@ -1041,11 +1083,7 @@ func TestClose_CalledAgainStillWaitsForTheWorkers(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack5,
 	)
 	recv(
 		t,
@@ -1083,14 +1121,15 @@ func TestClose_CalledAgainStillWaitsForTheWorkers(
 func TestTicket_UnrunSaysWhyNoHandlerRan(
 	t *testing.T,
 ) {
+	handler6 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return nil
+	}
 	d := newDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: always, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			return nil
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: always, Handler: handler6}},
 	)
 	ctx := context.Background()
 	ack := func(
@@ -1156,46 +1195,22 @@ func TestHandlerContext_MarksItsAggregateAndEndsWithTheDelivery(
 	var d, other *dispatcher[int]
 	d = newDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: always, Handler: func(
-			ctx context.Context,
-			e asynxmd.Event[int],
-		) error {
-			got = ctx
-			if other.InHandler(
-				ctx,
-				"a",
-			) {
-				t.Error("another dispatcher's InHandler is true for this handler's context: same ID, different instance")
-			}
-
-			if !d.InHandler(
-				ctx,
-				"a",
-			) ||
-				d.InHandler(
-					ctx,
-					"b",
-				) {
-				t.Errorf(
-					"InHandler(a)=%v InHandler(b)=%v",
-					d.InHandler(
-						ctx,
-						"a",
-					),
-					d.InHandler(
-						ctx,
-						"b",
-					),
-				)
-			}
-
-			return nil
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: always, Handler: makeHandler(
+			&got,
+			&other,
+			t,
+			&d,
+		)}},
 	)
 	other = newDurable(
 		t,
 		nil,
 	)
+	ack6 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	tk, _ := enqueueTicket(
 		context.Background(),
 		d,
@@ -1203,11 +1218,7 @@ func TestHandlerContext_MarksItsAggregateAndEndsWithTheDelivery(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack6,
 	)
 	final(
 		t,
@@ -1233,18 +1244,24 @@ func TestClose_GivingUpCancelsRunningHandlers(
 		chan context.Context,
 		1,
 	)
+	handler7 := func(
+		ctx context.Context,
+		_ asynxmd.Event[int],
+	) error {
+		started <- ctx
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	d := newDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: always, Handler: func(
-			ctx context.Context,
-			_ asynxmd.Event[int],
-		) error {
-			started <- ctx
-			<-ctx.Done()
-			return ctx.Err()
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: always, Handler: handler7}},
 		withMaxAttempts[int](1),
 	)
+	ack7 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	enqueueTicket(
 		context.Background(),
 		d,
@@ -1252,11 +1269,7 @@ func TestClose_GivingUpCancelsRunningHandlers(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack7,
 	)
 	hctx := recv(
 		t,
@@ -1306,16 +1319,7 @@ func TestResume_LiftsAParkAndDeliversAgain(
 	var healthy atomic.Bool
 	d := newDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: always, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			if healthy.Load() {
-				return nil
-			}
-
-			return errors.New("down")
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: always, Handler: makeHandler2(&healthy)}},
 		withMaxAttempts[int](2),
 	)
 
@@ -1396,25 +1400,18 @@ func TestSupersede_LetsTheTombstoneThroughAFailingDelivery(
 		chan struct{},
 		8,
 	)
+	match := func(
+		name string,
+	) bool {
+		return name == "test.event"
+	}
 	d := newDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: func(
-			name string,
-		) bool {
-			return name == "test.event"
-		},
-			Handler: func(
-				_ context.Context,
-				e asynxmd.Event[int],
-			) error {
-				seen.add(e)
-				if e.EventName == "test.event" {
-					attempted <- struct{}{}
-					return errors.New("poison")
-				}
-
-				return nil
-			}}},
+		[]asynxmd.DurableSub[int]{{Match: match,
+			Handler: makeHandler3(
+				&seen,
+				attempted,
+			)}},
 		withRetryBackoff[int](
 			time.Hour,
 			time.Hour,
@@ -1600,19 +1597,17 @@ func TestPark_KeepsLiveOnlyJobsQueuedAndDropsDurableOnes(
 	)
 	d := newDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: always, Handler: func(
-			_ context.Context,
-			e asynxmd.Event[int],
-		) error {
-			if e.Version == 1 {
-				started <- struct{}{}
-				<-gate
-			}
-
-			return nil
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: always, Handler: makeHandler4(
+			started,
+			gate,
+		)}},
 	)
 	ctx := context.Background()
+	ack8 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	enqueueTicket(
 		ctx,
 		d,
@@ -1620,17 +1615,18 @@ func TestPark_KeepsLiveOnlyJobsQueuedAndDropsDurableOnes(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack8,
 	)
 	recv(
 		t,
 		started,
 		"v1 running",
 	)
+	ack9 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	durable, _ := enqueueTicket(
 		ctx,
 		d,
@@ -1638,11 +1634,7 @@ func TestPark_KeepsLiveOnlyJobsQueuedAndDropsDurableOnes(
 			"a",
 			2,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack9,
 	)
 	live, _ := enqueueTicket(
 		ctx,
@@ -1695,17 +1687,10 @@ func TestPark_QueuedDurableJobsReportThemselvesUnrun(
 	)
 	d := newDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: always, Handler: func(
-			_ context.Context,
-			e asynxmd.Event[int],
-		) error {
-			if e.Version == 1 {
-				started <- struct{}{}
-				<-gate
-			}
-
-			return nil
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: always, Handler: makeHandler5(
+			started,
+			gate,
+		)}},
 	)
 	ctx := context.Background()
 	ack := func(
@@ -1901,18 +1886,23 @@ func TestResumeUndelivered_LeavesAParkImposedAgainSinceItWasListed(
 
 type noopBus[T any] struct{}
 
+// Publish satisfies the interface that noopBus fakes.
 func (b *noopBus[T]) Publish(
 	_ context.Context,
 	_ asynxmd.Event[T],
 ) error {
 	return nil
 }
+
+// PublishSync satisfies the interface that noopBus fakes.
 func (b *noopBus[T]) PublishSync(
 	_ context.Context,
 	_ asynxmd.Event[T],
 ) error {
 	return nil
 }
+
+// Subscribe satisfies the interface that noopBus fakes.
 func (b *noopBus[T]) Subscribe(
 	_ string,
 	_ asynxmd.ProjectionHandler[T],
@@ -1921,16 +1911,22 @@ func (b *noopBus[T]) Subscribe(
 	return "",
 		nil
 }
+
+// Unsubscribe satisfies the interface that noopBus fakes.
 func (b *noopBus[T]) Unsubscribe(
 	_ string,
 ) error {
 	return nil
 }
+
+// Close satisfies the interface that noopBus fakes.
 func (b *noopBus[T]) Close(
 	_ context.Context,
 ) error {
 	return nil
 }
+
+// WaitForHandlers satisfies the interface that noopBus fakes.
 func (b *noopBus[T]) WaitForHandlers() {}
 
 func BenchmarkDispatch_SingleAggregate(
@@ -1969,35 +1965,7 @@ func BenchmarkDispatch_MultiAggregate(
 				"aggs=%d",
 				n,
 			),
-			func(
-				b *testing.B,
-			) {
-				d := newTestDispatcher[string](&noopBus[string]{})
-				ctx := context.Background()
-
-				b.ResetTimer()
-				b.ReportAllocs()
-
-				for i := 0; i < b.N; i++ {
-					aggID := fmt.Sprintf(
-						"agg%d",
-						i%n,
-					)
-					_ = dispatch(
-						ctx,
-						d,
-						asynxmd.Event[string]{
-							AggregateID: aggID,
-							EventName:   "BenchEvent",
-							Version:     int64(i),
-						},
-						false,
-					)
-				}
-
-				b.StopTimer()
-				_ = d.Close(context.Background())
-			},
+			makeRunCallback(n),
 		)
 	}
 }
@@ -2011,24 +1979,10 @@ func BenchmarkDispatch_Parallel(
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	b.RunParallel(func(
-		pb *testing.PB,
-	) {
-		i := int64(0)
-		for pb.Next() {
-			_ = dispatch(
-				ctx,
-				d,
-				asynxmd.Event[string]{
-					AggregateID: "agg1",
-					EventName:   "BenchEvent",
-					Version:     i,
-				},
-				false,
-			)
-			i++
-		}
-	})
+	b.RunParallel(makeBody(
+		ctx,
+		d,
+	))
 
 	b.StopTimer()
 	_ = d.Close(context.Background())
@@ -2088,6 +2042,11 @@ func TestInspect_GiveUpCauseNamesTheLastHandlerError(
 		withMaxAttempts[int](3),
 	)
 
+	ack10 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	tk, err := enqueueTicket(
 		context.Background(),
 		d,
@@ -2095,11 +2054,7 @@ func TestInspect_GiveUpCauseNamesTheLastHandlerError(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack10,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2158,16 +2113,22 @@ func TestInspect_GiveUpCauseNamesTheLastHandlerError(
 func TestInspect_AckFailureCauseIsTheAckError(
 	t *testing.T,
 ) {
+	handler8 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return nil
+	}
 	d := newDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: always, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			return nil
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: always, Handler: handler8}},
 	)
 
+	ack11 := func(
+		context.Context,
+	) error {
+		return errAckFailure
+	}
 	tk, err := enqueueTicket(
 		context.Background(),
 		d,
@@ -2175,11 +2136,7 @@ func TestInspect_AckFailureCauseIsTheAckError(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return errAckFailure
-		},
+		ack11,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2218,6 +2175,11 @@ func TestInspect_InterruptCauseIsDispatcherClosed(
 		),
 	)
 
+	ack12 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	tk, err := enqueueTicket(
 		context.Background(),
 		d,
@@ -2225,11 +2187,7 @@ func TestInspect_InterruptCauseIsDispatcherClosed(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack12,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2690,6 +2648,7 @@ type blockingBus struct {
 	release chan struct{}
 }
 
+// PublishSync satisfies the interface that blockingBus fakes.
 func (b *blockingBus) PublishSync(
 	ctx context.Context,
 	e asynxmd.Event[int],
@@ -2709,6 +2668,7 @@ type callbackBus struct {
 	) error
 }
 
+// PublishSync satisfies the interface that callbackBus fakes.
 func (b *callbackBus) PublishSync(
 	ctx context.Context,
 	e asynxmd.Event[int],
@@ -2719,6 +2679,7 @@ func (b *callbackBus) PublishSync(
 	)
 }
 
+// Publish satisfies the interface that callbackBus fakes.
 func (b *callbackBus) Publish(
 	context.Context,
 	asynxmd.Event[int],
@@ -2726,6 +2687,7 @@ func (b *callbackBus) Publish(
 	return nil
 }
 
+// Subscribe satisfies the interface that callbackBus fakes.
 func (b *callbackBus) Subscribe(
 	string,
 	asynxmd.ProjectionHandler[int],
@@ -2735,18 +2697,21 @@ func (b *callbackBus) Subscribe(
 		nil
 }
 
+// Unsubscribe satisfies the interface that callbackBus fakes.
 func (b *callbackBus) Unsubscribe(
 	string,
 ) error {
 	return nil
 }
 
+// Close satisfies the interface that callbackBus fakes.
 func (b *callbackBus) Close(
 	context.Context,
 ) error {
 	return nil
 }
 
+// WaitForHandlers satisfies the interface that callbackBus fakes.
 func (b *callbackBus) WaitForHandlers() {}
 
 type recordingBus struct {
@@ -2755,6 +2720,7 @@ type recordingBus struct {
 	delay time.Duration
 }
 
+// PublishSync satisfies the interface that recordingBus fakes.
 func (b *recordingBus) PublishSync(
 	_ context.Context,
 	e asynxmd.Event[int],
@@ -2772,6 +2738,7 @@ func (b *recordingBus) PublishSync(
 	return nil
 }
 
+// Publish satisfies the interface that recordingBus fakes.
 func (b *recordingBus) Publish(
 	context.Context,
 	asynxmd.Event[int],
@@ -2779,6 +2746,7 @@ func (b *recordingBus) Publish(
 	return nil
 }
 
+// Subscribe satisfies the interface that recordingBus fakes.
 func (b *recordingBus) Subscribe(
 	string,
 	asynxmd.ProjectionHandler[int],
@@ -2788,18 +2756,21 @@ func (b *recordingBus) Subscribe(
 		nil
 }
 
+// Unsubscribe satisfies the interface that recordingBus fakes.
 func (b *recordingBus) Unsubscribe(
 	string,
 ) error {
 	return nil
 }
 
+// Close satisfies the interface that recordingBus fakes.
 func (b *recordingBus) Close(
 	context.Context,
 ) error {
 	return nil
 }
 
+// WaitForHandlers satisfies the interface that recordingBus fakes.
 func (b *recordingBus) WaitForHandlers() {}
 
 func (b *recordingBus) snapshot() []asynxmd.Event[int] {
@@ -3053,16 +3024,17 @@ func (h harness) awaitForgotten(
 	what string,
 ) {
 	t.Helper()
+	cond4 := func() bool {
+		_, found := d.TicketFor(
+			aggregateID,
+			version,
+		)
+		return !found
+	}
 	h.waitFor(
 		t,
 		what,
-		func() bool {
-			_, found := d.TicketFor(
-				aggregateID,
-				version,
-			)
-			return !found
-		},
+		cond4,
 	)
 }
 
@@ -3100,6 +3072,7 @@ type bus struct {
 	calls []asynxmd.Event[Aggregate]
 }
 
+// PublishSync satisfies the interface that bus fakes.
 func (b *bus) PublishSync(
 	ctx context.Context,
 	e asynxmd.Event[Aggregate],
@@ -3140,6 +3113,7 @@ func (b *bus) published() []asynxmd.Event[Aggregate] {
 	)
 }
 
+// Publish satisfies the interface that bus fakes.
 func (b *bus) Publish(
 	context.Context,
 	asynxmd.Event[Aggregate],
@@ -3147,6 +3121,7 @@ func (b *bus) Publish(
 	return nil
 }
 
+// Subscribe satisfies the interface that bus fakes.
 func (b *bus) Subscribe(
 	string,
 	asynxmd.ProjectionHandler[Aggregate],
@@ -3156,18 +3131,21 @@ func (b *bus) Subscribe(
 		nil
 }
 
+// Unsubscribe satisfies the interface that bus fakes.
 func (b *bus) Unsubscribe(
 	string,
 ) error {
 	return nil
 }
 
+// Close satisfies the interface that bus fakes.
 func (b *bus) Close(
 	context.Context,
 ) error {
 	return nil
 }
 
+// WaitForHandlers satisfies the interface that bus fakes.
 func (b *bus) WaitForHandlers() {}
 
 const eventName = "test.event"
@@ -3579,7 +3557,7 @@ func receive[V any](
 	patience time.Duration,
 	ch <-chan V,
 	what string,
-) V {
+) (v V) {
 	t.Helper()
 	timer := time.NewTimer(patience)
 	defer timer.Stop()
@@ -3593,8 +3571,7 @@ func receive[V any](
 		)
 	}
 
-	var zero V
-	return zero
+	return v
 }
 
 func isClosed(
@@ -3695,13 +3672,14 @@ func without(
 	entries []string,
 	prefix string,
 ) []string {
+	del := func(
+		entry string,
+	) bool {
+		return len(entry) >= len(prefix) && entry[:len(prefix)] == prefix
+	}
 	return slices.DeleteFunc(
 		slices.Clone(entries),
-		func(
-			entry string,
-		) bool {
-			return len(entry) >= len(prefix) && entry[:len(prefix)] == prefix
-		},
+		del,
 	)
 }
 
@@ -3718,8 +3696,7 @@ func unjoin(
 
 func subscriberNames(
 	err error,
-) []string {
-	var names []string
+) (names []string) {
 	for _, part := range unjoin(err) {
 		names = appendSubscriber(
 			names,
@@ -4640,19 +4617,20 @@ func durableSettledAfterTheFirstAttempt(
 	release := make(chan struct{})
 	t.Cleanup(func() { closeOnce(release) })
 	var acked atomic.Bool
+	handler9 := func(
+		context.Context,
+		asynxmd.Event[Aggregate],
+	) error {
+		return errorIf(
+			!isClosed(release),
+			errDown,
+		)
+	}
 	d := h.build(
 		t,
 		config(
 			&bus{},
-			subscriber(func(
-				context.Context,
-				asynxmd.Event[Aggregate],
-			) error {
-				return errorIf(
-					!isClosed(release),
-					errDown,
-				)
-			}),
+			subscriber(handler9),
 		),
 	)
 	ack := func(
@@ -4701,18 +4679,19 @@ func durablePanicIsAFailure(
 		chan error,
 		8,
 	)
+	handler10 := func(
+		context.Context,
+		asynxmd.Event[Aggregate],
+	) error {
+		panicIf(
+			attempts.Add(1) == 1,
+			"boom",
+		)
+		return nil
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			context.Context,
-			asynxmd.Event[Aggregate],
-		) error {
-			panicIf(
-				attempts.Add(1) == 1,
-				"boom",
-			)
-			return nil
-		}),
+		subscriber(handler10),
 	)
 	cfg.OnPanic = func(
 		context.Context,
@@ -4785,18 +4764,19 @@ func durablePanickingPanicHandler(
 ) {
 	var attempts atomic.Int32
 	var acked atomic.Bool
+	handler11 := func(
+		context.Context,
+		asynxmd.Event[Aggregate],
+	) error {
+		panicIf(
+			attempts.Add(1) == 1,
+			"boom",
+		)
+		return nil
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			context.Context,
-			asynxmd.Event[Aggregate],
-		) error {
-			panicIf(
-				attempts.Add(1) == 1,
-				"boom",
-			)
-			return nil
-		}),
+		subscriber(handler11),
 	)
 	cfg.OnPanic = func(
 		context.Context,
@@ -4913,17 +4893,18 @@ func durableNonDurableJobsSkipDurableSubscribers(
 	h harness,
 ) {
 	var runs atomic.Int32
+	handler12 := func(
+		context.Context,
+		asynxmd.Event[Aggregate],
+	) error {
+		runs.Add(1)
+		return nil
+	}
 	d := h.build(
 		t,
 		config(
 			&bus{},
-			subscriber(func(
-				context.Context,
-				asynxmd.Event[Aggregate],
-			) error {
-				runs.Add(1)
-				return nil
-			}),
+			subscriber(handler12),
 		),
 	)
 
@@ -5330,17 +5311,18 @@ func busErrorDoesNotSkipTheDurableDelivery(
 	) error {
 		return errDown
 	}}
+	handler13 := func(
+		_ context.Context,
+		e asynxmd.Event[Aggregate],
+	) error {
+		rec.add(e)
+		return nil
+	}
 	d := h.build(
 		t,
 		config(
 			b,
-			subscriber(func(
-				_ context.Context,
-				e asynxmd.Event[Aggregate],
-			) error {
-				rec.add(e)
-				return nil
-			}),
+			subscriber(handler13),
 		),
 	)
 
@@ -5601,22 +5583,23 @@ func deliveryErrorHandlerPanicKeepsTheHold(
 	var once sync.Once
 	gate := make(chan struct{})
 	t.Cleanup(func() { closeOnce(gate) })
+	handler14 := func(
+		_ context.Context,
+		e asynxmd.Event[Aggregate],
+	) error {
+		rec.add(e)
+		holdIf(
+			e.Version == 1 && firstTime(&once),
+			gate,
+		)
+		return errorIf(
+			e.Version == 1 && failures.Add(-1) >= 0,
+			errDown,
+		)
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			_ context.Context,
-			e asynxmd.Event[Aggregate],
-		) error {
-			rec.add(e)
-			holdIf(
-				e.Version == 1 && firstTime(&once),
-				gate,
-			)
-			return errorIf(
-				e.Version == 1 && failures.Add(-1) >= 0,
-				errDown,
-			)
-		}),
+		subscriber(handler14),
 	)
 	cfg.OnDeliveryError = func(
 		context.Context,
@@ -6123,17 +6106,18 @@ func redeliveryWithANilAck(
 ) {
 	b := &bus{}
 	var runs atomic.Int32
+	handler15 := func(
+		context.Context,
+		asynxmd.Event[Aggregate],
+	) error {
+		runs.Add(1)
+		return nil
+	}
 	d := h.build(
 		t,
 		config(
 			b,
-			subscriber(func(
-				context.Context,
-				asynxmd.Event[Aggregate],
-			) error {
-				runs.Add(1)
-				return nil
-			}),
+			subscriber(handler15),
 		),
 	)
 
@@ -6209,27 +6193,28 @@ func exhaustedAttemptsPark(
 	var acked sync.Map
 	var once sync.Once
 	gate := make(chan struct{})
+	handler16 := func(
+		_ context.Context,
+		e asynxmd.Event[Aggregate],
+	) error {
+		rec.add(e)
+		poison := e.AggregateID == "a" && e.Version == 1
+		holdIf(
+			poison && firstTime(&once),
+			gate,
+		)
+		countIf(
+			poison,
+			&attempts,
+		)
+		return errorIf(
+			poison,
+			errPoison,
+		)
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			_ context.Context,
-			e asynxmd.Event[Aggregate],
-		) error {
-			rec.add(e)
-			poison := e.AggregateID == "a" && e.Version == 1
-			holdIf(
-				poison && firstTime(&once),
-				gate,
-			)
-			countIf(
-				poison,
-				&attempts,
-			)
-			return errorIf(
-				poison,
-				errPoison,
-			)
-		}),
+		subscriber(handler16),
 	)
 	cfg.MaxAttempts = 4
 	cfg.OnDeliveryError = func(
@@ -6395,17 +6380,18 @@ func resumeLiftsAPark(
 ) {
 	var healthy atomic.Bool
 	var acked sync.Map
+	handler17 := func(
+		context.Context,
+		asynxmd.Event[Aggregate],
+	) error {
+		return errorIf(
+			!healthy.Load(),
+			errDown,
+		)
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			context.Context,
-			asynxmd.Event[Aggregate],
-		) error {
-			return errorIf(
-				!healthy.Load(),
-				errDown,
-			)
-		}),
+		subscriber(handler17),
 	)
 	cfg.MaxAttempts = 2
 	d := h.build(
@@ -6511,22 +6497,23 @@ func deadLetterAcceptance(
 	var acked sync.Map
 	var once sync.Once
 	gate := make(chan struct{})
+	handler18 := func(
+		_ context.Context,
+		e asynxmd.Event[Aggregate],
+	) error {
+		rec.add(e)
+		holdIf(
+			e.Version == 1 && firstTime(&once),
+			gate,
+		)
+		return errorIf(
+			e.Version == 1,
+			errPoison,
+		)
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			_ context.Context,
-			e asynxmd.Event[Aggregate],
-		) error {
-			rec.add(e)
-			holdIf(
-				e.Version == 1 && firstTime(&once),
-				gate,
-			)
-			return errorIf(
-				e.Version == 1,
-				errPoison,
-			)
-		}),
+		subscriber(handler18),
 	)
 	cfg.MaxAttempts = 3
 	cfg.DeadLetter = func(
@@ -6673,22 +6660,23 @@ func deadLetterReturnedError(
 	var dead atomic.Int32
 	var once sync.Once
 	gate := make(chan struct{})
+	handler19 := func(
+		_ context.Context,
+		e asynxmd.Event[Aggregate],
+	) error {
+		rec.add(e)
+		holdIf(
+			e.Version == 1 && firstTime(&once),
+			gate,
+		)
+		return errorIf(
+			e.Version == 1,
+			errPoison,
+		)
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			_ context.Context,
-			e asynxmd.Event[Aggregate],
-		) error {
-			rec.add(e)
-			holdIf(
-				e.Version == 1 && firstTime(&once),
-				gate,
-			)
-			return errorIf(
-				e.Version == 1,
-				errPoison,
-			)
-		}),
+		subscriber(handler19),
 	)
 	cfg.MaxAttempts = 2
 	cfg.DeadLetter = func(
@@ -6860,23 +6848,24 @@ func supersedeLetsATombstoneWithAnAckThrough(
 		chan struct{},
 		8,
 	)
+	handler20 := func(
+		_ context.Context,
+		e asynxmd.Event[Aggregate],
+	) error {
+		poison := e.EventName == eventName
+		sendIf(
+			poison,
+			attempted,
+			struct{}{},
+		)
+		return errorIf(
+			poison,
+			errPoison,
+		)
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			_ context.Context,
-			e asynxmd.Event[Aggregate],
-		) error {
-			poison := e.EventName == eventName
-			sendIf(
-				poison,
-				attempted,
-				struct{}{},
-			)
-			return errorIf(
-				poison,
-				errPoison,
-			)
-		}),
+		subscriber(handler20),
 	)
 	cfg.RetryInitial, cfg.RetryMax = time.Hour, time.Hour
 	d := h.build(
@@ -7074,22 +7063,23 @@ func supersedeAfterThePop(
 		)
 		return nil
 	}}
+	handler21 := func(
+		_ context.Context,
+		e asynxmd.Event[Aggregate],
+	) error {
+		old := e.EventName != asynxmd.ForgetEventName
+		countIf(
+			old,
+			&oldRuns,
+		)
+		return errorIf(
+			old,
+			errDown,
+		)
+	}
 	cfg := config(
 		b,
-		subscriber(func(
-			_ context.Context,
-			e asynxmd.Event[Aggregate],
-		) error {
-			old := e.EventName != asynxmd.ForgetEventName
-			countIf(
-				old,
-				&oldRuns,
-			)
-			return errorIf(
-				old,
-				errDown,
-			)
-		}),
+		subscriber(handler21),
 	)
 	cfg.RetryInitial, cfg.RetryMax = time.Hour, time.Hour
 	cfg.MaxAttempts = 5
@@ -7320,16 +7310,17 @@ func giveUpAfterASupersede(
 	)
 	release := make(chan struct{})
 	var dead atomic.Int32
+	handler22 := func(
+		context.Context,
+		asynxmd.Event[Aggregate],
+	) error {
+		inHandler <- struct{}{}
+		<-release
+		return errDown
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			context.Context,
-			asynxmd.Event[Aggregate],
-		) error {
-			inHandler <- struct{}{}
-			<-release
-			return errDown
-		}),
+		subscriber(handler22),
 	)
 	cfg.MaxAttempts = 1
 	cfg.DeadLetter = func(
@@ -7396,19 +7387,20 @@ func interruptAfterASupersede(
 		chan struct{},
 		4,
 	)
+	handler23 := func(
+		context.Context,
+		asynxmd.Event[Aggregate],
+	) error {
+		sendIf(
+			true,
+			attempted,
+			struct{}{},
+		)
+		return errDown
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			context.Context,
-			asynxmd.Event[Aggregate],
-		) error {
-			sendIf(
-				true,
-				attempted,
-				struct{}{},
-			)
-			return errDown
-		}),
+		subscriber(handler23),
 	)
 	cfg.RetryInitial, cfg.RetryMax = time.Hour, time.Hour
 	cfg.MaxAttempts = 100
@@ -7541,25 +7533,26 @@ func parkKeepsLiveOnlyJobs(
 		chan struct{},
 		1,
 	)
+	handler24 := func(
+		_ context.Context,
+		e asynxmd.Event[Aggregate],
+	) error {
+		sendIf(
+			e.Version == 1,
+			started,
+			struct{}{},
+		)
+		holdIf(
+			e.Version == 1,
+			gate,
+		)
+		return nil
+	}
 	d := h.build(
 		t,
 		config(
 			&bus{},
-			subscriber(func(
-				_ context.Context,
-				e asynxmd.Event[Aggregate],
-			) error {
-				sendIf(
-					e.Version == 1,
-					started,
-					struct{}{},
-				)
-				holdIf(
-					e.Version == 1,
-					gate,
-				)
-				return nil
-			}),
+			subscriber(handler24),
 		),
 	)
 	t.Cleanup(func() { closeOnce(gate) })
@@ -7649,25 +7642,26 @@ func parkQueuedJobsReportUnrun(
 		chan struct{},
 		1,
 	)
+	handler25 := func(
+		_ context.Context,
+		e asynxmd.Event[Aggregate],
+	) error {
+		sendIf(
+			e.Version == 1,
+			started,
+			struct{}{},
+		)
+		holdIf(
+			e.Version == 1,
+			gate,
+		)
+		return nil
+	}
 	d := h.build(
 		t,
 		config(
 			&bus{},
-			subscriber(func(
-				_ context.Context,
-				e asynxmd.Event[Aggregate],
-			) error {
-				sendIf(
-					e.Version == 1,
-					started,
-					struct{}{},
-				)
-				holdIf(
-					e.Version == 1,
-					gate,
-				)
-				return nil
-			}),
+			subscriber(handler25),
 		),
 	)
 	t.Cleanup(func() { closeOnce(gate) })
@@ -7994,15 +7988,16 @@ func ackFailureParks(
 ) {
 	var rec journal
 	var reported atomic.Int32
+	handler26 := func(
+		_ context.Context,
+		e asynxmd.Event[Aggregate],
+	) error {
+		rec.add(e)
+		return nil
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			_ context.Context,
-			e asynxmd.Event[Aggregate],
-		) error {
-			rec.add(e)
-			return nil
-		}),
+		subscriber(handler26),
 	)
 	cfg.OnPublishError = func(
 		context.Context,
@@ -8817,17 +8812,18 @@ func ticketOfAParkedEvent(
 ) {
 	var runs journal
 	b := &bus{}
+	handler27 := func(
+		_ context.Context,
+		e asynxmd.Event[Aggregate],
+	) error {
+		runs.add(e)
+		return nil
+	}
 	d := h.build(
 		t,
 		config(
 			b,
-			subscriber(func(
-				_ context.Context,
-				e asynxmd.Event[Aggregate],
-			) error {
-				runs.add(e)
-				return nil
-			}),
+			subscriber(handler27),
 		),
 	)
 	d.Park(
@@ -9180,22 +9176,23 @@ func closeCalledAgainStillWaits(
 		chan struct{},
 		1,
 	)
+	handler28 := func(
+		context.Context,
+		asynxmd.Event[Aggregate],
+	) error {
+		sendIf(
+			true,
+			started,
+			struct{}{},
+		)
+		<-release
+		return nil
+	}
 	d := h.build(
 		t,
 		config(
 			&bus{},
-			subscriber(func(
-				context.Context,
-				asynxmd.Event[Aggregate],
-			) error {
-				sendIf(
-					true,
-					started,
-					struct{}{},
-				)
-				<-release
-				return nil
-			}),
+			subscriber(handler28),
 		),
 	)
 	t.Cleanup(func() { closeOnce(release) })
@@ -9259,20 +9256,21 @@ func closeGivingUpCancelsHandlers(
 		chan context.Context,
 		1,
 	)
+	handler29 := func(
+		ctx context.Context,
+		_ asynxmd.Event[Aggregate],
+	) error {
+		sendIf(
+			true,
+			started,
+			ctx,
+		)
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			ctx context.Context,
-			_ asynxmd.Event[Aggregate],
-		) error {
-			sendIf(
-				true,
-				started,
-				ctx,
-			)
-			<-ctx.Done()
-			return ctx.Err()
-		}),
+		subscriber(handler29),
 	)
 	cfg.MaxAttempts = 1
 	d := h.build(
@@ -9370,23 +9368,24 @@ func shutdownDuringRetry(
 		chan struct{},
 		64,
 	)
+	handler30 := func(
+		_ context.Context,
+		e asynxmd.Event[Aggregate],
+	) error {
+		rec.add(e)
+		sendIf(
+			e.Version == 1,
+			attempted,
+			struct{}{},
+		)
+		return errorIf(
+			e.Version == 1,
+			errPoison,
+		)
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			_ context.Context,
-			e asynxmd.Event[Aggregate],
-		) error {
-			rec.add(e)
-			sendIf(
-				e.Version == 1,
-				attempted,
-				struct{}{},
-			)
-			return errorIf(
-				e.Version == 1,
-				errPoison,
-			)
-		}),
+		subscriber(handler30),
 	)
 	cfg.RetryInitial, cfg.RetryMax = time.Hour, time.Hour
 	d := h.build(
@@ -9472,19 +9471,20 @@ func interruptReleasesWaiters(
 		chan struct{},
 		8,
 	)
+	handler31 := func(
+		context.Context,
+		asynxmd.Event[Aggregate],
+	) error {
+		sendIf(
+			true,
+			attempted,
+			struct{}{},
+		)
+		return errPoison
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			context.Context,
-			asynxmd.Event[Aggregate],
-		) error {
-			sendIf(
-				true,
-				attempted,
-				struct{}{},
-			)
-			return errPoison
-		}),
+		subscriber(handler31),
 	)
 	cfg.RetryInitial, cfg.RetryMax = time.Hour, time.Hour
 	d := h.build(
@@ -9552,19 +9552,20 @@ func interruptParks(
 		chan struct{},
 		8,
 	)
+	handler32 := func(
+		context.Context,
+		asynxmd.Event[Aggregate],
+	) error {
+		sendIf(
+			true,
+			attempted,
+			struct{}{},
+		)
+		return errPoison
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			context.Context,
-			asynxmd.Event[Aggregate],
-		) error {
-			sendIf(
-				true,
-				attempted,
-				struct{}{},
-			)
-			return errPoison
-		}),
+		subscriber(handler32),
 	)
 	cfg.RetryInitial, cfg.RetryMax = time.Hour, time.Hour
 	d := h.build(
@@ -9778,33 +9779,34 @@ func handlerContextMarksItsAggregate(
 		chan context.Context,
 		1,
 	)
+	handler33 := func(
+		ctx context.Context,
+		_ asynxmd.Event[Aggregate],
+	) error {
+		inOwn.Store(d.InHandler(
+			ctx,
+			"a",
+		))
+		inOtherAggregate.Store(d.InHandler(
+			ctx,
+			"b",
+		))
+		inOther.Store(other.InHandler(
+			ctx,
+			"a",
+		))
+		sendIf(
+			true,
+			contexts,
+			ctx,
+		)
+		return nil
+	}
 	d = h.build(
 		t,
 		config(
 			&bus{},
-			subscriber(func(
-				ctx context.Context,
-				_ asynxmd.Event[Aggregate],
-			) error {
-				inOwn.Store(d.InHandler(
-					ctx,
-					"a",
-				))
-				inOtherAggregate.Store(d.InHandler(
-					ctx,
-					"b",
-				))
-				inOther.Store(other.InHandler(
-					ctx,
-					"a",
-				))
-				sendIf(
-					true,
-					contexts,
-					ctx,
-				)
-				return nil
-			}),
+			subscriber(handler33),
 		),
 	)
 	other = h.build(
@@ -10167,14 +10169,15 @@ func inspectGiveUpCause(
 	t testing.TB,
 	h harness,
 ) {
+	handler34 := func(
+		context.Context,
+		asynxmd.Event[Aggregate],
+	) error {
+		return errPoison
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			context.Context,
-			asynxmd.Event[Aggregate],
-		) error {
-			return errPoison
-		}),
+		subscriber(handler34),
 	)
 	cfg.MaxAttempts = 3
 	d := h.build(
@@ -10270,19 +10273,20 @@ func inspectInterruptCause(
 		chan struct{},
 		8,
 	)
+	handler35 := func(
+		context.Context,
+		asynxmd.Event[Aggregate],
+	) error {
+		sendIf(
+			true,
+			attempted,
+			struct{}{},
+		)
+		return errPoison
+	}
 	cfg := config(
 		&bus{},
-		subscriber(func(
-			context.Context,
-			asynxmd.Event[Aggregate],
-		) error {
-			sendIf(
-				true,
-				attempted,
-				struct{}{},
-			)
-			return errPoison
-		}),
+		subscriber(handler35),
 	)
 	cfg.RetryInitial, cfg.RetryMax = time.Hour, time.Hour
 	d := h.build(
@@ -10409,13 +10413,14 @@ func (c brokenCase) check(
 		"failed scenarios: %v",
 		failedNames(failed),
 	)
+	del2 := func(
+		scenario string,
+	) bool {
+		return failed[scenario]
+	}
 	missed := slices.DeleteFunc(
 		slices.Clone(c.flagged),
-		func(
-			scenario string,
-		) bool {
-			return failed[scenario]
-		},
+		del2,
 	)
 	if len(missed) != 0 {
 		t.Fatalf(
@@ -10537,13 +10542,14 @@ func failedNames(
 	failed map[string]bool,
 ) []string {
 	names := slices.Collect(maps.Keys(failed))
+	del3 := func(
+		name string,
+	) bool {
+		return !failed[name]
+	}
 	names = slices.DeleteFunc(
 		names,
-		func(
-			name string,
-		) bool {
-			return !failed[name]
-		},
+		del3,
 	)
 	slices.Sort(names)
 	return names
@@ -10695,6 +10701,7 @@ func skipDrain(
 	return drainSkippingDispatcher{Dispatcher: inner}
 }
 
+// Close satisfies the interface that drainSkippingDispatcher fakes.
 func (d drainSkippingDispatcher) Close(
 	context.Context,
 ) error {
@@ -10721,6 +10728,7 @@ func ackEarly(
 	return earlyAckDispatcher{Dispatcher: inner}
 }
 
+// Enqueue satisfies the interface that earlyAckDispatcher fakes.
 func (d earlyAckDispatcher) Enqueue(
 	ctx context.Context,
 	r asynxmd.DispatchRequest[Aggregate],
@@ -10891,6 +10899,7 @@ func ignoreGeneration(
 	return generationBlindDispatcher{Dispatcher: inner}
 }
 
+// ResumeUndelivered satisfies the interface that generationBlindDispatcher fakes.
 func (d generationBlindDispatcher) ResumeUndelivered(
 	aggregateID string,
 	_ uint64,
@@ -11233,6 +11242,7 @@ func hollow(
 		nil
 }
 
+// Enqueue satisfies the interface that hollowDispatcher fakes.
 func (hollowDispatcher) Enqueue(
 	context.Context,
 	asynxmd.DispatchRequest[Aggregate],
@@ -11248,6 +11258,7 @@ func (hollowDispatcher) Enqueue(
 		nil
 }
 
+// TicketFor satisfies the interface that hollowDispatcher fakes.
 func (hollowDispatcher) TicketFor(
 	string,
 	int64,
@@ -11256,6 +11267,7 @@ func (hollowDispatcher) TicketFor(
 		false
 }
 
+// Unrun satisfies the interface that hollowDispatcher fakes.
 func (hollowDispatcher) Unrun(
 	string,
 	int64,
@@ -11263,6 +11275,7 @@ func (hollowDispatcher) Unrun(
 	return nil
 }
 
+// Park satisfies the interface that hollowDispatcher fakes.
 func (hollowDispatcher) Park(
 	string,
 	error,
@@ -11270,21 +11283,25 @@ func (hollowDispatcher) Park(
 ) {
 }
 
+// Inspect satisfies the interface that hollowDispatcher fakes.
 func (hollowDispatcher) Inspect(
 	string,
 ) asynxmd.DeliveryStatus {
 	return asynxmd.DeliveryStatus{}
 }
 
+// Supersede satisfies the interface that hollowDispatcher fakes.
 func (hollowDispatcher) Supersede(
 	string,
 ) {
 }
 
+// Parks satisfies the interface that hollowDispatcher fakes.
 func (hollowDispatcher) Parks() map[string]uint64 {
 	return map[string]uint64{}
 }
 
+// ResumeUndelivered satisfies the interface that hollowDispatcher fakes.
 func (hollowDispatcher) ResumeUndelivered(
 	string,
 	uint64,
@@ -11293,6 +11310,7 @@ func (hollowDispatcher) ResumeUndelivered(
 		nil
 }
 
+// InHandler satisfies the interface that hollowDispatcher fakes.
 func (hollowDispatcher) InHandler(
 	context.Context,
 	string,
@@ -11300,18 +11318,22 @@ func (hollowDispatcher) InHandler(
 	return false
 }
 
+// Interrupt satisfies the interface that hollowDispatcher fakes.
 func (hollowDispatcher) Interrupt() {}
 
+// Interrupted satisfies the interface that hollowDispatcher fakes.
 func (hollowDispatcher) Interrupted() <-chan struct{} {
 	return nil
 }
 
+// Close satisfies the interface that hollowDispatcher fakes.
 func (hollowDispatcher) Close(
 	context.Context,
 ) error {
 	return nil
 }
 
+// WaitIdle satisfies the interface that hollowDispatcher fakes.
 func (hollowDispatcher) WaitIdle() {}
 
 type inspectHidingDispatcher struct {
@@ -11324,6 +11346,7 @@ func hideParksFromInspect(
 	return inspectHidingDispatcher{Dispatcher: inner}
 }
 
+// Inspect satisfies the interface that inspectHidingDispatcher fakes.
 func (d inspectHidingDispatcher) Inspect(
 	aggregateID string,
 ) asynxmd.DeliveryStatus {
@@ -11408,6 +11431,7 @@ func hideParks(
 	return parkHidingDispatcher{Dispatcher: inner}
 }
 
+// Enqueue satisfies the interface that parkHidingDispatcher fakes.
 func (d parkHidingDispatcher) Enqueue(
 	ctx context.Context,
 	r asynxmd.DispatchRequest[Aggregate],
@@ -11420,6 +11444,7 @@ func (d parkHidingDispatcher) Enqueue(
 		err
 }
 
+// TicketFor satisfies the interface that parkHidingDispatcher fakes.
 func (d parkHidingDispatcher) TicketFor(
 	aggregateID string,
 	version int64,
@@ -11432,6 +11457,7 @@ func (d parkHidingDispatcher) TicketFor(
 		found
 }
 
+// Unrun satisfies the interface that parkHidingDispatcher fakes.
 func (d parkHidingDispatcher) Unrun(
 	aggregateID string,
 	version int64,
@@ -11474,6 +11500,7 @@ func queueWhileParked(
 	return parkIgnoringDispatcher{Dispatcher: inner}
 }
 
+// Enqueue satisfies the interface that parkIgnoringDispatcher fakes.
 func (d parkIgnoringDispatcher) Enqueue(
 	ctx context.Context,
 	r asynxmd.DispatchRequest[Aggregate],
@@ -11506,6 +11533,7 @@ func parkingEverything(
 		nil
 }
 
+// Enqueue satisfies the interface that parkingEverythingDispatcher fakes.
 func (parkingEverythingDispatcher) Enqueue(
 	context.Context,
 	asynxmd.DispatchRequest[Aggregate],
@@ -11521,6 +11549,7 @@ func (parkingEverythingDispatcher) Enqueue(
 		nil
 }
 
+// TicketFor satisfies the interface that parkingEverythingDispatcher fakes.
 func (parkingEverythingDispatcher) TicketFor(
 	string,
 	int64,
@@ -11529,6 +11558,7 @@ func (parkingEverythingDispatcher) TicketFor(
 		true
 }
 
+// Unrun satisfies the interface that parkingEverythingDispatcher fakes.
 func (parkingEverythingDispatcher) Unrun(
 	string,
 	int64,
@@ -11536,10 +11566,12 @@ func (parkingEverythingDispatcher) Unrun(
 	return asynxmd.ErrDeliveryParked
 }
 
+// Parks satisfies the interface that parkingEverythingDispatcher fakes.
 func (parkingEverythingDispatcher) Parks() map[string]uint64 {
 	return map[string]uint64{"a": 1, "ghost": 1}
 }
 
+// ResumeUndelivered satisfies the interface that parkingEverythingDispatcher fakes.
 func (parkingEverythingDispatcher) ResumeUndelivered(
 	string,
 	uint64,
@@ -11548,6 +11580,7 @@ func (parkingEverythingDispatcher) ResumeUndelivered(
 		[]int64{1}
 }
 
+// InHandler satisfies the interface that parkingEverythingDispatcher fakes.
 func (parkingEverythingDispatcher) InHandler(
 	context.Context,
 	string,
@@ -11555,6 +11588,7 @@ func (parkingEverythingDispatcher) InHandler(
 	return true
 }
 
+// Interrupted satisfies the interface that parkingEverythingDispatcher fakes.
 func (parkingEverythingDispatcher) Interrupted() <-chan struct{} {
 	done := make(chan struct{})
 	close(done)
@@ -11577,8 +11611,10 @@ type recorder struct {
 	cleanups []func()
 }
 
+// Helper satisfies the interface that recorder fakes.
 func (r *recorder) Helper() {}
 
+// Errorf satisfies the interface that recorder fakes.
 func (r *recorder) Errorf(
 	string,
 	...any,
@@ -11586,12 +11622,14 @@ func (r *recorder) Errorf(
 	r.failed.Store(true)
 }
 
+// Error satisfies the interface that recorder fakes.
 func (r *recorder) Error(
 	...any,
 ) {
 	r.failed.Store(true)
 }
 
+// Fatalf satisfies the interface that recorder fakes.
 func (r *recorder) Fatalf(
 	string,
 	...any,
@@ -11600,6 +11638,7 @@ func (r *recorder) Fatalf(
 	runtime.Goexit()
 }
 
+// Fatal satisfies the interface that recorder fakes.
 func (r *recorder) Fatal(
 	...any,
 ) {
@@ -11607,6 +11646,7 @@ func (r *recorder) Fatal(
 	runtime.Goexit()
 }
 
+// Cleanup satisfies the interface that recorder fakes.
 func (r *recorder) Cleanup(
 	fn func(),
 ) {
@@ -11633,13 +11673,14 @@ func fails(
 		testing.TB,
 	),
 ) bool {
+	check2 := func(
+		t testing.TB,
+		_ harness,
+	) {
+		check(t)
+	}
 	return (&recorder{}).run(
-		func(
-			t testing.TB,
-			_ harness,
-		) {
-			check(t)
-		},
+		check2,
 		harness{},
 	)
 }
@@ -11674,6 +11715,7 @@ func refusing(
 		nil
 }
 
+// Enqueue satisfies the interface that refusingDispatcher fakes.
 func (refusingDispatcher) Enqueue(
 	context.Context,
 	asynxmd.DispatchRequest[Aggregate],
@@ -11682,6 +11724,7 @@ func (refusingDispatcher) Enqueue(
 		errRefused
 }
 
+// Close satisfies the interface that refusingDispatcher fakes.
 func (refusingDispatcher) Close(
 	context.Context,
 ) error {
@@ -11700,6 +11743,7 @@ func reorder(
 	return &reorderingDispatcher{Dispatcher: inner, held: map[string]heldRequest{}}
 }
 
+// Enqueue satisfies the interface that reorderingDispatcher fakes.
 func (d *reorderingDispatcher) Enqueue(
 	ctx context.Context,
 	r asynxmd.DispatchRequest[Aggregate],
@@ -11740,11 +11784,13 @@ func (d *reorderingDispatcher) flush() {
 	clear(d.held)
 }
 
+// WaitIdle satisfies the interface that reorderingDispatcher fakes.
 func (d *reorderingDispatcher) WaitIdle() {
 	d.flush()
 	d.Dispatcher.WaitIdle()
 }
 
+// Close satisfies the interface that reorderingDispatcher fakes.
 func (d *reorderingDispatcher) Close(
 	ctx context.Context,
 ) error {
@@ -11789,6 +11835,7 @@ func hoardTickets(
 	}
 }
 
+// Enqueue satisfies the interface that ticketHoardingDispatcher fakes.
 func (d ticketHoardingDispatcher) Enqueue(
 	ctx context.Context,
 	r asynxmd.DispatchRequest[Aggregate],
@@ -11814,6 +11861,7 @@ func (d ticketHoardingDispatcher) Enqueue(
 		nil
 }
 
+// TicketFor satisfies the interface that ticketHoardingDispatcher fakes.
 func (d ticketHoardingDispatcher) TicketFor(
 	aggregateID string,
 	version int64,
@@ -11855,6 +11903,7 @@ func deadLetterTombstones(
 	return tombstoneDeadLetteringDispatcher{Dispatcher: inner}
 }
 
+// Enqueue satisfies the interface that tombstoneDeadLetteringDispatcher fakes.
 func (d tombstoneDeadLetteringDispatcher) Enqueue(
 	ctx context.Context,
 	r asynxmd.DispatchRequest[Aggregate],
@@ -11884,6 +11933,7 @@ func treatForgetNamesAsTombstones(
 	return tombstoneRekindingDispatcher{Dispatcher: inner}
 }
 
+// Enqueue satisfies the interface that tombstoneRekindingDispatcher fakes.
 func (d tombstoneRekindingDispatcher) Enqueue(
 	ctx context.Context,
 	r asynxmd.DispatchRequest[Aggregate],
@@ -12052,43 +12102,27 @@ func TestDurable_FailedHandlerRetriesAndHoldsBackLaterEventsOfTheAggregate(
 	failuresLeft.Store(3)
 
 	var reports []int
+	callback := func(
+		_ context.Context,
+		_ asynxmd.Event[int],
+		_ error,
+		attempt int,
+	) {
+		mu.Lock()
+		reports = append(
+			reports,
+			attempt,
+		)
+		mu.Unlock()
+	}
 	d := newDeliveryDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
-			_ context.Context,
-			e asynxmd.Event[int],
-		) error {
-			mu.Lock()
-			defer mu.Unlock()
-			isFirstOfA := e.AggregateID == "a" && e.Version == 1
-			if isFirstOfA &&
-				failuresLeft.Add(-1) >= 0 {
-				order = append(
-					order,
-					"a1-fail",
-				)
-				return errors.New("transient")
-			}
-
-			order = append(
-				order,
-				e.AggregateID+string(rune('0'+e.Version)),
-			)
-			return nil
-		}}},
-		withDeliveryErrorHandler[int](func(
-			_ context.Context,
-			_ asynxmd.Event[int],
-			_ error,
-			attempt int,
-		) {
-			mu.Lock()
-			reports = append(
-				reports,
-				attempt,
-			)
-			mu.Unlock()
-		}),
+		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: makeHandler6(
+			&mu,
+			&failuresLeft,
+			&order,
+		)}},
+		withDeliveryErrorHandler[int](callback),
 	)
 
 	var acks atomic.Int32
@@ -12178,20 +12212,16 @@ func TestDurable_DoneClosesAfterTheFirstAttemptEvenWhenItFails(
 	release := make(chan struct{})
 	d := newDeliveryDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			select {
-			case <-release:
-				return nil
-			default:
-				return errors.New("not yet")
-			}
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: makeHandler7(release)}},
 	)
 
 	var acked atomic.Bool
+	ack13 := func(
+		context.Context,
+	) error {
+		acked.Store(true)
+		return nil
+	}
 	done, err := enqueueDeliveryEvent(
 		context.Background(),
 		d,
@@ -12199,12 +12229,7 @@ func TestDurable_DoneClosesAfterTheFirstAttemptEvenWhenItFails(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			acked.Store(true)
-			return nil
-		},
+		ack13,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -12233,36 +12258,35 @@ func TestDurable_PanicIsAFailureThatRetriesAndReachesThePanicHandler(
 ) {
 	var attempts, panics atomic.Int32
 	var lastErr atomic.Value
+	callback2 := func(
+		context.Context,
+		asynxmd.Event[int],
+		any,
+	) {
+		panics.Add(1)
+	}
+	callback3 := func(
+		_ context.Context,
+		_ asynxmd.Event[int],
+		err error,
+		_ int,
+	) {
+		lastErr.Store(err)
+	}
 	d := newDeliveryDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			if attempts.Add(1) == 1 {
-				panic("boom")
-			}
-
-			return nil
-		}}},
-		withDeliveryPanicHandler[int](func(
-			context.Context,
-			asynxmd.Event[int],
-			any,
-		) {
-			panics.Add(1)
-		}),
-		withDeliveryErrorHandler[int](func(
-			_ context.Context,
-			_ asynxmd.Event[int],
-			err error,
-			_ int,
-		) {
-			lastErr.Store(err)
-		}),
+		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: makeHandler8(&attempts)}},
+		withDeliveryPanicHandler[int](callback2),
+		withDeliveryErrorHandler[int](callback3),
 	)
 
 	var acked atomic.Bool
+	ack14 := func(
+		context.Context,
+	) error {
+		acked.Store(true)
+		return nil
+	}
 	enqueueDeliveryEvent(
 		context.Background(),
 		d,
@@ -12270,12 +12294,7 @@ func TestDurable_PanicIsAFailureThatRetriesAndReachesThePanicHandler(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			acked.Store(true)
-			return nil
-		},
+		ack14,
 	)
 	waitForDelivery(
 		t,
@@ -12305,28 +12324,26 @@ func TestDurable_APanickingPanicHandlerCannotKillTheWorker(
 	t *testing.T,
 ) {
 	var attempts atomic.Int32
+	callback4 := func(
+		context.Context,
+		asynxmd.Event[int],
+		any,
+	) {
+		panic("handler of handlers")
+	}
 	d := newDeliveryDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			if attempts.Add(1) == 1 {
-				panic("boom")
-			}
-
-			return nil
-		}}},
-		withDeliveryPanicHandler[int](func(
-			context.Context,
-			asynxmd.Event[int],
-			any,
-		) {
-			panic("handler of handlers")
-		}),
+		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: makeHandler9(&attempts)}},
+		withDeliveryPanicHandler[int](callback4),
 	)
 
 	var acked atomic.Bool
+	ack15 := func(
+		context.Context,
+	) error {
+		acked.Store(true)
+		return nil
+	}
 	enqueueDeliveryEvent(
 		context.Background(),
 		d,
@@ -12334,12 +12351,7 @@ func TestDurable_APanickingPanicHandlerCannotKillTheWorker(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			acked.Store(true)
-			return nil
-		},
+		ack15,
 	)
 	waitForDelivery(
 		t,
@@ -12362,36 +12374,16 @@ func TestDurable_TimeoutIsReportedButTheHandlerIsStillWaitedFor(
 		[]asynxmd.DurableSub[int]{{
 			Match:   alwaysDelivery,
 			Timeout: 10 * time.Millisecond,
-			Handler: func(
-				context.Context,
-				asynxmd.Event[int],
-			) error {
-				if !running.CompareAndSwap(
-					false,
-					true,
-				) {
-					overlapped.Store(true)
-				}
-
-				<-timedOut
-				running.Store(false)
-				return nil
-			},
+			Handler: makeHandler10(
+				&running,
+				&overlapped,
+				timedOut,
+			),
 		}},
-		withDeliveryErrorHandler[int](func(
-			_ context.Context,
-			_ asynxmd.Event[int],
-			err error,
-			_ int,
-		) {
-			if errors.Is(
-				err,
-				asynxmd.ErrHandlerTimeout,
-			) {
-				timeouts.Add(1)
-				timedOut <- struct{}{}
-			}
-		}),
+		withDeliveryErrorHandler[int](makeCallback(
+			&timeouts,
+			timedOut,
+		)),
 	)
 
 	var acks atomic.Int32
@@ -12441,41 +12433,41 @@ func TestDurable_OnlyFailedHandlersAreRetried(
 	t *testing.T,
 ) {
 	var goodRuns, flakyRuns atomic.Int32
+	handler36 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		goodRuns.Add(1)
+		return nil
+	}
+	match2 := func(
+		string,
+	) bool {
+		return false
+	}
+	handler37 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		t.Error("a non-matching subscriber ran")
+		return nil
+	}
 	d := newDeliveryDurable(
 		t,
 		[]asynxmd.DurableSub[int]{
-			{Match: alwaysDelivery, Handler: func(
-				context.Context,
-				asynxmd.Event[int],
-			) error {
-				goodRuns.Add(1)
-				return nil
-			}},
-			{Match: alwaysDelivery, Handler: func(
-				context.Context,
-				asynxmd.Event[int],
-			) error {
-				if flakyRuns.Add(1) < 3 {
-					return errors.New("flaky")
-				}
-
-				return nil
-			}},
-			{Match: func(
-				string,
-			) bool {
-				return false
-			}, Handler: func(
-				context.Context,
-				asynxmd.Event[int],
-			) error {
-				t.Error("a non-matching subscriber ran")
-				return nil
-			}},
+			{Match: alwaysDelivery, Handler: handler36},
+			{Match: alwaysDelivery, Handler: makeHandler11(&flakyRuns)},
+			{Match: match2, Handler: handler37},
 		},
 	)
 
 	var acked atomic.Bool
+	ack16 := func(
+		context.Context,
+	) error {
+		acked.Store(true)
+		return nil
+	}
 	enqueueDeliveryEvent(
 		context.Background(),
 		d,
@@ -12483,12 +12475,7 @@ func TestDurable_OnlyFailedHandlersAreRetried(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			acked.Store(true)
-			return nil
-		},
+		ack16,
 	)
 	waitForDelivery(
 		t,
@@ -12510,15 +12497,16 @@ func TestDurable_CloseInterruptsRetriesAndLeavesTheDeliveryUnacked(
 	t *testing.T,
 ) {
 	var attempts atomic.Int32
+	handler38 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		attempts.Add(1)
+		return errors.New("always failing")
+	}
 	d := newDeliveryTestDispatcher[int](
 		&recordingDeliveryBus{},
-		withDeliveryDurableSubs([]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			attempts.Add(1)
-			return errors.New("always failing")
-		}}}),
+		withDeliveryDurableSubs([]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: handler38}}),
 		withDeliveryRetryBackoff[int](
 			time.Hour,
 			time.Hour,
@@ -12526,6 +12514,12 @@ func TestDurable_CloseInterruptsRetriesAndLeavesTheDeliveryUnacked(
 	)
 
 	var acked atomic.Bool
+	ack17 := func(
+		context.Context,
+	) error {
+		acked.Store(true)
+		return nil
+	}
 	done, _ := enqueueDeliveryEvent(
 		context.Background(),
 		d,
@@ -12533,12 +12527,7 @@ func TestDurable_CloseInterruptsRetriesAndLeavesTheDeliveryUnacked(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			acked.Store(true)
-			return nil
-		},
+		ack17,
 	)
 	<-done
 
@@ -12570,6 +12559,12 @@ func TestDurable_DeliveryWithNoMatchingSubscriberIsStillAcked(
 		nil,
 	)
 	var acked atomic.Bool
+	ack18 := func(
+		context.Context,
+	) error {
+		acked.Store(true)
+		return nil
+	}
 	done, _ := enqueueDeliveryEvent(
 		context.Background(),
 		d,
@@ -12577,12 +12572,7 @@ func TestDurable_DeliveryWithNoMatchingSubscriberIsStillAcked(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			acked.Store(true)
-			return nil
-		},
+		ack18,
 	)
 	<-done
 	if !acked.Load() {
@@ -12594,29 +12584,37 @@ func TestDurable_HandlerFinishingBeforeItsTimeoutReportsNothing(
 	t *testing.T,
 ) {
 	var reports atomic.Int32
+	handler39 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return nil
+	}
+	callback5 := func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+		int,
+	) {
+		reports.Add(1)
+	}
 	d := newDeliveryDurable(
 		t,
 		[]asynxmd.DurableSub[int]{{
 			Match:   alwaysDelivery,
 			Timeout: time.Second,
-			Handler: func(
-				context.Context,
-				asynxmd.Event[int],
-			) error {
-				return nil
-			},
+			Handler: handler39,
 		}},
-		withDeliveryErrorHandler[int](func(
-			context.Context,
-			asynxmd.Event[int],
-			error,
-			int,
-		) {
-			reports.Add(1)
-		}),
+		withDeliveryErrorHandler[int](callback5),
 	)
 
 	var acked atomic.Bool
+	ack19 := func(
+		context.Context,
+	) error {
+		acked.Store(true)
+		return nil
+	}
 	enqueueDeliveryEvent(
 		context.Background(),
 		d,
@@ -12624,12 +12622,7 @@ func TestDurable_HandlerFinishingBeforeItsTimeoutReportsNothing(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			acked.Store(true)
-			return nil
-		},
+		ack19,
 	)
 	waitForDelivery(
 		t,
@@ -12657,34 +12650,21 @@ func TestDurable_ATimedOutHandlerThatThenFailsIsRetried(
 		[]asynxmd.DurableSub[int]{{
 			Match:   alwaysDelivery,
 			Timeout: 5 * time.Millisecond,
-			Handler: func(
-				context.Context,
-				asynxmd.Event[int],
-			) error {
-				if attempts.Add(1) == 1 {
-					<-timedOut
-					return errors.New("failed late")
-				}
-
-				return nil
-			},
+			Handler: makeHandler12(
+				&attempts,
+				timedOut,
+			),
 		}},
-		withDeliveryErrorHandler[int](func(
-			_ context.Context,
-			_ asynxmd.Event[int],
-			err error,
-			_ int,
-		) {
-			if errors.Is(
-				err,
-				asynxmd.ErrHandlerTimeout,
-			) {
-				timedOut <- struct{}{}
-			}
-		}),
+		withDeliveryErrorHandler[int](makeCallback2(timedOut)),
 	)
 
 	var acked atomic.Bool
+	ack20 := func(
+		context.Context,
+	) error {
+		acked.Store(true)
+		return nil
+	}
 	enqueueDeliveryEvent(
 		context.Background(),
 		d,
@@ -12692,12 +12672,7 @@ func TestDurable_ATimedOutHandlerThatThenFailsIsRetried(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			acked.Store(true)
-			return nil
-		},
+		ack20,
 	)
 	waitForDelivery(
 		t,
@@ -12722,18 +12697,10 @@ func TestShutdownDuringRetry_NeverDeliversALaterEventPastTheFailingOne(
 	)
 	d := newDeliveryTestDispatcher[int](
 		&recordingDeliveryBus{},
-		withDeliveryDurableSubs([]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
-			_ context.Context,
-			e asynxmd.Event[int],
-		) error {
-			rec.add(e)
-			if e.Version == 1 {
-				attempted <- struct{}{}
-				return errors.New("poison")
-			}
-
-			return nil
-		}}}),
+		withDeliveryDurableSubs([]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: makeHandler13(
+			&rec,
+			attempted,
+		)}}),
 		withDeliveryRetryBackoff[int](
 			time.Hour,
 			time.Hour,
@@ -12827,35 +12794,27 @@ func TestExhaustedAttempts_ParkTheAggregateAndLeaveOthersAlone(
 	var rec deliveriesDelivery
 	var mu sync.Mutex
 	var reports []error
+	callback6 := func(
+		_ context.Context,
+		_ asynxmd.Event[int],
+		err error,
+		_ int,
+	) {
+		mu.Lock()
+		reports = append(
+			reports,
+			err,
+		)
+		mu.Unlock()
+	}
 	d := newDeliveryDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
-			_ context.Context,
-			e asynxmd.Event[int],
-		) error {
-			rec.add(e)
-			if e.AggregateID == "a" &&
-				e.Version == 1 {
-				attempts.Add(1)
-				return errors.New("poison")
-			}
-
-			return nil
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: makeHandler14(
+			&rec,
+			&attempts,
+		)}},
 		withDeliveryMaxAttempts[int](4),
-		withDeliveryErrorHandler[int](func(
-			_ context.Context,
-			_ asynxmd.Event[int],
-			err error,
-			_ int,
-		) {
-			mu.Lock()
-			reports = append(
-				reports,
-				err,
-			)
-			mu.Unlock()
-		}),
+		withDeliveryErrorHandler[int](callback6),
 	)
 
 	var acked sync.Map
@@ -13016,28 +12975,19 @@ func TestDeadLetter_AcceptingTheEventSkipsItAndLetsLaterEventsFlow(
 ) {
 	var rec deliveriesDelivery
 	var dead atomic.Value
+	callback7 := func(
+		_ context.Context,
+		e asynxmd.Event[int],
+		err error,
+	) error {
+		dead.Store(e.Version)
+		return nil
+	}
 	d := newDeliveryDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
-			_ context.Context,
-			e asynxmd.Event[int],
-		) error {
-			rec.add(e)
-			if e.Version == 1 {
-				return errors.New("poison")
-			}
-
-			return nil
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: makeHandler15(&rec)}},
 		withDeliveryMaxAttempts[int](3),
-		withDeadLetterHandler[int](func(
-			_ context.Context,
-			e asynxmd.Event[int],
-			err error,
-		) error {
-			dead.Store(e.Version)
-			return nil
-		}),
+		withDeadLetterHandler[int](callback7),
 	)
 
 	var acked sync.Map
@@ -13117,23 +13067,30 @@ func TestDeadLetter_AcceptingTheEventSkipsItAndLetsLaterEventsFlow(
 func TestDeadLetter_RefusalParksTheAggregate(
 	t *testing.T,
 ) {
+	handler40 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return errors.New("poison")
+	}
+	callback8 := func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+	) error {
+		panic("dead-letter store down")
+	}
 	d := newDeliveryDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			return errors.New("poison")
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: handler40}},
 		withDeliveryMaxAttempts[int](2),
-		withDeadLetterHandler[int](func(
-			context.Context,
-			asynxmd.Event[int],
-			error,
-		) error {
-			panic("dead-letter store down")
-		}),
+		withDeadLetterHandler[int](callback8),
 	)
+	ack21 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	tk, _ := enqueueDeliveryTicket(
 		context.Background(),
 		d,
@@ -13141,11 +13098,7 @@ func TestDeadLetter_RefusalParksTheAggregate(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack21,
 	)
 	if err := finalDelivery(
 		t,
@@ -13165,19 +13118,21 @@ func TestDeadLetter_RefusalParksTheAggregate(
 func TestTombstone_FinalReportsADurableSubscriberThatKeepsFailing(
 	t *testing.T,
 ) {
+	match3 := func(
+		string,
+	) bool {
+		return false
+	}
+	handler41 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return errors.New("cannot forget")
+	}
 	d := newDeliveryDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: func(
-			string,
-		) bool {
-			return false
-		},
-			Handler: func(
-				context.Context,
-				asynxmd.Event[int],
-			) error {
-				return errors.New("cannot forget")
-			}}},
+		[]asynxmd.DurableSub[int]{{Match: match3,
+			Handler: handler41}},
 		withDeliveryMaxAttempts[int](2),
 	)
 	tomb := makeDeliveryEvent(
@@ -13210,38 +13165,41 @@ func TestEnqueueForget_IsNeverDeadLettered(
 	t *testing.T,
 ) {
 	var dead atomic.Int32
+	handler42 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return errors.New("cannot forget")
+	}
+	callback9 := func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+	) error {
+		dead.Add(1)
+		return nil
+	}
 	d := newDeliveryDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			return errors.New("cannot forget")
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: handler42}},
 		withDeliveryMaxAttempts[int](2),
-		withDeadLetterHandler[int](func(
-			context.Context,
-			asynxmd.Event[int],
-			error,
-		) error {
-			dead.Add(1)
-			return nil
-		}),
+		withDeadLetterHandler[int](callback9),
 	)
 	marker := makeDeliveryEvent(
 		"a",
 		2,
 	)
 	marker.EventName = asynxmd.ForgetEventName
+	ack22 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	tk, _ := enqueueDeliveryForget(
 		context.Background(),
 		d,
 		marker,
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack22,
 	)
 	if err := finalDelivery(
 		t,
@@ -13271,26 +13229,33 @@ func TestGiveUp_AfterASupersedeDoesNotParkTheAggregateAgain(
 	inHandler := make(chan struct{})
 	release := make(chan struct{})
 	var dead atomic.Int32
+	handler43 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		inHandler <- struct{}{}
+		<-release
+		return errors.New("down")
+	}
+	callback10 := func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+	) error {
+		dead.Add(1)
+		return nil
+	}
 	d := newDeliveryDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			inHandler <- struct{}{}
-			<-release
-			return errors.New("down")
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: handler43}},
 		withDeliveryMaxAttempts[int](1),
-		withDeadLetterHandler[int](func(
-			context.Context,
-			asynxmd.Event[int],
-			error,
-		) error {
-			dead.Add(1)
-			return nil
-		}),
+		withDeadLetterHandler[int](callback10),
 	)
+	ack23 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	tk, _ := enqueueDeliveryTicket(
 		context.Background(),
 		d,
@@ -13298,11 +13263,7 @@ func TestGiveUp_AfterASupersedeDoesNotParkTheAggregateAgain(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack23,
 	)
 	recvDelivery(
 		t,
@@ -13345,21 +13306,27 @@ func TestInterrupt_AfterASupersedeDoesNotParkTheAggregate(
 		chan struct{},
 		4,
 	)
+	handler44 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		attempted <- struct{}{}
+		return errors.New("down")
+	}
 	d := newDeliveryDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			attempted <- struct{}{}
-			return errors.New("down")
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: handler44}},
 		withDeliveryRetryBackoff[int](
 			time.Hour,
 			time.Hour,
 		),
 		withDeliveryMaxAttempts[int](100),
 	)
+	ack24 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	tk, _ := enqueueDeliveryTicket(
 		context.Background(),
 		d,
@@ -13367,11 +13334,7 @@ func TestInterrupt_AfterASupersedeDoesNotParkTheAggregate(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack24,
 	)
 	recvDelivery(
 		t,
@@ -13399,28 +13362,21 @@ func TestDeliveryErrorHandlerPanicDoesNotReleaseTheHold(
 	var rec deliveriesDelivery
 	var failures atomic.Int32
 	failures.Store(2)
+	callback11 := func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+		int,
+	) {
+		panic("boom")
+	}
 	d := newDeliveryDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
-			_ context.Context,
-			e asynxmd.Event[int],
-		) error {
-			rec.add(e)
-			if e.Version == 1 &&
-				failures.Add(-1) >= 0 {
-				return errors.New("down")
-			}
-
-			return nil
-		}}},
-		withDeliveryErrorHandler[int](func(
-			context.Context,
-			asynxmd.Event[int],
-			error,
-			int,
-		) {
-			panic("boom")
-		}),
+		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: makeHandler16(
+			&rec,
+			&failures,
+		)}},
+		withDeliveryErrorHandler[int](callback11),
 	)
 
 	ctx := context.Background()
@@ -13479,30 +13435,27 @@ func TestGiveUp_TheAggregateIsParkedBeforeTheErrorHandlerIsTold(
 		chan []string,
 		1,
 	)
+	handler45 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return errors.New("down")
+	}
 	d = newDeliveryDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			return errors.New("down")
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: alwaysDelivery, Handler: handler45}},
 		withDeliveryMaxAttempts[int](1),
-		withDeliveryErrorHandler[int](func(
-			_ context.Context,
-			_ asynxmd.Event[int],
-			err error,
-			_ int,
-		) {
-			if errors.Is(
-				err,
-				asynxmd.ErrDeliveryParked,
-			) {
-				parkedWhenTold <- haltedDelivery(d)
-			}
-		}),
+		withDeliveryErrorHandler[int](makeCallback3(
+			parkedWhenTold,
+			&d,
+		)),
 	)
 
+	ack25 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	enqueueDeliveryTicket(
 		context.Background(),
 		d,
@@ -13510,11 +13463,7 @@ func TestGiveUp_TheAggregateIsParkedBeforeTheErrorHandlerIsTold(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack25,
 	)
 	if got := recvDelivery(
 		t,
@@ -13541,46 +13490,55 @@ func TestDurable_FailuresNameTheSubscriberAndDeadLetterGetsThemAll(
 		chan error,
 		1,
 	)
+	handler46 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return billing
+	}
+	handler47 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return search
+	}
+	callback12 := func(
+		_ context.Context,
+		_ asynxmd.Event[int],
+		err error,
+		_ int,
+	) {
+		mu.Lock()
+		reported = append(
+			reported,
+			err,
+		)
+		mu.Unlock()
+	}
+	callback13 := func(
+		_ context.Context,
+		_ asynxmd.Event[int],
+		err error,
+	) error {
+		deadLettered <- err
+		return nil
+	}
 	d := newDeliveryDurable(
 		t,
 		[]asynxmd.DurableSub[int]{
-			{Name: "OrderUpdated#1", Match: alwaysDelivery, Handler: func(
-				context.Context,
-				asynxmd.Event[int],
-			) error {
-				return billing
-			}},
-			{Name: "OrderUpdated#2", Match: alwaysDelivery, Handler: func(
-				context.Context,
-				asynxmd.Event[int],
-			) error {
-				return search
-			}},
+			{Name: "OrderUpdated#1", Match: alwaysDelivery, Handler: handler46},
+			{Name: "OrderUpdated#2", Match: alwaysDelivery, Handler: handler47},
 		},
 		withDeliveryMaxAttempts[int](2),
-		withDeliveryErrorHandler[int](func(
-			_ context.Context,
-			_ asynxmd.Event[int],
-			err error,
-			_ int,
-		) {
-			mu.Lock()
-			reported = append(
-				reported,
-				err,
-			)
-			mu.Unlock()
-		}),
-		withDeadLetterHandler[int](func(
-			_ context.Context,
-			_ asynxmd.Event[int],
-			err error,
-		) error {
-			deadLettered <- err
-			return nil
-		}),
+		withDeliveryErrorHandler[int](callback12),
+		withDeadLetterHandler[int](callback13),
 	)
 
+	ack26 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	ticket, err := enqueueDeliveryTicket(
 		context.Background(),
 		d,
@@ -13588,11 +13546,7 @@ func TestDurable_FailuresNameTheSubscriberAndDeadLetterGetsThemAll(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack26,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -13669,30 +13623,37 @@ func TestDurable_ATimeoutNamesItsSubscriber(
 		chan error,
 		4,
 	)
+	handler48 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		<-release
+		return nil
+	}
+	callback14 := func(
+		_ context.Context,
+		_ asynxmd.Event[int],
+		err error,
+		_ int,
+	) {
+		reported <- err
+	}
 	d := newDeliveryDurable(
 		t,
 		[]asynxmd.DurableSub[int]{{
 			Name:    "slow#1",
 			Match:   alwaysDelivery,
 			Timeout: time.Millisecond,
-			Handler: func(
-				context.Context,
-				asynxmd.Event[int],
-			) error {
-				<-release
-				return nil
-			},
+			Handler: handler48,
 		}},
-		withDeliveryErrorHandler[int](func(
-			_ context.Context,
-			_ asynxmd.Event[int],
-			err error,
-			_ int,
-		) {
-			reported <- err
-		}),
+		withDeliveryErrorHandler[int](callback14),
 	)
 
+	ack27 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	ticket, err := enqueueDeliveryTicket(
 		context.Background(),
 		d,
@@ -13700,11 +13661,7 @@ func TestDurable_ATimeoutNamesItsSubscriber(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack27,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -14082,6 +14039,7 @@ type recordingDeliveryBus struct {
 	delay time.Duration
 }
 
+// PublishSync satisfies the interface that recordingDeliveryBus fakes.
 func (b *recordingDeliveryBus) PublishSync(
 	_ context.Context,
 	e asynxmd.Event[int],
@@ -14099,6 +14057,7 @@ func (b *recordingDeliveryBus) PublishSync(
 	return nil
 }
 
+// Publish satisfies the interface that recordingDeliveryBus fakes.
 func (b *recordingDeliveryBus) Publish(
 	context.Context,
 	asynxmd.Event[int],
@@ -14106,6 +14065,7 @@ func (b *recordingDeliveryBus) Publish(
 	return nil
 }
 
+// Subscribe satisfies the interface that recordingDeliveryBus fakes.
 func (b *recordingDeliveryBus) Subscribe(
 	string,
 	asynxmd.ProjectionHandler[int],
@@ -14115,18 +14075,21 @@ func (b *recordingDeliveryBus) Subscribe(
 		nil
 }
 
+// Unsubscribe satisfies the interface that recordingDeliveryBus fakes.
 func (b *recordingDeliveryBus) Unsubscribe(
 	string,
 ) error {
 	return nil
 }
 
+// Close satisfies the interface that recordingDeliveryBus fakes.
 func (b *recordingDeliveryBus) Close(
 	context.Context,
 ) error {
 	return nil
 }
 
+// WaitForHandlers satisfies the interface that recordingDeliveryBus fakes.
 func (b *recordingDeliveryBus) WaitForHandlers() {}
 
 func (b *recordingDeliveryBus) snapshot() []asynxmd.Event[int] {
@@ -14224,22 +14187,10 @@ func TestDispatch_CrossAggregateIndependence(
 		finished []string
 	)
 
-	bus := &callbackWorkerBus{fn: func(
-		_ context.Context,
-		e asynxmd.Event[int],
-	) error {
-		if e.AggregateID == "agg-slow" {
-			time.Sleep(50 * time.Millisecond)
-		}
-
-		mu.Lock()
-		finished = append(
-			finished,
-			e.AggregateID,
-		)
-		mu.Unlock()
-		return nil
-	}}
+	bus := &callbackWorkerBus{fn: makeFn(
+		&mu,
+		&finished,
+	)}
 
 	d := newWorkerTestDispatcher[int](bus)
 	ctx := context.Background()
@@ -14487,21 +14438,22 @@ func TestDispatch_ConcurrentSameAggregate(
 	const n = 100
 	var wg sync.WaitGroup
 	wg.Add(n)
+	callback15 := func(
+		v int64,
+	) {
+		defer wg.Done()
+		_ = dispatchWorker(
+			ctx,
+			d,
+			makeWorkerEvent(
+				"agg-1",
+				v,
+			),
+			false,
+		)
+	}
 	for i := 0; i < n; i++ {
-		go func(
-			v int64,
-		) {
-			defer wg.Done()
-			_ = dispatchWorker(
-				ctx,
-				d,
-				makeWorkerEvent(
-					"agg-1",
-					v,
-				),
-				false,
-			)
-		}(int64(i))
+		go callback15(int64(i))
 	}
 
 	wg.Wait()
@@ -14533,17 +14485,7 @@ func TestDispatch_WorkerSurvivesPanic(
 ) {
 	var callCount atomic.Int64
 
-	bus := &callbackWorkerBus{fn: func(
-		_ context.Context,
-		e asynxmd.Event[int],
-	) error {
-		n := callCount.Add(1)
-		if n == 1 {
-			panic("boom")
-		}
-
-		return nil
-	}}
+	bus := &callbackWorkerBus{fn: makeFn2(&callCount)}
 
 	d := newWorkerTestDispatcher[int](bus)
 	ctx := context.Background()
@@ -14600,16 +14542,11 @@ func TestEnqueue_AckRunsAfterHandlersFinish(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			if !handled.Load() {
-				t.Error("ack ran before the handlers finished")
-			}
-
-			acked.Store(true)
-			return nil
-		},
+		makeAck(
+			&handled,
+			t,
+			&acked,
+		),
 	)
 	if err != nil {
 		t.Fatalf(
@@ -14634,18 +14571,24 @@ func TestEnqueue_AckErrorIsReported(
 ) {
 	ackErr := errors.New("ack failed")
 	var got atomic.Value
+	callback16 := func(
+		_ context.Context,
+		_ asynxmd.Event[int],
+		err error,
+	) {
+		got.Store(err)
+	}
 	d := newWorkerTestDispatcher(
 		asynxmd.Bus[int](&recordingWorkerBus{}),
-		withPublishErrorHandler[int](func(
-			_ context.Context,
-			_ asynxmd.Event[int],
-			err error,
-		) {
-			got.Store(err)
-		}),
+		withPublishErrorHandler[int](callback16),
 	)
 	defer d.Close(context.Background())
 
+	ack28 := func(
+		context.Context,
+	) error {
+		return ackErr
+	}
 	done, _ := enqueueWorkerEvent(
 		context.Background(),
 		d,
@@ -14653,11 +14596,7 @@ func TestEnqueue_AckErrorIsReported(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return ackErr
-		},
+		ack28,
 	)
 	<-done
 
@@ -14701,15 +14640,16 @@ func TestHandle_DispatcherPanicIsReportedNotSwallowed(
 	) error {
 		panic("bus exploded")
 	}}
+	callback17 := func(
+		_ context.Context,
+		_ asynxmd.Event[int],
+		err error,
+	) {
+		got.Store(err)
+	}
 	d := newWorkerTestDispatcher[int](
 		bus,
-		withPublishErrorHandler[int](func(
-			_ context.Context,
-			_ asynxmd.Event[int],
-			err error,
-		) {
-			got.Store(err)
-		}),
+		withPublishErrorHandler[int](callback17),
 	)
 	defer d.Close(context.Background())
 
@@ -14748,18 +14688,25 @@ func TestEnqueue_DurableDeliveryStillAcksWhenBusRejectsEvent(
 ) {
 	var acked atomic.Bool
 	var reported atomic.Int32
+	callback18 := func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+	) {
+		reported.Add(1)
+	}
 	d := newWorkerTestDispatcher(
 		asynxmd.Bus[int](&errBus{err: errors.New("bus closed")}),
-		withPublishErrorHandler[int](func(
-			context.Context,
-			asynxmd.Event[int],
-			error,
-		) {
-			reported.Add(1)
-		}),
+		withPublishErrorHandler[int](callback18),
 	)
 	defer d.Close(context.Background())
 
+	ack29 := func(
+		context.Context,
+	) error {
+		acked.Store(true)
+		return nil
+	}
 	ticket, err := enqueueWorkerTicket(
 		context.Background(),
 		d,
@@ -14767,12 +14714,7 @@ func TestEnqueue_DurableDeliveryStillAcksWhenBusRejectsEvent(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			acked.Store(true)
-			return nil
-		},
+		ack29,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -14807,15 +14749,16 @@ func TestEnqueue_DurableDeliveryStillAcksWhenBusRejectsEvent(
 func TestDurable_NonDurableJobsSkipDurableSubscribers(
 	t *testing.T,
 ) {
+	handler49 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		t.Error("durable handler ran for a job without an ack")
+		return nil
+	}
 	d := newWorkerDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			t.Error("durable handler ran for a job without an ack")
-			return nil
-		}}},
+		[]asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: handler49}},
 	)
 	done, _ := enqueueWorkerEvent(
 		context.Background(),
@@ -14833,15 +14776,16 @@ func TestBusErrorDoesNotSkipTheDurableDelivery(
 	t *testing.T,
 ) {
 	var rec deliveriesWorker
+	handler50 := func(
+		_ context.Context,
+		e asynxmd.Event[int],
+	) error {
+		rec.add(e)
+		return nil
+	}
 	d := newWorkerTestDispatcher[int](
 		&errBus{err: errors.New("bus down")},
-		withWorkerDurableSubs([]asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: func(
-			_ context.Context,
-			e asynxmd.Event[int],
-		) error {
-			rec.add(e)
-			return nil
-		}}}),
+		withWorkerDurableSubs([]asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: handler50}}),
 	)
 	defer d.Close(context.Background())
 
@@ -14891,20 +14835,22 @@ func TestEnqueueRedelivery_GoesToTheDurableSubscribersOnly(
 ) {
 	bus := &recordingWorkerBus{}
 	var seen deliveriesWorker
+	match4 := func(
+		name string,
+	) bool {
+		return name == "test.event"
+	}
+	handler51 := func(
+		_ context.Context,
+		e asynxmd.Event[int],
+	) error {
+		seen.add(e)
+		return nil
+	}
 	d := newWorkerTestDispatcher[int](
 		bus,
-		withWorkerDurableSubs([]asynxmd.DurableSub[int]{{Match: func(
-			name string,
-		) bool {
-			return name == "test.event"
-		},
-			Handler: func(
-				_ context.Context,
-				e asynxmd.Event[int],
-			) error {
-				seen.add(e)
-				return nil
-			}}}),
+		withWorkerDurableSubs([]asynxmd.DurableSub[int]{{Match: match4,
+			Handler: handler51}}),
 	)
 	t.Cleanup(func() { d.Close(context.Background()) })
 	var acked atomic.Int32
@@ -14977,23 +14923,31 @@ func TestBusPanicDoesNotSkipTheDurableDelivery(
 ) {
 	var acked atomic.Bool
 	var reported atomic.Int32
+	handler52 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return nil
+	}
+	callback19 := func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+	) {
+		reported.Add(1)
+	}
 	d := newWorkerTestDispatcher[int](
 		&panicBus{},
-		withWorkerDurableSubs([]asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			return nil
-		}}}),
-		withPublishErrorHandler[int](func(
-			context.Context,
-			asynxmd.Event[int],
-			error,
-		) {
-			reported.Add(1)
-		}),
+		withWorkerDurableSubs([]asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: handler52}}),
+		withPublishErrorHandler[int](callback19),
 	)
 	t.Cleanup(func() { d.Close(context.Background()) })
+	ack30 := func(
+		context.Context,
+	) error {
+		acked.Store(true)
+		return nil
+	}
 	tk, _ := enqueueWorkerTicket(
 		context.Background(),
 		d,
@@ -15001,12 +14955,7 @@ func TestBusPanicDoesNotSkipTheDurableDelivery(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			acked.Store(true)
-			return nil
-		},
+		ack30,
 	)
 	if err := finalWorker(
 		t,
@@ -15032,15 +14981,16 @@ func TestBusPanicDoesNotSkipTheDurableDelivery(
 func TestPublishErrorHandlerPanicDoesNotCrashTheWorker(
 	t *testing.T,
 ) {
+	callback20 := func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+	) {
+		panic("boom")
+	}
 	d := newWorkerTestDispatcher[int](
 		&errBus{err: errors.New("down")},
-		withPublishErrorHandler[int](func(
-			context.Context,
-			asynxmd.Event[int],
-			error,
-		) {
-			panic("boom")
-		}),
+		withPublishErrorHandler[int](callback20),
 	)
 	t.Cleanup(func() { d.Close(context.Background()) })
 	done, err := enqueueWorkerEvent(
@@ -15084,17 +15034,7 @@ func TestSupersede_AfterThePopStillSkipsTheSupersededJob(
 	var oldRuns atomic.Int32
 	d := newWorkerTestDispatcher[int](
 		bus,
-		withWorkerDurableSubs([]asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: func(
-			_ context.Context,
-			e asynxmd.Event[int],
-		) error {
-			if e.EventName != asynxmd.ForgetEventName {
-				oldRuns.Add(1)
-				return errors.New("down")
-			}
-
-			return nil
-		}}}),
+		withWorkerDurableSubs([]asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: makeHandler17(&oldRuns)}}),
 		withWorkerRetryBackoff[int](
 			50*time.Millisecond,
 			50*time.Millisecond,
@@ -15104,6 +15044,11 @@ func TestSupersede_AfterThePopStillSkipsTheSupersededJob(
 	t.Cleanup(func() { d.Close(context.Background()) })
 
 	ctx := context.Background()
+	ack31 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	enqueueWorkerTicket(
 		ctx,
 		d,
@@ -15111,11 +15056,7 @@ func TestSupersede_AfterThePopStillSkipsTheSupersededJob(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack31,
 	)
 	recvWorker(
 		t,
@@ -15129,15 +15070,16 @@ func TestSupersede_AfterThePopStillSkipsTheSupersededJob(
 		2,
 	)
 	marker.EventName = asynxmd.ForgetEventName
+	ack32 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	tk, _ := enqueueWorkerForget(
 		ctx,
 		d,
 		marker,
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack32,
 	)
 	close(bus.release)
 
@@ -15178,23 +15120,30 @@ func TestAckFailure_TheAggregateIsParkedBeforeThePublishErrorHandlerIsTold(
 		chan []string,
 		1,
 	)
+	handler53 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		return nil
+	}
+	callback21 := func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+	) {
+		parkedWhenTold <- haltedWorker(d)
+	}
 	d = newWorkerDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			return nil
-		}}},
-		withPublishErrorHandler[int](func(
-			context.Context,
-			asynxmd.Event[int],
-			error,
-		) {
-			parkedWhenTold <- haltedWorker(d)
-		}),
+		[]asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: handler53}},
+		withPublishErrorHandler[int](callback21),
 	)
 
+	ack33 := func(
+		context.Context,
+	) error {
+		return errors.New("store down")
+	}
 	enqueueWorkerTicket(
 		context.Background(),
 		d,
@@ -15202,11 +15151,7 @@ func TestAckFailure_TheAggregateIsParkedBeforeThePublishErrorHandlerIsTold(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return errors.New("store down")
-		},
+		ack33,
 	)
 	if got := recvWorker(
 		t,
@@ -15228,25 +15173,32 @@ func TestAckFailure_ParksTheAggregateSoALaterEventDoesNotOvertake(
 ) {
 	var rec deliveriesWorker
 	var reported atomic.Int32
+	handler54 := func(
+		_ context.Context,
+		e asynxmd.Event[int],
+	) error {
+		rec.add(e)
+		return nil
+	}
+	callback22 := func(
+		context.Context,
+		asynxmd.Event[int],
+		error,
+	) {
+		reported.Add(1)
+	}
 	d := newWorkerDurable(
 		t,
-		[]asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: func(
-			_ context.Context,
-			e asynxmd.Event[int],
-		) error {
-			rec.add(e)
-			return nil
-		}}},
-		withPublishErrorHandler[int](func(
-			context.Context,
-			asynxmd.Event[int],
-			error,
-		) {
-			reported.Add(1)
-		}),
+		[]asynxmd.DurableSub[int]{{Match: alwaysWorker, Handler: handler54}},
+		withPublishErrorHandler[int](callback22),
 	)
 
 	ctx := context.Background()
+	ack34 := func(
+		context.Context,
+	) error {
+		return errors.New("store down")
+	}
 	t1, _ := enqueueWorkerTicket(
 		ctx,
 		d,
@@ -15254,12 +15206,13 @@ func TestAckFailure_ParksTheAggregateSoALaterEventDoesNotOvertake(
 			"a",
 			1,
 		),
-		func(
-			context.Context,
-		) error {
-			return errors.New("store down")
-		},
+		ack34,
 	)
+	ack35 := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	t2, _ := enqueueWorkerTicket(
 		ctx,
 		d,
@@ -15267,11 +15220,7 @@ func TestAckFailure_ParksTheAggregateSoALaterEventDoesNotOvertake(
 			"a",
 			2,
 		),
-		func(
-			context.Context,
-		) error {
-			return nil
-		},
+		ack35,
 	)
 	if err := finalWorker(
 		t,
@@ -15712,6 +15661,7 @@ type callbackWorkerBus struct {
 	) error
 }
 
+// PublishSync satisfies the interface that callbackWorkerBus fakes.
 func (b *callbackWorkerBus) PublishSync(
 	ctx context.Context,
 	e asynxmd.Event[int],
@@ -15722,6 +15672,7 @@ func (b *callbackWorkerBus) PublishSync(
 	)
 }
 
+// Publish satisfies the interface that callbackWorkerBus fakes.
 func (b *callbackWorkerBus) Publish(
 	context.Context,
 	asynxmd.Event[int],
@@ -15729,6 +15680,7 @@ func (b *callbackWorkerBus) Publish(
 	return nil
 }
 
+// Subscribe satisfies the interface that callbackWorkerBus fakes.
 func (b *callbackWorkerBus) Subscribe(
 	string,
 	asynxmd.ProjectionHandler[int],
@@ -15738,18 +15690,21 @@ func (b *callbackWorkerBus) Subscribe(
 		nil
 }
 
+// Unsubscribe satisfies the interface that callbackWorkerBus fakes.
 func (b *callbackWorkerBus) Unsubscribe(
 	string,
 ) error {
 	return nil
 }
 
+// Close satisfies the interface that callbackWorkerBus fakes.
 func (b *callbackWorkerBus) Close(
 	context.Context,
 ) error {
 	return nil
 }
 
+// WaitForHandlers satisfies the interface that callbackWorkerBus fakes.
 func (b *callbackWorkerBus) WaitForHandlers() {}
 
 type deliveriesWorker struct {
@@ -15781,6 +15736,7 @@ type errBus struct {
 	err error
 }
 
+// PublishSync satisfies the interface that errBus fakes.
 func (b *errBus) PublishSync(
 	context.Context,
 	asynxmd.Event[int],
@@ -15788,6 +15744,7 @@ func (b *errBus) PublishSync(
 	return b.err
 }
 
+// Publish satisfies the interface that errBus fakes.
 func (b *errBus) Publish(
 	context.Context,
 	asynxmd.Event[int],
@@ -15795,6 +15752,7 @@ func (b *errBus) Publish(
 	return nil
 }
 
+// Subscribe satisfies the interface that errBus fakes.
 func (b *errBus) Subscribe(
 	string,
 	asynxmd.ProjectionHandler[int],
@@ -15804,18 +15762,21 @@ func (b *errBus) Subscribe(
 		nil
 }
 
+// Unsubscribe satisfies the interface that errBus fakes.
 func (b *errBus) Unsubscribe(
 	string,
 ) error {
 	return nil
 }
 
+// Close satisfies the interface that errBus fakes.
 func (b *errBus) Close(
 	context.Context,
 ) error {
 	return nil
 }
 
+// WaitForHandlers satisfies the interface that errBus fakes.
 func (b *errBus) WaitForHandlers() {}
 
 type gateBus struct {
@@ -15825,6 +15786,7 @@ type gateBus struct {
 	once    sync.Once
 }
 
+// PublishSync satisfies the interface that gateBus fakes.
 func (b *gateBus) PublishSync(
 	ctx context.Context,
 	e asynxmd.Event[int],
@@ -15838,6 +15800,7 @@ func (b *gateBus) PublishSync(
 
 type panicBus struct{ recordingWorkerBus }
 
+// PublishSync satisfies the interface that panicBus fakes.
 func (*panicBus) PublishSync(
 	context.Context,
 	asynxmd.Event[int],
@@ -15851,6 +15814,7 @@ type recordingWorkerBus struct {
 	delay time.Duration
 }
 
+// PublishSync satisfies the interface that recordingWorkerBus fakes.
 func (b *recordingWorkerBus) PublishSync(
 	_ context.Context,
 	e asynxmd.Event[int],
@@ -15868,6 +15832,7 @@ func (b *recordingWorkerBus) PublishSync(
 	return nil
 }
 
+// Publish satisfies the interface that recordingWorkerBus fakes.
 func (b *recordingWorkerBus) Publish(
 	context.Context,
 	asynxmd.Event[int],
@@ -15875,6 +15840,7 @@ func (b *recordingWorkerBus) Publish(
 	return nil
 }
 
+// Subscribe satisfies the interface that recordingWorkerBus fakes.
 func (b *recordingWorkerBus) Subscribe(
 	string,
 	asynxmd.ProjectionHandler[int],
@@ -15884,18 +15850,21 @@ func (b *recordingWorkerBus) Subscribe(
 		nil
 }
 
+// Unsubscribe satisfies the interface that recordingWorkerBus fakes.
 func (b *recordingWorkerBus) Unsubscribe(
 	string,
 ) error {
 	return nil
 }
 
+// Close satisfies the interface that recordingWorkerBus fakes.
 func (b *recordingWorkerBus) Close(
 	context.Context,
 ) error {
 	return nil
 }
 
+// WaitForHandlers satisfies the interface that recordingWorkerBus fakes.
 func (b *recordingWorkerBus) WaitForHandlers() {}
 
 func (b *recordingWorkerBus) snapshot() []asynxmd.Event[int] {
@@ -15920,3 +15889,845 @@ type testWorkerConfig[T any] struct {
 type testWorkerOpt[T any] func(
 	c *testWorkerConfig[T],
 )
+
+func makeHandler(
+	got *context.Context,
+	other **dispatcher[int],
+	t *testing.T,
+	d **dispatcher[int],
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler(
+			got,
+			other,
+			t,
+			d,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler(
+	got *context.Context,
+	other **dispatcher[int],
+	t *testing.T,
+	d **dispatcher[int],
+	ctx context.Context,
+	e asynxmd.Event[int],
+) error {
+	(*got) = ctx
+	if (*other).InHandler(
+		ctx,
+		"a",
+	) {
+		t.Error("another dispatcher's InHandler is true for this handler's context: same ID, different instance")
+	}
+
+	if !(*d).InHandler(
+		ctx,
+		"a",
+	) ||
+		(*d).InHandler(
+			ctx,
+			"b",
+		) {
+		t.Errorf(
+			"InHandler(a)=%v InHandler(b)=%v",
+			(*d).InHandler(
+				ctx,
+				"a",
+			),
+			(*d).InHandler(
+				ctx,
+				"b",
+			),
+		)
+	}
+
+	return nil
+}
+
+func makeHandler2(
+	healthy *atomic.Bool,
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler2(
+			healthy,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler2(
+	healthy *atomic.Bool,
+	_ context.Context,
+	_ asynxmd.Event[int],
+) error {
+	if (*healthy).Load() {
+		return nil
+	}
+
+	return errors.New("down")
+}
+
+func makeHandler3(
+	seen *deliveries,
+	attempted chan struct{},
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler3(
+			seen,
+			attempted,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler3(
+	seen *deliveries,
+	attempted chan struct{},
+	_ context.Context,
+	e asynxmd.Event[int],
+) error {
+	(*seen).add(e)
+	if e.EventName == "test.event" {
+		attempted <- struct{}{}
+		return errors.New("poison")
+	}
+
+	return nil
+}
+
+func makeHandler4(
+	started chan struct{},
+	gate chan struct{},
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler4(
+			started,
+			gate,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler4(
+	started chan struct{},
+	gate chan struct{},
+	_ context.Context,
+	e asynxmd.Event[int],
+) error {
+	if e.Version == 1 {
+		started <- struct{}{}
+		<-gate
+	}
+
+	return nil
+}
+
+func makeHandler5(
+	started chan struct{},
+	gate chan struct{},
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler5(
+			started,
+			gate,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler5(
+	started chan struct{},
+	gate chan struct{},
+	_ context.Context,
+	e asynxmd.Event[int],
+) error {
+	if e.Version == 1 {
+		started <- struct{}{}
+		<-gate
+	}
+
+	return nil
+}
+
+func makeRunCallback(
+	n int,
+) func(*testing.B) {
+	return func(
+		p0 *testing.B,
+	) {
+		runRunCallback(
+			n,
+			p0,
+		)
+	}
+}
+
+func runRunCallback(
+	n int,
+	b *testing.B,
+) {
+	d := newTestDispatcher[string](&noopBus[string]{})
+	ctx := context.Background()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		aggID := fmt.Sprintf(
+			"agg%d",
+			i%n,
+		)
+		_ = dispatch(
+			ctx,
+			d,
+			asynxmd.Event[string]{
+				AggregateID: aggID,
+				EventName:   "BenchEvent",
+				Version:     int64(i),
+			},
+			false,
+		)
+	}
+
+	b.StopTimer()
+	_ = d.Close(context.Background())
+}
+
+func makeBody(
+	ctx context.Context,
+	d *dispatcher[string],
+) func(*testing.PB) {
+	return func(
+		p0 *testing.PB,
+	) {
+		runBody(
+			ctx,
+			d,
+			p0,
+		)
+	}
+}
+
+func runBody(
+	ctx context.Context,
+	d *dispatcher[string],
+	pb *testing.PB,
+) {
+	i := int64(0)
+	for pb.Next() {
+		_ = dispatch(
+			ctx,
+			d,
+			asynxmd.Event[string]{
+				AggregateID: "agg1",
+				EventName:   "BenchEvent",
+				Version:     i,
+			},
+			false,
+		)
+		i++
+	}
+}
+
+func makeHandler6(
+	mu *sync.Mutex,
+	failuresLeft *atomic.Int32,
+	order *[]string,
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler6(
+			mu,
+			failuresLeft,
+			order,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler6(
+	mu *sync.Mutex,
+	failuresLeft *atomic.Int32,
+	order *[]string,
+	_ context.Context,
+	e asynxmd.Event[int],
+) error {
+	(*mu).Lock()
+	defer (*mu).Unlock()
+	isFirstOfA := e.AggregateID == "a" && e.Version == 1
+	if isFirstOfA &&
+		(*failuresLeft).Add(-1) >= 0 {
+		(*order) = append(
+			(*order),
+			"a1-fail",
+		)
+		return errors.New("transient")
+	}
+
+	(*order) = append(
+		(*order),
+		e.AggregateID+string(rune('0'+e.Version)),
+	)
+	return nil
+}
+
+func makeHandler7(
+	release chan struct{},
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler7(
+			release,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler7(
+	release chan struct{},
+	_ context.Context,
+	_ asynxmd.Event[int],
+) error {
+	select {
+	case <-release:
+		return nil
+	default:
+		return errors.New("not yet")
+	}
+}
+
+func makeHandler8(
+	attempts *atomic.Int32,
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler8(
+			attempts,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler8(
+	attempts *atomic.Int32,
+	_ context.Context,
+	_ asynxmd.Event[int],
+) error {
+	if (*attempts).Add(1) == 1 {
+		panic("boom")
+	}
+
+	return nil
+}
+
+func makeHandler9(
+	attempts *atomic.Int32,
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler9(
+			attempts,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler9(
+	attempts *atomic.Int32,
+	_ context.Context,
+	_ asynxmd.Event[int],
+) error {
+	if (*attempts).Add(1) == 1 {
+		panic("boom")
+	}
+
+	return nil
+}
+
+func makeHandler10(
+	running *atomic.Bool,
+	overlapped *atomic.Bool,
+	timedOut chan struct{},
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler10(
+			running,
+			overlapped,
+			timedOut,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler10(
+	running *atomic.Bool,
+	overlapped *atomic.Bool,
+	timedOut chan struct{},
+	_ context.Context,
+	_ asynxmd.Event[int],
+) error {
+	if !(*running).CompareAndSwap(
+		false,
+		true,
+	) {
+		(*overlapped).Store(true)
+	}
+
+	<-timedOut
+	(*running).Store(false)
+	return nil
+}
+
+func makeCallback(
+	timeouts *atomic.Int32,
+	timedOut chan struct{},
+) func(context.Context, asynxmd.Event[int], error, int) {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+		p2 error,
+		p3 int,
+	) {
+		runCallback(
+			timeouts,
+			timedOut,
+			p0,
+			p1,
+			p2,
+			p3,
+		)
+	}
+}
+
+func runCallback(
+	timeouts *atomic.Int32,
+	timedOut chan struct{},
+	_ context.Context,
+	_ asynxmd.Event[int],
+	err error,
+	_ int,
+) {
+	if errors.Is(
+		err,
+		asynxmd.ErrHandlerTimeout,
+	) {
+		(*timeouts).Add(1)
+		timedOut <- struct{}{}
+	}
+}
+
+func makeHandler11(
+	flakyRuns *atomic.Int32,
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler11(
+			flakyRuns,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler11(
+	flakyRuns *atomic.Int32,
+	_ context.Context,
+	_ asynxmd.Event[int],
+) error {
+	if (*flakyRuns).Add(1) < 3 {
+		return errors.New("flaky")
+	}
+
+	return nil
+}
+
+func makeHandler12(
+	attempts *atomic.Int32,
+	timedOut chan struct{},
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler12(
+			attempts,
+			timedOut,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler12(
+	attempts *atomic.Int32,
+	timedOut chan struct{},
+	_ context.Context,
+	_ asynxmd.Event[int],
+) error {
+	if (*attempts).Add(1) == 1 {
+		<-timedOut
+		return errors.New("failed late")
+	}
+
+	return nil
+}
+
+func makeCallback2(
+	timedOut chan struct{},
+) func(context.Context, asynxmd.Event[int], error, int) {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+		p2 error,
+		p3 int,
+	) {
+		runCallback2(
+			timedOut,
+			p0,
+			p1,
+			p2,
+			p3,
+		)
+	}
+}
+
+func runCallback2(
+	timedOut chan struct{},
+	_ context.Context,
+	_ asynxmd.Event[int],
+	err error,
+	_ int,
+) {
+	if errors.Is(
+		err,
+		asynxmd.ErrHandlerTimeout,
+	) {
+		timedOut <- struct{}{}
+	}
+}
+
+func makeHandler13(
+	rec *deliveriesDelivery,
+	attempted chan struct{},
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler13(
+			rec,
+			attempted,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler13(
+	rec *deliveriesDelivery,
+	attempted chan struct{},
+	_ context.Context,
+	e asynxmd.Event[int],
+) error {
+	(*rec).add(e)
+	if e.Version == 1 {
+		attempted <- struct{}{}
+		return errors.New("poison")
+	}
+
+	return nil
+}
+
+func makeHandler14(
+	rec *deliveriesDelivery,
+	attempts *atomic.Int32,
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler14(
+			rec,
+			attempts,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler14(
+	rec *deliveriesDelivery,
+	attempts *atomic.Int32,
+	_ context.Context,
+	e asynxmd.Event[int],
+) error {
+	(*rec).add(e)
+	if e.AggregateID == "a" &&
+		e.Version == 1 {
+		(*attempts).Add(1)
+		return errors.New("poison")
+	}
+
+	return nil
+}
+
+func makeHandler15(
+	rec *deliveriesDelivery,
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler15(
+			rec,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler15(
+	rec *deliveriesDelivery,
+	_ context.Context,
+	e asynxmd.Event[int],
+) error {
+	(*rec).add(e)
+	if e.Version == 1 {
+		return errors.New("poison")
+	}
+
+	return nil
+}
+
+func makeHandler16(
+	rec *deliveriesDelivery,
+	failures *atomic.Int32,
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler16(
+			rec,
+			failures,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler16(
+	rec *deliveriesDelivery,
+	failures *atomic.Int32,
+	_ context.Context,
+	e asynxmd.Event[int],
+) error {
+	(*rec).add(e)
+	if e.Version == 1 &&
+		(*failures).Add(-1) >= 0 {
+		return errors.New("down")
+	}
+
+	return nil
+}
+
+func makeCallback3(
+	parkedWhenTold chan []string,
+	d *asynxmd.Dispatcher[int],
+) func(context.Context, asynxmd.Event[int], error, int) {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+		p2 error,
+		p3 int,
+	) {
+		runCallback3(
+			parkedWhenTold,
+			d,
+			p0,
+			p1,
+			p2,
+			p3,
+		)
+	}
+}
+
+func runCallback3(
+	parkedWhenTold chan []string,
+	d *asynxmd.Dispatcher[int],
+	_ context.Context,
+	_ asynxmd.Event[int],
+	err error,
+	_ int,
+) {
+	if errors.Is(
+		err,
+		asynxmd.ErrDeliveryParked,
+	) {
+		parkedWhenTold <- haltedDelivery((*d))
+	}
+}
+
+func makeFn(
+	mu *sync.Mutex,
+	finished *[]string,
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runFn(
+			mu,
+			finished,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runFn(
+	mu *sync.Mutex,
+	finished *[]string,
+	_ context.Context,
+	e asynxmd.Event[int],
+) error {
+	if e.AggregateID == "agg-slow" {
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	(*mu).Lock()
+	(*finished) = append(
+		(*finished),
+		e.AggregateID,
+	)
+	(*mu).Unlock()
+	return nil
+}
+
+func makeFn2(
+	callCount *atomic.Int64,
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runFn2(
+			callCount,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runFn2(
+	callCount *atomic.Int64,
+	_ context.Context,
+	e asynxmd.Event[int],
+) error {
+	n := (*callCount).Add(1)
+	if n == 1 {
+		panic("boom")
+	}
+
+	return nil
+}
+
+func makeAck(
+	handled *atomic.Bool,
+	t *testing.T,
+	acked *atomic.Bool,
+) func(context.Context) error {
+	return func(
+		p0 context.Context,
+	) error {
+		return runAck(
+			handled,
+			t,
+			acked,
+			p0,
+		)
+	}
+}
+
+func runAck(
+	handled *atomic.Bool,
+	t *testing.T,
+	acked *atomic.Bool,
+	_ context.Context,
+) error {
+	if !(*handled).Load() {
+		t.Error("ack ran before the handlers finished")
+	}
+
+	(*acked).Store(true)
+	return nil
+}
+
+func makeHandler17(
+	oldRuns *atomic.Int32,
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler17(
+			oldRuns,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler17(
+	oldRuns *atomic.Int32,
+	_ context.Context,
+	e asynxmd.Event[int],
+) error {
+	if e.EventName != asynxmd.ForgetEventName {
+		(*oldRuns).Add(1)
+		return errors.New("down")
+	}
+
+	return nil
+}

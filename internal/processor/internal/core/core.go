@@ -17,6 +17,7 @@ import (
 	"time"
 )
 
+// Processor routes commands to shards, runs the write pipeline and delivers events.
 type Processor[T any] struct {
 	es            eventstore.EventStore[T]
 	pool          *pool.ShardPool[T]
@@ -37,6 +38,8 @@ const (
 	defaultRetryInitial = 100 * time.Millisecond
 	defaultRetryMax     = 30 * time.Second
 	defaultMaxAttempts  = 20
+	defaultShards       = 8
+	defaultWorkers      = 8
 )
 
 var errNilDispatcher = errors.New("asynx: the dispatcher factory returned no dispatcher")
@@ -60,6 +63,58 @@ func New[T any](
 			err
 	}
 
+	router, err := queue.New(cfg.Shards)
+	if err != nil {
+		return nil,
+			fmt.Errorf(
+				"asynx: shard router: %w",
+				err,
+			)
+	}
+
+	return assemble(
+			es,
+			bus,
+			d,
+			router,
+			cfg,
+		),
+		nil
+}
+
+func assemble[T any](
+	es eventstore.EventStore[T],
+	bus asynxmd.Bus[T],
+	d asynxmd.Dispatcher[T],
+	router *queue.Router,
+	cfg *models.Config[T],
+) *Processor[T] {
+	executor := newExecutor(
+		es,
+		d,
+		cfg,
+	)
+	return &Processor[T]{
+		es: es,
+		pool: pool.New(
+			executor,
+			cfg.Shards,
+			cfg.QueueDepth,
+			cfg.WorkersPerShard,
+		),
+		router:       router,
+		executor:     executor,
+		dispatcher:   d,
+		onPublishErr: cfg.PublishErrorHandler,
+		bus:          bus,
+	}
+}
+
+func newExecutor[T any](
+	es eventstore.EventStore[T],
+	d asynxmd.Dispatcher[T],
+	cfg *models.Config[T],
+) *exec.CommandExecutor[T] {
 	executor := exec.New(
 		es,
 		d,
@@ -68,23 +123,7 @@ func New[T any](
 		exec.WithSnapshotErrorHandler(cfg.SnapshotErrorHandler),
 	)
 	es.GuardAutoSnapshots(executor.WithLockIfFree)
-	return &Processor[T]{
-			es: es,
-			pool: pool.New(
-				executor,
-				cfg.Shards,
-				cfg.QueueDepth,
-				cfg.WorkersPerShard,
-			),
-			router: queue.New(
-				cfg.Shards,
-			),
-			executor:     executor,
-			dispatcher:   d,
-			onPublishErr: cfg.PublishErrorHandler,
-			bus:          bus,
-		},
-		nil
+	return executor
 }
 
 func newDispatcher[T any](
@@ -147,9 +186,9 @@ func configure[T any](
 	opts ...models.Opt[T],
 ) *models.Config[T] {
 	cfg := &models.Config[T]{
-		Shards:          8,
+		Shards:          defaultShards,
 		QueueDepth:      -1,
-		WorkersPerShard: 8,
+		WorkersPerShard: defaultWorkers,
 		Dispatcher: asynxmd.DispatcherConfig[T]{
 			RetryInitial: defaultRetryInitial,
 			RetryMax:     defaultRetryMax,
@@ -174,6 +213,12 @@ func defaultDispatcher[T any](
 		nil
 }
 
+func discardPanic() {
+	if r := recover(); r != nil {
+		return
+	}
+}
+
 func (p *Processor[T]) reportPublishError(
 	ctx context.Context,
 	event asynxmd.Event[T],
@@ -183,7 +228,7 @@ func (p *Processor[T]) reportPublishError(
 		return
 	}
 
-	defer func() { _ = recover() }()
+	defer discardPanic()
 	p.onPublishErr(
 		ctx,
 		event,

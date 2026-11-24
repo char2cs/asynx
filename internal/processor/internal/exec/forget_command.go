@@ -21,10 +21,17 @@ func NewForgetCommand[T any](
 	return &ForgetCommand[T]{id: aggregateID}
 }
 
-func (c *ForgetCommand[T]) AggregateID() string  { return c.id }
-func (c *ForgetCommand[T]) EventName() string    { return models.ForgetEventName }
+// AggregateID returns the ID of the aggregate to forget.
+func (c *ForgetCommand[T]) AggregateID() string { return c.id }
+
+// EventName returns the name of the tombstone event.
+func (c *ForgetCommand[T]) EventName() string { return models.ForgetEventName }
+
+// ShouldSnapshot reports false: a tombstone is never snapshotted.
 func (c *ForgetCommand[T]) ShouldSnapshot() bool { return false }
 
+// Validate captures the current state of the aggregate for the tombstone and
+// fails when the aggregate does not exist.
 func (c *ForgetCommand[T]) Validate(
 	current *T,
 ) error {
@@ -40,12 +47,12 @@ func (c *ForgetCommand[T]) Validate(
 	return nil
 }
 
+// EmitEvent returns the state captured by Validate as the tombstone payload.
 func (c *ForgetCommand[T]) EmitEvent(
 	_ *T,
-) T {
+) (state T) {
 	if c.last == nil {
-		var zero T
-		return zero
+		return state
 	}
 
 	return *c.last

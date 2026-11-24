@@ -9,6 +9,7 @@ import (
 // All other operations succeed silently.
 type ErrBus[T any] struct{ Err error }
 
+// Publish returns Err.
 func (b *ErrBus[T]) Publish(
 	_ context.Context,
 	_ models.Event[T],
@@ -16,6 +17,7 @@ func (b *ErrBus[T]) Publish(
 	return b.Err
 }
 
+// PublishSync returns Err.
 func (b *ErrBus[T]) PublishSync(
 	_ context.Context,
 	_ models.Event[T],
@@ -23,6 +25,7 @@ func (b *ErrBus[T]) PublishSync(
 	return b.Err
 }
 
+// Subscribe registers nothing and returns an empty ID.
 func (b *ErrBus[T]) Subscribe(
 	_ string,
 	_ models.ProjectionHandler[T],
@@ -32,16 +35,19 @@ func (b *ErrBus[T]) Subscribe(
 		nil
 }
 
+// Unsubscribe does nothing and succeeds.
 func (b *ErrBus[T]) Unsubscribe(
 	_ string,
 ) error {
 	return nil
 }
 
+// Close does nothing and succeeds.
 func (b *ErrBus[T]) Close(
 	_ context.Context,
 ) error {
 	return nil
 }
 
+// WaitForHandlers returns immediately.
 func (b *ErrBus[T]) WaitForHandlers() {}

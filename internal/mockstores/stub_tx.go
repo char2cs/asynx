@@ -10,6 +10,7 @@ type stubTx struct {
 	deleteFn func(context.Context, string) error
 }
 
+// Append discards the data and succeeds.
 func (t stubTx) Append(
 	ctx context.Context,
 	id string,
@@ -24,6 +25,7 @@ func (t stubTx) Append(
 	)
 }
 
+// DeleteStream delegates to the configured delete function.
 func (t stubTx) DeleteStream(
 	ctx context.Context,
 	id string,
@@ -34,6 +36,7 @@ func (t stubTx) DeleteStream(
 	)
 }
 
+// DropDeliveries does nothing and succeeds.
 func (stubTx) DropDeliveries(
 	context.Context,
 	string,
@@ -41,6 +44,7 @@ func (stubTx) DropDeliveries(
 	return nil
 }
 
+// PutReceipt does nothing and succeeds.
 func (stubTx) PutReceipt(
 	context.Context,
 	string,
@@ -49,6 +53,7 @@ func (stubTx) PutReceipt(
 	return nil
 }
 
+// EnqueueDelivery does nothing and succeeds.
 func (stubTx) EnqueueDelivery(
 	context.Context,
 	string,
@@ -57,4 +62,5 @@ func (stubTx) EnqueueDelivery(
 	return nil
 }
 
+// Native returns nil because the transaction has no native handle.
 func (stubTx) Native() any { return nil }

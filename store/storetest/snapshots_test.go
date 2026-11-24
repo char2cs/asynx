@@ -9,13 +9,14 @@ import (
 func TestMemorySnapshotStoreConforms(
 	t *testing.T,
 ) {
+	newStore := func(
+		*testing.T,
+	) models.SnapshotStore {
+		return store.NewSnapshots()
+	}
 	RunSnapshots(
 		t,
-		func(
-			*testing.T,
-		) models.SnapshotStore {
-			return store.NewSnapshots()
-		},
+		newStore,
 	)
 }
 

@@ -2,6 +2,7 @@ package asynx
 
 import (
 	"context"
+	"errors"
 	"github.com/char2cs/asynx/internal/bus"
 	"github.com/char2cs/asynx/internal/eventstore"
 	"github.com/char2cs/asynx/internal/firsterror"
@@ -15,26 +16,50 @@ import (
 // Build requires WithEventStore and WithSnapshotStore; all other options have
 // defaults.
 func (b *Builder[T]) Build() (Asynx[T], error) {
-	if b.eventStore == nil {
+	err := b.requireStores()
+	if err != nil {
 		return nil,
-			models.ErrMissingEventStore
-	}
-
-	if b.snapshotStore == nil {
-		return nil,
-			models.ErrMissingSnapshotStore
+			err
 	}
 
 	activeBus := b.activeBus()
+	es := b.newEventStore()
 
-	es := eventstore.New[T](
-		b.eventStore,
-		b.snapshotStore,
-		maps.Clone(b.upcasters),
-		b.schemaVersion,
-		b.corruptionHook,
+	proc, err := b.newProcessor(
+		es,
+		activeBus,
 	)
+	if err != nil {
+		return nil,
+			err
+	}
 
+	instance := &asynxImpl[T]{
+		proc: proc,
+		es:   es,
+		bus:  activeBus,
+	}
+
+	err = b.finish(
+		instance,
+		proc,
+	)
+	if err != nil {
+		return nil,
+			withCleanup(
+				err,
+				shutdownProcessor(proc),
+			)
+	}
+
+	return instance,
+		nil
+}
+
+func (b *Builder[T]) newProcessor(
+	es eventstore.EventStore[T],
+	activeBus models.Bus[T],
+) (processor.Processor[T], error) {
 	procOpts, err := b.processorOpts()
 	if err != nil {
 		return nil,
@@ -47,35 +72,37 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 		procOpts...,
 	)
 	if err != nil {
-		closeAbandonedBus(activeBus)
 		return nil,
-			err
+			withCleanup(
+				err,
+				closeAbandonedBus(activeBus),
+			)
 	}
 
-	instance := &asynxImpl[T]{
-		proc: proc,
-		es:   es,
-		bus:  activeBus,
-	}
-
-	built := false
-	defer shutdownUnlessBuilt(
-		proc,
-		&built,
-	)
-
-	err = b.finish(
-		instance,
-		proc,
-	)
-	if err != nil {
-		return nil,
-			err
-	}
-
-	built = true
-	return instance,
+	return proc,
 		nil
+}
+
+func (b *Builder[T]) requireStores() error {
+	if b.eventStore == nil {
+		return models.ErrMissingEventStore
+	}
+
+	if b.snapshotStore == nil {
+		return models.ErrMissingSnapshotStore
+	}
+
+	return nil
+}
+
+func (b *Builder[T]) newEventStore() eventstore.EventStore[T] {
+	return eventstore.New[T](
+		b.eventStore,
+		b.snapshotStore,
+		maps.Clone(b.upcasters),
+		b.schemaVersion,
+		b.corruptionHook,
+	)
 }
 
 func (b *Builder[T]) activeBus() models.Bus[T] {
@@ -124,29 +151,37 @@ func (b *Builder[T]) processorOpts() ([]procmodels.Opt[T], error) {
 			durableMatch,
 		)...,
 	)
-	if b.snapshotErrHandler != nil {
-		procOpts = append(
+
+	return append(
 			procOpts,
+			b.handlerOpts()...,
+		),
+		nil
+}
+
+func (b *Builder[T]) handlerOpts() (opts []procmodels.Opt[T]) {
+	if b.snapshotErrHandler != nil {
+		opts = append(
+			opts,
 			procmodels.WithSnapshotErrorHandler(b.snapshotErrHandler),
 		)
 	}
 
 	if b.publishErrorHandler != nil {
-		procOpts = append(
-			procOpts,
+		opts = append(
+			opts,
 			procmodels.WithPublishErrorHandler[T](b.publishErrorHandler),
 		)
 	}
 
 	if b.dispatcherFactory != nil {
-		procOpts = append(
-			procOpts,
+		opts = append(
+			opts,
 			procmodels.WithDispatcherFactory(b.dispatcherFactory),
 		)
 	}
 
-	return procOpts,
-		nil
+	return opts
 }
 
 func (b *Builder[T]) durableOpts(
@@ -175,13 +210,19 @@ func (b *Builder[T]) durableOpts(
 		)
 	}
 
-	opts = append(
+	return append(
 		opts,
+		b.retryOpts()...,
+	)
+}
+
+func (b *Builder[T]) retryOpts() []procmodels.Opt[T] {
+	opts := []procmodels.Opt[T]{
 		procmodels.WithDeliveryRetry[T](
 			b.retryInitial,
 			b.retryMax,
 		),
-	)
+	}
 	if b.maxAttempts > 0 {
 		opts = append(
 			opts,
@@ -203,14 +244,16 @@ func (b *Builder[T]) finish(
 	instance *asynxImpl[T],
 	proc processor.Processor[T],
 ) error {
+	register := func(
+		fn models.ForgetHandler[T],
+	) error {
+		_, err := instance.OnForget(fn)
+		return err
+	}
+
 	err := firsterror.Of(
 		b.forgetHandlers,
-		func(
-			fn models.ForgetHandler[T],
-		) error {
-			_, err := instance.OnForget(fn)
-			return err
-		},
+		register,
 	)
 	if err != nil {
 		return err
@@ -226,31 +269,42 @@ func (b *Builder[T]) finish(
 	)
 }
 
-func shutdownUnlessBuilt[T any](
-	proc processor.Processor[T],
-	built *bool,
-) {
-	if *built {
-		return
+func withCleanup(
+	err error,
+	cleanupErr error,
+) error {
+	if cleanupErr == nil {
+		return err
 	}
 
+	return errors.Join(
+		err,
+		cleanupErr,
+	)
+}
+
+func shutdownProcessor[T any](
+	proc processor.Processor[T],
+) error {
 	sctx, cancel := context.WithTimeout(
 		context.Background(),
 		failedBuildShutdown,
 	)
 	defer cancel()
-	_ = proc.Shutdown(sctx)
+
+	return proc.Shutdown(sctx)
 }
 
 func closeAbandonedBus[T any](
 	activeBus models.Bus[T],
-) {
+) error {
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
 		failedBuildShutdown,
 	)
 	defer cancel()
-	_ = activeBus.Close(ctx)
+
+	return activeBus.Close(ctx)
 }
 
 const failedBuildShutdown = 30 * time.Second

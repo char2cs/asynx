@@ -7,42 +7,83 @@ import (
 	"github.com/char2cs/asynx/internal/mocks"
 	"github.com/char2cs/asynx/models"
 	"github.com/char2cs/asynx/store"
+	"slices"
 	"sync"
 	"testing"
 )
 
+type orderRecorder struct {
+	mu    sync.Mutex
+	order []string
+}
+
+func (r *orderRecorder) rec(
+	name string,
+) func(context.Context, models.Tx, models.Event[mocks.Order]) error {
+	return func(
+		_ context.Context,
+		_ models.Tx,
+		e models.Event[mocks.Order],
+	) error {
+		r.add(name + ":" + e.EventName)
+		return nil
+	}
+}
+
+func (r *orderRecorder) add(
+	entry string,
+) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.order = append(
+		r.order,
+		entry,
+	)
+}
+
+func (r *orderRecorder) calls() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append(
+		[]string(nil),
+		r.order...,
+	)
+}
+
+func requireCalls(
+	t *testing.T,
+	got []string,
+	want []string,
+) {
+	t.Helper()
+
+	if !slices.Equal(
+		got,
+		want,
+	) {
+		t.Fatalf(
+			"calls = %v, want %v",
+			got,
+			want,
+		)
+	}
+}
+
 func TestGuarantee_SyncProjectionPatternsRegexAndOrder(
 	t *testing.T,
 ) {
-	var mu sync.Mutex
-	var order []string
-	rec := func(
-		name string,
-	) func(context.Context, models.Tx, models.Event[mocks.Order]) error {
-		return func(
-			_ context.Context,
-			_ models.Tx,
-			e models.Event[mocks.Order],
-		) error {
-			mu.Lock()
-			order = append(
-				order,
-				name+":"+e.EventName,
-			)
-			mu.Unlock()
-			return nil
-		}
-	}
+	recorder := &orderRecorder{}
 	inst := build(
 		t,
 		eight(store.New()).
 			WithSyncProjection(
 				"^Order(Created|Updated)$",
-				rec("regex"),
+				recorder.rec("regex"),
 			).
 			WithSyncProjection(
 				"OrderUpdated",
-				rec("exact"),
+				recorder.rec("exact"),
 			),
 	)
 
@@ -59,45 +100,83 @@ func TestGuarantee_SyncProjectionPatternsRegexAndOrder(
 		),
 	)
 
-	mu.Lock()
-	defer mu.Unlock()
-	want := []string{"regex:OrderCreated", "regex:OrderUpdated", "exact:OrderUpdated"}
-	if len(order) != len(want) {
+	requireCalls(
+		t,
+		recorder.calls(),
+		[]string{"regex:OrderCreated", "regex:OrderUpdated", "exact:OrderUpdated"},
+	)
+}
+
+func noopSyncProjection(
+	context.Context,
+	models.Tx,
+	models.Event[mocks.Order],
+) error {
+	return nil
+}
+
+func noopSubscriber(
+	context.Context,
+	models.Event[mocks.Order],
+) error {
+	return nil
+}
+
+func requireBuildErr(
+	t *testing.T,
+	b *asynx.Builder[mocks.Order],
+	want error,
+) {
+	t.Helper()
+
+	_, err := b.Build()
+	if !errors.Is(
+		err,
+		want,
+	) {
 		t.Fatalf(
-			"calls = %v, want %v",
-			order,
+			"Build err = %v, want %v",
+			err,
 			want,
 		)
 	}
+}
 
-	for i := range want {
-		if order[i] != want[i] {
-			t.Fatalf(
-				"calls = %v, want %v",
-				order,
-				want,
-			)
-		}
+func requireBuildFails(
+	t *testing.T,
+	b *asynx.Builder[mocks.Order],
+	msg string,
+) {
+	t.Helper()
+
+	_, err := b.Build()
+	if err == nil {
+		t.Fatal(msg)
 	}
+}
+
+type buildCase struct {
+	b    *asynx.Builder[mocks.Order]
+	want error
+}
+
+func (c buildCase) run(
+	t *testing.T,
+) {
+	requireBuildErr(
+		t,
+		c.b,
+		c.want,
+	)
 }
 
 func TestGuarantee_BuildRejectsBadProjectionsAndSubscribers(
 	t *testing.T,
 ) {
-	noop := func(
-		context.Context,
-		models.Tx,
-		models.Event[mocks.Order],
-	) error {
-		return nil
-	}
-	cases := map[string]struct {
-		b    *asynx.Builder[mocks.Order]
-		want error
-	}{
+	cases := map[string]buildCase{
 		"empty projection pattern": {eight(store.New()).WithSyncProjection(
 			"",
-			noop,
+			noopSyncProjection,
 		), models.ErrEmptyPattern},
 		"nil projection fn": {eight(store.New()).WithSyncProjection(
 			"X",
@@ -105,12 +184,7 @@ func TestGuarantee_BuildRejectsBadProjectionsAndSubscribers(
 		), models.ErrNilHandler},
 		"empty subscriber pattern": {eight(store.New()).WithSubscriber(
 			"",
-			func(
-				context.Context,
-				models.Event[mocks.Order],
-			) error {
-				return nil
-			},
+			noopSubscriber,
 		), models.ErrEmptyPattern},
 		"nil subscriber handler": {eight(store.New()).WithSubscriber(
 			"X",
@@ -120,41 +194,32 @@ func TestGuarantee_BuildRejectsBadProjectionsAndSubscribers(
 	for name, tc := range cases {
 		t.Run(
 			name,
-			func(
-				t *testing.T,
-			) {
-				if _, err := tc.b.Build(); !errors.Is(
-					err,
-					tc.want,
-				) {
-					t.Fatalf(
-						"Build err = %v, want %v",
-						err,
-						tc.want,
-					)
-				}
-			},
+			tc.run,
 		)
 	}
 
-	if _, err := eight(store.New()).WithSyncProjection(
-		"(unclosed",
-		noop,
-	).Build(); err == nil {
-		t.Fatal("invalid regexp pattern was accepted")
-	}
+	requireBuildFails(
+		t,
+		eight(store.New()).WithSyncProjection(
+			"(unclosed",
+			noopSyncProjection,
+		),
+		"invalid regexp pattern was accepted",
+	)
+	requireBuildFails(
+		t,
+		eight(store.New()).WithSubscriber(
+			"(unclosed",
+			noopSubscriber,
+		),
+		"invalid subscriber pattern was accepted",
+	)
+}
 
-	if _, err := eight(store.New()).WithSubscriber(
-		"(unclosed",
-		func(
-			context.Context,
-			models.Event[mocks.Order],
-		) error {
-			return nil
-		},
-	).Build(); err == nil {
-		t.Fatal("invalid subscriber pattern was accepted")
-	}
+func noopFallback(
+	context.Context,
+	models.Event[mocks.Order],
+) {
 }
 
 func TestGuarantee_DurableFallbackIsRejectedAtBuild(
@@ -163,17 +228,8 @@ func TestGuarantee_DurableFallbackIsRejectedAtBuild(
 	_, err := eight(store.New()).
 		WithSubscriber(
 			"OrderUpdated",
-			func(
-				context.Context,
-				models.Event[mocks.Order],
-			) error {
-				return nil
-			},
-			models.WithFallback(func(
-				context.Context,
-				models.Event[mocks.Order],
-			) {
-			}),
+			noopSubscriber,
+			models.WithFallback(noopFallback),
 		).
 		Build()
 	if !errors.Is(

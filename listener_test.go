@@ -12,6 +12,265 @@ import (
 	"time"
 )
 
+type lstEvents = <-chan models.Event[mocks.Order]
+
+func lstListen(
+	t *testing.T,
+	instance asynx.Asynx[mocks.Order],
+	pattern string,
+	count int,
+	label string,
+) (lstEvents, func()) {
+	t.Helper()
+
+	ch, unsub, err := instance.Listen(
+		pattern,
+		count,
+	)
+	if err != nil {
+		t.Fatalf(
+			"%sListen: %v",
+			label,
+			err,
+		)
+	}
+
+	return ch,
+		unsub
+}
+
+func lstSendWait(
+	t *testing.T,
+	instance asynx.Asynx[mocks.Order],
+	cmd mocks.CreateOrderCmd,
+	what string,
+) {
+	t.Helper()
+
+	_, err := instance.SendWait(
+		context.Background(),
+		cmd,
+	)
+	if err != nil {
+		t.Fatalf(
+			"%s: %v",
+			what,
+			err,
+		)
+	}
+}
+
+func lstRecv(
+	t *testing.T,
+	ch lstEvents,
+	timeoutMsg string,
+) models.Event[mocks.Order] {
+	t.Helper()
+
+	select {
+	case evt := <-ch:
+		return evt
+	case <-time.After(2 * time.Second):
+		t.Fatal(timeoutMsg)
+	}
+
+	return models.Event[mocks.Order]{}
+}
+
+func lstRecvOpen(
+	t *testing.T,
+	ch lstEvents,
+) {
+	t.Helper()
+
+	select {
+	case _, ok := <-ch:
+		lstRequireTrue(
+			t,
+			ok,
+			"channel closed before delivering event",
+		)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for event")
+	}
+}
+
+func lstRecvClosed(
+	t *testing.T,
+	ch lstEvents,
+) {
+	t.Helper()
+
+	select {
+	case _, ok := <-ch:
+		lstRequireTrue(
+			t,
+			!ok,
+			"expected channel to be closed after count events",
+		)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for channel close")
+	}
+}
+
+func lstRequireTrue(
+	t *testing.T,
+	cond bool,
+	msg string,
+) {
+	t.Helper()
+
+	if !cond {
+		t.Fatal(msg)
+	}
+}
+
+func lstExpectSilent(
+	t *testing.T,
+	ch lstEvents,
+	wait time.Duration,
+	label string,
+) {
+	t.Helper()
+
+	select {
+	case evt, ok := <-ch:
+		lstRequireTrue(
+			t,
+			!ok,
+			fmt.Sprintf(
+				"%s: %v",
+				label,
+				evt,
+			),
+		)
+	case <-time.After(wait):
+	}
+}
+
+func lstExpectEventID(
+	t *testing.T,
+	ch lstEvents,
+	expected string,
+	idx int,
+) {
+	t.Helper()
+
+	select {
+	case evt := <-ch:
+		lstRequireTrue(
+			t,
+			evt.AggregateID == expected,
+			fmt.Sprintf(
+				"expected %s, got %s",
+				expected,
+				evt.AggregateID,
+			),
+		)
+	case <-time.After(2 * time.Second):
+		t.Fatalf(
+			"timed out waiting for event %d",
+			idx,
+		)
+	}
+}
+
+func lstSendWaitSeries(
+	t *testing.T,
+	instance asynx.Asynx[mocks.Order],
+	prefix string,
+	n int,
+) {
+	t.Helper()
+
+	for i := range n {
+		lstSendWait(
+			t,
+			instance,
+			mocks.CreateOrderCmd{ID: fmt.Sprintf(
+				"%s-%d",
+				prefix,
+				i,
+			), Total: float64(i + 1)},
+			"SendWait",
+		)
+	}
+}
+
+func lstSendOne(
+	wg *sync.WaitGroup,
+	instance asynx.Asynx[mocks.Order],
+	id string,
+	total float64,
+) {
+	defer wg.Done()
+	instance.Send(
+		context.Background(),
+		mocks.CreateOrderCmd{ID: id, Total: total},
+	)
+}
+
+func lstSendBurst(
+	wg *sync.WaitGroup,
+	instance asynx.Asynx[mocks.Order],
+	prefix string,
+	iter int,
+	n int,
+) {
+	for i := range n {
+		wg.Add(1)
+		go lstSendOne(
+			wg,
+			instance,
+			fmt.Sprintf(
+				"%s-%d-%d",
+				prefix,
+				iter,
+				i,
+			),
+			float64(i+1),
+		)
+	}
+}
+
+func lstDrain(
+	ch lstEvents,
+) {
+	for range ch {
+	}
+}
+
+func lstDrainThenClose(
+	ch lstEvents,
+	drained chan<- struct{},
+) {
+	lstDrain(ch)
+	close(drained)
+}
+
+func lstNext(
+	t *testing.T,
+	ch lstEvents,
+	deadline <-chan time.Time,
+	what string,
+	got int,
+) bool {
+	t.Helper()
+
+	select {
+	case _, ok := <-ch:
+		return ok
+	case <-deadline:
+		t.Fatalf(
+			"%s: timed out: got %d events, channel not closed",
+			what,
+			got,
+		)
+	}
+
+	return false
+}
+
 func TestListen_EmptyPattern(
 	t *testing.T,
 ) {
@@ -33,40 +292,32 @@ func TestListen_EventArrivesBeforeDeadline(
 ) {
 	instance := newInstance(t)
 
-	ch, unsub, err := instance.Listen(
+	ch, unsub := lstListen(
+		t,
+		instance,
 		"OrderCreated",
 		1,
+		"",
 	)
-	if err != nil {
-		t.Fatalf(
-			"Listen: %v",
-			err,
-		)
-	}
-
 	defer unsub()
 
-	cmd := mocks.CreateOrderCmd{ID: "listen-1", Total: 50.0}
-	if _, err := instance.SendWait(
-		context.Background(),
-		cmd,
-	); err != nil {
-		t.Fatalf(
-			"SendWait: %v",
-			err,
-		)
-	}
+	lstSendWait(
+		t,
+		instance,
+		mocks.CreateOrderCmd{ID: "listen-1", Total: 50.0},
+		"SendWait",
+	)
 
-	select {
-	case evt := <-ch:
-		if evt.AggregateID != "listen-1" {
-			t.Fatalf(
-				"expected AggregateID listen-1, got %q",
-				evt.AggregateID,
-			)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for event")
+	evt := lstRecv(
+		t,
+		ch,
+		"timed out waiting for event",
+	)
+	if evt.AggregateID != "listen-1" {
+		t.Fatalf(
+			"expected AggregateID listen-1, got %q",
+			evt.AggregateID,
+		)
 	}
 }
 
@@ -75,40 +326,29 @@ func TestListen_UnsubscribeCleansUp(
 ) {
 	instance := newInstance(t)
 
-	ch, unsub, err := instance.Listen(
+	ch, unsub := lstListen(
+		t,
+		instance,
 		"OrderCreated",
 		0,
+		"",
 	)
-	if err != nil {
-		t.Fatalf(
-			"Listen: %v",
-			err,
-		)
-	}
 
 	unsub()
 
-	cmd := mocks.CreateOrderCmd{ID: "listen-unsub", Total: 50.0}
-	if _, err := instance.SendWait(
-		context.Background(),
-		cmd,
-	); err != nil {
-		t.Fatalf(
-			"SendWait: %v",
-			err,
-		)
-	}
+	lstSendWait(
+		t,
+		instance,
+		mocks.CreateOrderCmd{ID: "listen-unsub", Total: 50.0},
+		"SendWait",
+	)
 
-	select {
-	case evt, ok := <-ch:
-		if ok {
-			t.Fatalf(
-				"expected no event after unsub, got %v",
-				evt,
-			)
-		}
-	case <-time.After(200 * time.Millisecond):
-	}
+	lstExpectSilent(
+		t,
+		ch,
+		200*time.Millisecond,
+		"expected no event after unsub, got",
+	)
 }
 
 func TestListen_UnsubIsIdempotent(
@@ -116,16 +356,13 @@ func TestListen_UnsubIsIdempotent(
 ) {
 	instance := newInstance(t)
 
-	_, unsub, err := instance.Listen(
+	_, unsub := lstListen(
+		t,
+		instance,
 		"OrderCreated",
 		0,
+		"",
 	)
-	if err != nil {
-		t.Fatalf(
-			"Listen: %v",
-			err,
-		)
-	}
 
 	unsub()
 	unsub()
@@ -136,46 +373,96 @@ func TestListen_CountAutoCloses(
 ) {
 	instance := newInstance(t)
 
+	ch, unsub := lstListen(
+		t,
+		instance,
+		"OrderCreated",
+		1,
+		"",
+	)
+	defer unsub()
+
+	lstSendWait(
+		t,
+		instance,
+		mocks.CreateOrderCmd{ID: "listen-auto", Total: 50.0},
+		"SendWait",
+	)
+
+	lstRecvOpen(
+		t,
+		ch,
+	)
+	lstRecvClosed(
+		t,
+		ch,
+	)
+}
+
+func lstRaceOnce(
+	t *testing.T,
+	instance asynx.Asynx[mocks.Order],
+	w int,
+	n int,
+) bool {
 	ch, unsub, err := instance.Listen(
 		"OrderCreated",
 		1,
 	)
 	if err != nil {
-		t.Fatalf(
+		t.Errorf(
 			"Listen: %v",
 			err,
 		)
+		return false
 	}
 
-	defer unsub()
-
-	cmd := mocks.CreateOrderCmd{ID: "listen-auto", Total: 50.0}
-	if _, err := instance.SendWait(
+	id := fmt.Sprintf(
+		"listen-race-%d-%d",
+		w,
+		n,
+	)
+	_, err = instance.Send(
 		context.Background(),
-		cmd,
-	); err != nil {
-		t.Fatalf(
-			"SendWait: %v",
+		mocks.CreateOrderCmd{ID: id, Total: 10},
+	)
+	if err != nil {
+		t.Errorf(
+			"Send: %v",
 			err,
 		)
+		unsub()
+		return false
 	}
 
 	select {
-	case _, ok := <-ch:
-		if !ok {
-			t.Fatal("channel closed before delivering event")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for event")
+	case <-ch:
+		unsub()
+		return true
+	case <-time.After(5 * time.Second):
+		t.Error("timed out waiting for event")
+		unsub()
+		return false
 	}
+}
 
-	select {
-	case _, ok := <-ch:
-		if ok {
-			t.Fatal("expected channel to be closed after count events")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for channel close")
+func lstRaceWorker(
+	t *testing.T,
+	wg *sync.WaitGroup,
+	instance asynx.Asynx[mocks.Order],
+	w int,
+	iterations int,
+) {
+	defer wg.Done()
+
+	ok := true
+	for n := 0; ok && n < iterations; n++ {
+		ok = lstRaceOnce(
+			t,
+			instance,
+			w,
+			n,
+		)
 	}
 }
 
@@ -188,50 +475,13 @@ func TestListen_UnsubRightAfterLastEventDoesNotDoubleClose(
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
-		go func(
-			w int,
-		) {
-			defer wg.Done()
-			for n := 0; n < iterations; n++ {
-				ch, unsub, err := instance.Listen(
-					"OrderCreated",
-					1,
-				)
-				if err != nil {
-					t.Errorf(
-						"Listen: %v",
-						err,
-					)
-					return
-				}
-
-				id := fmt.Sprintf(
-					"listen-race-%d-%d",
-					w,
-					n,
-				)
-				if _, err := instance.Send(
-					context.Background(),
-					mocks.CreateOrderCmd{ID: id, Total: 10},
-				); err != nil {
-					t.Errorf(
-						"Send: %v",
-						err,
-					)
-					unsub()
-					return
-				}
-
-				select {
-				case <-ch:
-					unsub()
-				case <-time.After(5 * time.Second):
-					t.Error("timed out waiting for event")
-					unsub()
-					return
-				}
-			}
-		}(w)
+		go lstRaceWorker(
+			t,
+			&wg,
+			instance,
+			w,
+			iterations,
+		)
 	}
 
 	wg.Wait()
@@ -242,40 +492,32 @@ func TestListen_BufferedChannelPreservesEvent(
 ) {
 	instance := newInstance(t)
 
-	ch, unsub, err := instance.Listen(
+	ch, unsub := lstListen(
+		t,
+		instance,
 		"OrderCreated",
 		1,
+		"",
 	)
-	if err != nil {
-		t.Fatalf(
-			"Listen: %v",
-			err,
-		)
-	}
-
 	defer unsub()
 
-	cmd := mocks.CreateOrderCmd{ID: "listen-buf", Total: 75.0}
-	if _, err := instance.SendWait(
-		context.Background(),
-		cmd,
-	); err != nil {
-		t.Fatalf(
-			"SendWait: %v",
-			err,
-		)
-	}
+	lstSendWait(
+		t,
+		instance,
+		mocks.CreateOrderCmd{ID: "listen-buf", Total: 75.0},
+		"SendWait",
+	)
 
-	select {
-	case evt := <-ch:
-		if evt.Aggregate.Total != 75.0 {
-			t.Fatalf(
-				"expected Total 75.0, got %f",
-				evt.Aggregate.Total,
-			)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("event was lost — not in buffer")
+	evt := lstRecv(
+		t,
+		ch,
+		"event was lost — not in buffer",
+	)
+	if evt.Aggregate.Total != 75.0 {
+		t.Fatalf(
+			"expected Total 75.0, got %f",
+			evt.Aggregate.Total,
+		)
 	}
 }
 
@@ -284,55 +526,32 @@ func TestListen_Unbounded_ReceivesMultipleEvents(
 ) {
 	instance := newInstance(t)
 
-	ch, unsub, err := instance.Listen(
+	ch, unsub := lstListen(
+		t,
+		instance,
 		"OrderCreated",
 		0,
+		"",
 	)
-	if err != nil {
-		t.Fatalf(
-			"Listen: %v",
-			err,
-		)
-	}
-
 	defer unsub()
 
-	for i := range 3 {
-		cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf(
-			"listen-ub-%d",
-			i,
-		), Total: float64(i + 1)}
-		if _, err := instance.SendWait(
-			context.Background(),
-			cmd,
-		); err != nil {
-			t.Fatalf(
-				"SendWait: %v",
-				err,
-			)
-		}
-	}
+	lstSendWaitSeries(
+		t,
+		instance,
+		"listen-ub",
+		3,
+	)
 
 	for i := range 3 {
-		select {
-		case evt := <-ch:
-			expected := fmt.Sprintf(
+		lstExpectEventID(
+			t,
+			ch,
+			fmt.Sprintf(
 				"listen-ub-%d",
 				i,
-			)
-			if evt.AggregateID != expected {
-				t.Fatalf(
-					"expected %s, got %s",
-					expected,
-					evt.AggregateID,
-				)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf(
-				"timed out waiting for event %d",
-				i,
-			)
-		}
+			),
+			i,
+		)
 	}
 }
 
@@ -341,40 +560,32 @@ func TestListen_UsesTopicPattern(
 ) {
 	instance := newInstance(t)
 
-	ch, unsub, err := instance.Listen(
+	ch, unsub := lstListen(
+		t,
+		instance,
 		"*",
 		1,
+		"",
 	)
-	if err != nil {
-		t.Fatalf(
-			"Listen: %v",
-			err,
-		)
-	}
-
 	defer unsub()
 
-	cmd := mocks.CreateOrderCmd{ID: "listen-topic", Total: 10.0}
-	if _, err := instance.SendWait(
-		context.Background(),
-		cmd,
-	); err != nil {
-		t.Fatalf(
-			"SendWait: %v",
-			err,
-		)
-	}
+	lstSendWait(
+		t,
+		instance,
+		mocks.CreateOrderCmd{ID: "listen-topic", Total: 10.0},
+		"SendWait",
+	)
 
-	select {
-	case evt := <-ch:
-		if evt.AggregateID != "listen-topic" {
-			t.Fatalf(
-				"expected listen-topic, got %q",
-				evt.AggregateID,
-			)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("topic pattern did not match — Listen should use Topic() internally")
+	evt := lstRecv(
+		t,
+		ch,
+		"topic pattern did not match — Listen should use Topic() internally",
+	)
+	if evt.AggregateID != "listen-topic" {
+		t.Fatalf(
+			"expected listen-topic, got %q",
+			evt.AggregateID,
+		)
 	}
 }
 
@@ -422,84 +633,74 @@ func TestListen_CountOverflow_DoesNotBlock(
 	}
 }
 
+func lstOverflowIter(
+	t *testing.T,
+	iter int,
+) {
+	instance := newInstance(t)
+
+	const count = 1
+	label := fmt.Sprintf(
+		"iter %d: ",
+		iter,
+	)
+	ch, unsub := lstListen(
+		t,
+		instance,
+		"OrderCreated",
+		count,
+		label,
+	)
+	defer unsub()
+
+	var wg sync.WaitGroup
+	lstSendBurst(
+		&wg,
+		instance,
+		"ovfc",
+		iter,
+		16,
+	)
+
+	wg.Wait()
+	waitPublish(
+		t,
+		instance,
+	)
+
+	got := 0
+	deadline := time.After(2 * time.Second)
+	for lstNext(
+		t,
+		ch,
+		deadline,
+		fmt.Sprintf(
+			"iter %d",
+			iter,
+		),
+		got,
+	) {
+		got++
+	}
+
+	if got != count {
+		t.Fatalf(
+			"iter %d: expected %d events before close, got %d",
+			iter,
+			count,
+			got,
+		)
+	}
+}
+
 func TestListen_CountOverflowConcurrent_GuardsEnforced(
 	t *testing.T,
 ) {
 	for iter := range 10 {
-		func() {
-			instance := newInstance(t)
-
-			const count = 1
-			ch, unsub, err := instance.Listen(
-				"OrderCreated",
-				count,
-			)
-			if err != nil {
-				t.Fatalf(
-					"iter %d: Listen: %v",
-					iter,
-					err,
-				)
-			}
-
-			defer unsub()
-
-			const total = 16
-			var wg sync.WaitGroup
-			for i := range total {
-				wg.Add(1)
-				go func(
-					idx int,
-				) {
-					defer wg.Done()
-					instance.Send(
-						context.Background(),
-						mocks.CreateOrderCmd{
-							ID: fmt.Sprintf(
-								"ovfc-%d-%d",
-								iter,
-								idx,
-							),
-							Total: float64(idx + 1),
-						},
-					)
-				}(i)
-			}
-
-			wg.Wait()
-			waitPublish(
-				t,
-				instance,
-			)
-
-			got := 0
-			deadline := time.After(2 * time.Second)
-			for {
-				select {
-				case _, ok := <-ch:
-					if !ok {
-						if got != count {
-							t.Fatalf(
-								"iter %d: expected %d events before close, got %d",
-								iter,
-								count,
-								got,
-							)
-						}
-
-						return
-					}
-
-					got++
-				case <-deadline:
-					t.Fatalf(
-						"iter %d: timed out: got %d events, channel not closed",
-						iter,
-						got,
-					)
-				}
-			}
-		}()
+		lstOverflowIter(
+			t,
+			iter,
+		)
 	}
 }
 
@@ -548,99 +749,76 @@ func TestListen_NegativeCount_TreatedAsZero(
 
 	defer unsub()
 
-	for i := range 2 {
-		cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf(
-			"neg-%d",
-			i,
-		), Total: float64(i + 1)}
-		if _, err := instance.SendWait(
-			context.Background(),
-			cmd,
-		); err != nil {
-			t.Fatalf(
-				"SendWait: %v",
-				err,
-			)
-		}
-	}
+	lstSendWaitSeries(
+		t,
+		instance,
+		"neg",
+		2,
+	)
 
 	for i := range 2 {
-		select {
-		case evt := <-ch:
-			expected := fmt.Sprintf(
+		lstExpectEventID(
+			t,
+			ch,
+			fmt.Sprintf(
 				"neg-%d",
 				i,
-			)
-			if evt.AggregateID != expected {
-				t.Fatalf(
-					"expected %s, got %s",
-					expected,
-					evt.AggregateID,
-				)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf(
-				"timed out waiting for event %d",
-				i,
-			)
-		}
+			),
+			i,
+		)
 	}
+}
+
+func lstRaceIter(
+	t *testing.T,
+	iter int,
+	count int,
+	sends int,
+	prefix string,
+) {
+	instance := newInstance(t)
+
+	ch, unsub := lstListen(
+		t,
+		instance,
+		"OrderCreated",
+		count,
+		fmt.Sprintf(
+			"iter %d: ",
+			iter,
+		),
+	)
+	defer unsub()
+
+	go lstDrain(ch)
+
+	var wg sync.WaitGroup
+	lstSendBurst(
+		&wg,
+		instance,
+		prefix,
+		iter,
+		sends,
+	)
+
+	wg.Wait()
+	waitPublish(
+		t,
+		instance,
+	)
 }
 
 func TestListen_BoundedRace_NOverCount(
 	t *testing.T,
 ) {
 	for iter := range 10 {
-		func() {
-			instance := newInstance(t)
-
-			const count = 1
-			ch, unsub, err := instance.Listen(
-				"OrderCreated",
-				count,
-			)
-			if err != nil {
-				t.Fatalf(
-					"iter %d: Listen: %v",
-					iter,
-					err,
-				)
-			}
-
-			defer unsub()
-
-			go func() {
-				for range ch {
-				}
-			}()
-
-			var wg sync.WaitGroup
-			for i := range 100 {
-				wg.Add(1)
-				go func(
-					idx int,
-				) {
-					defer wg.Done()
-					instance.Send(
-						context.Background(),
-						mocks.CreateOrderCmd{
-							ID: fmt.Sprintf(
-								"race1-%d-%d",
-								iter,
-								idx,
-							),
-							Total: float64(idx + 1),
-						},
-					)
-				}(i)
-			}
-
-			wg.Wait()
-			waitPublish(
-				t,
-				instance,
-			)
-		}()
+		lstRaceIter(
+			t,
+			iter,
+			1,
+			100,
+			"race1",
+		)
 	}
 }
 
@@ -648,175 +826,182 @@ func TestListen_BoundedRace_PostClosedGuard(
 	t *testing.T,
 ) {
 	for iter := range 10 {
-		func() {
-			instance := newInstance(t)
-
-			const count = 5
-			ch, unsub, err := instance.Listen(
-				"OrderCreated",
-				count,
-			)
-			if err != nil {
-				t.Fatalf(
-					"iter %d: Listen: %v",
-					iter,
-					err,
-				)
-			}
-
-			defer unsub()
-
-			go func() {
-				for range ch {
-				}
-			}()
-
-			var wg sync.WaitGroup
-			for i := range 50 {
-				wg.Add(1)
-				go func(
-					idx int,
-				) {
-					defer wg.Done()
-					instance.Send(
-						context.Background(),
-						mocks.CreateOrderCmd{
-							ID: fmt.Sprintf(
-								"race2-%d-%d",
-								iter,
-								idx,
-							),
-							Total: float64(idx + 1),
-						},
-					)
-				}(i)
-			}
-
-			wg.Wait()
-			waitPublish(
-				t,
-				instance,
-			)
-		}()
+		lstRaceIter(
+			t,
+			iter,
+			5,
+			50,
+			"race2",
+		)
 	}
+}
+
+func lstUnsubDuringHandlerIter(
+	t *testing.T,
+	iter int,
+) {
+	instance := newInstance(t)
+
+	ch, unsub := lstListen(
+		t,
+		instance,
+		"OrderCreated",
+		50,
+		fmt.Sprintf(
+			"iter %d: ",
+			iter,
+		),
+	)
+
+	drained := make(chan struct{})
+	go lstDrainThenClose(
+		ch,
+		drained,
+	)
+
+	var wg sync.WaitGroup
+	lstSendBurst(
+		&wg,
+		instance,
+		"uh",
+		iter,
+		20,
+	)
+
+	unsub()
+	wg.Wait()
+
+	<-drained
+	instance.Shutdown(context.Background())
 }
 
 func TestListen_UnsubDuringHandler_BoundedReturnsCleanly(
 	t *testing.T,
 ) {
 	for iter := 0; iter < 100; iter++ {
-		instance := newInstance(t)
-
-		ch, unsub, err := instance.Listen(
-			"OrderCreated",
-			50,
+		lstUnsubDuringHandlerIter(
+			t,
+			iter,
 		)
-		if err != nil {
-			t.Fatalf(
-				"iter %d: Listen: %v",
-				iter,
-				err,
-			)
-		}
-
-		drained := make(chan struct{})
-		go func() {
-			for range ch {
-			}
-
-			close(drained)
-		}()
-
-		var wg sync.WaitGroup
-		for j := 0; j < 20; j++ {
-			wg.Add(1)
-			go func(
-				idx int,
-			) {
-				defer wg.Done()
-				cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf(
-					"uh-%d-%d",
-					iter,
-					idx,
-				), Total: 1.0}
-				_, _ = instance.Send(
-					context.Background(),
-					cmd,
-				)
-			}(j)
-		}
-
-		unsub()
-		wg.Wait()
-
-		<-drained
-		instance.Shutdown(context.Background())
 	}
+}
+
+func lstImmediateFireIter(
+	t *testing.T,
+	iter int,
+) {
+	instance := newInstance(t)
+
+	label := fmt.Sprintf(
+		"iter %d: ",
+		iter,
+	)
+	ch, unsub := lstListen(
+		t,
+		instance,
+		"OrderCreated",
+		1,
+		label,
+	)
+
+	lstSendWait(
+		t,
+		instance,
+		mocks.CreateOrderCmd{ID: "leak-1", Total: 1.0},
+		label+"SendWait",
+	)
+
+	lstRecv(
+		t,
+		ch,
+		label+"did not receive event",
+	)
+
+	lstSendWait(
+		t,
+		instance,
+		mocks.CreateOrderCmd{ID: "leak-2", Total: 1.0},
+		label+"SendWait 2",
+	)
+
+	lstExpectSilent(
+		t,
+		ch,
+		50*time.Millisecond,
+		label+"leaked event on closed-channel sub",
+	)
+
+	unsub()
+	instance.Shutdown(context.Background())
 }
 
 func TestListen_BoundedSubID_NoLeakOnImmediateFire(
 	t *testing.T,
 ) {
 	for iter := 0; iter < 50; iter++ {
-		instance := newInstance(t)
-
-		ch, unsub, err := instance.Listen(
-			"OrderCreated",
-			1,
+		lstImmediateFireIter(
+			t,
+			iter,
 		)
-		if err != nil {
-			t.Fatalf(
-				"iter %d: Listen: %v",
-				iter,
-				err,
-			)
-		}
+	}
+}
 
-		if _, err := instance.SendWait(
-			context.Background(),
-			mocks.CreateOrderCmd{ID: "leak-1", Total: 1.0},
-		); err != nil {
-			t.Fatalf(
-				"iter %d: SendWait: %v",
-				iter,
-				err,
-			)
-		}
+func lstUnsubThenClose(
+	unsub func(),
+	done chan<- struct{},
+) {
+	unsub()
+	close(done)
+}
 
-		select {
-		case <-ch:
-		case <-time.After(2 * time.Second):
-			t.Fatalf(
-				"iter %d: did not receive event",
-				iter,
-			)
-		}
+func lstTake(
+	ch lstEvents,
+	deadline <-chan time.Time,
+) bool {
+	select {
+	case <-ch:
+		return true
+	case <-deadline:
+		return false
+	}
+}
 
-		if _, err := instance.SendWait(
-			context.Background(),
-			mocks.CreateOrderCmd{ID: "leak-2", Total: 1.0},
-		); err != nil {
-			t.Fatalf(
-				"iter %d: SendWait 2: %v",
-				iter,
-				err,
-			)
-		}
+func lstFill(
+	t *testing.T,
+	instance asynx.Asynx[mocks.Order],
+	n int,
+) {
+	t.Helper()
 
-		select {
-		case evt, ok := <-ch:
-			if ok {
-				t.Fatalf(
-					"iter %d: leaked event %v on closed-channel sub",
-					iter,
-					evt,
-				)
-			}
-		case <-time.After(50 * time.Millisecond):
-		}
+	for i := range n {
+		lstSendFill(
+			t,
+			instance,
+			i,
+		)
+	}
+}
 
-		unsub()
-		instance.Shutdown(context.Background())
+func lstSendFill(
+	t *testing.T,
+	instance asynx.Asynx[mocks.Order],
+	i int,
+) {
+	t.Helper()
+
+	_, err := instance.Send(
+		context.Background(),
+		mocks.CreateOrderCmd{ID: fmt.Sprintf(
+			"fill-%d",
+			i,
+		), Total: 1.0},
+	)
+	if err != nil {
+		t.Fatalf(
+			"Send %d: %v",
+			i,
+			err,
+		)
 	}
 }
 
@@ -825,33 +1010,19 @@ func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(
 ) {
 	instance := newInstance(t)
 
-	ch, unsub, err := instance.Listen(
+	ch, unsub := lstListen(
+		t,
+		instance,
 		"OrderCreated",
 		0,
+		"",
 	)
-	if err != nil {
-		t.Fatalf(
-			"Listen: %v",
-			err,
-		)
-	}
 
-	for i := range 25 {
-		cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf(
-			"fill-%d",
-			i,
-		), Total: 1.0}
-		if _, err := instance.Send(
-			context.Background(),
-			cmd,
-		); err != nil {
-			t.Fatalf(
-				"Send %d: %v",
-				i,
-				err,
-			)
-		}
-	}
+	lstFill(
+		t,
+		instance,
+		25,
+	)
 
 	eventually(
 		t,
@@ -860,10 +1031,10 @@ func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(
 	)
 
 	done := make(chan struct{})
-	go func() {
-		unsub()
-		close(done)
-	}()
+	go lstUnsubThenClose(
+		unsub,
+		done,
+	)
 
 	select {
 	case <-done:
@@ -872,92 +1043,75 @@ func TestListen_UnboundedMode_UnsubReleasesBlockedHandler(
 	}
 
 	drainTimeout := time.After(500 * time.Millisecond)
-	for {
-		select {
-		case <-ch:
-		case <-drainTimeout:
-			return
-		}
+	for lstTake(
+		ch,
+		drainTimeout,
+	) {
 	}
+}
+
+func lstConcurrentIter(
+	t *testing.T,
+	iter int,
+) {
+	instance := newInstance(t)
+
+	const count = 5
+	what := fmt.Sprintf(
+		"iter %d",
+		iter,
+	)
+	ch, unsub := lstListen(
+		t,
+		instance,
+		"OrderCreated",
+		count,
+		what+": ",
+	)
+
+	var wg sync.WaitGroup
+	lstSendBurst(
+		&wg,
+		instance,
+		"br",
+		iter,
+		count,
+	)
+
+	wg.Wait()
+
+	received := 0
+	deadline := time.After(5 * time.Second)
+	for lstNext(
+		t,
+		ch,
+		deadline,
+		what,
+		received,
+	) {
+		received++
+	}
+
+	if received != count {
+		t.Fatalf(
+			"iter %d: received %d events, want %d (close-race bug?)",
+			iter,
+			received,
+			count,
+		)
+	}
+
+	unsub()
+	instance.Shutdown(context.Background())
 }
 
 func TestListen_BoundedConcurrent_DeliversAllCountEvents(
 	t *testing.T,
 ) {
 	for iter := 0; iter < 20; iter++ {
-		instance := newInstance(t)
-
-		const count = 5
-		ch, unsub, err := instance.Listen(
-			"OrderCreated",
-			count,
+		lstConcurrentIter(
+			t,
+			iter,
 		)
-		if err != nil {
-			t.Fatalf(
-				"iter %d: Listen: %v",
-				iter,
-				err,
-			)
-		}
-
-		var wg sync.WaitGroup
-		for j := 0; j < count; j++ {
-			wg.Add(1)
-			go func(
-				idx int,
-			) {
-				defer wg.Done()
-				cmd := mocks.CreateOrderCmd{ID: fmt.Sprintf(
-					"br-%d-%d",
-					iter,
-					idx,
-				), Total: float64(idx + 1)}
-				_, _ = instance.Send(
-					context.Background(),
-					cmd,
-				)
-			}(j)
-		}
-
-		wg.Wait()
-
-		received := 0
-		drainCtx, cancel := context.WithTimeout(
-			context.Background(),
-			5*time.Second,
-		)
-		for {
-			select {
-			case _, ok := <-ch:
-				if !ok {
-					goto done
-				}
-
-				received++
-			case <-drainCtx.Done():
-				cancel()
-				t.Fatalf(
-					"iter %d: timed out waiting for events; received %d/%d",
-					iter,
-					received,
-					count,
-				)
-			}
-		}
-
-	done:
-		cancel()
-
-		if received != count {
-			t.Fatalf(
-				"iter %d: received %d events, want %d (close-race bug?)",
-				iter,
-				received,
-				count,
-			)
-		}
-
-		unsub()
-		instance.Shutdown(context.Background())
 	}
 }

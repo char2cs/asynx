@@ -21,16 +21,18 @@ import (
 	"github.com/char2cs/asynx/store"
 )
 
+func forgetAlways(
+	string,
+) bool {
+	return true
+}
+
 func TestForget_ErasesStreamSnapshotAndPendingDeliveries(
 	t *testing.T,
 ) {
 	ex, s, ss, d, _ := newEnv(
 		t,
-		WithDurableDelivery[order](func(
-			string,
-		) bool {
-			return true
-		}),
+		WithDurableDelivery[order](forgetAlways),
 	)
 	ctx := context.Background()
 
@@ -38,24 +40,26 @@ func TestForget_ErasesStreamSnapshotAndPendingDeliveries(
 	if _, err := ex.Execute(
 		ctx,
 		cmd,
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
 
 	d.WaitIdle()
-	s.Atomically(
+	enqueue := func(
+		tx asynxmd.Tx,
+	) error {
+		return tx.EnqueueDelivery(
+			ctx,
+			"agg",
+			1,
+		)
+	}
+	if err := s.Atomically(
 		ctx,
-		func(
-			tx asynxmd.Tx,
-		) error {
-			return tx.EnqueueDelivery(
-				ctx,
-				"agg",
-				1,
-			)
-		},
-	)
+		enqueue,
+	); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := ex.Forget(
 		ctx,
@@ -107,26 +111,26 @@ func TestForget_DeliversTombstoneWithLastStateBeforeErasing(
 			"agg",
 			42,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
 
 	var gotTotal float64
 	var streamAtHandler int
+	record := func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) {
+		gotTotal = e.Aggregate.Total
+		streamAtHandler = streamLen(
+			t,
+			s,
+			"agg",
+		)
+	}
 	b.Subscribe(
 		"asynx\\.aggregate\\.forget",
-		func(
-			_ context.Context,
-			e asynxmd.Event[order],
-		) {
-			gotTotal = e.Aggregate.Total
-			streamAtHandler = streamLen(
-				t,
-				s,
-				"agg",
-			)
-		},
+		record,
 	)
 
 	if err := ex.Forget(
@@ -168,22 +172,25 @@ func TestForget_UnknownAggregateIsValidationError(
 
 type deleteFailStore struct{ store.Memory }
 
+// Atomically is the test double implementation for the code under test.
 func (s deleteFailStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
 ) error {
+	wrap := func(
+		tx asynxmd.Tx,
+	) error {
+		return fn(deleteFailTx{tx})
+	}
 	return s.Memory.Atomically(
 		ctx,
-		func(
-			tx asynxmd.Tx,
-		) error {
-			return fn(deleteFailTx{tx})
-		},
+		wrap,
 	)
 }
 
 type deleteFailTx struct{ asynxmd.Tx }
 
+// DeleteStream is the test double implementation for the code under test.
 func (deleteFailTx) DeleteStream(
 	context.Context,
 	string,
@@ -204,7 +211,6 @@ func TestForget_DeleteFailureReturnsErrForgetFailed(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +243,6 @@ func TestForget_ErasePhaseFailureParksTheAggregate(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -290,126 +295,202 @@ func TestForget_LockWaitHonoursContext(
 	}
 }
 
+func forgetOrUpdate(
+	ctx context.Context,
+	t *testing.T,
+	ex *CommandExecutor[order],
+	i int,
+) {
+	if i == forgetWorker {
+		requireForgotten(
+			ctx,
+			t,
+			ex,
+		)
+		return
+	}
+
+	_, err := ex.Execute(
+		ctx,
+		update(
+			"agg",
+			float64(i),
+		),
+	)
+	if err != nil &&
+		!errors.Is(
+			err,
+			asynxmd.ErrForgetInProgress,
+		) {
+		t.Errorf(
+			"Execute: %v",
+			err,
+		)
+	}
+}
+
+func requireForgotten(
+	ctx context.Context,
+	t *testing.T,
+	ex *CommandExecutor[order],
+) {
+	if err := ex.Forget(
+		ctx,
+		"agg",
+	); err != nil {
+		t.Errorf(
+			"Forget: %v",
+			err,
+		)
+	}
+}
+
+const forgetWorker = 6
+
+func requireNoGaps(
+	t *testing.T,
+	blobs [][]byte,
+) {
+	t.Helper()
+	for i, blob := range blobs {
+		requireVersionAt(
+			t,
+			blob,
+			i+1,
+		)
+	}
+}
+
+func requireVersionAt(
+	t *testing.T,
+	blob []byte,
+	position int,
+) {
+	t.Helper()
+	var evt esmodels.InternalEvent
+	if err := json.Unmarshal(
+		blob,
+		&evt,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if evt.Version != int64(position) {
+		t.Fatalf(
+			"stream has version %d at position %d: history is gapped",
+			evt.Version,
+			position,
+		)
+	}
+}
+
+func forgetOrUpdateDone(
+	ctx context.Context,
+	t *testing.T,
+	ex *CommandExecutor[order],
+	wg *sync.WaitGroup,
+	i int,
+) {
+	defer wg.Done()
+	forgetOrUpdate(
+		ctx,
+		t,
+		ex,
+		i,
+	)
+}
+
 func TestForget_ConcurrentWithUpdatesNeverLeavesAGappedStream(
 	t *testing.T,
 ) {
 	for range 20 {
-		ex, s, _, _, _ := newEnv(t)
-		ctx := context.Background()
-		if _, err := ex.Execute(
-			ctx,
-			update(
-				"agg",
-				1,
-			),
-			false,
-		); err != nil {
-			t.Fatal(err)
-		}
-
-		var wg sync.WaitGroup
-		for i := range 12 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				if i == 6 {
-					if err := ex.Forget(
-						ctx,
-						"agg",
-					); err != nil {
-						t.Errorf(
-							"Forget: %v",
-							err,
-						)
-					}
-
-					return
-				}
-
-				_, err := ex.Execute(
-					ctx,
-					update(
-						"agg",
-						float64(i),
-					),
-					false,
-				)
-				if err != nil &&
-					!errors.Is(
-						err,
-						asynxmd.ErrForgetInProgress,
-					) {
-					t.Errorf(
-						"Execute: %v",
-						err,
-					)
-				}
-			}()
-		}
-
-		wg.Wait()
-
-		blobs, _ := s.ReadFrom(
-			ctx,
-			"events:agg",
-			1,
-		)
-		for i, blob := range blobs {
-			var evt esmodels.InternalEvent
-			if err := json.Unmarshal(
-				blob,
-				&evt,
-			); err != nil {
-				t.Fatal(err)
-			}
-
-			if evt.Version != int64(i+1) {
-				t.Fatalf(
-					"stream has version %d at position %d: history is gapped",
-					evt.Version,
-					i+1,
-				)
-			}
-		}
+		runConcurrentForgetRound(t)
 	}
+}
+
+func runConcurrentForgetRound(
+	t *testing.T,
+) {
+	ex, s, _, _, _ := newEnv(t)
+	ctx := context.Background()
+	if _, err := ex.Execute(
+		ctx,
+		update(
+			"agg",
+			1,
+		),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for i := range 12 {
+		wg.Add(1)
+		go forgetOrUpdateDone(
+			ctx,
+			t,
+			ex,
+			&wg,
+			i,
+		)
+	}
+
+	wg.Wait()
+
+	blobs, _ := s.ReadFrom(
+		ctx,
+		"events:agg",
+		1,
+	)
+	requireNoGaps(
+		t,
+		blobs,
+	)
+}
+
+func matchTombstone(
+	name string,
+) bool {
+	return name == "asynx.aggregate.forget"
+}
+
+func matchNothing(
+	string,
+) bool {
+	return false
+}
+
+func failNever(
+	context.Context,
+	asynxmd.Tx,
+	asynxmd.Event[order],
+) error {
+	return errors.New("never")
 }
 
 func TestForget_RunsSyncProjectionsForTheTombstone(
 	t *testing.T,
 ) {
 	var names []string
+	record := func(
+		_ context.Context,
+		_ asynxmd.Tx,
+		e asynxmd.Event[order],
+	) error {
+		names = append(
+			names,
+			e.EventName,
+		)
+		return nil
+	}
 	ex, _, _, _, _ := newEnv(
 		t,
 		WithSyncProjections[order]([]models.SyncProjection[order]{{
-			Match: func(
-				name string,
-			) bool {
-				return name == "asynx.aggregate.forget"
-			},
-			Fn: func(
-				_ context.Context,
-				_ asynxmd.Tx,
-				e asynxmd.Event[order],
-			) error {
-				names = append(
-					names,
-					e.EventName,
-				)
-				return nil
-			},
+			Match: matchTombstone,
+			Fn:    record,
 		}, {
-			Match: func(
-				string,
-			) bool {
-				return false
-			},
-			Fn: func(
-				context.Context,
-				asynxmd.Tx,
-				asynxmd.Event[order],
-			) error {
-				return errors.New("never")
-			},
+			Match: matchNothing,
+			Fn:    failNever,
 		}}),
 	)
 	ctx := context.Background()
@@ -419,7 +500,6 @@ func TestForget_RunsSyncProjectionsForTheTombstone(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -440,23 +520,30 @@ func TestForget_RunsSyncProjectionsForTheTombstone(
 	}
 }
 
+func readModelState(
+	down bool,
+) error {
+	if down {
+		return errors.New("read model down")
+	}
+
+	return nil
+}
+
 func TestForget_SyncProjectionFailureAbortsBeforeErasing(
 	t *testing.T,
 ) {
 	failing := false
+	projection := func(
+		context.Context,
+		asynxmd.Tx,
+		asynxmd.Event[order],
+	) error {
+		return readModelState(failing)
+	}
 	ex, s, _, _, _ := newEnv(
 		t,
-		syncAll(func(
-			context.Context,
-			asynxmd.Tx,
-			asynxmd.Event[order],
-		) error {
-			if failing {
-				return errors.New("read model down")
-			}
-
-			return nil
-		}),
+		syncAll(projection),
 	)
 	ctx := context.Background()
 	if _, err := ex.Execute(
@@ -465,7 +552,6 @@ func TestForget_SyncProjectionFailureAbortsBeforeErasing(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -523,7 +609,6 @@ func TestForget_WithoutDispatcherStillErases(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -552,11 +637,7 @@ func TestForget_AfterDispatcherClosedFailsPipeline(
 ) {
 	ex, _, _, d, _ := newEnv(
 		t,
-		WithDurableDelivery[order](func(
-			string,
-		) bool {
-			return true
-		}),
+		WithDurableDelivery[order](forgetAlways),
 	)
 	ctx := context.Background()
 	if _, err := ex.Execute(
@@ -565,7 +646,6 @@ func TestForget_AfterDispatcherClosedFailsPipeline(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -616,7 +696,6 @@ func TestForget_WithoutDurableDeliveryWritesNoMarkerEntry(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -646,78 +725,134 @@ func TestForget_WithoutDurableDeliveryWritesNoMarkerEntry(
 	}
 }
 
+func hammer(
+	ctx context.Context,
+	ex *CommandExecutor[order],
+	returned *atomic.Bool,
+	stop <-chan struct{},
+	bad chan<- error,
+) {
+	defer close(bad)
+	for running := true; running && !isClosed(stop); {
+		running = hammerStep(
+			ctx,
+			ex,
+			returned,
+			bad,
+		)
+	}
+}
+
+func hammerStep(
+	ctx context.Context,
+	ex *CommandExecutor[order],
+	returned *atomic.Bool,
+	bad chan<- error,
+) bool {
+	err := hammerOnce(
+		ctx,
+		ex,
+		returned,
+	)
+	if err != nil {
+		bad <- err
+	}
+
+	return err == nil
+}
+
+func isClosed(
+	stop <-chan struct{},
+) bool {
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
+	}
+}
+
+func hammerOnce(
+	ctx context.Context,
+	ex *CommandExecutor[order],
+	returned *atomic.Bool,
+) error {
+	after := returned.Load()
+	_, err := ex.Execute(
+		ctx,
+		update(
+			"agg",
+			2,
+		),
+	)
+	if after &&
+		errors.Is(
+			err,
+			asynxmd.ErrForgetInProgress,
+		) {
+		return err
+	}
+
+	return nil
+}
+
 func TestForget_NoCommandIsRefusedAfterItReturns(
 	t *testing.T,
 ) {
 	for range 200 {
-		ex, _, _, _, _ := newEnv(t)
-		ctx := context.Background()
-		if _, err := ex.Execute(
-			ctx,
-			update(
-				"agg",
-				1,
-			),
-			false,
-		); err != nil {
-			t.Fatal(err)
-		}
+		runRefusalRound(t)
+	}
+}
 
-		var returned atomic.Bool
-		bad := make(
-			chan error,
-			1,
-		)
-		stop := make(chan struct{})
-		go func() {
-			defer close(bad)
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-
-				after := returned.Load()
-				_, err := ex.Execute(
-					ctx,
-					update(
-						"agg",
-						2,
-					),
-					false,
-				)
-				if after &&
-					errors.Is(
-						err,
-						asynxmd.ErrForgetInProgress,
-					) {
-					bad <- err
-					return
-				}
-			}
-		}()
-		if err := ex.Forget(
-			ctx,
+func runRefusalRound(
+	t *testing.T,
+) {
+	ex, _, _, _, _ := newEnv(t)
+	ctx := context.Background()
+	if _, err := ex.Execute(
+		ctx,
+		update(
 			"agg",
-		); err != nil {
-			t.Fatal(err)
-		}
+			1,
+		),
+	); err != nil {
+		t.Fatal(err)
+	}
 
-		returned.Store(true)
-		runtime.Gosched()
-		close(stop)
-		if err := <-bad; err != nil {
-			t.Fatalf(
-				"command refused after Forget returned: %v",
-				err,
-			)
-		}
+	var returned atomic.Bool
+	bad := make(
+		chan error,
+		1,
+	)
+	stop := make(chan struct{})
+	go hammer(
+		ctx,
+		ex,
+		&returned,
+		stop,
+		bad,
+	)
+	if err := ex.Forget(
+		ctx,
+		"agg",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	returned.Store(true)
+	runtime.Gosched()
+	close(stop)
+	if err := <-bad; err != nil {
+		t.Fatalf(
+			"command refused after Forget returned: %v",
+			err,
+		)
 	}
 }
 
 type snapshotDeleteFailStore struct{ asynxmd.SnapshotStore }
 
+// Delete is the test double implementation for the code under test.
 func (snapshotDeleteFailStore) Delete(
 	context.Context,
 	string,
@@ -747,7 +882,6 @@ func TestForget_SnapshotDeleteFailureReturnsErrForgetFailed(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -766,6 +900,95 @@ func TestForget_SnapshotDeleteFailureReturnsErrForgetFailed(
 	}
 }
 
+func reactToFirstVersion(
+	ctx context.Context,
+	ex *CommandExecutor[order],
+	e asynxmd.Event[order],
+	started chan<- struct{},
+	release <-chan struct{},
+) {
+	if e.Version != 1 {
+		return
+	}
+
+	close(started)
+	<-release
+	if _, err := ex.Execute(
+		ctx,
+		update(
+			"agg",
+			99,
+		),
+	); err != nil {
+		return
+	}
+}
+
+func forgetAsync(
+	ctx context.Context,
+	ex *CommandExecutor[order],
+	id string,
+) <-chan error {
+	out := make(
+		chan error,
+		1,
+	)
+	go deliverForget(
+		ctx,
+		ex,
+		id,
+		out,
+	)
+	return out
+}
+
+func deliverForget(
+	ctx context.Context,
+	ex *CommandExecutor[order],
+	id string,
+	out chan<- error,
+) {
+	out <- ex.Forget(
+		ctx,
+		id,
+	)
+}
+
+func requireForgetDone(
+	t *testing.T,
+	done <-chan error,
+	timeoutMsg string,
+) {
+	t.Helper()
+	select {
+	case err := <-done:
+		requireNoError(
+			t,
+			"Forget",
+			err,
+		)
+	case <-time.After(forgetTimeout):
+		t.Fatal(timeoutMsg)
+	}
+}
+
+func requireNoError(
+	t *testing.T,
+	what string,
+	err error,
+) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf(
+			"%s: %v",
+			what,
+			err,
+		)
+	}
+}
+
+const forgetTimeout = 5 * time.Second
+
 func TestForget_DoesNotDeadlockWithAReactionToItsOwnAggregate(
 	t *testing.T,
 ) {
@@ -774,27 +997,21 @@ func TestForget_DoesNotDeadlockWithAReactionToItsOwnAggregate(
 
 	started := make(chan struct{})
 	release := make(chan struct{})
+	react := func(
+		hctx context.Context,
+		e asynxmd.Event[order],
+	) {
+		reactToFirstVersion(
+			hctx,
+			ex,
+			e,
+			started,
+			release,
+		)
+	}
 	b.Subscribe(
 		"OrderUpdated",
-		func(
-			hctx context.Context,
-			e asynxmd.Event[order],
-		) {
-			if e.Version != 1 {
-				return
-			}
-
-			close(started)
-			<-release
-			ex.Execute(
-				hctx,
-				update(
-					"agg",
-					99,
-				),
-				false,
-			)
-		},
+		react,
 	)
 
 	if _, err := ex.Execute(
@@ -803,23 +1020,17 @@ func TestForget_DoesNotDeadlockWithAReactionToItsOwnAggregate(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
 
 	<-started
 
-	forgot := make(
-		chan error,
-		1,
+	forgot := forgetAsync(
+		ctx,
+		ex,
+		"agg",
 	)
-	go func() {
-		forgot <- ex.Forget(
-			ctx,
-			"agg",
-		)
-	}()
 	for !ex.isForgetting("agg") {
 		runtime.Gosched()
 	}
@@ -834,17 +1045,11 @@ func TestForget_DoesNotDeadlockWithAReactionToItsOwnAggregate(
 
 	close(release)
 
-	select {
-	case err := <-forgot:
-		if err != nil {
-			t.Fatalf(
-				"Forget: %v",
-				err,
-			)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Forget deadlocked against a reaction to its own aggregate")
-	}
+	requireForgetDone(
+		t,
+		forgot,
+		"Forget deadlocked against a reaction to its own aggregate",
+	)
 
 	if n := streamLen(
 		t,
@@ -880,7 +1085,6 @@ func TestForget_SnapshotIsDeletedBeforeTheStream(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -953,34 +1157,29 @@ func TestForget_SecondConcurrentForgetIsRefusedWhileOneRuns(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	hold := func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		close(entered)
+		<-release
+	}
 	b.Subscribe(
 		"asynx\\.aggregate\\.forget",
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) {
-			close(entered)
-			<-release
-		},
+		hold,
 	)
 
-	first := make(
-		chan error,
-		1,
+	first := forgetAsync(
+		ctx,
+		ex,
+		"agg",
 	)
-	go func() {
-		first <- ex.Forget(
-			ctx,
-			"agg",
-		)
-	}()
 	<-entered
 
 	if err := ex.Forget(
@@ -1002,7 +1201,6 @@ func TestForget_SecondConcurrentForgetIsRefusedWhileOneRuns(
 			"agg",
 			2,
 		),
-		false,
 	); !errors.Is(
 		err,
 		asynxmd.ErrForgetInProgress,
@@ -1032,35 +1230,30 @@ func TestForget_AbortsWhenTheCallerGivesUpWaitingForHandlers(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	hold := func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		close(entered)
+		<-release
+	}
 	b.Subscribe(
 		"asynx\\.aggregate\\.forget",
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) {
-			close(entered)
-			<-release
-		},
+		hold,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	got := make(
-		chan error,
-		1,
+	got := forgetAsync(
+		ctx,
+		ex,
+		"agg",
 	)
-	go func() {
-		got <- ex.Forget(
-			ctx,
-			"agg",
-		)
-	}()
 	<-entered
 	cancel()
 	if err := <-got; !errors.Is(
@@ -1089,7 +1282,6 @@ func TestForget_AbortsWhenTheCallerGivesUpWaitingForHandlers(
 			"agg",
 			2,
 		),
-		false,
 	); errors.Is(
 		err,
 		asynxmd.ErrForgetInProgress,
@@ -1108,7 +1300,6 @@ func TestForget_FailsWhenTheDispatcherIsClosed(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1134,7 +1325,6 @@ func TestForget_FailsWhenTheDispatcherIsClosed(
 			"agg",
 			2,
 		),
-		false,
 	); errors.Is(
 		err,
 		asynxmd.ErrForgetInProgress,
@@ -1160,11 +1350,10 @@ func durableEnv(
 	)
 	cfg := asynxmd.DispatcherConfig[order]{
 		Bus: bus.New[order](),
-		DurableSubs: []asynxmd.DurableSub[order]{{Match: func(
-			string,
-		) bool {
-			return true
-		}, Handler: handler}},
+		DurableSubs: []asynxmd.DurableSub[order]{{
+			Match:   forgetAlways,
+			Handler: handler,
+		}},
 		RetryInitial: time.Millisecond,
 		RetryMax:     2 * time.Millisecond,
 		MaxAttempts:  2,
@@ -1178,12 +1367,19 @@ func durableEnv(
 	return New(
 		es,
 		d,
-		WithDurableDelivery[order](func(
-			string,
-		) bool {
-			return true
-		}),
+		WithDurableDelivery[order](forgetAlways),
 	)
+}
+
+func refuseTombstone(
+	_ context.Context,
+	e asynxmd.Event[order],
+) error {
+	if e.EventName == asynxmd.ForgetEventName {
+		return errors.New("cannot drop state")
+	}
+
+	return nil
 }
 
 func TestForget_DoesNotEraseWhenADurableSubscriberCannotTakeTheTombstone(
@@ -1191,25 +1387,15 @@ func TestForget_DoesNotEraseWhenADurableSubscriberCannotTakeTheTombstone(
 ) {
 	ex := durableEnv(
 		t,
-		func(
-			_ context.Context,
-			e asynxmd.Event[order],
-		) error {
-			if e.EventName == asynxmd.ForgetEventName {
-				return errors.New("cannot drop state")
-			}
-
-			return nil
-		},
+		refuseTombstone,
 	)
 	ctx := context.Background()
-	if _, err := ex.Execute(
+	if _, err := ex.ExecuteWait(
 		ctx,
 		update(
 			"agg",
 			1,
 		),
-		true,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1262,6 +1448,22 @@ func TestForget_DoesNotEraseWhenADurableSubscriberCannotTakeTheTombstone(
 	}
 }
 
+func forgetOwnAggregate(
+	ctx context.Context,
+	ex *CommandExecutor[order],
+	e asynxmd.Event[order],
+	got chan<- error,
+) error {
+	if e.EventName != asynxmd.ForgetEventName {
+		got <- ex.Forget(
+			ctx,
+			e.AggregateID,
+		)
+	}
+
+	return nil
+}
+
 func TestForget_FromAHandlerOfTheSameAggregateFailsFast(
 	t *testing.T,
 ) {
@@ -1270,29 +1472,27 @@ func TestForget_FromAHandlerOfTheSameAggregateFailsFast(
 		chan error,
 		1,
 	)
+	handler := func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) error {
+		return forgetOwnAggregate(
+			ctx,
+			ex,
+			e,
+			got,
+		)
+	}
 	ex = durableEnv(
 		t,
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) error {
-			if e.EventName != asynxmd.ForgetEventName {
-				got <- ex.Forget(
-					ctx,
-					e.AggregateID,
-				)
-			}
-
-			return nil
-		},
+		handler,
 	)
-	if _, err := ex.Execute(
+	if _, err := ex.ExecuteWait(
 		context.Background(),
 		update(
 			"agg",
 			1,
 		),
-		true,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1312,6 +1512,23 @@ func TestForget_FromAHandlerOfTheSameAggregateFailsFast(
 	}
 }
 
+func forgetOtherAggregate(
+	ctx context.Context,
+	ex *CommandExecutor[order],
+	e asynxmd.Event[order],
+	got chan<- error,
+) error {
+	if e.EventName != asynxmd.ForgetEventName &&
+		e.AggregateID == "a" {
+		got <- ex.Forget(
+			ctx,
+			"b",
+		)
+	}
+
+	return nil
+}
+
 func TestForget_FromAHandlerOfAnotherAggregateIsAllowed(
 	t *testing.T,
 ) {
@@ -1320,42 +1537,38 @@ func TestForget_FromAHandlerOfAnotherAggregateIsAllowed(
 		chan error,
 		1,
 	)
+	handler := func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) error {
+		return forgetOtherAggregate(
+			ctx,
+			ex,
+			e,
+			got,
+		)
+	}
 	ex = durableEnv(
 		t,
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) error {
-			if e.EventName != asynxmd.ForgetEventName &&
-				e.AggregateID == "a" {
-				got <- ex.Forget(
-					ctx,
-					"b",
-				)
-			}
-
-			return nil
-		},
+		handler,
 	)
 	ctx := context.Background()
-	if _, err := ex.Execute(
+	if _, err := ex.ExecuteWait(
 		ctx,
 		update(
 			"b",
 			1,
 		),
-		true,
 	); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := ex.Execute(
+	if _, err := ex.ExecuteWait(
 		ctx,
 		update(
 			"a",
 			1,
 		),
-		true,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1368,6 +1581,24 @@ func TestForget_FromAHandlerOfAnotherAggregateIsAllowed(
 	}
 }
 
+func failUnlessTombstone(
+	e asynxmd.Event[order],
+	attempted chan<- struct{},
+) error {
+	if e.EventName == asynxmd.ForgetEventName {
+		return nil
+	}
+
+	attempted <- struct{}{}
+	return errors.New("poison")
+}
+
+func slowRetries(
+	cfg *asynxmd.DispatcherConfig[order],
+) {
+	cfg.RetryInitial, cfg.RetryMax, cfg.MaxAttempts = time.Hour, time.Hour, 100
+}
+
 func TestForget_LetsAFailingDeliveryGoWhenTheTombstoneIsAccepted(
 	t *testing.T,
 ) {
@@ -1375,24 +1606,19 @@ func TestForget_LetsAFailingDeliveryGoWhenTheTombstoneIsAccepted(
 		chan struct{},
 		8,
 	)
+	poison := func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) error {
+		return failUnlessTombstone(
+			e,
+			attempted,
+		)
+	}
 	ex := durableEnv(
 		t,
-		func(
-			_ context.Context,
-			e asynxmd.Event[order],
-		) error {
-			if e.EventName == asynxmd.ForgetEventName {
-				return nil
-			}
-
-			attempted <- struct{}{}
-			return errors.New("poison")
-		},
-		func(
-			cfg *asynxmd.DispatcherConfig[order],
-		) {
-			cfg.RetryInitial, cfg.RetryMax, cfg.MaxAttempts = time.Hour, time.Hour, 100
-		},
+		poison,
+		slowRetries,
 	)
 	ctx := context.Background()
 	if _, err := ex.Execute(
@@ -1401,34 +1627,22 @@ func TestForget_LetsAFailingDeliveryGoWhenTheTombstoneIsAccepted(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
 
 	<-attempted
 
-	done := make(
-		chan error,
-		1,
+	done := forgetAsync(
+		ctx,
+		ex,
+		"agg",
 	)
-	go func() {
-		done <- ex.Forget(
-			ctx,
-			"agg",
-		)
-	}()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf(
-				"Forget: %v",
-				err,
-			)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Forget held back by a failing delivery of the same aggregate")
-	}
+	requireForgetDone(
+		t,
+		done,
+		"Forget held back by a failing delivery of the same aggregate",
+	)
 }
 
 type deliveryFailStore struct {
@@ -1436,17 +1650,19 @@ type deliveryFailStore struct {
 	drop, enqueue bool
 }
 
+// Atomically is the test double implementation for the code under test.
 func (s deliveryFailStore) Atomically(
 	ctx context.Context,
 	fn func(asynxmd.Tx) error,
 ) error {
+	wrap := func(
+		tx asynxmd.Tx,
+	) error {
+		return fn(deliveryFailTx{Tx: tx, drop: s.drop, enqueue: s.enqueue})
+	}
 	return s.Memory.Atomically(
 		ctx,
-		func(
-			tx asynxmd.Tx,
-		) error {
-			return fn(deliveryFailTx{Tx: tx, drop: s.drop, enqueue: s.enqueue})
-		},
+		wrap,
 	)
 }
 
@@ -1455,6 +1671,7 @@ type deliveryFailTx struct {
 	drop, enqueue bool
 }
 
+// DropDeliveries is the test double implementation for the code under test.
 func (t deliveryFailTx) DropDeliveries(
 	ctx context.Context,
 	agg string,
@@ -1469,6 +1686,7 @@ func (t deliveryFailTx) DropDeliveries(
 	)
 }
 
+// EnqueueDelivery is the test double implementation for the code under test.
 func (t deliveryFailTx) EnqueueDelivery(
 	ctx context.Context,
 	agg string,
@@ -1492,68 +1710,100 @@ func TestForget_DeliveryLogFailureInTheTombstoneTransactionAbortsIt(
 		"drop":    {Memory: store.New(), drop: true},
 		"enqueue": {Memory: store.New(), enqueue: true},
 	} {
-		t.Run(
+		runDeliveryLogFailure(
+			t,
 			name,
-			func(
-				t *testing.T,
-			) {
-				ex, _, _, _, _ := newEnvOn(
-					t,
-					s,
-					WithDurableDelivery[order](func(
-						string,
-					) bool {
-						return true
-					}),
-				)
-				ctx := context.Background()
-				if _, err := eventstore.New[order](
-					s.Memory,
-					store.NewSnapshots(),
-					nil,
-					1,
-					nil,
-				).
-					Write(
-						ctx,
-						update(
-							"agg",
-							1,
-						),
-					); err != nil {
-					t.Fatal(err)
-				}
-
-				if err := ex.Forget(
-					ctx,
-					"agg",
-				); !errors.Is(
-					err,
-					asynxmd.ErrPipelineFailed,
-				) {
-					t.Fatalf(
-						"err = %v, want ErrPipelineFailed",
-						err,
-					)
-				}
-
-				if n := streamLen(
-					t,
-					s.Memory,
-					"agg",
-				); n != 1 {
-					t.Fatalf(
-						"stream length = %d, want the untouched 1: the tombstone must roll back",
-						n,
-					)
-				}
-
-				if ex.isForgetting("agg") {
-					t.Fatal("fence left up after the aborted tombstone")
-				}
-			},
+			s,
 		)
 	}
+}
+
+func runDeliveryLogFailure(
+	t *testing.T,
+	name string,
+	s deliveryFailStore,
+) {
+	run := func(
+		t *testing.T,
+	) {
+		requireTombstoneRollsBack(
+			t,
+			s,
+		)
+	}
+	t.Run(
+		name,
+		run,
+	)
+}
+
+func requireTombstoneRollsBack(
+	t *testing.T,
+	s deliveryFailStore,
+) {
+	ex, _, _, _, _ := newEnvOn(
+		t,
+		s,
+		WithDurableDelivery[order](forgetAlways),
+	)
+	ctx := context.Background()
+	if _, err := eventstore.New[order](
+		s.Memory,
+		store.NewSnapshots(),
+		nil,
+		1,
+		nil,
+	).
+		Write(
+			ctx,
+			update(
+				"agg",
+				1,
+			),
+		); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ex.Forget(
+		ctx,
+		"agg",
+	); !errors.Is(
+		err,
+		asynxmd.ErrPipelineFailed,
+	) {
+		t.Fatalf(
+			"err = %v, want ErrPipelineFailed",
+			err,
+		)
+	}
+
+	if n := streamLen(
+		t,
+		s.Memory,
+		"agg",
+	); n != 1 {
+		t.Fatalf(
+			"stream length = %d, want the untouched 1: the tombstone must roll back",
+			n,
+		)
+	}
+
+	if ex.isForgetting("agg") {
+		t.Fatal("fence left up after the aborted tombstone")
+	}
+}
+
+func blockUnlessTombstone(
+	e asynxmd.Event[order],
+	entered chan<- struct{},
+	release <-chan struct{},
+) error {
+	if e.EventName != asynxmd.ForgetEventName {
+		entered <- struct{}{}
+		<-release
+	}
+
+	return nil
 }
 
 func TestForget_GivesUpWhenShutdownBegins(
@@ -1564,19 +1814,19 @@ func TestForget_GivesUpWhenShutdownBegins(
 		1,
 	)
 	release := make(chan struct{})
+	block := func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) error {
+		return blockUnlessTombstone(
+			e,
+			entered,
+			release,
+		)
+	}
 	ex := durableEnv(
 		t,
-		func(
-			_ context.Context,
-			e asynxmd.Event[order],
-		) error {
-			if e.EventName != asynxmd.ForgetEventName {
-				entered <- struct{}{}
-				<-release
-			}
-
-			return nil
-		},
+		block,
 	)
 	ctx := context.Background()
 	if _, _, err := ex.ExecuteAsync(
@@ -1595,16 +1845,11 @@ func TestForget_GivesUpWhenShutdownBegins(
 		"the handler",
 	)
 
-	got := make(
-		chan error,
-		1,
+	got := forgetAsync(
+		ctx,
+		ex,
+		"agg",
 	)
-	go func() {
-		got <- ex.Forget(
-			ctx,
-			"agg",
-		)
-	}()
 	eventually(
 		t,
 		"the Forget to raise its fence",
@@ -1663,17 +1908,31 @@ func TestAwaitTombstone_PrefersADeliveryThatFinished(
 	finished := make(chan struct{})
 	close(finished)
 
+	ticket := asynxmd.Ticket{Final: finished, Err: func() error { return nil }}
 	for range 50 {
-		err := ex.awaitTombstone(
-			context.Background(),
-			asynxmd.Ticket{Final: finished, Err: func() error { return nil }},
+		requireTombstoneAwaited(
+			t,
+			ex,
+			ticket,
 		)
-		if err != nil {
-			t.Fatalf(
-				"awaitTombstone = %v for a tombstone that was delivered",
-				err,
-			)
-		}
+	}
+}
+
+func requireTombstoneAwaited(
+	t *testing.T,
+	ex *CommandExecutor[order],
+	ticket asynxmd.Ticket,
+) {
+	t.Helper()
+	err := ex.awaitTombstone(
+		context.Background(),
+		ticket,
+	)
+	if err != nil {
+		t.Fatalf(
+			"awaitTombstone = %v for a tombstone that was delivered",
+			err,
+		)
 	}
 }
 
@@ -1688,7 +1947,6 @@ func TestForget_TombstoneEnqueueFailureParksWithTheEnqueueError(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1735,7 +1993,6 @@ func TestForget_ErasePhaseFailureParksWithTheForgetError(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1764,31 +2021,41 @@ func TestForget_ErasePhaseFailureParksWithTheForgetError(
 	}
 }
 
+func holdTombstone(
+	e asynxmd.Event[order],
+	release <-chan struct{},
+) error {
+	if e.EventName == asynxmd.ForgetEventName {
+		<-release
+	}
+
+	return nil
+}
+
 func TestForget_GivingUpOnTheTombstoneParksWithTheWaitError(
 	t *testing.T,
 ) {
 	release := make(chan struct{})
+	hold := func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) error {
+		return holdTombstone(
+			e,
+			release,
+		)
+	}
 	ex := durableEnv(
 		t,
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) error {
-			if e.EventName == asynxmd.ForgetEventName {
-				<-release
-			}
-
-			return nil
-		},
+		hold,
 	)
 	defer close(release)
-	if _, err := ex.Execute(
+	if _, err := ex.ExecuteWait(
 		context.Background(),
 		update(
 			"agg",
 			1,
 		),
-		true,
 	); err != nil {
 		t.Fatal(err)
 	}

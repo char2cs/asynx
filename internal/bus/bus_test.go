@@ -33,32 +33,34 @@ func TestNew_WithHandlers_RoutesPanicAndTimeoutToThem(
 		chan struct{},
 		1,
 	)
+	withPanicHandlerFn := func(
+		_ context.Context,
+		_ asynxmd.Event[mocks.Order],
+		v any,
+	) {
+		panicked <- v
+	}
+	withTimeoutHandlerFn := func(
+		_ context.Context,
+		_ asynxmd.Event[mocks.Order],
+		_ time.Duration,
+	) {
+		timedOut <- struct{}{}
+	}
 	b := bus.New[mocks.Order](
-		bus.WithPanicHandler[mocks.Order](func(
-			_ context.Context,
-			_ asynxmd.Event[mocks.Order],
-			v any,
-		) {
-			panicked <- v
-		}),
-		bus.WithTimeoutHandler[mocks.Order](func(
-			_ context.Context,
-			_ asynxmd.Event[mocks.Order],
-			_ time.Duration,
-		) {
-			timedOut <- struct{}{}
-		}),
+		bus.WithPanicHandler[mocks.Order](withPanicHandlerFn),
+		bus.WithTimeoutHandler[mocks.Order](withTimeoutHandlerFn),
 	)
 	defer b.Close(context.Background())
-
+	subscribeFn := func(
+		context.Context,
+		asynxmd.Event[mocks.Order],
+	) {
+		panic("boom")
+	}
 	_, err := b.Subscribe(
 		"Boom",
-		func(
-			context.Context,
-			asynxmd.Event[mocks.Order],
-		) {
-			panic("boom")
-		},
+		subscribeFn,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -67,14 +69,15 @@ func TestNew_WithHandlers_RoutesPanicAndTimeoutToThem(
 		)
 	}
 
+	subscribeFn2 := func(
+		context.Context,
+		asynxmd.Event[mocks.Order],
+	) {
+		time.Sleep(50 * time.Millisecond)
+	}
 	_, err = b.Subscribe(
 		"Slow",
-		func(
-			context.Context,
-			asynxmd.Event[mocks.Order],
-		) {
-			time.Sleep(50 * time.Millisecond)
-		},
+		subscribeFn2,
 		asynxmd.WithHandlerTimeout[mocks.Order](5*time.Millisecond),
 	)
 	if err != nil {
@@ -85,17 +88,11 @@ func TestNew_WithHandlers_RoutesPanicAndTimeoutToThem(
 	}
 
 	for _, name := range []string{"Boom", "Slow"} {
-		err = b.PublishSync(
-			context.Background(),
-			asynxmd.Event[mocks.Order]{EventName: name},
+		publishSyncNamed(
+			t,
+			b,
+			name,
 		)
-		if err != nil {
-			t.Fatalf(
-				"PublishSync %s: %v",
-				name,
-				err,
-			)
-		}
 	}
 
 	select {
@@ -108,5 +105,25 @@ func TestNew_WithHandlers_RoutesPanicAndTimeoutToThem(
 	case <-timedOut:
 	case <-time.After(time.Second):
 		t.Fatal("timeout handler not called")
+	}
+}
+
+func publishSyncNamed(
+	t *testing.T,
+	b bus.Bus[mocks.Order],
+	name string,
+) {
+	t.Helper()
+
+	err := b.PublishSync(
+		context.Background(),
+		asynxmd.Event[mocks.Order]{EventName: name},
+	)
+	if err != nil {
+		t.Fatalf(
+			"PublishSync %s: %v",
+			name,
+			err,
+		)
 	}
 }

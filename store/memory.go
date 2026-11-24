@@ -1,7 +1,6 @@
 package store
 
 import (
-	"context"
 	"github.com/char2cs/asynx/models"
 )
 
@@ -14,6 +13,7 @@ import (
 // before it commits.
 type Memory interface {
 	models.Store
+	MemorySeeder
 
 	// SetError schedules a one-shot error for the next Append call on
 	// streamID. The error is consumed and removed after the first
@@ -22,18 +22,4 @@ type Memory interface {
 		streamID string,
 		err error,
 	)
-
-	// Append writes one blob in its own transaction.
-	Append(
-		ctx context.Context,
-		streamID string,
-		version int64,
-		data []byte,
-	) error
-
-	// Delete removes streamID in its own transaction.
-	Delete(
-		ctx context.Context,
-		streamID string,
-	) error
 }

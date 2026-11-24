@@ -4,7 +4,10 @@ package domain
 type OrderStatus string
 
 const (
-	OrderPending   OrderStatus = "Pending"
+	// OrderPending is the status of an order that was created and not yet confirmed.
+	OrderPending OrderStatus = "Pending"
+	// OrderConfirmed is the status of an order that was confirmed.
 	OrderConfirmed OrderStatus = "Confirmed"
-	OrderShipped   OrderStatus = "Shipped"
+	// OrderShipped is the status of an order that was shipped.
+	OrderShipped OrderStatus = "Shipped"
 )

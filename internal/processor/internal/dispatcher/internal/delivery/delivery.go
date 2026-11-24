@@ -43,6 +43,8 @@ type durableDeliverer[T any] struct {
 	interrupted  <-chan struct{}
 }
 
+// Deliver runs job's durable delivery with retries, as documented on
+// Deliverer.Deliver.
 func (d *durableDeliverer[T]) Deliver(
 	aggregateID string,
 	halt <-chan struct{},
@@ -67,12 +69,11 @@ func (d *durableDeliverer[T]) Deliver(
 		attempt:     1,
 		backoff:     d.retryInitial,
 	}
-	for loop.step() {
-	}
-
-	return loop.err
+	return loop.run()
 }
 
+// ParkThenReport parks the aggregate of an acked job, then calls report, as
+// documented on Deliverer.ParkThenReport.
 func (d *durableDeliverer[T]) ParkThenReport(
 	aggregateID string,
 	halt <-chan struct{},
@@ -80,19 +81,20 @@ func (d *durableDeliverer[T]) ParkThenReport(
 	cause error,
 	report func(),
 ) {
-	d.registry.ParkIfCurrent(
-		aggregateID,
-		halt,
-		job.Acked(),
-		cause,
-	)
+	if job.Acked() {
+		d.registry.ParkIfCurrent(
+			aggregateID,
+			halt,
+			cause,
+		)
+	}
+
 	report()
 }
 
 func (d *durableDeliverer[T]) subscribersFor(
 	job jobs.Job[T],
-) []asynxmd.DurableSub[T] {
-	var subs []asynxmd.DurableSub[T]
+) (subs []asynxmd.DurableSub[T]) {
 	for _, sub := range d.subs {
 		subs = appendReceiver(
 			subs,
@@ -108,8 +110,7 @@ func (d *durableDeliverer[T]) attempt(
 	job jobs.Job[T],
 	pending []asynxmd.DurableSub[T],
 	attempt int,
-) ([]asynxmd.DurableSub[T], error) {
-	var failed []asynxmd.DurableSub[T]
+) (failed []asynxmd.DurableSub[T], err error) {
 	var errs []error
 	for _, sub := range pending {
 		failed, errs = d.try(
@@ -324,18 +325,19 @@ func (d *durableDeliverer[T]) giveUp(
 		attempt,
 		last,
 	)
+	report := func() {
+		d.reports.DeliveryError(
+			job,
+			parked,
+			attempt,
+		)
+	}
 	d.ParkThenReport(
 		aggregateID,
 		halt,
 		job,
 		parked,
-		func() {
-			d.reports.DeliveryError(
-				job,
-				parked,
-				attempt,
-			)
-		},
+		report,
 	)
 	return parked
 }

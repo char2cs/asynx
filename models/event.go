@@ -2,6 +2,7 @@ package models
 
 import "time"
 
+// Event describes a change to an aggregate at one version.
 type Event[T any] struct {
 	ID                string
 	AggregateID       string

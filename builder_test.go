@@ -9,6 +9,7 @@ import (
 	"github.com/char2cs/asynx/models"
 	"github.com/char2cs/asynx/store"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 )
@@ -64,21 +65,37 @@ func TestShardingOpts_CustomShards(
 	}
 }
 
+type forgetTotal struct {
+	mu    sync.Mutex
+	total float64
+}
+
+func (f *forgetTotal) handle(
+	_ context.Context,
+	e models.Event[mocks.Order],
+) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.total = e.Aggregate.Total
+}
+
+func (f *forgetTotal) get() float64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.total
+}
+
 func TestWithForgetHandler_IsCalledOnForget(
 	t *testing.T,
 ) {
-	var gotTotal float64
+	got := &forgetTotal{}
 
 	instance, err := asynx.New[mocks.Order]().
 		WithEventStore(store.New()).
 		WithSnapshotStore(store.NewSnapshots()).
 		WithShardingOpts(asynx.ShardingOpts{Shards: 8, QueueDepth: 1000}).
-		WithForgetHandler(func(
-			_ context.Context,
-			e models.Event[mocks.Order],
-		) {
-			gotTotal = e.Aggregate.Total
-		}).
+		WithForgetHandler(got.handle).
 		Build()
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +124,7 @@ func TestWithForgetHandler_IsCalledOnForget(
 		)
 	}
 
-	if gotTotal != 77.0 {
+	if gotTotal := got.get(); gotTotal != 77.0 {
 		t.Errorf(
 			"ForgetHandler got Total=%v, want 77.0",
 			gotTotal,
@@ -120,6 +137,7 @@ type idemCmd struct {
 	Cmd string
 }
 
+// CommandID returns the idempotency key of the command.
 func (c idemCmd) CommandID() string { return c.Cmd }
 
 type idemCreate struct {
@@ -127,6 +145,7 @@ type idemCreate struct {
 	Cmd string
 }
 
+// CommandID returns the idempotency key of the command.
 func (c idemCreate) CommandID() string { return c.Cmd }
 
 func upd(
@@ -164,6 +183,7 @@ func eight(
 
 type ackErrStore struct{ store.Memory }
 
+// AckDelivery fails with the configured error.
 func (ackErrStore) AckDelivery(
 	context.Context,
 	string,
@@ -174,6 +194,7 @@ func (ackErrStore) AckDelivery(
 
 type pendingErrStore struct{ store.Memory }
 
+// PendingDeliveries fails with the configured error.
 func (pendingErrStore) PendingDeliveries(
 	context.Context,
 	int,
@@ -188,16 +209,31 @@ func eventually(
 	cond func() bool,
 ) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(eventuallyTimeout)
 	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf(
-				"timed out waiting for %s",
-				what,
-			)
-		}
-
+		failIfPast(
+			t,
+			deadline,
+			what,
+		)
 		runtime.Gosched()
+	}
+}
+
+const eventuallyTimeout = 5 * time.Second
+
+func failIfPast(
+	t *testing.T,
+	deadline time.Time,
+	what string,
+) {
+	t.Helper()
+
+	if time.Now().After(deadline) {
+		t.Fatalf(
+			"timed out waiting for %s",
+			what,
+		)
 	}
 }
 
@@ -207,6 +243,7 @@ type gatedUpdate struct {
 	gate    <-chan struct{}
 }
 
+// Validate checks the command against the current aggregate state.
 func (c gatedUpdate) Validate(
 	*mocks.Order,
 ) error {

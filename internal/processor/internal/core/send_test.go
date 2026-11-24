@@ -190,18 +190,48 @@ func TestProcessor_SendToMultipleShards(
 	ctx := context.Background()
 
 	for i := 0; i < 12; i++ {
-		cmd := mocks.CreateOrderCmd{ID: "order" + string(rune('0'+i)), Total: 100.0}
-		_, err := p.Send(
+		mustSendOrder(
+			t,
+			p,
 			ctx,
-			cmd,
+			"order"+string(rune('0'+i)),
+			i,
 		)
-		if err != nil {
-			t.Fatalf(
-				"Send %d failed: %v",
-				i,
-				err,
-			)
-		}
+	}
+}
+
+func requireCancelled(
+	t *testing.T,
+	err error,
+) {
+	t.Helper()
+	if err != asynxmd.ErrContextCancelled {
+		t.Errorf(
+			"expected ErrContextCancelled, got %v",
+			err,
+		)
+	}
+}
+
+func mustSendOrder(
+	t *testing.T,
+	p *Processor[order],
+	ctx context.Context,
+	id string,
+	i int,
+) {
+	t.Helper()
+	cmd := mocks.CreateOrderCmd{ID: id, Total: 100.0}
+	_, err := p.Send(
+		ctx,
+		cmd,
+	)
+	if err != nil {
+		t.Fatalf(
+			"send %d failed: %v",
+			i,
+			err,
+		)
 	}
 }
 
@@ -290,18 +320,13 @@ func TestProcessor_AllSendBranches(
 	}
 
 	for i := 0; i < 5; i++ {
-		cmd := mocks.CreateOrderCmd{ID: "order" + string(rune('A'+i)), Total: 100.0}
-		_, err := p.Send(
+		mustSendOrder(
+			t,
+			p,
 			ctx,
-			cmd,
+			"order"+string(rune('A'+i)),
+			i,
 		)
-		if err != nil {
-			t.Fatalf(
-				"send %d failed: %v",
-				i,
-				err,
-			)
-		}
 	}
 }
 
@@ -357,14 +382,15 @@ func TestProcessor_SendWait_HandlersCompleteBeforeReturn(
 	defer p.Shutdown(context.Background())
 
 	var handlerDone atomic.Bool
+	markDone := func(
+		_ context.Context,
+		_ asynxmd.Event[order],
+	) {
+		handlerDone.Store(true)
+	}
 	channelBus.Subscribe(
 		"OrderCreated",
-		func(
-			_ context.Context,
-			_ asynxmd.Event[order],
-		) {
-			handlerDone.Store(true)
-		},
+		markDone,
 	)
 
 	ctx := context.Background()
@@ -486,12 +512,10 @@ func TestProcessor_SendWait_ContextCancelledWhileWaiting(
 
 	select {
 	case err := <-done:
-		if err != asynxmd.ErrContextCancelled {
-			t.Errorf(
-				"expected ErrContextCancelled, got %v",
-				err,
-			)
-		}
+		requireCancelled(
+			t,
+			err,
+		)
 	case <-time.After(2 * time.Second):
 		t.Error("SendWait did not return after context cancel")
 	}
@@ -507,14 +531,15 @@ func TestProcessor_Forget_ErasesAndNotifiesHandlers(
 	ctx := context.Background()
 
 	var tombstones atomic.Int32
+	countTombstone := func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		tombstones.Add(1)
+	}
 	f.b.Subscribe(
 		"asynx\\.aggregate\\.forget",
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) {
-			tombstones.Add(1)
-		},
+		countTombstone,
 	)
 
 	if _, err := f.p.Send(
@@ -576,15 +601,16 @@ func TestProcessor_SendWait_GivesUpWaitingButReturnsTheCommittedEvent(
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
+	block := func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		close(entered)
+		<-release
+	}
 	f.b.Subscribe(
 		"OrderUpdated",
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) {
-			close(entered)
-			<-release
-		},
+		block,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -639,21 +665,22 @@ func TestProcessor_SendWait_FromAHandlerOfTheSameAggregateFailsFast(
 		chan error,
 		1,
 	)
+	sendWaitAgain := func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
+		_, err := f.p.SendWait(
+			ctx,
+			updateCmd(
+				e.AggregateID,
+				2,
+			),
+		)
+		got <- err
+	}
 	f.b.Subscribe(
 		"OrderUpdated",
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) {
-			_, err := f.p.SendWait(
-				ctx,
-				updateCmd(
-					e.AggregateID,
-					2,
-				),
-			)
-			got <- err
-		},
+		sendWaitAgain,
 	)
 	if _, err := f.p.Send(
 		context.Background(),
@@ -667,17 +694,28 @@ func TestProcessor_SendWait_FromAHandlerOfTheSameAggregateFailsFast(
 
 	select {
 	case err := <-got:
-		if !errors.Is(
+		requireSendWaitFromHandler(
+			t,
 			err,
-			asynxmd.ErrSendWaitFromHandler,
-		) {
-			t.Fatalf(
-				"SendWait from the handler = %v, want ErrSendWaitFromHandler",
-				err,
-			)
-		}
+		)
 	case <-time.After(5 * time.Second):
 		t.Fatal("SendWait from a handler hung")
+	}
+}
+
+func requireSendWaitFromHandler(
+	t *testing.T,
+	err error,
+) {
+	t.Helper()
+	if !errors.Is(
+		err,
+		asynxmd.ErrSendWaitFromHandler,
+	) {
+		t.Fatalf(
+			"SendWait from the handler = %v, want ErrSendWaitFromHandler",
+			err,
+		)
 	}
 }
 
@@ -690,42 +728,81 @@ func BenchmarkSend_MultiShard(
 				"shards=%d",
 				shards,
 			),
-			func(
-				b *testing.B,
-			) {
-				memStore := store.New()
-				channelBus := bus.New[order]()
-				es := eventstore.New[order](
-					memStore,
-					store.NewSnapshots(),
-					nil,
-					1,
-					nil,
-				)
-
-				p := mustNew(
-					b,
-					es,
-					channelBus,
-					models.WithShards[order](shards),
-				)
-				defer p.Shutdown(context.Background())
-
-				ctx := context.Background()
-
-				b.ReportAllocs()
-				b.ResetTimer()
-
-				for b.Loop() {
-					cmd := mocks.CreateOrderCmd{ID: "order", Total: 100.0}
-					p.Send(
-						ctx,
-						cmd,
-					)
-				}
-			},
+			multiShardBench(shards),
 		)
 	}
+}
+
+func multiShardBench(
+	shards int,
+) func(*testing.B) {
+	return func(
+		b *testing.B,
+	) {
+		runMultiShard(
+			b,
+			shards,
+		)
+	}
+}
+
+func runMultiShard(
+	b *testing.B,
+	shards int,
+) {
+	memStore := store.New()
+	channelBus := bus.New[order]()
+	es := eventstore.New[order](
+		memStore,
+		store.NewSnapshots(),
+		nil,
+		1,
+		nil,
+	)
+
+	p := mustNew(
+		b,
+		es,
+		channelBus,
+		models.WithShards[order](shards),
+	)
+	defer p.Shutdown(context.Background())
+
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		sendBenchOrder(
+			p,
+			ctx,
+		)
+	}
+}
+
+func drainBench(
+	pb *testing.PB,
+	p *Processor[order],
+	ctx context.Context,
+) {
+	for pb.Next() {
+		sendBenchOrder(
+			p,
+			ctx,
+		)
+	}
+}
+
+func sendBenchOrder(
+	p *Processor[order],
+	ctx context.Context,
+) {
+	cmd := mocks.CreateOrderCmd{ID: "order", Total: 100.0}
+	p.Send(
+		ctx,
+		cmd,
+	)
 }
 
 func BenchmarkSend_Parallel(
@@ -754,17 +831,16 @@ func BenchmarkSend_Parallel(
 	b.ReportAllocs()
 	b.ResetTimer()
 
-	b.RunParallel(func(
+	sendLoop := func(
 		pb *testing.PB,
 	) {
-		for pb.Next() {
-			cmd := mocks.CreateOrderCmd{ID: "order", Total: 100.0}
-			p.Send(
-				ctx,
-				cmd,
-			)
-		}
-	})
+		drainBench(
+			pb,
+			p,
+			ctx,
+		)
+	}
+	b.RunParallel(sendLoop)
 }
 
 func BenchmarkSend_WithBusFanout(

@@ -62,17 +62,13 @@ func TestProcessor_ShutdownDrains(
 
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
-		go func(
-			idx int,
-		) {
-			defer wg.Done()
-			cmd := mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0}
-			_, _err := p.Send(
-				ctx,
-				cmd,
-			)
-			errs <- _err
-		}(i)
+		go sendCreate(
+			ctx,
+			p,
+			i,
+			&wg,
+			errs,
+		)
 	}
 
 	wg.Wait()
@@ -88,12 +84,11 @@ func TestProcessor_ShutdownDrains(
 	close(errs)
 
 	for err := range errs {
-		if err != nil {
-			t.Errorf(
-				"Send failed: %v",
-				err,
-			)
-		}
+		expectNoErrorf(
+			t,
+			err,
+			"Send failed",
+		)
 	}
 }
 
@@ -342,6 +337,91 @@ func TestProcessor_Forget_RejectedWhenShuttingDownOrCancelled(
 	}
 }
 
+func forgetLogged(
+	ctx context.Context,
+	t *testing.T,
+	p *Processor[order],
+	id string,
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
+	err := p.Forget(
+		ctx,
+		id,
+	)
+	if err != nil {
+		t.Logf(
+			"Forget: %v",
+			err,
+		)
+	}
+}
+
+func sendGated(
+	p *Processor[order],
+	id string,
+	entered chan<- struct{},
+	gate <-chan struct{},
+	results chan<- error,
+) {
+	cmd := gatedCmd{
+		UpdateOrderCmd: updateCmd(
+			id,
+			1,
+		),
+		entered: entered,
+		gate:    gate,
+	}
+	_, err := p.Send(
+		context.Background(),
+		cmd,
+	)
+	results <- err
+}
+
+func sendBurst(
+	p *Processor[order],
+	entered chan<- struct{},
+	gate <-chan struct{},
+	results chan<- error,
+) {
+	for i := range 6 {
+		go sendGated(
+			p,
+			"agg"+string(rune('a'+i)),
+			entered,
+			gate,
+			results,
+		)
+	}
+}
+
+func shutdownInto(
+	p *Processor[order],
+	down chan<- error,
+) {
+	down <- p.Shutdown(context.Background())
+}
+
+func waitPublishThenClose(
+	p *Processor[order],
+	idle chan<- struct{},
+) {
+	p.WaitPublish()
+	close(idle)
+}
+
+func holdIfSlow(
+	id string,
+	entered chan<- struct{},
+	release <-chan struct{},
+) {
+	if id == "slow" {
+		entered <- struct{}{}
+		<-release
+	}
+}
+
 func TestProcessor_Shutdown_WaitsForForgetInFlightUntilItsContextEnds(
 	t *testing.T,
 ) {
@@ -359,25 +439,26 @@ func TestProcessor_Shutdown_WaitsForForgetInFlightUntilItsContextEnds(
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	block := func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		close(entered)
+		<-release
+	}
 	f.b.Subscribe(
 		"asynx\\.aggregate\\.forget",
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) {
-			close(entered)
-			<-release
-		},
+		block,
 	)
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		f.p.Forget(
-			ctx,
-			"o1",
-		)
-	}()
+	go forgetLogged(
+		ctx,
+		t,
+		f.p,
+		"o1",
+		&wg,
+	)
 	<-entered
 
 	short, cancel := context.WithTimeout(
@@ -419,19 +500,12 @@ func TestProcessor_Shutdown_NeverStrandsAQueuedSend(
 			chan error,
 			6,
 		)
-		for i := range 6 {
-			go func() {
-				cmd := gatedCmd{UpdateOrderCmd: updateCmd(
-					"agg"+string(rune('a'+i)),
-					1,
-				), entered: entered, gate: gate}
-				_, err := p.Send(
-					context.Background(),
-					cmd,
-				)
-				results <- err
-			}()
-		}
+		sendBurst(
+			p,
+			entered,
+			gate,
+			results,
+		)
 
 		<-entered
 
@@ -439,7 +513,10 @@ func TestProcessor_Shutdown_NeverStrandsAQueuedSend(
 			chan error,
 			1,
 		)
-		go func() { down <- p.Shutdown(context.Background()) }()
+		go shutdownInto(
+			p,
+			down,
+		)
 		close(gate)
 
 		awaitSendResults(
@@ -447,12 +524,11 @@ func TestProcessor_Shutdown_NeverStrandsAQueuedSend(
 			results,
 			6,
 		)
-		if err := <-down; err != nil {
-			t.Fatalf(
-				"Shutdown: %v",
-				err,
-			)
-		}
+		requireNoErrorf(
+			t,
+			<-down,
+			"Shutdown",
+		)
 	}
 }
 
@@ -469,15 +545,16 @@ func TestProcessor_Shutdown_CanBeRetriedAfterItsContextEnds(
 	b := bus.New[order]()
 	release := make(chan struct{})
 	entered := make(chan struct{})
+	block := func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		close(entered)
+		<-release
+	}
 	b.Subscribe(
 		"OrderUpdated",
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) {
-			close(entered)
-			<-release
-		},
+		block,
 	)
 	p := mustNew(
 		t,
@@ -618,10 +695,11 @@ func TestProcessor_WaitPublish_DoesNotFailCommandsSentWhileItWaits(
 		_ context.Context,
 		e asynxmd.Event[order],
 	) {
-		if e.AggregateID == "slow" {
-			entered <- struct{}{}
-			<-release
-		}
+		holdIfSlow(
+			e.AggregateID,
+			entered,
+			release,
+		)
 	}
 	if _, err := f.b.Subscribe(
 		"OrderCreated",
@@ -640,7 +718,10 @@ func TestProcessor_WaitPublish_DoesNotFailCommandsSentWhileItWaits(
 	<-entered
 
 	idle := make(chan struct{})
-	go func() { f.p.WaitPublish(); close(idle) }()
+	go waitPublishThenClose(
+		f.p,
+		idle,
+	)
 
 	if _, err := f.p.SendWait(
 		ctx,
@@ -688,6 +769,30 @@ func TestShutdown_InterruptsThenClosesTheSuppliedDispatcher(
 	}
 }
 
+func sendCounted(
+	ctx context.Context,
+	p *Processor[order],
+	idx int,
+	wg *sync.WaitGroup,
+	successCount *int32,
+) {
+	defer wg.Done()
+	cmd := mocks.CreateOrderCmd{
+		ID:    "order" + string(rune(idx%4)),
+		Total: 100.0,
+	}
+	_, err := p.Send(
+		ctx,
+		cmd,
+	)
+	if err == nil {
+		atomic.AddInt32(
+			successCount,
+			1,
+		)
+	}
+}
+
 func TestProcessor_IntegrationShutdownGraceful(
 	t *testing.T,
 ) {
@@ -719,24 +824,13 @@ func TestProcessor_IntegrationShutdownGraceful(
 	var wg sync.WaitGroup
 	for i := 0; i < commandCount; i++ {
 		wg.Add(1)
-		go func(
-			idx int,
-		) {
-			defer wg.Done()
-			cmd := mocks.CreateOrderCmd{
-				ID:    "order" + string(rune(idx%4)),
-				Total: 100.0,
-			}
-			if _, err := p.Send(
-				ctx,
-				cmd,
-			); err == nil {
-				atomic.AddInt32(
-					&successCount,
-					1,
-				)
-			}
-		}(i)
+		go sendCounted(
+			ctx,
+			p,
+			i,
+			&wg,
+			&successCount,
+		)
 	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(
@@ -760,10 +854,11 @@ func TestProcessor_IntegrationShutdownGraceful(
 	successVal := atomic.LoadInt32(&successCount)
 	if successVal == 0 {
 		t.Logf("Warning: no commands completed before shutdown")
-	} else {
-		t.Logf(
-			"Integration: %d commands completed before shutdown",
-			successVal,
-		)
+		return
 	}
+
+	t.Logf(
+		"Integration: %d commands completed before shutdown",
+		successVal,
+	)
 }

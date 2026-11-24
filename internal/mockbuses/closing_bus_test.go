@@ -5,17 +5,30 @@ import (
 	"testing"
 )
 
+func closeOnce(
+	t *testing.T,
+	b *ClosingBus[fakeOrder],
+) {
+	t.Helper()
+
+	err := b.Close(context.Background())
+	if err != nil {
+		t.Fatalf(
+			"Close = %v, want nil",
+			err,
+		)
+	}
+}
+
 func TestClosingBus_CountsEveryClose(
 	t *testing.T,
 ) {
 	b := &ClosingBus[fakeOrder]{}
 	for range 2 {
-		if err := b.Close(context.Background()); err != nil {
-			t.Fatalf(
-				"Close = %v, want nil",
-				err,
-			)
-		}
+		closeOnce(
+			t,
+			b,
+		)
 	}
 
 	if got := b.Closes.Load(); got != 2 {

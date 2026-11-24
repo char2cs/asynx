@@ -16,37 +16,19 @@ func TestKeyedLock_SameKeyIsMutuallyExclusive(
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
+	hold := func() {
+		defer wg.Done()
+		holdExclusively(
+			t,
+			&k,
+			&mu,
+			&inside,
+			&maxInside,
+		)
+	}
 	for range 50 {
 		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			unlock, err := k.Lock(
-				context.Background(),
-				"agg",
-			)
-			if err != nil {
-				t.Errorf(
-					"Lock: %v",
-					err,
-				)
-				return
-			}
-
-			mu.Lock()
-			inside++
-			maxInside = max(
-				maxInside,
-				inside,
-			)
-			mu.Unlock()
-
-			runtime.Gosched()
-
-			mu.Lock()
-			inside--
-			mu.Unlock()
-			unlock()
-		}()
+		go hold()
 	}
 
 	wg.Wait()
@@ -66,6 +48,41 @@ func TestKeyedLock_SameKeyIsMutuallyExclusive(
 	}
 }
 
+func holdExclusively(
+	t *testing.T,
+	k *KeyedLock,
+	mu *sync.Mutex,
+	inside *int,
+	maxInside *int,
+) {
+	unlock, err := k.Lock(
+		context.Background(),
+		"agg",
+	)
+	if err != nil {
+		t.Errorf(
+			"Lock: %v",
+			err,
+		)
+		return
+	}
+
+	mu.Lock()
+	*inside++
+	*maxInside = max(
+		*maxInside,
+		*inside,
+	)
+	mu.Unlock()
+
+	runtime.Gosched()
+
+	mu.Lock()
+	*inside--
+	mu.Unlock()
+	unlock()
+}
+
 func TestKeyedLock_DifferentKeysDoNotBlock(
 	t *testing.T,
 ) {
@@ -81,22 +98,32 @@ func TestKeyedLock_DifferentKeysDoNotBlock(
 	defer unlockA()
 
 	done := make(chan struct{})
-	go func() {
-		unlockB, err := k.Lock(
-			context.Background(),
+	lockB := func() {
+		lockAndRelease(
+			&k,
 			"b",
 		)
-		if err == nil {
-			unlockB()
-		}
-
 		close(done)
-	}()
+	}
+	go lockB()
 
 	select {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Lock(b) blocked behind Lock(a)")
+	}
+}
+
+func lockAndRelease(
+	k *KeyedLock,
+	key string,
+) {
+	unlock, err := k.Lock(
+		context.Background(),
+		key,
+	)
+	if err == nil {
+		unlock()
 	}
 }
 
@@ -117,21 +144,15 @@ func TestKeyedLock_CancelledWaiterReturnsCtxErrAndLeavesNoEntry(
 		chan error,
 		1,
 	)
-	go func() {
+	waiter := func() {
 		_, err := k.Lock(
 			ctx,
 			"agg",
 		)
 		errCh <- err
-	}()
-	for {
-		k.mu.Lock()
-		waiting := k.entries["agg"] != nil && k.entries["agg"].refs == 2
-		k.mu.Unlock()
-		if waiting {
-			break
-		}
-
+	}
+	go waiter()
+	for k.refs("agg") < 2 {
 		runtime.Gosched()
 	}
 
@@ -157,8 +178,9 @@ func TestKeyedLock_UnlockIsIdempotent(
 	t *testing.T,
 ) {
 	var k KeyedLock
-	unlock, _ := k.Lock(
-		context.Background(),
+	unlock := mustLock(
+		t,
+		&k,
 		"agg",
 	)
 	unlock()
@@ -189,11 +211,12 @@ func TestKeyedLock_TryLockTakesAFreeKeyAndRefusesAHeldOne(
 		t.Fatal("TryLock took a key that is held")
 	}
 
-	if other, ok := k.TryLock("other"); !ok {
+	other, ok := k.TryLock("other")
+	if !ok {
 		t.Fatal("TryLock refused an unrelated key")
-	} else {
-		other()
 	}
+
+	other()
 
 	unlock()
 	unlock()
@@ -215,21 +238,22 @@ func TestKeyedLock_TryLockDoesNotJumpAWaiter(
 	t *testing.T,
 ) {
 	var k KeyedLock
-	unlock, _ := k.TryLock("agg")
+	unlock, held := k.TryLock("agg")
+	if !held {
+		t.Fatal("TryLock refused a free key")
+	}
 
 	acquired := make(
 		chan func(),
 		1,
 	)
-	go func() {
-		release, err := k.Lock(
-			context.Background(),
-			"agg",
+	acquire := func() {
+		handOver(
+			&k,
+			acquired,
 		)
-		if err == nil {
-			acquired <- release
-		}
-	}()
+	}
+	go acquire()
 	for k.refs("agg") < 2 {
 		runtime.Gosched()
 	}
@@ -253,4 +277,34 @@ func (k *KeyedLock) refs(
 	}
 
 	return 0
+}
+
+func mustLock(
+	t *testing.T,
+	k *KeyedLock,
+	key string,
+) func() {
+	t.Helper()
+	unlock, err := k.Lock(
+		context.Background(),
+		key,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return unlock
+}
+
+func handOver(
+	k *KeyedLock,
+	acquired chan<- func(),
+) {
+	release, err := k.Lock(
+		context.Background(),
+		"agg",
+	)
+	if err == nil {
+		acquired <- release
+	}
 }

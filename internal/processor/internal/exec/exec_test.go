@@ -46,7 +46,6 @@ func TestExecute_SuccessNewAggregate(
 	_, err := executor.Execute(
 		ctx,
 		cmd,
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -97,7 +96,6 @@ func TestExecute_SuccessExistingAggregate(
 	_, err := executor.Execute(
 		ctx,
 		cmd1,
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -113,7 +111,6 @@ func TestExecute_SuccessExistingAggregate(
 	_, err = executor.Execute(
 		ctx,
 		cmd2,
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -164,7 +161,6 @@ func TestExecute_ValidationFailure(
 	_, err := executor.Execute(
 		ctx,
 		cmd,
-		false,
 	)
 	if err != asynxmd.ErrValidation {
 		t.Fatalf(
@@ -204,7 +200,6 @@ func TestExecute_ValidationFailureNoWrite(
 	executor.Execute(
 		ctx,
 		cmd1,
-		false,
 	)
 
 	cmd2 := mocks.CancelOrderCmd{ID: "order2"}
@@ -212,7 +207,6 @@ func TestExecute_ValidationFailureNoWrite(
 	_, err := executor.Execute(
 		ctx,
 		cmd2,
-		false,
 	)
 	if err != asynxmd.ErrValidation {
 		t.Fatalf(
@@ -255,7 +249,6 @@ func TestExecute_GetStorageError(
 	_, err := executor.Execute(
 		ctx,
 		cmd,
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -293,7 +286,6 @@ func TestExecute_WriteStorageError(
 	_, err := executor.Execute(
 		ctx,
 		cmd,
-		false,
 	)
 	if !errors.Is(
 		err,
@@ -328,7 +320,6 @@ func TestExecute_NilDispatcherNoPanic(
 	_, err := executor.Execute(
 		ctx,
 		cmd,
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -365,7 +356,6 @@ func TestExecute_DispatchCalledAsync(
 	_, err := executor.Execute(
 		ctx,
 		cmd,
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -407,7 +397,6 @@ func TestExecute_ContextAlreadyCancelled(
 	_, err := executor.Execute(
 		ctx,
 		cmd,
-		false,
 	)
 	if err != nil {
 		t.Logf(
@@ -439,7 +428,6 @@ func TestExecute_AggregateStatePreserved(
 	_, err := executor.Execute(
 		ctx,
 		cmd1,
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -466,7 +454,6 @@ func TestExecute_AggregateStatePreserved(
 	_, err = executor.Execute(
 		ctx,
 		cmd2,
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -517,7 +504,6 @@ func TestExecute_ReturnsEvent(
 	event, err := executor.Execute(
 		ctx,
 		cmd,
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -582,7 +568,6 @@ func TestPublishErrorHandler_CalledOnPublishError(
 	_, err := executor.Execute(
 		ctx,
 		mocks.CreateOrderCmd{ID: "err-order", Total: 1.0},
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -648,7 +633,6 @@ func TestPublishErrorHandler_NotCalledOnSuccess(
 	_, err := executor.Execute(
 		ctx,
 		mocks.CreateOrderCmd{ID: "ok-order", Total: 1.0},
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -692,7 +676,6 @@ func TestPublishErrorHandler_NilHandlerDoesNotPanic(
 	_, err := executor.Execute(
 		ctx,
 		mocks.CreateOrderCmd{ID: "nil-handler-order", Total: 1.0},
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -712,6 +695,7 @@ type recordingBus[T any] struct {
 	onPublishSync  func()
 }
 
+// Publish is the test double implementation for the code under test.
 func (b *recordingBus[T]) Publish(
 	_ context.Context,
 	_ asynxmd.Event[T],
@@ -719,6 +703,7 @@ func (b *recordingBus[T]) Publish(
 	return nil
 }
 
+// PublishSync is the test double implementation for the code under test.
 func (b *recordingBus[T]) PublishSync(
 	ctx context.Context,
 	_ asynxmd.Event[T],
@@ -735,6 +720,7 @@ func (b *recordingBus[T]) PublishSync(
 	return err
 }
 
+// Subscribe is the test double implementation for the code under test.
 func (b *recordingBus[T]) Subscribe(
 	_ string,
 	_ asynxmd.ProjectionHandler[T],
@@ -744,18 +730,21 @@ func (b *recordingBus[T]) Subscribe(
 		nil
 }
 
+// Unsubscribe is the test double implementation for the code under test.
 func (b *recordingBus[T]) Unsubscribe(
 	_ string,
 ) error {
 	return nil
 }
 
+// Close is the test double implementation for the code under test.
 func (b *recordingBus[T]) Close(
 	_ context.Context,
 ) error {
 	return nil
 }
 
+// WaitForHandlers is the test double implementation for the code under test.
 func (b *recordingBus[T]) WaitForHandlers() {}
 
 func newEnv(
@@ -818,20 +807,21 @@ func TestExecute_SameAggregateFlood_NoSpuriousFailuresAndOrderedDelivery(
 
 	var mu sync.Mutex
 	var seen []int64
+	record := func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) {
+		time.Sleep(200 * time.Microsecond)
+		mu.Lock()
+		seen = append(
+			seen,
+			e.Version,
+		)
+		mu.Unlock()
+	}
 	if _, err := b.Subscribe(
 		"OrderUpdated",
-		func(
-			_ context.Context,
-			e asynxmd.Event[order],
-		) {
-			time.Sleep(200 * time.Microsecond)
-			mu.Lock()
-			seen = append(
-				seen,
-				e.Version,
-			)
-			mu.Unlock()
-		},
+		record,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -844,19 +834,12 @@ func TestExecute_SameAggregateFlood_NoSpuriousFailuresAndOrderedDelivery(
 	)
 	for i := range n {
 		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if _, err := ex.Execute(
-				context.Background(),
-				update(
-					"agg",
-					float64(i+1),
-				),
-				false,
-			); err != nil {
-				errs <- err
-			}
-		}()
+		go floodOne(
+			ex,
+			&wg,
+			errs,
+			float64(i+1),
+		)
 	}
 
 	wg.Wait()
@@ -881,13 +864,46 @@ func TestExecute_SameAggregateFlood_NoSpuriousFailuresAndOrderedDelivery(
 	}
 
 	for i, v := range seen {
-		if v != int64(i+1) {
-			t.Fatalf(
-				"handler saw versions %v, want strictly increasing 1..%d",
-				seen,
-				n,
-			)
-		}
+		requireVersion(
+			t,
+			seen,
+			i,
+			v,
+		)
+	}
+}
+
+func floodOne(
+	ex *CommandExecutor[order],
+	wg *sync.WaitGroup,
+	errs chan<- error,
+	total float64,
+) {
+	defer wg.Done()
+	if _, err := ex.Execute(
+		context.Background(),
+		update(
+			"agg",
+			total,
+		),
+	); err != nil {
+		errs <- err
+	}
+}
+
+func requireVersion(
+	t *testing.T,
+	seen []int64,
+	i int,
+	v int64,
+) {
+	t.Helper()
+	if v != int64(i+1) {
+		t.Fatalf(
+			"handler saw versions %v, want strictly increasing 1..%d",
+			seen,
+			len(seen),
+		)
 	}
 }
 
@@ -901,41 +917,107 @@ func TestExecute_DifferentAggregatesRunInParallel(
 		chan struct{},
 		2,
 	)
+	signal := func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		started <- struct{}{}
+		<-release
+	}
 	if _, err := b.Subscribe(
 		"OrderUpdated",
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) {
-			started <- struct{}{}
-			<-release
-		},
+		signal,
 	); err != nil {
 		t.Fatal(err)
 	}
 
 	for _, id := range []string{"a", "b"} {
-		if _, err := ex.Execute(
-			context.Background(),
+		mustExecute(
+			t,
+			ex,
 			update(
 				id,
 				1,
 			),
-			false,
-		); err != nil {
-			t.Fatal(err)
-		}
+		)
 	}
 
 	for range 2 {
-		select {
-		case <-started:
-		case <-time.After(2 * time.Second):
-			t.Fatal("handlers of different aggregates did not run in parallel")
-		}
+		awaitStarted(
+			t,
+			started,
+		)
 	}
 
 	close(release)
+}
+
+func mustExecute(
+	t *testing.T,
+	ex *CommandExecutor[order],
+	cmd asynxmd.Command[order],
+) {
+	t.Helper()
+	if _, err := ex.Execute(
+		context.Background(),
+		cmd,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func awaitStarted(
+	t *testing.T,
+	started <-chan struct{},
+) {
+	t.Helper()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handlers of different aggregates did not run in parallel")
+	}
+}
+
+func holdFirst(
+	e asynxmd.Event[order],
+	entered chan<- struct{},
+	release <-chan struct{},
+) {
+	if e.Version != 1 {
+		return
+	}
+
+	entered <- struct{}{}
+	<-release
+}
+
+func awaitSecond(
+	t *testing.T,
+	committed <-chan error,
+) {
+	t.Helper()
+	select {
+	case err := <-committed:
+		requireSecondCommitted(
+			t,
+			err,
+		)
+	case <-time.After(2 * time.Second):
+		t.Fatal("aggregate lock was held while SendWait waited for handlers")
+	}
+}
+
+func requireSecondCommitted(
+	t *testing.T,
+	err error,
+) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf(
+			"second command failed: %v",
+			err,
+		)
+	}
 }
 
 func TestExecute_SendWaitDoesNotHoldAggregateLockWhileHandlersRun(
@@ -948,61 +1030,56 @@ func TestExecute_SendWaitDoesNotHoldAggregateLockWhileHandlersRun(
 		chan struct{},
 		1,
 	)
+	hold := func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) {
+		holdFirst(
+			e,
+			entered,
+			release,
+		)
+	}
 	if _, err := b.Subscribe(
 		"OrderUpdated",
-		func(
-			_ context.Context,
-			e asynxmd.Event[order],
-		) {
-			if e.Version == 1 {
-				entered <- struct{}{}
-				<-release
-			}
-		},
+		hold,
 	); err != nil {
 		t.Fatal(err)
 	}
 
 	waited := make(chan struct{})
-	go func() {
-		ex.Execute(
+	waitFirst := func() {
+		_, _ = ex.ExecuteWait(
 			context.Background(),
 			update(
 				"agg",
 				1,
 			),
-			true,
 		)
 		close(waited)
-	}()
+	}
+	go waitFirst()
 	<-entered
 
 	committed := make(
 		chan error,
 		1,
 	)
-	go func() {
+	commitSecond := func() {
 		_, err := ex.Execute(
 			context.Background(),
 			update(
 				"agg",
 				2,
 			),
-			false,
 		)
 		committed <- err
-	}()
-	select {
-	case err := <-committed:
-		if err != nil {
-			t.Fatalf(
-				"second command failed: %v",
-				err,
-			)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("aggregate lock was held while SendWait waited for handlers")
 	}
+	go commitSecond()
+	awaitSecond(
+		t,
+		committed,
+	)
 
 	close(release)
 	<-waited
@@ -1016,17 +1093,18 @@ func TestExecute_LockWaitHonoursContext(
 		chan struct{},
 		1,
 	)
+	blockProjection := func(
+		context.Context,
+		asynxmd.Tx,
+		asynxmd.Event[order],
+	) error {
+		entered <- struct{}{}
+		<-release
+		return nil
+	}
 	ex, _, _, _, _ := newEnv(
 		t,
-		syncAll(func(
-			context.Context,
-			asynxmd.Tx,
-			asynxmd.Event[order],
-		) error {
-			entered <- struct{}{}
-			<-release
-			return nil
-		}),
+		syncAll(blockProjection),
 	)
 
 	go ex.Execute(
@@ -1035,7 +1113,6 @@ func TestExecute_LockWaitHonoursContext(
 			"agg",
 			1,
 		),
-		false,
 	)
 	<-entered
 
@@ -1050,7 +1127,6 @@ func TestExecute_LockWaitHonoursContext(
 			"agg",
 			2,
 		),
-		false,
 	)
 	if !errors.Is(
 		err,
@@ -1069,25 +1145,27 @@ func TestExecute_SnapshotFailureIsNonFatalAndStillDispatches(
 	t *testing.T,
 ) {
 	var reported atomic.Int32
+	onSnapshotError := func(
+		context.Context,
+		asynxmd.Event[order],
+		error,
+	) {
+		reported.Add(1)
+	}
 	ex, _, ss, d, b := newEnv(
 		t,
-		WithSnapshotErrorHandler[order](func(
-			context.Context,
-			asynxmd.Event[order],
-			error,
-		) {
-			reported.Add(1)
-		}),
+		WithSnapshotErrorHandler[order](onSnapshotError),
 	)
 	var delivered atomic.Int32
+	count := func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		delivered.Add(1)
+	}
 	b.Subscribe(
 		"OrderUpdated",
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) {
-			delivered.Add(1)
-		},
+		count,
 	)
 
 	ss.SetError(
@@ -1099,7 +1177,6 @@ func TestExecute_SnapshotFailureIsNonFatalAndStillDispatches(
 	evt, err := ex.Execute(
 		context.Background(),
 		cmd,
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -1132,6 +1209,18 @@ func TestExecute_SnapshotFailureIsNonFatalAndStillDispatches(
 	}
 }
 
+func matchAll(
+	string,
+) bool {
+	return true
+}
+
+func matchUpdated(
+	name string,
+) bool {
+	return name == "OrderUpdated"
+}
+
 func syncAll(
 	fn func(
 		context.Context,
@@ -1151,26 +1240,23 @@ func TestExecute_DurableDeliveryIsPendingUntilHandlersFinish(
 ) {
 	ex, s, _, d, b := newEnv(
 		t,
-		WithDurableDelivery[order](func(
-			string,
-		) bool {
-			return true
-		}),
+		WithDurableDelivery[order](matchAll),
 	)
 	release := make(chan struct{})
 	entered := make(
 		chan struct{},
 		1,
 	)
+	hold := func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		entered <- struct{}{}
+		<-release
+	}
 	b.Subscribe(
 		"OrderUpdated",
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) {
-			entered <- struct{}{}
-			<-release
-		},
+		hold,
 	)
 
 	if _, err := ex.Execute(
@@ -1179,7 +1265,6 @@ func TestExecute_DurableDeliveryIsPendingUntilHandlersFinish(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1224,7 +1309,6 @@ func TestExecute_NoDeliveryEntriesWhenDurableOff(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1247,7 +1331,6 @@ func TestExecute_ValidationErrorPassesThroughUnwrapped(
 	_, err := ex.Execute(
 		context.Background(),
 		mocks.CreateOrderCmd{ID: "x", Total: -1},
-		false,
 	)
 	if err != asynxmd.ErrValidation {
 		t.Fatalf(
@@ -1267,6 +1350,70 @@ func TestExecute_ValidationErrorPassesThroughUnwrapped(
 	}
 }
 
+func reactOnce(
+	ctx context.Context,
+	t *testing.T,
+	ex *CommandExecutor[order],
+	e asynxmd.Event[order],
+	release <-chan struct{},
+	reacted chan<- struct{},
+) {
+	if e.Version != 1 {
+		return
+	}
+
+	<-release
+	if _, err := ex.Execute(
+		ctx,
+		update(
+			"agg",
+			999,
+		),
+	); err != nil {
+		t.Errorf(
+			"reaction Execute: %v",
+			err,
+		)
+	}
+
+	close(reacted)
+}
+
+func floodAggregate(
+	t *testing.T,
+	ex *CommandExecutor[order],
+	flooded chan<- struct{},
+) {
+	for i := range 60 {
+		executeReporting(
+			t,
+			ex,
+			float64(i+2),
+		)
+	}
+
+	close(flooded)
+}
+
+func executeReporting(
+	t *testing.T,
+	ex *CommandExecutor[order],
+	total float64,
+) {
+	if _, err := ex.Execute(
+		context.Background(),
+		update(
+			"agg",
+			total,
+		),
+	); err != nil {
+		t.Errorf(
+			"Execute: %v",
+			err,
+		)
+	}
+}
+
 func TestExecute_ReactionToOwnAggregateDoesNotDeadlockUnderBacklog(
 	t *testing.T,
 ) {
@@ -1274,31 +1421,22 @@ func TestExecute_ReactionToOwnAggregateDoesNotDeadlockUnderBacklog(
 
 	release := make(chan struct{})
 	reacted := make(chan struct{})
+	react := func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
+		reactOnce(
+			ctx,
+			t,
+			ex,
+			e,
+			release,
+			reacted,
+		)
+	}
 	b.Subscribe(
 		"OrderUpdated",
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) {
-			if e.Version == 1 {
-				<-release
-				if _, err := ex.Execute(
-					ctx,
-					update(
-						"agg",
-						999,
-					),
-					false,
-				); err != nil {
-					t.Errorf(
-						"reaction Execute: %v",
-						err,
-					)
-				}
-
-				close(reacted)
-			}
-		},
+		react,
 	)
 
 	if _, err := ex.Execute(
@@ -1307,31 +1445,16 @@ func TestExecute_ReactionToOwnAggregateDoesNotDeadlockUnderBacklog(
 			"agg",
 			1,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
 
 	flooded := make(chan struct{})
-	go func() {
-		for i := range 60 {
-			if _, err := ex.Execute(
-				context.Background(),
-				update(
-					"agg",
-					float64(i+2),
-				),
-				false,
-			); err != nil {
-				t.Errorf(
-					"Execute: %v",
-					err,
-				)
-			}
-		}
-
-		close(flooded)
-	}()
+	go floodAggregate(
+		t,
+		ex,
+		flooded,
+	)
 
 	select {
 	case <-flooded:
@@ -1354,21 +1477,18 @@ func TestExecute_DurableDeliveryOnlyForEventsADurableSubscriberWants(
 ) {
 	ex, s, _, _, b := newEnv(
 		t,
-		WithDurableDelivery[order](func(
-			name string,
-		) bool {
-			return name == "OrderUpdated"
-		}),
+		WithDurableDelivery[order](matchUpdated),
 	)
 	release := make(chan struct{})
+	waitRelease := func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		<-release
+	}
 	b.Subscribe(
 		"OrderUpdated",
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) {
-			<-release
-		},
+		waitRelease,
 	)
 	t.Cleanup(func() { close(release) })
 	ctx := context.Background()
@@ -1376,7 +1496,6 @@ func TestExecute_DurableDeliveryOnlyForEventsADurableSubscriberWants(
 	if _, err := ex.Execute(
 		ctx,
 		mocks.CreateOrderCmd{ID: "a", Total: 1},
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1397,7 +1516,6 @@ func TestExecute_DurableDeliveryOnlyForEventsADurableSubscriberWants(
 			"a",
 			2,
 		),
-		false,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1448,7 +1566,6 @@ func TestExecute_AfterDispatcherClosedFailsPipelineButKeepsTheCommit(
 			"agg",
 			1,
 		),
-		false,
 	)
 	if !errors.Is(
 		err,
@@ -1487,19 +1604,14 @@ func TestExecute_WithoutDispatcherCommitsAndReturns(
 	ex := New[order](
 		es,
 		nil,
-		WithDurableDelivery[order](func(
-			string,
-		) bool {
-			return true
-		}),
+		WithDurableDelivery[order](matchAll),
 	)
-	if _, err := ex.Execute(
+	if _, err := ex.ExecuteWait(
 		context.Background(),
 		update(
 			"agg",
 			1,
 		),
-		true,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1520,11 +1632,7 @@ func TestExecute_EnqueueFailureAfterCommitParksTheAggregate(
 ) {
 	ex, _, _, d, _ := newEnv(
 		t,
-		WithDurableDelivery[order](func(
-			string,
-		) bool {
-			return true
-		}),
+		WithDurableDelivery[order](matchAll),
 	)
 	d.Close(context.Background())
 
@@ -1534,7 +1642,6 @@ func TestExecute_EnqueueFailureAfterCommitParksTheAggregate(
 			"agg",
 			1,
 		),
-		false,
 	)
 	if !errors.Is(
 		err,
@@ -1582,16 +1689,18 @@ func TestWithLockIfFree_RunsWhenFreeAndSkipsWhenHeld(
 	}
 
 	var ranWhileHeld, reportedRunning bool
+	markRan := func() { ranWhileHeld = true }
+	probe := func() error {
+		reportedRunning = executor.WithLockIfFree(
+			"agg",
+			markRan,
+		)
+		return nil
+	}
 	err := executor.WithLock(
 		context.Background(),
 		"agg",
-		func() error {
-			reportedRunning = executor.WithLockIfFree(
-				"agg",
-				func() { ranWhileHeld = true },
-			)
-			return nil
-		},
+		probe,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1640,14 +1749,26 @@ func eventually(
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf(
-				"timed out waiting for %s",
-				what,
-			)
-		}
-
+		requireBefore(
+			t,
+			deadline,
+			what,
+		)
 		runtime.Gosched()
+	}
+}
+
+func requireBefore(
+	t *testing.T,
+	deadline time.Time,
+	what string,
+) {
+	t.Helper()
+	if time.Now().After(deadline) {
+		t.Fatalf(
+			"timed out waiting for %s",
+			what,
+		)
 	}
 }
 
@@ -1672,21 +1793,41 @@ func BenchmarkExecute_CreateNew(
 	for _, numEvents := range []int{1, 100, 1000} {
 		b.Run(
 			"events="+string(rune('0'+numEvents/100))+"_000",
-			func(
-				b *testing.B,
-			) {
-				b.ReportAllocs()
-				b.ResetTimer()
+			createBench(
+				ctx,
+				executor,
+			),
+		)
+	}
+}
 
-				for b.Loop() {
-					cmd := mocks.CreateOrderCmd{ID: "order" + string(rune(b.N)), Total: 100.0}
-					_, _ = executor.Execute(
-						ctx,
-						cmd,
-						false,
-					)
-				}
-			},
+func createBench(
+	ctx context.Context,
+	executor *CommandExecutor[order],
+) func(*testing.B) {
+	return func(
+		b *testing.B,
+	) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		runCreateLoop(
+			ctx,
+			b,
+			executor,
+		)
+	}
+}
+
+func runCreateLoop(
+	ctx context.Context,
+	b *testing.B,
+	executor *CommandExecutor[order],
+) {
+	for b.Loop() {
+		cmd := mocks.CreateOrderCmd{ID: "order" + string(rune(b.N)), Total: 100.0}
+		_, _ = executor.Execute(
+			ctx,
+			cmd,
 		)
 	}
 }
@@ -1713,30 +1854,49 @@ func BenchmarkExecute_UpdateExisting(
 	executor.Execute(
 		ctx,
 		createCmd,
-		false,
 	)
 
 	for _, numEvents := range []int{1, 100, 1000} {
 		b.Run(
 			"events="+string(rune('0'+numEvents/100))+"_000",
-			func(
-				b *testing.B,
-			) {
-				b.ReportAllocs()
-				b.ResetTimer()
+			updateBench(
+				ctx,
+				executor,
+			),
+		)
+	}
+}
 
-				for b.Loop() {
-					cmd := mocks.UpdateOrderCmd{
-						ID:       "order_base",
-						NewState: order{ID: "order_base", Total: 150.0, Status: "Confirmed"},
-					}
-					_, _ = executor.Execute(
-						ctx,
-						cmd,
-						false,
-					)
-				}
-			},
+func updateBench(
+	ctx context.Context,
+	executor *CommandExecutor[order],
+) func(*testing.B) {
+	return func(
+		b *testing.B,
+	) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		runUpdateLoop(
+			ctx,
+			b,
+			executor,
+		)
+	}
+}
+
+func runUpdateLoop(
+	ctx context.Context,
+	b *testing.B,
+	executor *CommandExecutor[order],
+) {
+	for b.Loop() {
+		cmd := mocks.UpdateOrderCmd{
+			ID:       "order_base",
+			NewState: order{ID: "order_base", Total: 150.0, Status: "Confirmed"},
+		}
+		_, _ = executor.Execute(
+			ctx,
+			cmd,
 		)
 	}
 }
@@ -1758,11 +1918,7 @@ func fakeEnv(
 	return New[order](
 			es,
 			fake,
-			WithDurableDelivery[order](func(
-				string,
-			) bool {
-				return true
-			}),
+			WithDurableDelivery[order](matchAll),
 		),
 		fake
 }
@@ -1779,7 +1935,6 @@ func TestExecute_EnqueueFailureParksWithTheEnqueueError(
 			"agg",
 			1,
 		),
-		false,
 	); !errors.Is(
 		err,
 		errEnqueue,

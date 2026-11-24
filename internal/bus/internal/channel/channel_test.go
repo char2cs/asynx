@@ -23,6 +23,64 @@ func ev(
 	return models.Event[string]{EventName: name}
 }
 
+type ctxKey struct{}
+
+func forwardCtxValue(
+	ctx context.Context,
+	received chan<- string,
+) {
+	v, ok := ctx.Value(ctxKey{}).(string)
+	if !ok {
+		return
+	}
+
+	received <- v
+}
+
+func unsubscribeJob(
+	b models.Bus[string],
+	id string,
+) func() {
+	return func() {
+		b.Unsubscribe(id)
+	}
+}
+
+func closeOnFirst(
+	calls *atomic.Int32,
+	ch chan struct{},
+) {
+	if calls.Add(1) != 1 {
+		return
+	}
+
+	close(ch)
+}
+
+func receiveNow[V any](
+	ch <-chan V,
+) (v V, ok bool) {
+	select {
+	case v = <-ch:
+		return v,
+			true
+	default:
+		return v,
+			false
+	}
+}
+
+func spawn(
+	wg *sync.WaitGroup,
+	work func(),
+) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		work()
+	}()
+}
+
 func closeAndWait(
 	t *testing.T,
 	b models.Bus[string],
@@ -173,20 +231,22 @@ func TestSubscribeWithFallback(
 		chan struct{},
 		1,
 	)
+	subscribeFn := func(
+		_ context.Context,
+		e models.Event[string],
+	) {
+		panic("boom")
+	}
+	withFallbackFn := func(
+		_ context.Context,
+		e models.Event[string],
+	) {
+		fallbackCalled <- struct{}{}
+	}
 	_, err := b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			e models.Event[string],
-		) {
-			panic("boom")
-		},
-		models.WithFallback[string](func(
-			_ context.Context,
-			e models.Event[string],
-		) {
-			fallbackCalled <- struct{}{}
-		}),
+		subscribeFn,
+		models.WithFallback[string](withFallbackFn),
 	)
 	if err != nil {
 		t.Fatalf(
@@ -219,16 +279,16 @@ func TestSubscribeWithHandlerTimeout(
 	started := make(chan struct{})
 	block := make(chan struct{})
 	defer close(block)
-
+	subscribeFn := func(
+		_ context.Context,
+		e models.Event[string],
+	) {
+		close(started)
+		<-block
+	}
 	_, err := b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			e models.Event[string],
-		) {
-			close(started)
-			<-block
-		},
+		subscribeFn,
 		models.WithHandlerTimeout[string](30*time.Millisecond),
 	)
 	if err != nil {
@@ -264,17 +324,18 @@ func TestUnsubscribeRemovesHandler(
 	b := newBus[string]()
 
 	var called int32
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		atomic.AddInt32(
+			&called,
+			1,
+		)
+	}
 	id, _ := b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			atomic.AddInt32(
-				&called,
-				1,
-			)
-		},
+		subscribeFn,
 	)
 
 	b.Unsubscribe(id)
@@ -388,14 +449,15 @@ func TestPublishExactMatch(
 		chan struct{},
 		1,
 	)
+	subscribeFn := func(
+		_ context.Context,
+		e models.Event[string],
+	) {
+		called <- struct{}{}
+	}
 	b.Subscribe(
 		"OrderPlaced",
-		func(
-			_ context.Context,
-			e models.Event[string],
-		) {
-			called <- struct{}{}
-		},
+		subscribeFn,
 	)
 
 	b.Publish(
@@ -420,17 +482,18 @@ func TestPublishExactMatchNoFalsePositive(
 	b := newBus[string]()
 
 	var called int32
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		atomic.AddInt32(
+			&called,
+			1,
+		)
+	}
 	b.Subscribe(
 		"OrderPlaced",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			atomic.AddInt32(
-				&called,
-				1,
-			)
-		},
+		subscribeFn,
 	)
 
 	b.Publish(
@@ -453,17 +516,18 @@ func TestPublishRegexMatch(
 	b := newBus[string]()
 
 	var count int32
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		atomic.AddInt32(
+			&count,
+			1,
+		)
+	}
 	b.Subscribe(
 		"^Order.*",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			atomic.AddInt32(
-				&count,
-				1,
-			)
-		},
+		subscribeFn,
 	)
 
 	b.Publish(
@@ -497,18 +561,19 @@ func TestPublishMultipleHandlers(
 	b := newBus[string]()
 
 	var count int32
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		atomic.AddInt32(
+			&count,
+			1,
+		)
+	}
 	for range 3 {
 		b.Subscribe(
 			"test",
-			func(
-				_ context.Context,
-				_ models.Event[string],
-			) {
-				atomic.AddInt32(
-					&count,
-					1,
-				)
-			},
+			subscribeFn,
 		)
 	}
 
@@ -538,14 +603,15 @@ func TestPublishEventDataPropagated(
 		chan models.Event[string],
 		1,
 	)
+	subscribeFn := func(
+		_ context.Context,
+		e models.Event[string],
+	) {
+		received <- e
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			e models.Event[string],
-		) {
-			received <- e
-		},
+		subscribeFn,
 	)
 
 	want := models.Event[string]{EventName: "test", AggregateID: "agg-42"}
@@ -558,17 +624,18 @@ func TestPublishEventDataPropagated(
 		b,
 	)
 
-	select {
-	case got := <-received:
-		if got.AggregateID != want.AggregateID {
-			t.Errorf(
-				"AggregateID: got %s, want %s",
-				got.AggregateID,
-				want.AggregateID,
-			)
-		}
-	default:
+	got, gotOK := receiveNow(received)
+	if !gotOK {
 		t.Error("handler not called")
+	}
+
+	if gotOK &&
+		got.AggregateID != want.AggregateID {
+		t.Errorf(
+			"AggregateID: got %s, want %s",
+			got.AggregateID,
+			want.AggregateID,
+		)
 	}
 }
 
@@ -644,23 +711,24 @@ func TestPublish_DeadlineExceeded(
 func TestPublish_CtxPropagatedToHandler(
 	t *testing.T,
 ) {
-	type ctxKey struct{}
 	b := newBus[string]()
 
 	received := make(
 		chan string,
 		1,
 	)
+	subscribeFn := func(
+		ctx context.Context,
+		_ models.Event[string],
+	) {
+		forwardCtxValue(
+			ctx,
+			received,
+		)
+	}
 	b.Subscribe(
 		"test",
-		func(
-			ctx context.Context,
-			_ models.Event[string],
-		) {
-			if v, ok := ctx.Value(ctxKey{}).(string); ok {
-				received <- v
-			}
-		},
+		subscribeFn,
 	)
 
 	ctx := context.WithValue(
@@ -677,46 +745,49 @@ func TestPublish_CtxPropagatedToHandler(
 		b,
 	)
 
-	select {
-	case got := <-received:
-		if got != "request-123" {
-			t.Errorf(
-				"got %q, want %q",
-				got,
-				"request-123",
-			)
-		}
-	default:
+	got, gotOK := receiveNow(received)
+	if !gotOK {
 		t.Error("handler not called or ctx value not propagated")
+	}
+
+	if gotOK &&
+		got != "request-123" {
+		t.Errorf(
+			"got %q, want %q",
+			got,
+			"request-123",
+		)
 	}
 }
 
 func TestPublish_CtxPropagatedToFallback(
 	t *testing.T,
 ) {
-	type ctxKey struct{}
 	b := newBus[string]()
 
 	received := make(
 		chan string,
 		1,
 	)
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		panic("boom")
+	}
+	withFallbackFn := func(
+		ctx context.Context,
+		_ models.Event[string],
+	) {
+		forwardCtxValue(
+			ctx,
+			received,
+		)
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			panic("boom")
-		},
-		models.WithFallback[string](func(
-			ctx context.Context,
-			_ models.Event[string],
-		) {
-			if v, ok := ctx.Value(ctxKey{}).(string); ok {
-				received <- v
-			}
-		}),
+		subscribeFn,
+		models.WithFallback[string](withFallbackFn),
 	)
 
 	ctx := context.WithValue(
@@ -733,17 +804,18 @@ func TestPublish_CtxPropagatedToFallback(
 		b,
 	)
 
-	select {
-	case got := <-received:
-		if got != "trace-abc" {
-			t.Errorf(
-				"got %q, want %q",
-				got,
-				"trace-abc",
-			)
-		}
-	default:
+	got, gotOK := receiveNow(received)
+	if !gotOK {
 		t.Error("fallback not called or ctx value not propagated")
+	}
+
+	if gotOK &&
+		got != "trace-abc" {
+		t.Errorf(
+			"got %q, want %q",
+			got,
+			"trace-abc",
+		)
 	}
 }
 
@@ -754,24 +826,25 @@ func TestChannelBus_WithPanicHandler(
 		chan any,
 		1,
 	)
+	withPanicHandlerFn := func(
+		_ context.Context,
+		_ models.Event[string],
+		v any,
+	) {
+		got <- v
+	}
 	b := bus.New[string](
-		bus.WithPanicHandler[string](func(
-			_ context.Context,
-			_ models.Event[string],
-			v any,
-		) {
-			got <- v
-		}),
+		bus.WithPanicHandler[string](withPanicHandlerFn),
 	)
-
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		panic("bus-panic")
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			panic("bus-panic")
-		},
+		subscribeFn,
 	)
 	b.Publish(
 		context.Background(),
@@ -782,17 +855,18 @@ func TestChannelBus_WithPanicHandler(
 		b,
 	)
 
-	select {
-	case v := <-got:
-		if v != "bus-panic" {
-			t.Errorf(
-				"got %v, want %q",
-				v,
-				"bus-panic",
-			)
-		}
-	default:
+	v, gotOK := receiveNow(got)
+	if !gotOK {
 		t.Error("panic handler not called")
+	}
+
+	if gotOK &&
+		v != "bus-panic" {
+		t.Errorf(
+			"got %v, want %q",
+			v,
+			"bus-panic",
+		)
 	}
 }
 
@@ -806,26 +880,26 @@ func TestChannelBus_WithTimeoutHandler(
 	started := make(chan struct{})
 	block := make(chan struct{})
 	defer close(block)
-
+	withTimeoutHandlerFn := func(
+		_ context.Context,
+		_ models.Event[string],
+		_ time.Duration,
+	) {
+		fired <- struct{}{}
+	}
 	b := bus.New[string](
-		bus.WithTimeoutHandler[string](func(
-			_ context.Context,
-			_ models.Event[string],
-			_ time.Duration,
-		) {
-			fired <- struct{}{}
-		}),
+		bus.WithTimeoutHandler[string](withTimeoutHandlerFn),
 	)
-
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		close(started)
+		<-block
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			close(started)
-			<-block
-		},
+		subscribeFn,
 		models.WithHandlerTimeout[string](20*time.Millisecond),
 	)
 	b.Publish(
@@ -854,27 +928,28 @@ func TestHandlerPanicDoesNotBlockOtherHandlers(
 	b := newBus[string]()
 
 	var normalCalled int32
-
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		panic("boom")
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			panic("boom")
-		},
+		subscribeFn,
 	)
+	subscribeFn2 := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		atomic.AddInt32(
+			&normalCalled,
+			1,
+		)
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			atomic.AddInt32(
-				&normalCalled,
-				1,
-			)
-		},
+		subscribeFn2,
 	)
 
 	b.Publish(
@@ -900,20 +975,22 @@ func TestFallbackCalledOnPanic(
 		chan struct{},
 		1,
 	)
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		panic("oops")
+	}
+	withFallbackFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		fallbackCalled <- struct{}{}
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			panic("oops")
-		},
-		models.WithFallback[string](func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			fallbackCalled <- struct{}{}
-		}),
+		subscribeFn,
+		models.WithFallback[string](withFallbackFn),
 	)
 
 	b.Publish(
@@ -941,20 +1018,22 @@ func TestFallbackReceivesOriginalEvent(
 		chan models.Event[string],
 		1,
 	)
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		panic("oops")
+	}
+	withFallbackFn := func(
+		_ context.Context,
+		e models.Event[string],
+	) {
+		received <- e
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			panic("oops")
-		},
-		models.WithFallback[string](func(
-			_ context.Context,
-			e models.Event[string],
-		) {
-			received <- e
-		}),
+		subscribeFn,
+		models.WithFallback[string](withFallbackFn),
 	)
 
 	want := models.Event[string]{EventName: "test", AggregateID: "agg-1"}
@@ -967,17 +1046,18 @@ func TestFallbackReceivesOriginalEvent(
 		b,
 	)
 
-	select {
-	case got := <-received:
-		if got.AggregateID != want.AggregateID {
-			t.Errorf(
-				"fallback got AggregateID %s, want %s",
-				got.AggregateID,
-				want.AggregateID,
-			)
-		}
-	default:
+	got, gotOK := receiveNow(received)
+	if !gotOK {
 		t.Error("fallback not called")
+	}
+
+	if gotOK &&
+		got.AggregateID != want.AggregateID {
+		t.Errorf(
+			"fallback got AggregateID %s, want %s",
+			got.AggregateID,
+			want.AggregateID,
+		)
 	}
 }
 
@@ -987,17 +1067,18 @@ func TestInvalidRegexTreatedAsNoMatch(
 	b := newBus[string]()
 
 	var called int32
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		atomic.AddInt32(
+			&called,
+			1,
+		)
+	}
 	b.Subscribe(
 		"^Order[",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			atomic.AddInt32(
-				&called,
-				1,
-			)
-		},
+		subscribeFn,
 	)
 
 	b.Publish(
@@ -1020,17 +1101,18 @@ func TestRegexAlternation(
 	b := newBus[string]()
 
 	var count int32
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		atomic.AddInt32(
+			&count,
+			1,
+		)
+	}
 	b.Subscribe(
 		"^(Order|Payment).*",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			atomic.AddInt32(
-				&count,
-				1,
-			)
-		},
+		subscribeFn,
 	)
 
 	b.Publish(
@@ -1064,17 +1146,18 @@ func TestLazyPatternCompilationCached(
 	b := newBus[string]()
 
 	var count int32
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		atomic.AddInt32(
+			&count,
+			1,
+		)
+	}
 	b.Subscribe(
 		"^Event.*",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			atomic.AddInt32(
-				&count,
-				1,
-			)
-		},
+		subscribeFn,
 	)
 
 	for range 5 {
@@ -1103,17 +1186,18 @@ func TestInvalidRegexCompilationCached(
 	b := newBus[string]()
 
 	var called int32
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		atomic.AddInt32(
+			&called,
+			1,
+		)
+	}
 	b.Subscribe(
 		"^Order[",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			atomic.AddInt32(
-				&called,
-				1,
-			)
-		},
+		subscribeFn,
 	)
 
 	for range 5 {
@@ -1140,16 +1224,16 @@ func TestCloseWaitsForHandlers(
 
 	var handlerDone atomic.Bool
 	block := make(chan struct{})
-
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		<-block
+		handlerDone.Store(true)
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			<-block
-			handlerDone.Store(true)
-		},
+		subscribeFn,
 	)
 
 	b.Publish(
@@ -1181,15 +1265,15 @@ func TestCloseDeadlineExceeded(
 
 	block := make(chan struct{})
 	defer close(block)
-
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		<-block
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			<-block
-		},
+		subscribeFn,
 	)
 
 	b.Publish(
@@ -1273,29 +1357,32 @@ func TestConcurrentPublishes(
 	b := newBus[string]()
 
 	var count int32
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		atomic.AddInt32(
+			&count,
+			1,
+		)
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			atomic.AddInt32(
-				&count,
-				1,
-			)
-		},
+		subscribeFn,
 	)
 
 	var wg sync.WaitGroup
+	publishFn := func() {
+		b.Publish(
+			context.Background(),
+			ev("test"),
+		)
+	}
 	for range 100 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			b.Publish(
-				context.Background(),
-				ev("test"),
-			)
-		}()
+		spawn(
+			&wg,
+			publishFn,
+		)
 	}
 
 	wg.Wait()
@@ -1319,26 +1406,31 @@ func TestConcurrentSubscribeAndPublish(
 	b := newBus[string]()
 
 	var wg sync.WaitGroup
+	subscribeFn := func() {
+		b.Subscribe(
+			"test",
+			func(
+				_ context.Context,
+				_ models.Event[string],
+			) {
+			},
+		)
+	}
+	publishFn := func() {
+		b.Publish(
+			context.Background(),
+			ev("test"),
+		)
+	}
 	for range 50 {
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			b.Subscribe(
-				"test",
-				func(
-					_ context.Context,
-					_ models.Event[string],
-				) {
-				},
-			)
-		}()
-		go func() {
-			defer wg.Done()
-			b.Publish(
-				context.Background(),
-				ev("test"),
-			)
-		}()
+		spawn(
+			&wg,
+			subscribeFn,
+		)
+		spawn(
+			&wg,
+			publishFn,
+		)
 	}
 
 	wg.Wait()
@@ -1371,21 +1463,24 @@ func TestConcurrentUnsubscribeAndPublish(
 	}
 
 	var wg sync.WaitGroup
+	publishFn := func() {
+		b.Publish(
+			context.Background(),
+			ev("test"),
+		)
+	}
 	for _, id := range ids {
-		wg.Add(2)
-		go func(
-			id string,
-		) {
-			defer wg.Done()
-			b.Unsubscribe(id)
-		}(id)
-		go func() {
-			defer wg.Done()
-			b.Publish(
-				context.Background(),
-				ev("test"),
-			)
-		}()
+		spawn(
+			&wg,
+			unsubscribeJob(
+				b,
+				id,
+			),
+		)
+		spawn(
+			&wg,
+			publishFn,
+		)
 	}
 
 	wg.Wait()
@@ -1428,17 +1523,17 @@ func TestPublishSync_BlocksUntilHandlersDone(
 	var done atomic.Bool
 	block := make(chan struct{})
 	started := make(chan struct{})
-
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		close(started)
+		<-block
+		done.Store(true)
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			close(started)
-			<-block
-			done.Store(true)
-		},
+		subscribeFn,
 	)
 
 	go func() {
@@ -1474,14 +1569,15 @@ func TestPublishSync_ExactMatch(
 		chan struct{},
 		1,
 	)
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		called <- struct{}{}
+	}
 	b.Subscribe(
 		"OrderPlaced",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			called <- struct{}{}
-		},
+		subscribeFn,
 	)
 
 	b.PublishSync(
@@ -1506,14 +1602,15 @@ func TestPublishSync_RegexMatch(
 	)
 
 	var count atomic.Int32
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		count.Add(1)
+	}
 	b.Subscribe(
 		"^Order.*",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			count.Add(1)
-		},
+		subscribeFn,
 	)
 
 	b.PublishSync(
@@ -1547,15 +1644,16 @@ func TestPublishSync_MultipleHandlers(
 	)
 
 	var count atomic.Int32
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		count.Add(1)
+	}
 	for range 3 {
 		b.Subscribe(
 			"test",
-			func(
-				_ context.Context,
-				_ models.Event[string],
-			) {
-				count.Add(1)
-			},
+			subscribeFn,
 		)
 	}
 
@@ -1663,28 +1761,29 @@ func TestPublishSync_PanicHandledDoesNotBlock(
 	t *testing.T,
 ) {
 	var panicCaught atomic.Bool
+	withPanicHandlerFn := func(
+		_ context.Context,
+		_ models.Event[string],
+		_ any,
+	) {
+		panicCaught.Store(true)
+	}
 	b := bus.New[string](
-		bus.WithPanicHandler[string](func(
-			_ context.Context,
-			_ models.Event[string],
-			_ any,
-		) {
-			panicCaught.Store(true)
-		}),
+		bus.WithPanicHandler[string](withPanicHandlerFn),
 	)
 	defer closeAndWait(
 		t,
 		b,
 	)
-
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		panic("boom")
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			panic("boom")
-		},
+		subscribeFn,
 	)
 
 	b.PublishSync(
@@ -1710,14 +1809,15 @@ func TestPublishSync_EventDataPropagated(
 		chan models.Event[string],
 		1,
 	)
+	subscribeFn := func(
+		_ context.Context,
+		e models.Event[string],
+	) {
+		received <- e
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			e models.Event[string],
-		) {
-			received <- e
-		},
+		subscribeFn,
 	)
 
 	want := models.Event[string]{EventName: "test", AggregateID: "agg-sync-42"}
@@ -1726,17 +1826,18 @@ func TestPublishSync_EventDataPropagated(
 		want,
 	)
 
-	select {
-	case got := <-received:
-		if got.AggregateID != want.AggregateID {
-			t.Errorf(
-				"AggregateID: got %s, want %s",
-				got.AggregateID,
-				want.AggregateID,
-			)
-		}
-	default:
+	got, gotOK := receiveNow(received)
+	if !gotOK {
 		t.Error("handler not called")
+	}
+
+	if gotOK &&
+		got.AggregateID != want.AggregateID {
+		t.Errorf(
+			"AggregateID: got %s, want %s",
+			got.AggregateID,
+			want.AggregateID,
+		)
 	}
 }
 
@@ -1750,26 +1851,29 @@ func TestPublishSync_ConcurrentCalls(
 	)
 
 	var count atomic.Int32
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		count.Add(1)
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			count.Add(1)
-		},
+		subscribeFn,
 	)
 
 	var wg sync.WaitGroup
+	publishSyncFn := func() {
+		b.PublishSync(
+			context.Background(),
+			ev("test"),
+		)
+	}
 	for range 50 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			b.PublishSync(
-				context.Background(),
-				ev("test"),
-			)
-		}()
+		spawn(
+			&wg,
+			publishSyncFn,
+		)
 	}
 
 	wg.Wait()
@@ -1804,19 +1908,19 @@ func TestGetCompiledPattern_ConcurrentSamePattern(
 	)
 
 	var wg sync.WaitGroup
-	wg.Add(goroutines)
 	ready := make(chan struct{})
-	for i := range goroutines {
-		go func(
-			i int,
-		) {
-			defer wg.Done()
-			<-ready
-			b.Publish(
-				context.Background(),
-				ev("order.created"),
-			)
-		}(i)
+	publishWhenReady := func() {
+		<-ready
+		b.Publish(
+			context.Background(),
+			ev("order.created"),
+		)
+	}
+	for range goroutines {
+		spawn(
+			&wg,
+			publishWhenReady,
+		)
 	}
 
 	close(ready)
@@ -1835,17 +1939,17 @@ func TestWaitForHandlers_BlocksUntilDone(
 	var done atomic.Bool
 	block := make(chan struct{})
 	started := make(chan struct{})
-
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		close(started)
+		<-block
+		done.Store(true)
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			close(started)
-			<-block
-			done.Store(true)
-		},
+		subscribeFn,
 	)
 
 	b.Publish(
@@ -1871,30 +1975,31 @@ func TestPublishSync_WaitsForATimedOutHandler(
 	var timeouts atomic.Int32
 	var finished atomic.Bool
 	timedOut := make(chan struct{})
-	b := bus.New[string](bus.WithTimeoutHandler[string](
-		func(
-			context.Context,
-			models.Event[string],
-			time.Duration,
-		) {
-			if timeouts.Add(1) == 1 {
-				close(timedOut)
-			}
-		}))
+	withTimeoutHandlerFn := func(
+		context.Context,
+		models.Event[string],
+		time.Duration,
+	) {
+		closeOnFirst(
+			&timeouts,
+			timedOut,
+		)
+	}
+	b := bus.New[string](bus.WithTimeoutHandler[string](withTimeoutHandlerFn))
 	defer closeAndWait(
 		t,
 		b,
 	)
-
+	subscribeFn := func(
+		context.Context,
+		models.Event[string],
+	) {
+		<-timedOut
+		finished.Store(true)
+	}
 	b.Subscribe(
 		"slow",
-		func(
-			context.Context,
-			models.Event[string],
-		) {
-			<-timedOut
-			finished.Store(true)
-		},
+		subscribeFn,
 		models.WithHandlerTimeout[string](20*time.Millisecond),
 	)
 
@@ -1926,24 +2031,24 @@ func TestPublish_StillAbandonsATimedOutHandler(
 		chan struct{},
 		1,
 	)
-	b := bus.New[string](bus.WithTimeoutHandler[string](
-		func(
-			context.Context,
-			models.Event[string],
-			time.Duration,
-		) {
-			timeouts.Add(1)
-			reported <- struct{}{}
-		}))
-
+	withTimeoutHandlerFn := func(
+		context.Context,
+		models.Event[string],
+		time.Duration,
+	) {
+		timeouts.Add(1)
+		reported <- struct{}{}
+	}
+	b := bus.New[string](bus.WithTimeoutHandler[string](withTimeoutHandlerFn))
+	subscribeFn := func(
+		context.Context,
+		models.Event[string],
+	) {
+		<-release
+	}
 	b.Subscribe(
 		"slow",
-		func(
-			context.Context,
-			models.Event[string],
-		) {
-			<-release
-		},
+		subscribeFn,
 		models.WithHandlerTimeout[string](20*time.Millisecond),
 	)
 
@@ -1976,25 +2081,26 @@ func TestChannelBus_APanicHandlerThatPanicsDoesNotCrashTheProcess(
 		chan struct{},
 		1,
 	)
+	withPanicHandlerFn := func(
+		_ context.Context,
+		_ models.Event[string],
+		_ any,
+	) {
+		called <- struct{}{}
+		panic("observer panic")
+	}
 	b := bus.New[string](
-		bus.WithPanicHandler[string](func(
-			_ context.Context,
-			_ models.Event[string],
-			_ any,
-		) {
-			called <- struct{}{}
-			panic("observer panic")
-		}),
+		bus.WithPanicHandler[string](withPanicHandlerFn),
 	)
-
+	subscribeFn := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		panic("handler panic")
+	}
 	b.Subscribe(
 		"test",
-		func(
-			_ context.Context,
-			_ models.Event[string],
-		) {
-			panic("handler panic")
-		},
+		subscribeFn,
 	)
 	b.Publish(
 		context.Background(),
@@ -2018,6 +2124,88 @@ var noop = func(
 ) {
 }
 
+func newBenchBus(
+	b *testing.B,
+) models.Bus[string] {
+	cb := bus.New[string]()
+	cleanupFn := func() { cb.Close(context.Background()) }
+	b.Cleanup(cleanupFn)
+
+	return cb
+}
+
+func subscribeFormatted(
+	cb models.Bus[string],
+	count int,
+	format string,
+) {
+	for i := range count {
+		cb.Subscribe(
+			fmt.Sprintf(
+				format,
+				i,
+			),
+			noop,
+		)
+	}
+}
+
+func subscribeSame(
+	cb models.Bus[string],
+	count int,
+	pattern string,
+) {
+	for range count {
+		cb.Subscribe(
+			pattern,
+			noop,
+		)
+	}
+}
+
+func publishLoop(
+	b *testing.B,
+	cb models.Bus[string],
+	eventName string,
+) {
+	event := models.Event[string]{EventName: eventName}
+	ctx := context.Background()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for range b.N {
+		cb.Publish(
+			ctx,
+			event,
+		)
+	}
+
+	b.StopTimer()
+}
+
+func publishFormattedBench(
+	n int,
+	format string,
+	eventName string,
+) func(*testing.B) {
+	return func(
+		b *testing.B,
+	) {
+		cb := newBenchBus(b)
+		subscribeFormatted(
+			cb,
+			n,
+			format,
+		)
+		publishLoop(
+			b,
+			cb,
+			eventName,
+		)
+	}
+}
+
 func BenchmarkPublish_ExactMatch(
 	b *testing.B,
 ) {
@@ -2027,37 +2215,11 @@ func BenchmarkPublish_ExactMatch(
 				"%d_subs",
 				n,
 			),
-			func(
-				b *testing.B,
-			) {
-				cb := bus.New[string]()
-				b.Cleanup(func() { cb.Close(context.Background()) })
-
-				for i := range n {
-					cb.Subscribe(
-						fmt.Sprintf(
-							"Event%d",
-							i,
-						),
-						noop,
-					)
-				}
-
-				event := models.Event[string]{EventName: "Event0"}
-				ctx := context.Background()
-
-				b.ResetTimer()
-				b.ReportAllocs()
-
-				for range b.N {
-					cb.Publish(
-						ctx,
-						event,
-					)
-				}
-
-				b.StopTimer()
-			},
+			publishFormattedBench(
+				n,
+				"Event%d",
+				"Event0",
+			),
 		)
 	}
 }
@@ -2071,37 +2233,11 @@ func BenchmarkPublish_NoMatch(
 				"%d_subs",
 				n,
 			),
-			func(
-				b *testing.B,
-			) {
-				cb := bus.New[string]()
-				b.Cleanup(func() { cb.Close(context.Background()) })
-
-				for i := range n {
-					cb.Subscribe(
-						fmt.Sprintf(
-							"Event%d",
-							i,
-						),
-						noop,
-					)
-				}
-
-				event := models.Event[string]{EventName: "NoMatch"}
-				ctx := context.Background()
-
-				b.ResetTimer()
-				b.ReportAllocs()
-
-				for range b.N {
-					cb.Publish(
-						ctx,
-						event,
-					)
-				}
-
-				b.StopTimer()
-			},
+			publishFormattedBench(
+				n,
+				"Event%d",
+				"NoMatch",
+			),
 		)
 	}
 }
@@ -2115,37 +2251,31 @@ func BenchmarkPublish_Regex(
 				"%d_patterns",
 				n,
 			),
-			func(
-				b *testing.B,
-			) {
-				cb := bus.New[string]()
-				b.Cleanup(func() { cb.Close(context.Background()) })
+			publishFormattedBench(
+				n,
+				"^Event%d.*",
+				"Event0Created",
+			),
+		)
+	}
+}
 
-				for i := range n {
-					cb.Subscribe(
-						fmt.Sprintf(
-							"^Event%d.*",
-							i,
-						),
-						noop,
-					)
-				}
-
-				event := models.Event[string]{EventName: "Event0Created"}
-				ctx := context.Background()
-
-				b.ResetTimer()
-				b.ReportAllocs()
-
-				for range b.N {
-					cb.Publish(
-						ctx,
-						event,
-					)
-				}
-
-				b.StopTimer()
-			},
+func publishFanoutBench(
+	n int,
+) func(*testing.B) {
+	return func(
+		b *testing.B,
+	) {
+		cb := newBenchBus(b)
+		subscribeSame(
+			cb,
+			n,
+			"OrderPlaced",
+		)
+		publishLoop(
+			b,
+			cb,
+			"OrderPlaced",
 		)
 	}
 }
@@ -2159,34 +2289,20 @@ func BenchmarkPublish_Fanout(
 				"%d_handlers",
 				n,
 			),
-			func(
-				b *testing.B,
-			) {
-				cb := bus.New[string]()
-				b.Cleanup(func() { cb.Close(context.Background()) })
+			publishFanoutBench(n),
+		)
+	}
+}
 
-				for range n {
-					cb.Subscribe(
-						"OrderPlaced",
-						noop,
-					)
-				}
-
-				event := models.Event[string]{EventName: "OrderPlaced"}
-				ctx := context.Background()
-
-				b.ResetTimer()
-				b.ReportAllocs()
-
-				for range b.N {
-					cb.Publish(
-						ctx,
-						event,
-					)
-				}
-
-				b.StopTimer()
-			},
+func publishWhileNext(
+	pb *testing.PB,
+	cb models.Bus[string],
+	event models.Event[string],
+) {
+	for pb.Next() {
+		cb.Publish(
+			context.Background(),
+			event,
 		)
 	}
 }
@@ -2194,87 +2310,82 @@ func BenchmarkPublish_Fanout(
 func BenchmarkPublish_Parallel(
 	b *testing.B,
 ) {
-	cb := bus.New[string]()
-	b.Cleanup(func() { cb.Close(context.Background()) })
-
+	cb := newBenchBus(b)
 	cb.Subscribe(
 		"OrderPlaced",
 		noop,
 	)
 
 	event := models.Event[string]{EventName: "OrderPlaced"}
-	ctx := context.Background()
 
 	b.ResetTimer()
 	b.ReportAllocs()
-
-	b.RunParallel(func(
+	runParallelFn := func(
 		pb *testing.PB,
 	) {
-		for pb.Next() {
-			cb.Publish(
-				ctx,
-				event,
-			)
-		}
-	})
+		publishWhileNext(
+			pb,
+			cb,
+			event,
+		)
+	}
+	b.RunParallel(runParallelFn)
 	b.StopTimer()
+}
+
+func publishMixedBench(
+	exact int,
+	regex int,
+) func(*testing.B) {
+	return func(
+		b *testing.B,
+	) {
+		cb := newBenchBus(b)
+		subscribeFormatted(
+			cb,
+			exact,
+			"Exact%d",
+		)
+		subscribeFormatted(
+			cb,
+			regex,
+			"^Regex%d.*",
+		)
+		publishLoop(
+			b,
+			cb,
+			"Exact0",
+		)
+	}
 }
 
 func BenchmarkPublish_MixedSubs(
 	b *testing.B,
 ) {
 	for _, exact := range []int{100, 1_000} {
-		for _, regex := range []int{5, 20} {
-			b.Run(
-				fmt.Sprintf(
-					"%d_exact_%d_regex",
-					exact,
-					regex,
-				),
-				func(
-					b *testing.B,
-				) {
-					cb := bus.New[string]()
-					b.Cleanup(func() { cb.Close(context.Background()) })
+		benchmarkMixedRegexes(
+			b,
+			exact,
+		)
+	}
+}
 
-					for i := range exact {
-						cb.Subscribe(
-							fmt.Sprintf(
-								"Exact%d",
-								i,
-							),
-							noop,
-						)
-					}
-
-					for i := range regex {
-						cb.Subscribe(
-							fmt.Sprintf(
-								"^Regex%d.*",
-								i,
-							),
-							noop,
-						)
-					}
-
-					event := models.Event[string]{EventName: "Exact0"}
-					ctx := context.Background()
-
-					b.ResetTimer()
-					b.ReportAllocs()
-
-					for range b.N {
-						cb.Publish(
-							ctx,
-							event,
-						)
-					}
-
-					b.StopTimer()
-				},
-			)
-		}
+func benchmarkMixedRegexes(
+	b *testing.B,
+	exact int,
+) {
+	for _, regex := range []int{5, 20} {
+		b.Run(
+			fmt.Sprintf(
+				"%d_exact_%d_regex",
+				exact,
+				regex,
+			),
+			publishMixedBench(
+				exact,
+				regex,
+			),
+		)
 	}
 }
 
@@ -2282,7 +2393,8 @@ func BenchmarkSubscribe(
 	b *testing.B,
 ) {
 	cb := bus.New[string]()
-	b.Cleanup(func() { cb.Close(context.Background()) })
+	cleanupFn := func() { cb.Close(context.Background()) }
+	b.Cleanup(cleanupFn)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -2299,7 +2411,8 @@ func BenchmarkSubscribe_Regex(
 	b *testing.B,
 ) {
 	cb := bus.New[string]()
-	b.Cleanup(func() { cb.Close(context.Background()) })
+	cleanupFn := func() { cb.Close(context.Background()) }
+	b.Cleanup(cleanupFn)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -2316,7 +2429,8 @@ func BenchmarkUnsubscribe(
 	b *testing.B,
 ) {
 	cb := bus.New[string]()
-	b.Cleanup(func() { cb.Close(context.Background()) })
+	cleanupFn := func() { cb.Close(context.Background()) }
+	b.Cleanup(cleanupFn)
 
 	ids := make(
 		[]string,
@@ -2341,14 +2455,15 @@ func BenchmarkPublish_Timeout(
 	b *testing.B,
 ) {
 	cb := bus.New[string]()
-	b.Cleanup(func() {
+	cleanupFn := func() {
 		ctx, cancel := context.WithTimeout(
 			context.Background(),
 			10*time.Second,
 		)
 		defer cancel()
 		cb.Close(ctx)
-	})
+	}
+	b.Cleanup(cleanupFn)
 
 	cb.Subscribe(
 		"OrderPlaced",

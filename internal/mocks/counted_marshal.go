@@ -12,6 +12,7 @@ type CountedMarshal struct {
 	FailAt int
 }
 
+// MarshalJSON counts the call and fails on call number FailAt.
 func (c *CountedMarshal) MarshalJSON() ([]byte, error) {
 	c.N++
 	if c.N == c.FailAt {

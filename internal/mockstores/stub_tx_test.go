@@ -7,106 +7,157 @@ import (
 	"testing"
 )
 
+type txProbe struct {
+	t       *testing.T
+	ctx     context.Context
+	wantErr bool
+}
+
+func (p txProbe) run(
+	tx asynxmd.Tx,
+) error {
+	p.checkAppend(tx)
+	p.checkDelete(tx)
+	p.checkNoops(tx)
+
+	return nil
+}
+
+func (p txProbe) checkAppend(
+	tx asynxmd.Tx,
+) {
+	err := tx.Append(
+		p.ctx,
+		"a",
+		1,
+		nil,
+	)
+	if (err != nil) != p.wantErr {
+		p.t.Errorf(
+			"Append err = %v",
+			err,
+		)
+	}
+}
+
+func (p txProbe) checkDelete(
+	tx asynxmd.Tx,
+) {
+	err := tx.DeleteStream(
+		p.ctx,
+		"a",
+	)
+	if (err != nil) != p.wantErr {
+		p.t.Errorf(
+			"DeleteStream err = %v",
+			err,
+		)
+	}
+}
+
+func (p txProbe) checkNoops(
+	tx asynxmd.Tx,
+) {
+	if tx.DropDeliveries(
+		p.ctx,
+		"a",
+	) != nil ||
+		tx.PutReceipt(
+			p.ctx,
+			"c",
+			asynxmd.Receipt{},
+		) != nil ||
+		tx.EnqueueDelivery(
+			p.ctx,
+			"a",
+			1,
+		) != nil ||
+		tx.Native() != nil {
+		p.t.Error("no-op tx methods should succeed")
+	}
+}
+
+func checkStubs(
+	t *testing.T,
+	s asynxmd.Store,
+	wantErr bool,
+) {
+	ctx := context.Background()
+	_, found, rerr := s.GetReceipt(
+		ctx,
+		"c",
+	)
+	pending, perr := s.PendingDeliveries(
+		ctx,
+		1,
+	)
+	aerr := s.AckDelivery(
+		ctx,
+		"a",
+		1,
+	)
+	if found ||
+		pending != nil ||
+		(rerr != nil) != wantErr ||
+		(perr != nil) != wantErr ||
+		(aerr != nil) != wantErr {
+		t.Errorf(
+			"receipt/delivery stubs: found=%v pending=%v errs=%v,%v,%v",
+			found,
+			pending,
+			rerr,
+			perr,
+			aerr,
+		)
+	}
+}
+
+type atomicCase struct {
+	name  string
+	store asynxmd.Store
+}
+
+func (c atomicCase) run(
+	t *testing.T,
+) {
+	wantErr := c.name == "ErrStore"
+	probe := txProbe{
+		t:       t,
+		ctx:     context.Background(),
+		wantErr: wantErr,
+	}
+
+	err := c.store.Atomically(
+		probe.ctx,
+		probe.run,
+	)
+	if err != nil {
+		t.Errorf(
+			"Atomically = %v",
+			err,
+		)
+	}
+
+	checkStubs(
+		t,
+		c.store,
+		wantErr,
+	)
+}
+
 func TestMockStores_AtomicallyDelegatesAppendAndDelete(
 	t *testing.T,
 ) {
-	ctx := context.Background()
 	sentinel := errors.New("fail")
-
-	for name, s := range map[string]asynxmd.Store{
+	stores := map[string]asynxmd.Store{
 		"Store":            &Store{},
 		"ErrStore":         &ErrStore{Err: sentinel},
 		"CorruptBlobStore": &CorruptBlobStore{},
-	} {
+	}
+	for name, s := range stores {
 		t.Run(
 			name,
-			func(
-				t *testing.T,
-			) {
-				wantErr := name == "ErrStore"
-				err := s.Atomically(
-					ctx,
-					func(
-						tx asynxmd.Tx,
-					) error {
-						if err := tx.Append(
-							ctx,
-							"a",
-							1,
-							nil,
-						); (err != nil) != wantErr {
-							t.Errorf(
-								"Append err = %v",
-								err,
-							)
-						}
-
-						if err := tx.DeleteStream(
-							ctx,
-							"a",
-						); (err != nil) != wantErr {
-							t.Errorf(
-								"DeleteStream err = %v",
-								err,
-							)
-						}
-
-						if tx.DropDeliveries(
-							ctx,
-							"a",
-						) != nil ||
-							tx.PutReceipt(
-								ctx,
-								"c",
-								asynxmd.Receipt{},
-							) != nil ||
-							tx.EnqueueDelivery(
-								ctx,
-								"a",
-								1,
-							) != nil ||
-							tx.Native() != nil {
-							t.Error("no-op tx methods should succeed")
-						}
-
-						return nil
-					},
-				)
-				if err != nil {
-					t.Errorf(
-						"Atomically = %v",
-						err,
-					)
-				}
-
-				_, found, rerr := s.GetReceipt(
-					ctx,
-					"c",
-				)
-				pending, perr := s.PendingDeliveries(
-					ctx,
-					1,
-				)
-				aerr := s.AckDelivery(
-					ctx,
-					"a",
-					1,
-				)
-				if found ||
-					pending != nil ||
-					(rerr != nil) != wantErr ||
-					(perr != nil) != wantErr ||
-					(aerr != nil) != wantErr {
-					t.Errorf(
-						"receipt/delivery stubs: found=%v pending=%v errs=%v,%v,%v",
-						found,
-						pending,
-						rerr,
-						perr,
-						aerr,
-					)
-				}
-			},
+			atomicCase{name: name, store: s}.run,
 		)
 	}
 }

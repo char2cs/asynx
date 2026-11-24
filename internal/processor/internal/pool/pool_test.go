@@ -22,12 +22,15 @@ type blockingBus[T any] struct {
 	unblockCh chan struct{}
 }
 
+// Publish is the test double implementation for the code under test.
 func (b *blockingBus[T]) Publish(
 	_ context.Context,
 	_ asynxmd.Event[T],
 ) error {
 	return nil
 }
+
+// PublishSync is the test double implementation for the code under test.
 func (b *blockingBus[T]) PublishSync(
 	_ context.Context,
 	_ asynxmd.Event[T],
@@ -35,6 +38,8 @@ func (b *blockingBus[T]) PublishSync(
 	<-b.unblockCh
 	return nil
 }
+
+// Subscribe is the test double implementation for the code under test.
 func (b *blockingBus[T]) Subscribe(
 	_ string,
 	_ asynxmd.ProjectionHandler[T],
@@ -43,16 +48,22 @@ func (b *blockingBus[T]) Subscribe(
 	return "",
 		nil
 }
+
+// Unsubscribe is the test double implementation for the code under test.
 func (b *blockingBus[T]) Unsubscribe(
 	_ string,
 ) error {
 	return nil
 }
+
+// Close is the test double implementation for the code under test.
 func (b *blockingBus[T]) Close(
 	_ context.Context,
 ) error {
 	return nil
 }
+
+// WaitForHandlers is the test double implementation for the code under test.
 func (b *blockingBus[T]) WaitForHandlers() {}
 
 type order = mocks.Order
@@ -172,13 +183,11 @@ func TestPool_SerialOrderingSameAggregate(
 		shard.CommandChan() <- envelope
 
 		result := <-envelope.ResultChan
-		if result.Err != nil {
-			t.Fatalf(
-				"Send failed at iteration %d: %v",
-				i,
-				result.Err,
-			)
-		}
+		requireSent(
+			t,
+			i,
+			result.Err,
+		)
 	}
 
 	agg, err := es.Get(
@@ -236,61 +245,30 @@ func TestPool_ParallelDifferentAggregates(
 
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
-		go func(
-			idx int,
-		) {
-			defer wg.Done()
-			shard := p.Shards()[idx%len(p.Shards())]
-
-			envelope := &models.CommandEnvelope[order]{
-				Cmd: mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0},
-				Ctx: ctx,
-				ResultChan: make(
-					chan models.CommandResult[order],
-					1,
-				),
-			}
-
-			shard.CommandChan() <- envelope
-			result := <-envelope.ResultChan
-			errs <- result.Err
-		}(i)
+		go submitCreate(
+			ctx,
+			&wg,
+			errs,
+			p.Shards()[i%len(p.Shards())],
+			i,
+		)
 	}
 
 	wg.Wait()
 	close(errs)
 
-	for err := range errs {
-		if err != nil {
-			t.Errorf(
-				"Send failed: %v",
-				err,
-			)
-		}
-	}
+	reportErrs(
+		t,
+		errs,
+	)
 
 	for i := 0; i < 10; i++ {
-		id := "order" + string(rune(i))
-		agg, err := es.Get(
+		checkTotal(
 			ctx,
-			id,
+			t,
+			es,
+			"order"+string(rune(i)),
 		)
-		if err != nil {
-			t.Errorf(
-				"aggregate %s not found: %v",
-				id,
-				err,
-			)
-			continue
-		}
-
-		if agg.Total != 100.0 {
-			t.Errorf(
-				"aggregate %s has Total=%f, expected 100.0",
-				id,
-				agg.Total,
-			)
-		}
 	}
 }
 
@@ -389,23 +367,13 @@ func TestPool_DrainWaitsForInflight(
 
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
-		go func(
-			idx int,
-		) {
-			defer wg.Done()
-			envelope := &models.CommandEnvelope[order]{
-				Cmd: mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0},
-				Ctx: ctx,
-				ResultChan: make(
-					chan models.CommandResult[order],
-					1,
-				),
-			}
-
-			shard.CommandChan() <- envelope
-			result := <-envelope.ResultChan
-			errs <- result.Err
-		}(i)
+		go submitCreate(
+			ctx,
+			&wg,
+			errs,
+			shard,
+			i,
+		)
 	}
 
 	wg.Wait()
@@ -420,28 +388,18 @@ func TestPool_DrainWaitsForInflight(
 
 	close(errs)
 
-	for err := range errs {
-		if err != nil {
-			t.Errorf(
-				"Send failed: %v",
-				err,
-			)
-		}
-	}
+	reportErrs(
+		t,
+		errs,
+	)
 
 	for i := 0; i < 10; i++ {
-		id := "order" + string(rune(i))
-		_, err := es.Get(
+		checkExists(
 			ctx,
-			id,
+			t,
+			es,
+			"order"+string(rune(i)),
 		)
-		if err != nil {
-			t.Errorf(
-				"aggregate %s not found: %v",
-				id,
-				err,
-			)
-		}
 	}
 }
 
@@ -618,39 +576,22 @@ func TestPool_MultipleWorkers(
 
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
-		go func(
-			idx int,
-		) {
-			defer wg.Done()
-			shardIdx := idx % 4
-			shard := p.Shards()[shardIdx]
-
-			envelope := &models.CommandEnvelope[order]{
-				Cmd: mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0},
-				Ctx: ctx,
-				ResultChan: make(
-					chan models.CommandResult[order],
-					1,
-				),
-			}
-
-			shard.CommandChan() <- envelope
-			result := <-envelope.ResultChan
-			errs <- result.Err
-		}(i)
+		go submitCreate(
+			ctx,
+			&wg,
+			errs,
+			p.Shards()[i%4],
+			i,
+		)
 	}
 
 	wg.Wait()
 	close(errs)
 
-	for err := range errs {
-		if err != nil {
-			t.Errorf(
-				"Send failed: %v",
-				err,
-			)
-		}
-	}
+	reportErrs(
+		t,
+		errs,
+	)
 }
 
 func TestPool_ValidationErrorDecrementVersionSingleWorker(
@@ -1076,55 +1017,61 @@ func BenchmarkPool_Send_MultiShard(
 				"shards=%d",
 				shards,
 			),
-			func(
-				b *testing.B,
-			) {
-				s := store.New()
-				bu := bus.New[order]()
-				es := eventstore.New[order](
-					s,
-					store.NewSnapshots(),
-					nil,
-					1,
-					nil,
-				)
-				d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: bu})
-				defer d.Close(context.Background())
-				executor := exec.New(
-					es,
-					d,
-				)
+			multiShardBench(shards),
+		)
+	}
+}
 
-				p := pool.New(
-					executor,
-					shards,
-					0,
-					1,
-				)
-				defer p.Drain(context.Background())
+func multiShardBench(
+	shards int,
+) func(*testing.B) {
+	return func(
+		b *testing.B,
+	) {
+		benchMultiShard(
+			b,
+			shards,
+		)
+	}
+}
 
-				ctx := context.Background()
+func benchMultiShard(
+	b *testing.B,
+	shards int,
+) {
+	s := store.New()
+	bu := bus.New[order]()
+	es := eventstore.New[order](
+		s,
+		store.NewSnapshots(),
+		nil,
+		1,
+		nil,
+	)
+	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: bu})
+	defer d.Close(context.Background())
+	executor := exec.New(
+		es,
+		d,
+	)
 
-				b.ReportAllocs()
-				b.ResetTimer()
+	p := pool.New(
+		executor,
+		shards,
+		0,
+		1,
+	)
+	defer p.Drain(context.Background())
 
-				for b.Loop() {
-					idx := b.N % shards
-					shard := p.Shards()[idx]
+	ctx := context.Background()
 
-					envelope := &models.CommandEnvelope[order]{
-						Cmd: mocks.CreateOrderCmd{ID: "order", Total: 100.0},
-						Ctx: ctx,
-						ResultChan: make(
-							chan models.CommandResult[order],
-							1,
-						),
-					}
+	b.ReportAllocs()
+	b.ResetTimer()
 
-					shard.CommandChan() <- envelope
-					<-envelope.ResultChan
-				}
-			},
+	for b.Loop() {
+		benchSend(
+			ctx,
+			p.Shards()[b.N%shards],
 		)
 	}
 }
@@ -1161,25 +1108,157 @@ func BenchmarkPool_Send_Parallel(
 	b.ReportAllocs()
 	b.ResetTimer()
 
-	b.RunParallel(func(
+	work := func(
 		pb *testing.PB,
 	) {
-		idx := 0
-		for pb.Next() {
-			shard := p.Shards()[idx%8]
-			idx++
+		benchParallel(
+			ctx,
+			pb,
+			p,
+		)
+	}
+	b.RunParallel(work)
+}
 
-			envelope := &models.CommandEnvelope[order]{
-				Cmd: mocks.CreateOrderCmd{ID: "order", Total: 100.0},
-				Ctx: ctx,
-				ResultChan: make(
-					chan models.CommandResult[order],
-					1,
-				),
-			}
+func benchParallel(
+	ctx context.Context,
+	pb *testing.PB,
+	p *pool.ShardPool[order],
+) {
+	idx := 0
+	for pb.Next() {
+		benchSend(
+			ctx,
+			p.Shards()[idx%8],
+		)
+		idx++
+	}
+}
 
-			shard.CommandChan() <- envelope
-			<-envelope.ResultChan
-		}
-	})
+func benchSend(
+	ctx context.Context,
+	shard *pool.Shard[order],
+) {
+	envelope := &models.CommandEnvelope[order]{
+		Cmd: mocks.CreateOrderCmd{ID: "order", Total: 100.0},
+		Ctx: ctx,
+		ResultChan: make(
+			chan models.CommandResult[order],
+			1,
+		),
+	}
+
+	shard.CommandChan() <- envelope
+	<-envelope.ResultChan
+}
+
+func submitCreate(
+	ctx context.Context,
+	wg *sync.WaitGroup,
+	errs chan<- error,
+	shard *pool.Shard[order],
+	idx int,
+) {
+	defer wg.Done()
+	envelope := &models.CommandEnvelope[order]{
+		Cmd: mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0},
+		Ctx: ctx,
+		ResultChan: make(
+			chan models.CommandResult[order],
+			1,
+		),
+	}
+
+	shard.CommandChan() <- envelope
+	result := <-envelope.ResultChan
+	errs <- result.Err
+}
+
+func requireSent(
+	t *testing.T,
+	iteration int,
+	err error,
+) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf(
+			"Send failed at iteration %d: %v",
+			iteration,
+			err,
+		)
+	}
+}
+
+func reportErrs(
+	t *testing.T,
+	errs <-chan error,
+) {
+	t.Helper()
+	for err := range errs {
+		reportErr(
+			t,
+			err,
+		)
+	}
+}
+
+func reportErr(
+	t *testing.T,
+	err error,
+) {
+	t.Helper()
+	if err != nil {
+		t.Errorf(
+			"Send failed: %v",
+			err,
+		)
+	}
+}
+
+func checkExists(
+	ctx context.Context,
+	t *testing.T,
+	es eventstore.EventStore[order],
+	id string,
+) {
+	t.Helper()
+	if _, err := es.Get(
+		ctx,
+		id,
+	); err != nil {
+		t.Errorf(
+			"aggregate %s not found: %v",
+			id,
+			err,
+		)
+	}
+}
+
+func checkTotal(
+	ctx context.Context,
+	t *testing.T,
+	es eventstore.EventStore[order],
+	id string,
+) {
+	t.Helper()
+	agg, err := es.Get(
+		ctx,
+		id,
+	)
+	if err != nil {
+		t.Errorf(
+			"aggregate %s not found: %v",
+			id,
+			err,
+		)
+		return
+	}
+
+	if agg.Total != 100.0 {
+		t.Errorf(
+			"aggregate %s has Total=%f, expected 100.0",
+			id,
+			agg.Total,
+		)
+	}
 }

@@ -12,6 +12,7 @@ type handlerReporter[T any] struct {
 	onPanic         asynxmd.PanicHandler[T]
 }
 
+// PublishError calls the publish error handler, if any, swallowing its panic.
 func (r *handlerReporter[T]) PublishError(
 	job contracts.Job[T],
 	err error,
@@ -20,7 +21,7 @@ func (r *handlerReporter[T]) PublishError(
 		return
 	}
 
-	defer func() { _ = recover() }()
+	defer swallowPanic()
 	r.onPublishError(
 		job.Context(),
 		job.Event(),
@@ -28,6 +29,7 @@ func (r *handlerReporter[T]) PublishError(
 	)
 }
 
+// DeliveryError calls the delivery error handler, if any, swallowing its panic.
 func (r *handlerReporter[T]) DeliveryError(
 	job contracts.Job[T],
 	err error,
@@ -37,7 +39,7 @@ func (r *handlerReporter[T]) DeliveryError(
 		return
 	}
 
-	defer func() { _ = recover() }()
+	defer swallowPanic()
 	r.onDeliveryError(
 		job.Context(),
 		job.Event(),
@@ -46,6 +48,7 @@ func (r *handlerReporter[T]) DeliveryError(
 	)
 }
 
+// Panic calls the panic handler, if any, swallowing its panic.
 func (r *handlerReporter[T]) Panic(
 	job contracts.Job[T],
 	recovered any,
@@ -54,10 +57,15 @@ func (r *handlerReporter[T]) Panic(
 		return
 	}
 
-	defer func() { _ = recover() }()
+	defer swallowPanic()
 	r.onPanic(
 		job.Context(),
 		job.Event(),
 		recovered,
 	)
+}
+
+func swallowPanic() {
+	recovered := recover()
+	_ = recovered
 }

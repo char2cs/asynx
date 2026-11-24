@@ -15,75 +15,125 @@ import (
 // run in goroutines nobody recovers, so a panic inside one is swallowed: a
 // misbehaving observer must not take the process down.
 func Handler[T any](
+	ctx context.Context,
 	wg *sync.WaitGroup,
 	job *HandlerJob[T],
 ) {
 	defer wg.Done()
 
-	panicFn := panicCallback(job)
-	timeoutFn := timeoutCallback(job)
+	panicFn := panicCallback(
+		ctx,
+		job,
+	)
+	timeoutFn := timeoutCallback(
+		ctx,
+		job,
+	)
 	defer fallBackOnPanic(
+		ctx,
 		job,
 		panicFn,
 		timeoutFn,
 	)
 
 	executeWithTimeout(
-		job.Ctx,
+		ctx,
 		job.Handler,
 		job.Event,
 		job.Timeout,
 		panicFn,
 		timeoutFn,
-		job.WaitAfterTimeout,
+		job.waitMode(),
 	)
 }
 
+func swallowPanic() {
+	if recover() != nil {
+		return
+	}
+}
+
+func reportRecovered(
+	panicFn func(any),
+) {
+	recovered := recover()
+	if recovered == nil {
+		return
+	}
+
+	panicFn(recovered)
+}
+
 func panicCallback[T any](
+	ctx context.Context,
 	job *HandlerJob[T],
 ) func(any) {
 	return func(
 		v any,
 	) {
-		defer func() { _ = recover() }()
-		if job.OnPanic == nil {
-			OnHandlerPanic(
-				v,
-				job,
-			)
-			return
-		}
-
-		job.OnPanic(
-			job.Ctx,
-			job.Event,
+		defer swallowPanic()
+		notifyPanic(
+			ctx,
+			job,
 			v,
 		)
 	}
 }
 
+func notifyPanic[T any](
+	ctx context.Context,
+	job *HandlerJob[T],
+	v any,
+) {
+	if job.OnPanic == nil {
+		OnHandlerPanic(
+			v,
+			job,
+		)
+		return
+	}
+
+	job.OnPanic(
+		ctx,
+		job.Event,
+		v,
+	)
+}
+
 func timeoutCallback[T any](
+	ctx context.Context,
 	job *HandlerJob[T],
 ) func() {
 	return func() {
-		defer func() { _ = recover() }()
-		if job.OnTimeout == nil {
-			OnHandlerTimeout(
-				job.Event,
-				job.Timeout,
-			)
-			return
-		}
-
-		job.OnTimeout(
-			job.Ctx,
-			job.Event,
-			job.Timeout,
+		defer swallowPanic()
+		notifyTimeout(
+			ctx,
+			job,
 		)
 	}
 }
 
+func notifyTimeout[T any](
+	ctx context.Context,
+	job *HandlerJob[T],
+) {
+	if job.OnTimeout == nil {
+		OnHandlerTimeout(
+			job.Event,
+			job.Timeout,
+		)
+		return
+	}
+
+	job.OnTimeout(
+		ctx,
+		job.Event,
+		job.Timeout,
+	)
+}
+
 func fallBackOnPanic[T any](
+	ctx context.Context,
 	job *HandlerJob[T],
 	panicFn func(any),
 	timeoutFn func(),
@@ -99,6 +149,7 @@ func fallBackOnPanic[T any](
 	}
 
 	runFallback(
+		ctx,
 		job,
 		panicFn,
 		timeoutFn,
@@ -106,23 +157,20 @@ func fallBackOnPanic[T any](
 }
 
 func runFallback[T any](
+	ctx context.Context,
 	job *HandlerJob[T],
 	panicFn func(any),
 	timeoutFn func(),
 ) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			panicFn(recovered)
-		}
-	}()
+	defer reportRecovered(panicFn)
 	executeWithTimeout(
-		job.Ctx,
+		ctx,
 		job.FallbackHandler,
 		job.Event,
 		job.Timeout,
 		panicFn,
 		timeoutFn,
-		job.WaitAfterTimeout,
+		job.waitMode(),
 	)
 }
 
@@ -145,7 +193,7 @@ func WithTimeout[T any](
 		timeout,
 		onPanic,
 		onTimeout,
-		false,
+		abandonAfterTimeout,
 	)
 }
 
@@ -156,7 +204,7 @@ func executeWithTimeout[T any](
 	timeout time.Duration,
 	onPanic func(any),
 	onTimeout func(),
-	waitAfterTimeout bool,
+	mode waitMode,
 ) {
 	if timeout == 0 {
 		handler(
@@ -183,7 +231,7 @@ func executeWithTimeout[T any](
 	case <-timer.C:
 		afterTimeout(
 			onTimeout,
-			waitAfterTimeout,
+			mode,
 			done,
 		)
 	}
@@ -213,24 +261,25 @@ func reportPanic(
 		return
 	}
 
-	defer func() { _ = recover() }()
+	defer swallowPanic()
 	onPanic(recovered)
 }
 
 func afterTimeout(
 	onTimeout func(),
-	waitAfterTimeout bool,
+	mode waitMode,
 	done <-chan struct{},
 ) {
 	if onTimeout != nil {
 		onTimeout()
 	}
 
-	if waitAfterTimeout {
+	if mode == waitForHandler {
 		<-done
 	}
 }
 
+// OnHandlerPanic is the default panic callback: it logs the panic to stderr.
 func OnHandlerPanic[T any](
 	panicValue any,
 	job *HandlerJob[T],
@@ -243,6 +292,8 @@ func OnHandlerPanic[T any](
 	)
 }
 
+// OnHandlerTimeout is the default timeout callback: it logs the timeout to
+// stderr.
 func OnHandlerTimeout[T any](
 	event asynxmd.Event[T],
 	timeout time.Duration,
@@ -253,4 +304,12 @@ func OnHandlerTimeout[T any](
 		timeout,
 		event.EventName,
 	)
+}
+
+func (j *HandlerJob[T]) waitMode() waitMode {
+	if j.WaitAfterTimeout {
+		return waitForHandler
+	}
+
+	return abandonAfterTimeout
 }

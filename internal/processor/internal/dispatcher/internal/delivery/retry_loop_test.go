@@ -21,23 +21,18 @@ func TestRetryLoop_SettlesTheJobAfterTheFirstAttempt(
 		chan bool,
 		1,
 	)
+	match := func(
+		string,
+	) bool {
+		return true
+	}
 	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
-		Match: func(
-			string,
-		) bool {
-			return true
-		},
-		Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			if runs.Add(1) == 1 {
-				return errors.New("not yet")
-			}
-
-			settledAtSecond <- isClosed(job.Ticket().Settled)
-			return nil
-		},
+		Match: match,
+		Handler: makeHandler2(
+			&runs,
+			settledAtSecond,
+			&job,
+		),
 	}}})
 	job, halt := f.pop(
 		t,
@@ -64,32 +59,26 @@ func TestRetryLoop_RetriesOnlyTheFailedSubscribers(
 	t *testing.T,
 ) {
 	var goodRuns, flakyRuns atomic.Int32
+	match2 := func(
+		string,
+	) bool {
+		return true
+	}
+	handler := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		goodRuns.Add(1)
+		return nil
+	}
+	match3 := func(
+		string,
+	) bool {
+		return true
+	}
 	f := newFixture(asynxmd.DispatcherConfig[int]{MaxAttempts: 5, DurableSubs: []asynxmd.DurableSub[int]{
-		{Match: func(
-			string,
-		) bool {
-			return true
-		}, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			goodRuns.Add(1)
-			return nil
-		}},
-		{Match: func(
-			string,
-		) bool {
-			return true
-		}, Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			if flakyRuns.Add(1) < 3 {
-				return errors.New("flaky")
-			}
-
-			return nil
-		}},
+		{Match: match2, Handler: handler},
+		{Match: match3, Handler: makeHandler3(&flakyRuns)},
 	}})
 	job, halt := f.pop(
 		t,
@@ -121,19 +110,21 @@ func TestRetryLoop_StopsAtTheAttemptCap(
 	t *testing.T,
 ) {
 	var runs atomic.Int32
+	match4 := func(
+		string,
+	) bool {
+		return true
+	}
+	handler2 := func(
+		context.Context,
+		asynxmd.Event[int],
+	) error {
+		runs.Add(1)
+		return errors.New("down")
+	}
 	f := newFixture(asynxmd.DispatcherConfig[int]{MaxAttempts: 4, DurableSubs: []asynxmd.DurableSub[int]{{
-		Match: func(
-			string,
-		) bool {
-			return true
-		},
-		Handler: func(
-			context.Context,
-			asynxmd.Event[int],
-		) error {
-			runs.Add(1)
-			return errors.New("down")
-		},
+		Match:   match4,
+		Handler: handler2,
 	}}})
 	job, halt := f.pop(
 		t,
@@ -162,6 +153,26 @@ func TestRetryLoop_StopsAtTheAttemptCap(
 	}
 }
 
+func stepRetrying(
+	t *testing.T,
+	loop *retryLoop[int],
+) {
+	t.Helper()
+	err := loop.step()
+	if errors.Is(
+		err,
+		errRetrying,
+	) {
+		return
+	}
+
+	t.Fatalf(
+		"step = %v, want %v",
+		err,
+		errRetrying,
+	)
+}
+
 func TestRetryLoop_DoublesTheBackoffUpToTheMaximum(
 	t *testing.T,
 ) {
@@ -182,7 +193,10 @@ func TestRetryLoop_DoublesTheBackoffUpToTheMaximum(
 
 	var backoffs []time.Duration
 	for range 3 {
-		loop.step()
+		stepRetrying(
+			t,
+			loop,
+		)
 		backoffs = append(
 			backoffs,
 			loop.backoff,
@@ -258,4 +272,65 @@ func requireParkedWait(
 			err,
 		)
 	}
+}
+
+func makeHandler2(
+	runs *atomic.Int32,
+	settledAtSecond chan bool,
+	job *jobs.Job[int],
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler2(
+			runs,
+			settledAtSecond,
+			job,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler2(
+	runs *atomic.Int32,
+	settledAtSecond chan bool,
+	job *jobs.Job[int],
+	_ context.Context,
+	_ asynxmd.Event[int],
+) error {
+	if (*runs).Add(1) == 1 {
+		return errors.New("not yet")
+	}
+
+	settledAtSecond <- isClosed((*job).Ticket().Settled)
+	return nil
+}
+
+func makeHandler3(
+	flakyRuns *atomic.Int32,
+) func(context.Context, asynxmd.Event[int]) error {
+	return func(
+		p0 context.Context,
+		p1 asynxmd.Event[int],
+	) error {
+		return runHandler3(
+			flakyRuns,
+			p0,
+			p1,
+		)
+	}
+}
+
+func runHandler3(
+	flakyRuns *atomic.Int32,
+	_ context.Context,
+	_ asynxmd.Event[int],
+) error {
+	if (*flakyRuns).Add(1) < 3 {
+		return errors.New("flaky")
+	}
+
+	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -401,17 +402,18 @@ func TestGet_WarmPath_CorruptSnapshot_CallsOnCorruption(
 		1,
 		order{},
 	)
+	newFn := func(
+		err error,
+	) {
+		hookErr = err
+	}
 	r := New[order](
 		es,
 		ss,
 		rep,
 		1,
 		order{},
-		func(
-			err error,
-		) {
-			hookErr = err
-		},
+		newFn,
 	)
 
 	_, _ = r.Get(
@@ -573,16 +575,16 @@ func TestGet_AutoSnapshotFail_ReturnsState(
 	es := store.New()
 	ss := store.NewSnapshots()
 	ctx := context.Background()
-
+	fn := func(
+		_ context.Context,
+		_ string,
+		p []byte,
+	) ([]byte, error) {
+		return p,
+			nil
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(
-			_ context.Context,
-			_ string,
-			p []byte,
-		) ([]byte, error) {
-			return p,
-				nil
-		},
+		1: fn,
 	}
 	rep := replayer.New[order](
 		es,
@@ -643,16 +645,16 @@ func TestGet_AutoSnapshot_WrittenAfterUpcasting(
 	es := store.New()
 	ss := store.NewSnapshots()
 	ctx := context.Background()
-
+	fn := func(
+		_ context.Context,
+		_ string,
+		p []byte,
+	) ([]byte, error) {
+		return p,
+			nil
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(
-			_ context.Context,
-			_ string,
-			p []byte,
-		) ([]byte, error) {
-			return p,
-				nil
-		},
+		1: fn,
 	}
 	rep := replayer.New[order](
 		es,
@@ -901,16 +903,16 @@ func TestGet_WarmPath_AutoSnapshotError_ReturnsStateNotError(
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"New"}]`),
 		),
 	)
-
+	fn := func(
+		_ context.Context,
+		_ string,
+		p []byte,
+	) ([]byte, error) {
+		return p,
+			nil
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(
-			_ context.Context,
-			_ string,
-			p []byte,
-		) ([]byte, error) {
-			return p,
-				nil
-		},
+		1: fn,
 	}
 	rep := replayer.New[order](
 		es,
@@ -971,16 +973,16 @@ func TestGet_ColdPath_AutoSnapshotError_ReturnsStateNotError(
 			json.RawMessage(`[{"op":"replace","path":"/Status","value":"Pending"}]`),
 		),
 	)
-
+	fn := func(
+		_ context.Context,
+		_ string,
+		p []byte,
+	) ([]byte, error) {
+		return p,
+			nil
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(
-			_ context.Context,
-			_ string,
-			p []byte,
-		) ([]byte, error) {
-			return p,
-				nil
-		},
+		1: fn,
 	}
 	rep := replayer.New[order](
 		es,
@@ -1043,15 +1045,16 @@ func TestGet_ColdPath_HydrateError_ReturnsError(
 	)
 
 	sentinel := errors.New("upcaster failed")
+	fn := func(
+		_ context.Context,
+		_ string,
+		_ []byte,
+	) ([]byte, error) {
+		return nil,
+			sentinel
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(
-			_ context.Context,
-			_ string,
-			_ []byte,
-		) ([]byte, error) {
-			return nil,
-				sentinel
-		},
+		1: fn,
 	}
 	rep := replayer.New[order](
 		es,
@@ -1274,17 +1277,18 @@ func TestReader_CorruptSnapshotFallsBackToColdPath(
 	)
 
 	var corruptionErr error
+	newFn := func(
+		err error,
+	) {
+		corruptionErr = err
+	}
 	r := New[order](
 		events,
 		snaps,
 		rep,
 		1,
 		order{},
-		func(
-			err error,
-		) {
-			corruptionErr = err
-		},
+		newFn,
 	)
 
 	writeEvent(
@@ -1456,6 +1460,7 @@ func TestReader_StaleSnapshotStillHydratesCorrectState(
 
 type failingSnapshots struct{ err error }
 
+// Put returns the configured error.
 func (f *failingSnapshots) Put(
 	context.Context,
 	string,
@@ -1464,6 +1469,8 @@ func (f *failingSnapshots) Put(
 ) error {
 	return f.err
 }
+
+// Get returns the configured error.
 func (f *failingSnapshots) Get(
 	context.Context,
 	string,
@@ -1472,6 +1479,8 @@ func (f *failingSnapshots) Get(
 		false,
 		f.err
 }
+
+// Delete returns the configured error.
 func (f *failingSnapshots) Delete(
 	context.Context,
 	string,
@@ -1485,6 +1494,7 @@ type afterReadStore struct {
 	once bool
 }
 
+// ReadFrom reads from the wrapped store, then runs the hook once.
 func (s *afterReadStore) ReadFrom(
 	ctx context.Context,
 	streamID string,
@@ -1508,15 +1518,16 @@ func upcastingReader(
 	es asynxmd.Store,
 	ss asynxmd.SnapshotStore,
 ) *Reader[order] {
+	fn := func(
+		_ context.Context,
+		_ string,
+		p []byte,
+	) ([]byte, error) {
+		return p,
+			nil
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(
-			_ context.Context,
-			_ string,
-			p []byte,
-		) ([]byte, error) {
-			return p,
-				nil
-		},
+		1: fn,
 	}
 	return New[order](
 		es,
@@ -1552,13 +1563,13 @@ func TestGet_AutoSnapshot_NotWrittenOverAStreamErasedMeanwhile(
 			json.RawMessage(`[]`),
 		),
 	)
-
-	es := &afterReadStore{Store: mem, hook: func() {
+	hook2 := func() {
 		mem.Delete(
 			ctx,
 			"events:agg1",
 		)
-	}}
+	}
+	es := &afterReadStore{Store: mem, hook: hook2}
 	if _, err := upcastingReader(
 		es,
 		ss,
@@ -1704,6 +1715,7 @@ func TestGet_AutoSnapshot_NotWrittenWhenTheStreamCannotBeReChecked(
 
 type readRangeFailsStore struct{ asynxmd.Store }
 
+// ReadRange always fails with the shared storage error.
 func (readRangeFailsStore) ReadRange(
 	context.Context,
 	string,
@@ -1712,6 +1724,21 @@ func (readRangeFailsStore) ReadRange(
 ) ([][]byte, error) {
 	return nil,
 		storageErr
+}
+
+func assertNoSnapshot(
+	t *testing.T,
+	ss asynxmd.SnapshotStore,
+) {
+	t.Helper()
+
+	_, found, _ := ss.Get(
+		context.Background(),
+		"agg1",
+	)
+	if found {
+		t.Error("the snapshot was written before the guard ran")
+	}
 }
 
 func TestGet_AutoSnapshot_IsWrittenUnderTheGuard(
@@ -1739,7 +1766,7 @@ func TestGet_AutoSnapshot_IsWrittenUnderTheGuard(
 		ss,
 	)
 	var guarded []string
-	r.SetSnapshotGuard(func(
+	setSnapshotGuardFn := func(
 		id string,
 		fn func(),
 	) bool {
@@ -1747,16 +1774,14 @@ func TestGet_AutoSnapshot_IsWrittenUnderTheGuard(
 			guarded,
 			id,
 		)
-		if _, found, _ := ss.Get(
-			ctx,
-			"agg1",
-		); found {
-			t.Error("the snapshot was written before the guard ran")
-		}
-
+		assertNoSnapshot(
+			t,
+			ss,
+		)
 		fn()
 		return true
-	})
+	}
+	r.SetSnapshotGuard(setSnapshotGuardFn)
 
 	if _, err := r.Get(
 		ctx,
@@ -1808,12 +1833,13 @@ func TestGet_AutoSnapshot_SkippedWhenTheGuardRefuses(
 		mem,
 		ss,
 	)
-	r.SetSnapshotGuard(func(
+	setSnapshotGuardFn := func(
 		string,
 		func(),
 	) bool {
 		return false
-	})
+	}
+	r.SetSnapshotGuard(setSnapshotGuardFn)
 
 	if _, err := r.Get(
 		ctx,
@@ -1857,13 +1883,14 @@ func TestLoad_AutoSnapshot_DoesNotUseTheGuard(
 		mem,
 		ss,
 	)
-	r.SetSnapshotGuard(func(
+	setSnapshotGuardFn := func(
 		string,
 		func(),
 	) bool {
 		t.Error("Load asked for the guard")
 		return false
-	})
+	}
+	r.SetSnapshotGuard(setSnapshotGuardFn)
 
 	if _, _, err := r.Load(
 		ctx,
@@ -2186,78 +2213,131 @@ func populateEvents(
 	n int,
 ) {
 	b.Helper()
+
 	patch := json.RawMessage(`[{"op":"replace","path":"/Status","value":"x"}]`)
-	ctx := context.Background()
 	for i := 0; i < n; i++ {
-		v := int64(startVersion + i)
-		if err := es.Append(
-			ctx,
-			"events:agg1",
-			v,
-			benchEventBlob(
-				v,
-				patch,
-			),
-		); err != nil {
-			b.Fatal(err)
-		}
+		appendBenchEvent(
+			b,
+			es,
+			int64(startVersion+i),
+			patch,
+		)
 	}
+}
+
+func appendBenchEvent(
+	b *testing.B,
+	es store.Memory,
+	version int64,
+	patch json.RawMessage,
+) {
+	b.Helper()
+
+	err := es.Append(
+		context.Background(),
+		"events:agg1",
+		version,
+		benchEventBlob(
+			version,
+			patch,
+		),
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+}
+
+func mustGet(
+	b *testing.B,
+	r *Reader[order],
+) {
+	b.Helper()
+
+	_, err := r.Get(
+		context.Background(),
+		"agg1",
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+}
+
+func benchGetLoop(
+	b *testing.B,
+	r *Reader[order],
+) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		mustGet(
+			b,
+			r,
+		)
+	}
+}
+
+func benchCounts() []int {
+	return []int{1, 10, 1_000_000}
 }
 
 func BenchmarkGet_WarmPath(
 	b *testing.B,
 ) {
-	for _, tc := range []struct {
-		name   string
-		deltas int
-	}{
-		{"deltas=1", 1},
-		{"deltas=10", 10},
-		{"deltas=1_000_000", 1_000_000},
-	} {
+	for _, deltas := range benchCounts() {
 		b.Run(
-			tc.name,
-			func(
-				b *testing.B,
-			) {
-				es := store.New()
-				ss := store.NewSnapshots()
-				ctx := context.Background()
+			fmt.Sprintf(
+				"deltas=%d",
+				deltas,
+			),
+			warmPathBench(deltas),
+		)
+	}
+}
 
-				if err := ss.Put(
-					ctx,
-					"agg1",
-					1,
-					benchSnapshotBlob(
-						1,
-						order{ID: "1", Status: "Pending", Total: 50},
-					),
-				); err != nil {
-					b.Fatal(err)
-				}
+func seedBenchSnapshot(
+	b *testing.B,
+	ss asynxmd.SnapshotStore,
+) {
+	b.Helper()
 
-				populateEvents(
-					b,
-					es,
-					2,
-					tc.deltas,
-				)
+	err := ss.Put(
+		context.Background(),
+		"agg1",
+		1,
+		benchSnapshotBlob(
+			1,
+			order{ID: "1", Status: "Pending", Total: 50},
+		),
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+}
 
-				r := newTestReader(
-					es,
-					ss,
-				)
-				b.ReportAllocs()
-				b.ResetTimer()
-				for b.Loop() {
-					if _, err := r.Get(
-						ctx,
-						"agg1",
-					); err != nil {
-						b.Fatal(err)
-					}
-				}
-			},
+func warmPathBench(
+	deltas int,
+) func(*testing.B) {
+	return func(
+		b *testing.B,
+	) {
+		es := store.New()
+		ss := store.NewSnapshots()
+		seedBenchSnapshot(
+			b,
+			ss,
+		)
+		populateEvents(
+			b,
+			es,
+			2,
+			deltas,
+		)
+		benchGetLoop(
+			b,
+			newTestReader(
+				es,
+				ss,
+			),
 		)
 	}
 }
@@ -2265,42 +2345,36 @@ func BenchmarkGet_WarmPath(
 func BenchmarkGet_ColdPath(
 	b *testing.B,
 ) {
-	for _, tc := range []struct {
-		name   string
-		events int
-	}{
-		{"events=1", 1},
-		{"events=10", 10},
-		{"events=1_000_000", 1_000_000},
-	} {
+	for _, events := range benchCounts() {
 		b.Run(
-			tc.name,
-			func(
-				b *testing.B,
-			) {
-				es := store.New()
-				ctx := context.Background()
-				populateEvents(
-					b,
-					es,
-					1,
-					tc.events,
-				)
-				r := newTestReader(
-					es,
-					store.NewSnapshots(),
-				)
-				b.ReportAllocs()
-				b.ResetTimer()
-				for b.Loop() {
-					if _, err := r.Get(
-						ctx,
-						"agg1",
-					); err != nil {
-						b.Fatal(err)
-					}
-				}
-			},
+			fmt.Sprintf(
+				"events=%d",
+				events,
+			),
+			coldPathBench(events),
+		)
+	}
+}
+
+func coldPathBench(
+	events int,
+) func(*testing.B) {
+	return func(
+		b *testing.B,
+	) {
+		es := store.New()
+		populateEvents(
+			b,
+			es,
+			1,
+			events,
+		)
+		benchGetLoop(
+			b,
+			newTestReader(
+				es,
+				store.NewSnapshots(),
+			),
 		)
 	}
 }

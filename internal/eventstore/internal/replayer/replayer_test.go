@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -208,15 +209,16 @@ func TestHydrate_EmptyPatches_NoOp(
 func TestHydrate_WithUpcasting_WritesAutoSnapshot(
 	t *testing.T,
 ) {
+	fn := func(
+		_ context.Context,
+		_ string,
+		p []byte,
+	) ([]byte, error) {
+		return p,
+			nil
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(
-			_ context.Context,
-			_ string,
-			p []byte,
-		) ([]byte, error) {
-			return p,
-				nil
-		},
+		1: fn,
 	}
 	r := newTestReplayer(
 		store.New(),
@@ -287,15 +289,16 @@ func TestHydrate_NoAutoSnapshot_WhenNoUpcasting(
 func TestHydrate_MarshalSeedError(
 	t *testing.T,
 ) {
+	fn := func(
+		_ context.Context,
+		_ string,
+		p []byte,
+	) ([]byte, error) {
+		return p,
+			nil
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(
-			_ context.Context,
-			_ string,
-			p []byte,
-		) ([]byte, error) {
-			return p,
-				nil
-		},
+		1: fn,
 	}
 	r := New[mocks.ErrMarshal](
 		store.New(),
@@ -348,15 +351,16 @@ func TestHydrate_UpcasterError_PropagatesFast(
 	t *testing.T,
 ) {
 	upcastErr := errors.New("upcaster broken")
+	fn := func(
+		_ context.Context,
+		_ string,
+		_ []byte,
+	) ([]byte, error) {
+		return nil,
+			upcastErr
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(
-			_ context.Context,
-			_ string,
-			_ []byte,
-		) ([]byte, error) {
-			return nil,
-				upcastErr
-		},
+		1: fn,
 	}
 	r := newTestReplayer(
 		store.New(),
@@ -390,17 +394,25 @@ func TestHydrate_UpcasterError_PropagatesFast(
 	}
 }
 
+func expectPanicPropagated() {
+	rec := recover()
+	if rec == nil {
+		panic("expected upcaster panic to propagate, but it was swallowed")
+	}
+}
+
 func TestHydrate_UpcasterPanic_Propagates(
 	t *testing.T,
 ) {
+	fn := func(
+		_ context.Context,
+		_ string,
+		_ []byte,
+	) ([]byte, error) {
+		panic("upcaster panic")
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(
-			_ context.Context,
-			_ string,
-			_ []byte,
-		) ([]byte, error) {
-			panic("upcaster panic")
-		},
+		1: fn,
 	}
 	r := newTestReplayer(
 		store.New(),
@@ -412,11 +424,7 @@ func TestHydrate_UpcasterPanic_Propagates(
 		{ID: "e1", Version: 1, SchemaVersion: 1, Patches: json.RawMessage(`[]`)},
 	}
 
-	defer func() {
-		if rec := recover(); rec == nil {
-			panic("expected upcaster panic to propagate, but it was swallowed")
-		}
-	}()
+	defer expectPanicPropagated()
 	r.Hydrate(
 		context.Background(),
 		"agg1",
@@ -435,17 +443,18 @@ func TestReplay_EmptyStore_ReturnsNil(
 	)
 
 	var called bool
+	replayFn := func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
+		called = true
+	}
 	err := r.Replay(
 		context.Background(),
 		"agg1",
 		1,
 		0,
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) {
-			called = true
-		},
+		replayFn,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -499,20 +508,21 @@ func TestReplay_AllEvents(
 	)
 
 	var got []asynxmd.Event[order]
+	replayFn := func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
+		got = append(
+			got,
+			e,
+		)
+	}
 	err := r.Replay(
 		ctx,
 		"agg1",
 		1,
 		0,
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) {
-			got = append(
-				got,
-				e,
-			)
-		},
+		replayFn,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -590,20 +600,21 @@ func TestReplay_WithVersionRange(
 	)
 
 	var got []asynxmd.Event[order]
+	replayFn := func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
+		got = append(
+			got,
+			e,
+		)
+	}
 	err := r.Replay(
 		ctx,
 		"agg1",
 		2,
 		2,
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) {
-			got = append(
-				got,
-				e,
-			)
-		},
+		replayFn,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -673,20 +684,21 @@ func TestReplay_PreviousAggregate_CorrectForMidStreamStart(
 	)
 
 	var got []asynxmd.Event[order]
+	replayFn := func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
+		got = append(
+			got,
+			e,
+		)
+	}
 	err := r.Replay(
 		ctx,
 		"agg1",
 		3,
 		3,
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) {
-			got = append(
-				got,
-				e,
-			)
-		},
+		replayFn,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -810,15 +822,16 @@ func TestReplay_NoAutoSnapshot(
 	t *testing.T,
 ) {
 	es := store.New()
+	fn := func(
+		_ context.Context,
+		_ string,
+		p []byte,
+	) ([]byte, error) {
+		return p,
+			nil
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(
-			_ context.Context,
-			_ string,
-			p []byte,
-		) ([]byte, error) {
-			return p,
-				nil
-		},
+		1: fn,
 	}
 	r := newTestReplayer(
 		es,
@@ -863,31 +876,34 @@ func TestUpcast_ChainApplied(
 	t *testing.T,
 ) {
 	var calls []int
+	fn := func(
+		_ context.Context,
+		_ string,
+		p []byte,
+	) ([]byte, error) {
+		calls = append(
+			calls,
+			1,
+		)
+		return p,
+			nil
+	}
+	fn2 := func(
+		_ context.Context,
+		_ string,
+		p []byte,
+	) ([]byte, error) {
+		calls = append(
+			calls,
+			2,
+		)
+		return p,
+			nil
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(
-			_ context.Context,
-			_ string,
-			p []byte,
-		) ([]byte, error) {
-			calls = append(
-				calls,
-				1,
-			)
-			return p,
-				nil
-		},
-		2: func(
-			_ context.Context,
-			_ string,
-			p []byte,
-		) ([]byte, error) {
-			calls = append(
-				calls,
-				2,
-			)
-			return p,
-				nil
-		},
+		1: fn,
+
+		2: fn2,
 	}
 	r := newTestReplayer(
 		store.New(),
@@ -927,15 +943,16 @@ func TestUpcast_ChainApplied(
 func TestUpcast_MissingUpcasterSkipped(
 	t *testing.T,
 ) {
+	fn := func(
+		_ context.Context,
+		_ string,
+		p []byte,
+	) ([]byte, error) {
+		return p,
+			nil
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		2: func(
-			_ context.Context,
-			_ string,
-			p []byte,
-		) ([]byte, error) {
-			return p,
-				nil
-		},
+		2: fn,
 	}
 	r := newTestReplayer(
 		store.New(),
@@ -967,15 +984,16 @@ func TestUpcast_ErrorWrapped(
 	t *testing.T,
 ) {
 	inner := errors.New("inner")
+	fn := func(
+		_ context.Context,
+		_ string,
+		_ []byte,
+	) ([]byte, error) {
+		return nil,
+			inner
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(
-			_ context.Context,
-			_ string,
-			_ []byte,
-		) ([]byte, error) {
-			return nil,
-				inner
-		},
+		1: fn,
 	}
 	r := newTestReplayer(
 		store.New(),
@@ -1160,15 +1178,16 @@ func TestReplay_UpcasterError(
 	t *testing.T,
 ) {
 	upcastErr := errors.New("upcaster broken")
+	fn := func(
+		_ context.Context,
+		_ string,
+		_ []byte,
+	) ([]byte, error) {
+		return nil,
+			upcastErr
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(
-			_ context.Context,
-			_ string,
-			_ []byte,
-		) ([]byte, error) {
-			return nil,
-				upcastErr
-		},
+		1: fn,
 	}
 	es := store.New()
 	ctx := context.Background()
@@ -1367,126 +1386,206 @@ func populateEvents(
 	n int,
 ) {
 	b.Helper()
+
 	patch := json.RawMessage(`[{"op":"replace","path":"/Status","value":"x"}]`)
-	ctx := context.Background()
 	for i := 1; i <= n; i++ {
-		if err := es.Append(
-			ctx,
-			"events:agg1",
+		appendBenchEvent(
+			b,
+			es,
 			int64(i),
-			benchEventBlob(
-				int64(i),
-				patch,
-			),
-		); err != nil {
-			b.Fatal(err)
-		}
+			patch,
+		)
 	}
+}
+
+func appendBenchEvent(
+	b *testing.B,
+	es store.Memory,
+	version int64,
+	patch json.RawMessage,
+) {
+	b.Helper()
+
+	err := es.Append(
+		context.Background(),
+		"events:agg1",
+		version,
+		benchEventBlob(
+			version,
+			patch,
+		),
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+}
+
+func benchEventCounts() []int {
+	return []int{1, 10, 10_000}
 }
 
 func BenchmarkHydrate(
 	b *testing.B,
 ) {
-	for _, tc := range []struct {
-		name   string
-		events int
-	}{
-		{"events=1", 1},
-		{"events=10", 10},
-		{"events=10_000", 10_000},
-	} {
+	for _, n := range benchEventCounts() {
 		b.Run(
-			tc.name,
-			func(
-				b *testing.B,
-			) {
-				patch := json.RawMessage(`[{"op":"replace","path":"/Status","value":"x"}]`)
-				now := time.Now().UTC()
-				events := make(
-					[]esmodels.InternalEvent,
-					tc.events,
-				)
-				for i := range events {
-					events[i] = esmodels.InternalEvent{
-						ID:            "bench",
-						EventName:     "Updated",
-						Version:       int64(i + 1),
-						SchemaVersion: 1,
-						OccurredAt:    now,
-						Patches:       patch,
-					}
-				}
-
-				r := newTestReplayer(
-					store.New(),
-					nil,
-					1,
-				)
-				seed := order{}
-				ctx := context.Background()
-				b.ReportAllocs()
-				b.ResetTimer()
-				for b.Loop() {
-					if _, err := r.Hydrate(
-						ctx,
-						"agg1",
-						seed,
-						events,
-					); err != nil {
-						b.Fatal(err)
-					}
-				}
-			},
+			fmt.Sprintf(
+				"events=%d",
+				n,
+			),
+			hydrateBench(n),
 		)
+	}
+}
+
+func hydrateBench(
+	n int,
+) func(*testing.B) {
+	return func(
+		b *testing.B,
+	) {
+		events := benchInternalEvents(n)
+		r := newTestReplayer(
+			store.New(),
+			nil,
+			1,
+		)
+		benchHydrateLoop(
+			b,
+			r,
+			events,
+		)
+	}
+}
+
+func benchHydrateLoop(
+	b *testing.B,
+	r *Replayer[order],
+	events []esmodels.InternalEvent,
+) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		mustHydrate(
+			b,
+			r,
+			events,
+		)
+	}
+}
+
+func benchInternalEvents(
+	n int,
+) []esmodels.InternalEvent {
+	patch := json.RawMessage(`[{"op":"replace","path":"/Status","value":"x"}]`)
+	now := time.Now().UTC()
+	events := make(
+		[]esmodels.InternalEvent,
+		n,
+	)
+	for i := range events {
+		events[i] = esmodels.InternalEvent{
+			ID:            "bench",
+			EventName:     "Updated",
+			Version:       int64(i + 1),
+			SchemaVersion: 1,
+			OccurredAt:    now,
+			Patches:       patch,
+		}
+	}
+
+	return events
+}
+
+func mustHydrate(
+	b *testing.B,
+	r *Replayer[order],
+	events []esmodels.InternalEvent,
+) {
+	b.Helper()
+
+	_, err := r.Hydrate(
+		context.Background(),
+		"agg1",
+		order{},
+		events,
+	)
+	if err != nil {
+		b.Fatal(err)
 	}
 }
 
 func BenchmarkReplay(
 	b *testing.B,
 ) {
-	for _, tc := range []struct {
-		name   string
-		events int
-	}{
-		{"events=1", 1},
-		{"events=10", 10},
-		{"events=10_000", 10_000},
-	} {
+	for _, n := range benchEventCounts() {
 		b.Run(
-			tc.name,
-			func(
-				b *testing.B,
-			) {
-				es := store.New()
-				populateEvents(
-					b,
-					es,
-					tc.events,
-				)
-				r := newTestReplayer(
-					es,
-					nil,
-					1,
-				)
-				ctx := context.Background()
-				b.ReportAllocs()
-				b.ResetTimer()
-				for b.Loop() {
-					if err := r.Replay(
-						ctx,
-						"agg1",
-						1,
-						0,
-						func(
-							ctx context.Context,
-							e asynxmd.Event[order],
-						) {
-						},
-					); err != nil {
-						b.Fatal(err)
-					}
-				}
-			},
+			fmt.Sprintf(
+				"events=%d",
+				n,
+			),
+			replayBench(n),
 		)
+	}
+}
+
+func replayBench(
+	n int,
+) func(*testing.B) {
+	return func(
+		b *testing.B,
+	) {
+		es := store.New()
+		populateEvents(
+			b,
+			es,
+			n,
+		)
+		r := newTestReplayer(
+			es,
+			nil,
+			1,
+		)
+		benchReplayLoop(
+			b,
+			r,
+		)
+	}
+}
+
+func benchReplayLoop(
+	b *testing.B,
+	r *Replayer[order],
+) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		mustReplay(
+			b,
+			r,
+		)
+	}
+}
+
+func mustReplay(
+	b *testing.B,
+	r *Replayer[order],
+) {
+	b.Helper()
+
+	noopHandler := func(
+		_ context.Context,
+		_ asynxmd.Event[order],
+	) {
+	}
+	err := r.Replay(
+		context.Background(),
+		"agg1",
+		1,
+		0,
+		noopHandler,
+	)
+	if err != nil {
+		b.Fatal(err)
 	}
 }

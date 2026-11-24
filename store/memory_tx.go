@@ -1,7 +1,6 @@
 package store
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"github.com/char2cs/asynx/models"
@@ -11,6 +10,16 @@ import (
 type memoryTx struct {
 	s    *memoryStore
 	undo []func()
+}
+
+func (t *memoryTx) rollbackUnless(
+	committed *bool,
+) {
+	if *committed {
+		return
+	}
+
+	t.rollback()
 }
 
 func (t *memoryTx) rollback() {
@@ -23,8 +32,10 @@ func (t *memoryTx) rollback() {
 	t.undo = nil
 }
 
+// Native returns nil: the in-memory store has no underlying handle.
 func (t *memoryTx) Native() any { return nil }
 
+// Append stores data at (streamID, version), failing on a version conflict.
 func (t *memoryTx) Append(
 	ctx context.Context,
 	streamID string,
@@ -47,19 +58,24 @@ func (t *memoryTx) Append(
 		return err
 	}
 
+	return t.insert(
+		streamID,
+		version,
+		data,
+	)
+}
+
+func (t *memoryTx) insert(
+	streamID string,
+	version int64,
+	data []byte,
+) error {
+	s := t.s
 	entries := s.streams[streamID]
 	idx, found := slices.BinarySearchFunc(
 		entries,
 		version,
-		func(
-			e entry,
-			v int64,
-		) int {
-			return cmp.Compare(
-				e.version,
-				v,
-			)
-		},
+		compareEntryVersion,
 	)
 	if found {
 		return fmt.Errorf(
@@ -75,18 +91,20 @@ func (t *memoryTx) Append(
 		idx,
 		entry{version: version, data: data},
 	)
+	undo := func() {
+		s.removeEntry(
+			streamID,
+			version,
+		)
+	}
 	t.undo = append(
 		t.undo,
-		func() {
-			s.removeEntry(
-				streamID,
-				version,
-			)
-		},
+		undo,
 	)
 	return nil
 }
 
+// DeleteStream removes every record of streamID.
 func (t *memoryTx) DeleteStream(
 	ctx context.Context,
 	streamID string,
@@ -105,15 +123,17 @@ func (t *memoryTx) DeleteStream(
 		streamID,
 	)
 	if existed {
+		undo := func() { s.streams[streamID] = old }
 		t.undo = append(
 			t.undo,
-			func() { s.streams[streamID] = old },
+			undo,
 		)
 	}
 
 	return nil
 }
 
+// DropDeliveries removes every pending delivery of aggregateID.
 func (t *memoryTx) DropDeliveries(
 	ctx context.Context,
 	aggregateID string,
@@ -127,21 +147,24 @@ func (t *memoryTx) DropDeliveries(
 	defer s.mu.Unlock()
 
 	old := s.deliveries
+	ofAggregate := func(
+		d models.Delivery,
+	) bool {
+		return d.AggregateID == aggregateID
+	}
 	s.deliveries = slices.DeleteFunc(
 		slices.Clone(old),
-		func(
-			d models.Delivery,
-		) bool {
-			return d.AggregateID == aggregateID
-		},
+		ofAggregate,
 	)
+	undo := func() { s.deliveries = old }
 	t.undo = append(
 		t.undo,
-		func() { s.deliveries = old },
+		undo,
 	)
 	return nil
 }
 
+// PutReceipt stores the receipt for commandID, failing on a duplicate.
 func (t *memoryTx) PutReceipt(
 	ctx context.Context,
 	commandID string,
@@ -164,18 +187,20 @@ func (t *memoryTx) PutReceipt(
 	}
 
 	s.receipts[commandID] = r
+	undo := func() {
+		delete(
+			s.receipts,
+			commandID,
+		)
+	}
 	t.undo = append(
 		t.undo,
-		func() {
-			delete(
-				s.receipts,
-				commandID,
-			)
-		},
+		undo,
 	)
 	return nil
 }
 
+// EnqueueDelivery records that (aggregateID, version) awaits delivery.
 func (t *memoryTx) EnqueueDelivery(
 	ctx context.Context,
 	aggregateID string,
@@ -194,9 +219,10 @@ func (t *memoryTx) EnqueueDelivery(
 		slices.Clone(old),
 		models.Delivery{AggregateID: aggregateID, Version: version},
 	)
+	undo := func() { s.deliveries = old }
 	t.undo = append(
 		t.undo,
-		func() { s.deliveries = old },
+		undo,
 	)
 	return nil
 }

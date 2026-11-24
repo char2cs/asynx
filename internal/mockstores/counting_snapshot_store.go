@@ -14,6 +14,7 @@ type CountingSnapshotStore struct {
 	GetBytes int
 }
 
+// Put forwards to the inner store.
 func (c *CountingSnapshotStore) Put(
 	ctx context.Context,
 	aggregateID string,
@@ -28,6 +29,7 @@ func (c *CountingSnapshotStore) Put(
 	)
 }
 
+// Get forwards to the inner store and records the call and the bytes returned.
 func (c *CountingSnapshotStore) Get(
 	ctx context.Context,
 	aggregateID string,
@@ -36,14 +38,14 @@ func (c *CountingSnapshotStore) Get(
 		ctx,
 		aggregateID,
 	)
-	c.GetCalls++
-	c.GetBytes += len(data)
+	c.record(len(data))
 
 	return data,
 		found,
 		err
 }
 
+// Delete forwards to the inner store.
 func (c *CountingSnapshotStore) Delete(
 	ctx context.Context,
 	aggregateID string,
@@ -57,4 +59,11 @@ func (c *CountingSnapshotStore) Delete(
 // Reset zeroes the counters so a test can measure a single operation.
 func (c *CountingSnapshotStore) Reset() {
 	c.GetCalls, c.GetBytes = 0, 0
+}
+
+func (c *CountingSnapshotStore) record(
+	n int,
+) {
+	c.GetCalls++
+	c.GetBytes += n
 }

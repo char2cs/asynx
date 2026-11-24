@@ -16,6 +16,7 @@ type SubscriberError struct {
 	Err        error
 }
 
+// Error describes the failed subscriber and its cause.
 func (e *SubscriberError) Error() string {
 	return fmt.Sprintf(
 		"subscriber %s: %v",
@@ -24,4 +25,5 @@ func (e *SubscriberError) Error() string {
 	)
 }
 
+// Unwrap returns the cause of the failure.
 func (e *SubscriberError) Unwrap() error { return e.Err }

@@ -5,10 +5,12 @@ import (
 	"time"
 )
 
+const jitterDivisor = 2
+
 func jittered(
 	delay time.Duration,
 ) time.Duration {
-	half := delay / 2
+	half := delay / jitterDivisor
 	if half <= 0 {
 		return delay
 	}

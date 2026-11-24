@@ -59,6 +59,7 @@ func observe(
 	return &observedJob{Job: job, asked: make(chan struct{})}
 }
 
+// Ticket satisfies the interface that observedJob fakes.
 func (j *observedJob) Ticket() asynxmd.Ticket {
 	j.once.Do(func() { close(j.asked) })
 	return j.Job.Ticket()

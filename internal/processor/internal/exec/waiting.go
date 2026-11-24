@@ -62,19 +62,31 @@ func waitOn[T any](
 	return func(
 		ctx context.Context,
 	) error {
-		select {
-		case <-t.Settled:
-			return settledOutcome(
-				t,
-				event,
-			)
-		case <-ctx.Done():
-			return fmt.Errorf(
-				"%w: waiting for handlers: %w",
-				asynxmd.ErrContextCancelled,
-				ctx.Err(),
-			)
-		}
+		return awaitTicket(
+			ctx,
+			t,
+			event,
+		)
+	}
+}
+
+func awaitTicket[T any](
+	ctx context.Context,
+	t asynxmd.Ticket,
+	event asynxmd.Event[T],
+) error {
+	select {
+	case <-t.Settled:
+		return settledOutcome(
+			t,
+			event,
+		)
+	case <-ctx.Done():
+		return fmt.Errorf(
+			"%w: waiting for handlers: %w",
+			asynxmd.ErrContextCancelled,
+			ctx.Err(),
+		)
 	}
 }
 

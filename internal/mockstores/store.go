@@ -12,6 +12,7 @@ type Store struct{}
 
 func (s *Store) tx() models.Tx { return stubTx{appendFn: s.Append, deleteFn: s.Delete} }
 
+// Atomically runs fn against a transaction that discards every write.
 func (s *Store) Atomically(
 	_ context.Context,
 	fn func(models.Tx) error,
@@ -19,6 +20,7 @@ func (s *Store) Atomically(
 	return fn(s.tx())
 }
 
+// GetReceipt reports that no receipt exists.
 func (s *Store) GetReceipt(
 	context.Context,
 	string,
@@ -28,6 +30,7 @@ func (s *Store) GetReceipt(
 		nil
 }
 
+// PendingDeliveries returns no pending deliveries.
 func (s *Store) PendingDeliveries(
 	context.Context,
 	int,
@@ -36,6 +39,7 @@ func (s *Store) PendingDeliveries(
 		nil
 }
 
+// AckDelivery does nothing and succeeds.
 func (s *Store) AckDelivery(
 	context.Context,
 	string,
@@ -44,6 +48,7 @@ func (s *Store) AckDelivery(
 	return nil
 }
 
+// Append discards the data and succeeds.
 func (s *Store) Append(
 	_ context.Context,
 	_ string,
@@ -53,6 +58,7 @@ func (s *Store) Append(
 	return nil
 }
 
+// ReadFrom returns no events.
 func (s *Store) ReadFrom(
 	_ context.Context,
 	_ string,
@@ -62,6 +68,7 @@ func (s *Store) ReadFrom(
 		nil
 }
 
+// ReadRange returns no events.
 func (s *Store) ReadRange(
 	_ context.Context,
 	_ string,
@@ -72,6 +79,7 @@ func (s *Store) ReadRange(
 		nil
 }
 
+// Delete does nothing and succeeds.
 func (s *Store) Delete(
 	_ context.Context,
 	_ string,

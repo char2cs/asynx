@@ -5,6 +5,7 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates/contracts"
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
@@ -21,7 +22,7 @@ type aggregateRegistry[J Item] struct {
 // released.
 func (r *aggregateRegistry[J]) Enqueue(
 	job J,
-) (Admission, error) {
+) (contracts.Admission, error) {
 	admission, err := r.enqueue(job)
 	if admission.Parked {
 		job.Complete(asynxmd.ErrDeliveryParked)
@@ -33,11 +34,11 @@ func (r *aggregateRegistry[J]) Enqueue(
 
 func (r *aggregateRegistry[J]) enqueue(
 	job J,
-) (Admission, error) {
+) (contracts.Admission, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return Admission{},
+		return contracts.Admission{},
 			asynxmd.ErrDispatcherClosed
 	}
 
@@ -50,12 +51,13 @@ func (r *aggregateRegistry[J]) enqueue(
 			current,
 			job,
 		)
-		return Admission{Parked: true},
+		return contracts.Admission{Parked: true},
 			nil
 	}
 
 	rec := r.recordOf(agg)
-	spawned := r.ensureWorker(
+	spawned := !rec.worker
+	r.ensureWorker(
 		agg,
 		rec,
 	)
@@ -65,7 +67,7 @@ func (r *aggregateRegistry[J]) enqueue(
 		job,
 	)
 	signal(rec.wake)
-	return Admission{Spawned: spawned},
+	return contracts.Admission{Spawned: spawned},
 		nil
 }
 
@@ -73,20 +75,19 @@ func (r *aggregateRegistry[J]) enqueue(
 // channel it is delivered under (see Registry.Pop).
 func (r *aggregateRegistry[J]) Pop(
 	aggregateID string,
-) (J, <-chan struct{}, bool) {
+) (job J, halt <-chan struct{}, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var zero J
-	rec, ok := r.records[aggregateID]
-	if !ok ||
+	rec, found := r.records[aggregateID]
+	if !found ||
 		len(rec.jobs) == 0 {
-		return zero,
+		return job,
 			nil,
 			false
 	}
 
-	job := rec.jobs[0]
-	rec.jobs[0] = zero
+	job = rec.jobs[0]
+	clear(rec.jobs[:1])
 	rec.jobs = rec.jobs[1:]
 	return job,
 		rec.halt,
@@ -150,18 +151,13 @@ func (r *aggregateRegistry[J]) Park(
 	}
 }
 
-// ParkIfCurrent parks a durable job's aggregate unless halt has been closed
+// ParkIfCurrent parks the aggregate unless halt has been closed
 // since the job was popped (see Registry.ParkIfCurrent).
 func (r *aggregateRegistry[J]) ParkIfCurrent(
 	aggregateID string,
 	halt <-chan struct{},
-	durable bool,
 	cause error,
 ) bool {
-	if !durable {
-		return false
-	}
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if isClosed(halt) {
@@ -302,8 +298,12 @@ func (r *aggregateRegistry[J]) Close() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	first := !r.closed
-	r.closed = true
+	r.shut()
 	return first
+}
+
+func (r *aggregateRegistry[J]) shut() {
+	r.closed = true
 }
 
 func (r *aggregateRegistry[J]) recordOf(
@@ -325,9 +325,9 @@ func (r *aggregateRegistry[J]) recordOf(
 func (r *aggregateRegistry[J]) ensureWorker(
 	agg string,
 	rec *record[J],
-) bool {
+) {
 	if rec.worker {
-		return false
+		return
 	}
 
 	rec.worker = true
@@ -337,7 +337,6 @@ func (r *aggregateRegistry[J]) ensureWorker(
 	)
 	rec.halt = make(chan struct{})
 	r.spawn(agg)
-	return true
 }
 
 func (r *aggregateRegistry[J]) spawn(

@@ -5,28 +5,42 @@ import (
 	"testing"
 )
 
+func checkEmptyObject(
+	t *testing.T,
+	cm *CountedMarshal,
+	call int,
+) {
+	t.Helper()
+
+	b, err := json.Marshal(cm)
+	if err != nil {
+		t.Fatalf(
+			"call %d: unexpected error: %v",
+			call,
+			err,
+		)
+	}
+
+	if string(b) != "{}" {
+		t.Errorf(
+			"call %d: got %q, want {}",
+			call,
+			b,
+		)
+	}
+}
+
 func TestCountedMarshal_SucceedsBeforeFailAt(
 	t *testing.T,
 ) {
 	cm := &CountedMarshal{FailAt: 3}
 
 	for i := 1; i <= 2; i++ {
-		b, err := json.Marshal(cm)
-		if err != nil {
-			t.Fatalf(
-				"call %d: unexpected error: %v",
-				i,
-				err,
-			)
-		}
-
-		if string(b) != "{}" {
-			t.Errorf(
-				"call %d: got %q, want {}",
-				i,
-				b,
-			)
-		}
+		checkEmptyObject(
+			t,
+			cm,
+			i,
+		)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 	jsonpatch "github.com/evanphx/json-patch/v5"
 	"maps"
+	"slices"
 )
 
 // Replayer applies patches sequentially to reconstruct aggregate state,
@@ -61,58 +62,101 @@ func (r *Replayer[T]) Hydrate(
 			nil
 	}
 
-	stateJSON, err := json.Marshal(seedState)
+	current, err := r.fold(
+		ctx,
+		seedState,
+		events,
+	)
 	if err != nil {
 		return HydrateResult[T]{},
 			err
 	}
 
-	upcasted := false
-	var lastVersion int64
-
-	for _, evt := range events {
-		if evt.SchemaVersion < r.currentSchemaVersion {
-			upcasted = true
-		}
-
-		upcastedEvt, err := r.upcastInternalEvent(
-			ctx,
-			evt,
-		)
-		if err != nil {
-			return HydrateResult[T]{},
-				err
-		}
-
-		stateJSON, err = applyPatchesToJSON(
-			stateJSON,
-			upcastedEvt.Patches,
-		)
-		if err != nil {
-			return HydrateResult[T]{},
-				err
-		}
-
-		lastVersion = evt.Version
-	}
-
-	var current T
-	if err := json.Unmarshal(
-		stateJSON,
-		&current,
-	); err != nil {
-		return HydrateResult[T]{},
-			err
-	}
-
 	result := HydrateResult[T]{State: current}
-	if upcasted {
+	if slices.ContainsFunc(
+		events,
+		r.needsUpcast,
+	) {
 		result.DidUpcast = true
-		result.LastVersion = lastVersion
+		result.LastVersion = events[len(events)-1].Version
 	}
 
 	return result,
 		nil
+}
+
+func (r *Replayer[T]) fold(
+	ctx context.Context,
+	seedState T,
+	events []esmodels.InternalEvent,
+) (current T, err error) {
+	stateJSON, err := json.Marshal(seedState)
+	if err != nil {
+		return current,
+			err
+	}
+
+	stateJSON, err = r.applyEvents(
+		ctx,
+		stateJSON,
+		events,
+	)
+	if err != nil {
+		return current,
+			err
+	}
+
+	err = json.Unmarshal(
+		stateJSON,
+		&current,
+	)
+	return current,
+		err
+}
+
+func (r *Replayer[T]) needsUpcast(
+	evt esmodels.InternalEvent,
+) bool {
+	return evt.SchemaVersion < r.currentSchemaVersion
+}
+
+func (r *Replayer[T]) applyEvents(
+	ctx context.Context,
+	stateJSON []byte,
+	events []esmodels.InternalEvent,
+) (out []byte, err error) {
+	out = stateJSON
+	for i := 0; i < len(events) &&
+		err == nil; i++ {
+		out, err = r.applyEvent(
+			ctx,
+			out,
+			events[i],
+		)
+	}
+
+	return out,
+		err
+}
+
+func (r *Replayer[T]) applyEvent(
+	ctx context.Context,
+	stateJSON []byte,
+	evt esmodels.InternalEvent,
+) ([]byte, error) {
+	upcastedEvt, err := r.upcastInternalEvent(
+		ctx,
+		evt,
+	)
+	if err != nil {
+		return nil,
+			err
+	}
+
+	return applyPatchesToJSON(
+		stateJSON,
+		upcastedEvt.Patches,
+	)
 }
 
 // Replay iterates events in version order, upcasting each to the current schema
@@ -131,118 +175,216 @@ func (r *Replayer[T]) Replay(
 	toVersion int64,
 	fn asynxmd.ProjectionHandler[T],
 ) error {
-	eventBlobs, err := r.eventStore.ReadFrom(
+	eventBlobs, frame, err := r.replayStart(
 		ctx,
-		"events:"+aggregateID,
-		1,
+		aggregateID,
 	)
 	if err != nil {
 		return err
 	}
 
-	if len(eventBlobs) == 0 {
-		return nil
-	}
-
-	currentJSON, err := json.Marshal(r.stateZeroValue)
-	if err != nil {
-		return err
-	}
-
-	previous := r.stateZeroValue
-	currentVersion := int64(1)
-
-	for _, blob := range eventBlobs {
-		var evt esmodels.InternalEvent
-		if err := json.Unmarshal(
-			blob,
-			&evt,
-		); err != nil {
-			return err
-		}
-
-		upcastedEvt, err := r.upcastInternalEvent(
+	limit := replayLimit(
+		len(eventBlobs),
+		toVersion,
+	)
+	for i := 0; i < limit &&
+		err == nil; i++ {
+		frame, err = r.replayOne(
 			ctx,
-			evt,
+			aggregateID,
+			eventBlobs[i],
+			int64(i)+1,
+			frame,
+			bounds{
+				from: fromVersion,
+				to:   toVersion,
+			},
+			fn,
 		)
-		if err != nil {
-			return err
-		}
-
-		currentJSON, err = applyPatchesToJSON(
-			currentJSON,
-			upcastedEvt.Patches,
-		)
-		if err != nil {
-			return err
-		}
-
-		var current T
-		if err := json.Unmarshal(
-			currentJSON,
-			&current,
-		); err != nil {
-			return err
-		}
-
-		if currentVersion >= fromVersion &&
-			(toVersion == 0 ||
-				currentVersion <= toVersion) {
-			fn(
-				ctx,
-				asynxmd.Event[T]{
-					ID:                upcastedEvt.ID,
-					AggregateID:       aggregateID,
-					EventName:         upcastedEvt.EventName,
-					Version:           upcastedEvt.Version,
-					SchemaVersion:     upcastedEvt.SchemaVersion,
-					OccurredAt:        upcastedEvt.OccurredAt,
-					Aggregate:         current,
-					PreviousAggregate: previous,
-				},
-			)
-		}
-
-		previous = current
-		currentVersion++
-
-		if toVersion > 0 &&
-			currentVersion > toVersion {
-			break
-		}
 	}
 
-	return nil
+	return err
+}
+
+func (r *Replayer[T]) replayStart(
+	ctx context.Context,
+	aggregateID string,
+) (eventBlobs [][]byte, frame replayFrame[T], err error) {
+	eventBlobs, err = r.eventStore.ReadFrom(
+		ctx,
+		"events:"+aggregateID,
+		1,
+	)
+	if err != nil ||
+		len(eventBlobs) == 0 {
+		return nil,
+			frame,
+			err
+	}
+
+	frame.State = r.stateZeroValue
+	frame.JSON, err = json.Marshal(r.stateZeroValue)
+	return eventBlobs,
+		frame,
+		err
+}
+
+func replayLimit(
+	blobCount int,
+	toVersion int64,
+) int {
+	if toVersion > 0 &&
+		toVersion < int64(blobCount) {
+		return int(toVersion)
+	}
+
+	return blobCount
+}
+
+func (r *Replayer[T]) replayOne(
+	ctx context.Context,
+	aggregateID string,
+	blob []byte,
+	version int64,
+	previous replayFrame[T],
+	window bounds,
+	fn asynxmd.ProjectionHandler[T],
+) (replayFrame[T], error) {
+	next, err := r.advance(
+		ctx,
+		previous,
+		blob,
+	)
+	if err != nil {
+		return replayFrame[T]{},
+			err
+	}
+
+	if !window.contains(version) {
+		return next,
+			nil
+	}
+
+	fn(
+		ctx,
+		asynxmd.Event[T]{
+			ID:                next.Event.ID,
+			AggregateID:       aggregateID,
+			EventName:         next.Event.EventName,
+			Version:           next.Event.Version,
+			SchemaVersion:     next.Event.SchemaVersion,
+			OccurredAt:        next.Event.OccurredAt,
+			Aggregate:         next.State,
+			PreviousAggregate: previous.State,
+		},
+	)
+
+	return next,
+		nil
+}
+
+func (r *Replayer[T]) advance(
+	ctx context.Context,
+	previous replayFrame[T],
+	blob []byte,
+) (replayFrame[T], error) {
+	var evt esmodels.InternalEvent
+	err := json.Unmarshal(
+		blob,
+		&evt,
+	)
+	if err != nil {
+		return replayFrame[T]{},
+			err
+	}
+
+	upcastedEvt, err := r.upcastInternalEvent(
+		ctx,
+		evt,
+	)
+	if err != nil {
+		return replayFrame[T]{},
+			err
+	}
+
+	return nextFrame(
+		previous,
+		upcastedEvt,
+	)
+}
+
+func nextFrame[T any](
+	previous replayFrame[T],
+	evt esmodels.InternalEvent,
+) (frame replayFrame[T], err error) {
+	frame.Event = evt
+	frame.JSON, err = applyPatchesToJSON(
+		previous.JSON,
+		evt.Patches,
+	)
+	if err != nil {
+		return replayFrame[T]{},
+			err
+	}
+
+	err = json.Unmarshal(
+		frame.JSON,
+		&frame.State,
+	)
+	if err != nil {
+		return replayFrame[T]{},
+			err
+	}
+
+	return frame,
+		nil
 }
 
 func (r *Replayer[T]) upcastInternalEvent(
 	ctx context.Context,
 	evt esmodels.InternalEvent,
-) (esmodels.InternalEvent, error) {
-	for v := evt.SchemaVersion; v < r.currentSchemaVersion; v++ {
-		upcaster, ok := r.upcasters[v]
-		if !ok {
-			continue
-		}
-
-		upcastedPatchesJSON, err := upcaster(
+) (out esmodels.InternalEvent, err error) {
+	out = evt
+	for v := evt.SchemaVersion; v < r.currentSchemaVersion &&
+		err == nil; v++ {
+		out, err = r.upcastStep(
 			ctx,
-			evt.EventName,
-			evt.Patches,
+			out,
+			v,
 		)
-		if err != nil {
-			return esmodels.InternalEvent{},
-				fmt.Errorf(
-					"eventstore: upcaster %d failed: %w",
-					v,
-					err,
-				)
-		}
-
-		evt.Patches = upcastedPatchesJSON
-		evt.SchemaVersion = v + 1
 	}
 
+	return out,
+		err
+}
+
+func (r *Replayer[T]) upcastStep(
+	ctx context.Context,
+	evt esmodels.InternalEvent,
+	version int,
+) (esmodels.InternalEvent, error) {
+	upcaster, ok := r.upcasters[version]
+	if !ok {
+		return evt,
+			nil
+	}
+
+	upcastedPatchesJSON, err := upcaster(
+		ctx,
+		evt.EventName,
+		evt.Patches,
+	)
+	if err != nil {
+		return esmodels.InternalEvent{},
+			fmt.Errorf(
+				"eventstore: upcaster %d failed: %w",
+				version,
+				err,
+			)
+	}
+
+	evt.Patches = upcastedPatchesJSON
+	evt.SchemaVersion = version + 1
 	return evt,
 		nil
 }

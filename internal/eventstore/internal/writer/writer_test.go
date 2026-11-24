@@ -48,7 +48,6 @@ func TestWrite_AppendsEventAndReturnsPublicEvent(
 		0,
 		prev,
 		next,
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -109,7 +108,6 @@ func TestWrite_PatchRecordsOnlyDiff(
 		0,
 		order{Status: "Pending", Total: 50},
 		order{Status: "Shipped", Total: 50},
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -158,39 +156,50 @@ func TestWrite_PatchRecordsOnlyDiff(
 func TestWrite_VersionIncrements(
 	t *testing.T,
 ) {
-	es := store.New()
 	w := newTestWriter(
-		es,
+		store.New(),
 		store.NewSnapshots(),
 	)
-	ctx := context.Background()
 
 	for i := int64(1); i <= 3; i++ {
-		evt, err := w.Write(
-			ctx,
-			"agg1",
-			"Event",
-			i-1,
-			order{},
-			order{Status: "x"},
-			false,
+		assertWriteVersion(
+			t,
+			w,
+			i,
 		)
-		if err != nil {
-			t.Fatalf(
-				"Write #%d: %v",
-				i,
-				err,
-			)
-		}
+	}
+}
 
-		if evt.Version != i {
-			t.Errorf(
-				"Write #%d: Version = %d, want %d",
-				i,
-				evt.Version,
-				i,
-			)
-		}
+func assertWriteVersion(
+	t *testing.T,
+	w *Writer[order],
+	i int64,
+) {
+	t.Helper()
+
+	evt, err := w.Write(
+		context.Background(),
+		"agg1",
+		"Event",
+		i-1,
+		order{},
+		order{Status: "x"},
+	)
+	if err != nil {
+		t.Fatalf(
+			"Write #%d: %v",
+			i,
+			err,
+		)
+	}
+
+	if evt.Version != i {
+		t.Errorf(
+			"Write #%d: Version = %d, want %d",
+			i,
+			evt.Version,
+			i,
+		)
 	}
 }
 
@@ -210,7 +219,6 @@ func TestWrite_AppendsAtExpectedVersionPlusOne(
 		7,
 		order{},
 		order{},
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -237,14 +245,13 @@ func TestWrite_WritesSnapshot_WhenRequested(
 		ss,
 	)
 
-	_, err := w.Write(
+	_, err := w.WriteSnapshotted(
 		context.Background(),
 		"agg1",
 		"Created",
 		0,
 		order{},
 		order{Status: "Active"},
-		true,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -296,7 +303,6 @@ func TestWrite_NoSnapshot_WhenNotRequested(
 		0,
 		order{},
 		order{},
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -329,7 +335,6 @@ func TestWrite_EventStoreError_ReturnsError(
 		0,
 		order{},
 		order{},
-		false,
 	)
 	if !errors.Is(
 		err,
@@ -363,7 +368,6 @@ func TestWrite_EventStoreAppendError(
 		0,
 		order{},
 		order{Status: "x"},
-		false,
 	)
 	if !errors.Is(
 		err,
@@ -389,14 +393,13 @@ func TestWrite_SnapshotStoreError_ReturnsError(
 		ss,
 	)
 
-	_, err := w.Write(
+	_, err := w.WriteSnapshotted(
 		context.Background(),
 		"agg1",
 		"Evt",
 		0,
 		order{},
 		order{},
-		true,
 	)
 	if !errors.Is(
 		err,
@@ -425,7 +428,6 @@ func TestWrite_MarshalPreviousStateError(
 		0,
 		mocks.ErrMarshal{},
 		mocks.ErrMarshal{},
-		false,
 	)
 	if err == nil {
 		t.Fatal("expected marshal error on previousState")
@@ -449,7 +451,6 @@ func TestWrite_MarshalNewStateError(
 		0,
 		cm,
 		cm,
-		false,
 	)
 	if err == nil {
 		t.Fatal("expected marshal error on newState")
@@ -466,14 +467,13 @@ func TestWriteSnapshot_MarshalStateError(
 	)
 
 	cm := &mocks.CountedMarshal{FailAt: 3}
-	_, err := w.Write(
+	_, err := w.WriteSnapshotted(
 		context.Background(),
 		"agg1",
 		"Evt",
 		0,
 		cm,
 		cm,
-		true,
 	)
 	if err == nil {
 		t.Fatal("expected marshal error on newState before writeSnapshotFromBytes")
@@ -524,24 +524,12 @@ func TestWriter_SnapshotIsUpsertedNotAccumulated(
 
 	prev := order{}
 	for i := range 20 {
-		next := order{ID: "agg-1", Total: float64(i), Status: "Pending"}
-		if _, err := w.Write(
-			ctx,
-			"agg-1",
-			"OrderUpdated",
-			int64(i),
+		prev = writeSnapshotted(
+			t,
+			w,
 			prev,
-			next,
-			true,
-		); err != nil {
-			t.Fatalf(
-				"write %d: %v",
-				i,
-				err,
-			)
-		}
-
-		prev = next
+			i,
+		)
 	}
 
 	blob, found, err := snaps.Get(
@@ -583,51 +571,143 @@ func TestWriter_SnapshotIsUpsertedNotAccumulated(
 	}
 }
 
+func writeSnapshotted(
+	t *testing.T,
+	w *Writer[order],
+	prev order,
+	i int,
+) order {
+	t.Helper()
+
+	next := order{ID: "agg-1", Total: float64(i), Status: "Pending"}
+	_, err := w.WriteSnapshotted(
+		context.Background(),
+		"agg-1",
+		"OrderUpdated",
+		int64(i),
+		prev,
+		next,
+	)
+	if err != nil {
+		t.Fatalf(
+			"write %d: %v",
+			i,
+			err,
+		)
+	}
+
+	return next
+}
+
+type writeFunc func(
+	w *Writer[order],
+	prev order,
+	next order,
+) error
+
 func BenchmarkWrite(
 	b *testing.B,
 ) {
-	for _, tc := range []struct {
-		name           string
-		shouldSnapshot bool
-	}{
-		{"no_snapshot", false},
-		{"with_snapshot", true},
-	} {
-		b.Run(
-			tc.name,
-			func(
-				b *testing.B,
-			) {
-				var es store.Memory
-				var ss store.SnapshotMemory
-				var w *Writer[order]
-				prevState := order{Status: "Pending", Total: 50}
-				nextState := order{Status: "Shipped", Total: 50}
-				ctx := context.Background()
-				b.ReportAllocs()
-				b.ResetTimer()
-				for b.Loop() {
-					b.StopTimer()
-					es = store.New()
-					ss = store.NewSnapshots()
-					w = newTestWriter(
-						es,
-						ss,
-					)
-					b.StartTimer()
-					if _, err := w.Write(
-						ctx,
-						"agg1",
-						"Updated",
-						0,
-						prevState,
-						nextState,
-						tc.shouldSnapshot,
-					); err != nil {
-						b.Fatal(err)
-					}
-				}
-			},
+	b.Run(
+		"no_snapshot",
+		benchmarkPlainWrite,
+	)
+	b.Run(
+		"with_snapshot",
+		benchmarkSnapshottedWrite,
+	)
+}
+
+func benchmarkPlainWrite(
+	b *testing.B,
+) {
+	benchmarkWrite(
+		b,
+		plainWrite,
+	)
+}
+
+func benchmarkSnapshottedWrite(
+	b *testing.B,
+) {
+	benchmarkWrite(
+		b,
+		snapshottedWrite,
+	)
+}
+
+func plainWrite(
+	w *Writer[order],
+	prev order,
+	next order,
+) error {
+	_, err := w.Write(
+		context.Background(),
+		"agg1",
+		"Updated",
+		0,
+		prev,
+		next,
+	)
+	return err
+}
+
+func snapshottedWrite(
+	w *Writer[order],
+	prev order,
+	next order,
+) error {
+	_, err := w.WriteSnapshotted(
+		context.Background(),
+		"agg1",
+		"Updated",
+		0,
+		prev,
+		next,
+	)
+	return err
+}
+
+func benchmarkWrite(
+	b *testing.B,
+	write writeFunc,
+) {
+	prevState := order{Status: "Pending", Total: 50}
+	nextState := order{Status: "Shipped", Total: 50}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		b.StopTimer()
+		w := newTestWriter(
+			store.New(),
+			store.NewSnapshots(),
 		)
+		b.StartTimer()
+		mustWrite(
+			b,
+			write,
+			w,
+			prevState,
+			nextState,
+		)
+	}
+}
+
+func mustWrite(
+	b *testing.B,
+	write writeFunc,
+	w *Writer[order],
+	prev order,
+	next order,
+) {
+	b.Helper()
+
+	err := write(
+		w,
+		prev,
+		next,
+	)
+	if err != nil {
+		b.Fatal(err)
 	}
 }

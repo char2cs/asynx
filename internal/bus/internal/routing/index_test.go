@@ -33,12 +33,10 @@ func TestIsExactPattern_PlainString(
 	t *testing.T,
 ) {
 	for _, p := range []string{"hello", "OrderPlaced", "a", "foo-bar_baz"} {
-		if !routing.IsExactPattern(p) {
-			t.Errorf(
-				"IsExactPattern(%q) = false, want true",
-				p,
-			)
-		}
+		assertExactPattern(
+			t,
+			p,
+		)
 	}
 }
 
@@ -46,12 +44,38 @@ func TestIsExactPattern_RegexChars(
 	t *testing.T,
 ) {
 	for _, p := range []string{"^hello", "hello.*", "hell[o", "hello.", "Order+"} {
-		if routing.IsExactPattern(p) {
-			t.Errorf(
-				"IsExactPattern(%q) = true, want false",
-				p,
-			)
-		}
+		assertRegexPattern(
+			t,
+			p,
+		)
+	}
+}
+
+func assertExactPattern(
+	t *testing.T,
+	pattern string,
+) {
+	t.Helper()
+
+	if !routing.IsExactPattern(pattern) {
+		t.Errorf(
+			"IsExactPattern(%q) = false, want true",
+			pattern,
+		)
+	}
+}
+
+func assertRegexPattern(
+	t *testing.T,
+	pattern string,
+) {
+	t.Helper()
+
+	if routing.IsExactPattern(pattern) {
+		t.Errorf(
+			"IsExactPattern(%q) = true, want false",
+			pattern,
+		)
 	}
 }
 
@@ -306,24 +330,28 @@ func BenchmarkIsExactPattern(
 ) {
 	b.Run(
 		"exact",
-		func(
-			b *testing.B,
-		) {
-			for range b.N {
-				routing.IsExactPattern("OrderPlaced")
-			}
-		},
+		benchmarkIsExactPatternExact,
 	)
 	b.Run(
 		"regex",
-		func(
-			b *testing.B,
-		) {
-			for range b.N {
-				routing.IsExactPattern("^Order.*")
-			}
-		},
+		benchmarkIsExactPatternRegex,
 	)
+}
+
+func benchmarkIsExactPatternExact(
+	b *testing.B,
+) {
+	for range b.N {
+		routing.IsExactPattern("OrderPlaced")
+	}
+}
+
+func benchmarkIsExactPatternRegex(
+	b *testing.B,
+) {
+	for range b.N {
+		routing.IsExactPattern("^Order.*")
+	}
 }
 
 func BenchmarkIndexWith_Exact(
@@ -335,27 +363,37 @@ func BenchmarkIndexWith_Exact(
 				"%d_existing",
 				n,
 			),
-			func(
-				b *testing.B,
-			) {
-				idx := buildExactIndex(n)
-				sub := &models.Subscription[string]{
-					Pattern: "NewEvent",
-					Handler: func(
-						_ context.Context,
-						_ asynxmd.Event[string],
-					) {
-					},
-				}
-				b.ReportAllocs()
-				b.ResetTimer()
-				for range b.N {
-					routing.IndexWith(
-						idx,
-						sub,
-					)
-				}
-			},
+			indexWithExact(n),
+		)
+	}
+}
+
+func indexWithExact(
+	n int,
+) func(*testing.B) {
+	return func(
+		b *testing.B,
+	) {
+		benchIndexWith(
+			b,
+			buildExactIndex(n),
+			"NewEvent",
+		)
+	}
+}
+
+func benchIndexWith(
+	b *testing.B,
+	idx *models.PublishIndex[string],
+	pattern string,
+) {
+	sub := newSub(pattern)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		routing.IndexWith(
+			idx,
+			sub,
 		)
 	}
 }
@@ -369,27 +407,22 @@ func BenchmarkIndexWith_Regex(
 				"%d_existing",
 				n,
 			),
-			func(
-				b *testing.B,
-			) {
-				idx, _ := buildRegexIndex(n)
-				sub := &models.Subscription[string]{
-					Pattern: "^NewEvent.*",
-					Handler: func(
-						_ context.Context,
-						_ asynxmd.Event[string],
-					) {
-					},
-				}
-				b.ReportAllocs()
-				b.ResetTimer()
-				for range b.N {
-					routing.IndexWith(
-						idx,
-						sub,
-					)
-				}
-			},
+			indexWithRegex(n),
+		)
+	}
+}
+
+func indexWithRegex(
+	n int,
+) func(*testing.B) {
+	return func(
+		b *testing.B,
+	) {
+		idx, _ := buildRegexIndex(n)
+		benchIndexWith(
+			b,
+			idx,
+			"^NewEvent.*",
 		)
 	}
 }
@@ -403,20 +436,37 @@ func BenchmarkIndexWithout_Exact(
 				"%d_existing",
 				n,
 			),
-			func(
-				b *testing.B,
-			) {
-				idx := buildExactIndex(n)
-				target := idx.ExactSubs["Event0"][0]
-				b.ReportAllocs()
-				b.ResetTimer()
-				for range b.N {
-					routing.IndexWithout(
-						idx,
-						target,
-					)
-				}
-			},
+			indexWithoutExact(n),
+		)
+	}
+}
+
+func indexWithoutExact(
+	n int,
+) func(*testing.B) {
+	return func(
+		b *testing.B,
+	) {
+		idx := buildExactIndex(n)
+		benchIndexWithout(
+			b,
+			idx,
+			idx.ExactSubs["Event0"][0],
+		)
+	}
+}
+
+func benchIndexWithout(
+	b *testing.B,
+	idx *models.PublishIndex[string],
+	target *models.Subscription[string],
+) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		routing.IndexWithout(
+			idx,
+			target,
 		)
 	}
 }
@@ -430,20 +480,22 @@ func BenchmarkIndexWithout_Regex(
 				"%d_existing",
 				n,
 			),
-			func(
-				b *testing.B,
-			) {
-				idx, subs := buildRegexIndex(n)
-				target := subs[0]
-				b.ReportAllocs()
-				b.ResetTimer()
-				for range b.N {
-					routing.IndexWithout(
-						idx,
-						target,
-					)
-				}
-			},
+			indexWithoutRegex(n),
+		)
+	}
+}
+
+func indexWithoutRegex(
+	n int,
+) func(*testing.B) {
+	return func(
+		b *testing.B,
+	) {
+		idx, subs := buildRegexIndex(n)
+		benchIndexWithout(
+			b,
+			idx,
+			subs[0],
 		)
 	}
 }

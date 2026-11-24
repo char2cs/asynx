@@ -7,6 +7,8 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
+// Send runs cmd on the shard that owns its aggregate and returns its event once
+// it is committed.
 func (p *Processor[T]) Send(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
@@ -23,19 +25,10 @@ func (p *Processor[T]) Send(
 			asynxmd.ErrContextCancelled
 	}
 
-	shardIndex := p.router.Route(
-		cmd.AggregateID(),
+	commands, envelope := p.enqueueTarget(
+		ctx,
+		cmd,
 	)
-	commands := p.pool.Shards()[shardIndex].CommandChan()
-	envelope := &models.CommandEnvelope[T]{
-		Cmd: cmd,
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[T],
-			1,
-		),
-	}
-
 	return p.sendAndWait(
 		ctx,
 		commands,
@@ -43,6 +36,7 @@ func (p *Processor[T]) Send(
 	)
 }
 
+// SendWait is Send that also waits for the handlers of the event to run once.
 func (p *Processor[T]) SendWait(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
@@ -54,20 +48,49 @@ func (p *Processor[T]) SendWait(
 
 	defer p.sends.Done()
 
+	if err := p.refuseSendWait(
+		ctx,
+		cmd,
+	); err != nil {
+		return asynxmd.Event[T]{},
+			err
+	}
+
+	commands, envelope := p.enqueueTarget(
+		ctx,
+		cmd,
+	)
+	envelope.WaitHandlers = true
+	return p.sendAndWait(
+		ctx,
+		commands,
+		envelope,
+	)
+}
+
+func (p *Processor[T]) refuseSendWait(
+	ctx context.Context,
+	cmd asynxmd.Command[T],
+) error {
 	if p.dispatcher != nil &&
 		p.dispatcher.InHandler(
 			ctx,
 			cmd.AggregateID(),
 		) {
-		return asynxmd.Event[T]{},
-			asynxmd.ErrSendWaitFromHandler
+		return asynxmd.ErrSendWaitFromHandler
 	}
 
 	if err := ctx.Err(); err != nil {
-		return asynxmd.Event[T]{},
-			asynxmd.ErrContextCancelled
+		return asynxmd.ErrContextCancelled
 	}
 
+	return nil
+}
+
+func (p *Processor[T]) enqueueTarget(
+	ctx context.Context,
+	cmd asynxmd.Command[T],
+) (chan<- *models.CommandEnvelope[T], *models.CommandEnvelope[T]) {
 	shardIndex := p.router.Route(
 		cmd.AggregateID(),
 	)
@@ -79,14 +102,10 @@ func (p *Processor[T]) SendWait(
 			chan models.CommandResult[T],
 			1,
 		),
-		WaitHandlers: true,
 	}
 
-	return p.sendAndWait(
-		ctx,
-		commands,
-		envelope,
-	)
+	return commands,
+		envelope
 }
 
 func (p *Processor[T]) isShuttingDown() bool {

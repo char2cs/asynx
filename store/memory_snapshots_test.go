@@ -7,26 +7,77 @@ import (
 	"testing"
 )
 
+func putRevisions(
+	t *testing.T,
+	s SnapshotMemory,
+	n int,
+) {
+	t.Helper()
+
+	for i := range n {
+		putRevision(
+			t,
+			s,
+			i,
+		)
+	}
+}
+
+func putRevision(
+	t *testing.T,
+	s SnapshotMemory,
+	i int,
+) {
+	t.Helper()
+
+	err := s.Put(
+		context.Background(),
+		"agg-1",
+		int64(i+1),
+		[]byte{byte(i)},
+	)
+	if err != nil {
+		t.Fatalf(
+			"put %d: %v",
+			i,
+			err,
+		)
+	}
+}
+
+func snapshotFound(
+	t *testing.T,
+	s SnapshotMemory,
+	id string,
+) bool {
+	t.Helper()
+
+	_, found, err := s.Get(
+		context.Background(),
+		id,
+	)
+	if err != nil {
+		t.Fatalf(
+			"get %s: %v",
+			id,
+			err,
+		)
+	}
+
+	return found
+}
+
 func TestSnapshotMemory_PutReplacesRatherThanAccumulates(
 	t *testing.T,
 ) {
 	ctx := context.Background()
 	s := NewSnapshots()
 
-	for i := range 100 {
-		if err := s.Put(
-			ctx,
-			"agg-1",
-			int64(i+1),
-			[]byte{byte(i)},
-		); err != nil {
-			t.Fatalf(
-				"put %d: %v",
-				i,
-				err,
-			)
-		}
-	}
+	putRevisions(
+		t,
+		s,
+		100,
+	)
 
 	data, found, err := s.Get(
 		ctx,
@@ -119,10 +170,11 @@ func TestSnapshotMemory_DeleteIsIdempotent(
 		)
 	}
 
-	if _, found, _ := s.Get(
-		ctx,
+	if snapshotFound(
+		t,
+		s,
 		"agg-1",
-	); found {
+	) {
 		t.Error("found = true after delete, want false")
 	}
 }
@@ -167,10 +219,11 @@ func TestSnapshotMemory_DeleteIsScopedToOneAggregate(
 		)
 	}
 
-	if _, found, _ := s.Get(
-		ctx,
+	if !snapshotFound(
+		t,
+		s,
 		"agg-2",
-	); !found {
+	) {
 		t.Error("agg-2 snapshot was removed by deleting agg-1")
 	}
 }
@@ -265,6 +318,47 @@ func TestSnapshotMemory_ContextCancellationIsRespected(
 	}
 }
 
+func putAsync(
+	t *testing.T,
+	wg *sync.WaitGroup,
+	s SnapshotMemory,
+	i int,
+) {
+	defer wg.Done()
+
+	err := s.Put(
+		context.Background(),
+		"agg-1",
+		int64(i+1),
+		[]byte{byte(i)},
+	)
+	if err != nil {
+		t.Errorf(
+			"put: %v",
+			err,
+		)
+	}
+}
+
+func getAsync(
+	t *testing.T,
+	wg *sync.WaitGroup,
+	s SnapshotMemory,
+) {
+	defer wg.Done()
+
+	_, _, err := s.Get(
+		context.Background(),
+		"agg-1",
+	)
+	if err != nil {
+		t.Errorf(
+			"get: %v",
+			err,
+		)
+	}
+}
+
 func TestSnapshotMemory_ConcurrentPutGetIsRaceFree(
 	t *testing.T,
 ) {
@@ -274,22 +368,17 @@ func TestSnapshotMemory_ConcurrentPutGetIsRaceFree(
 	var wg sync.WaitGroup
 	for i := range 50 {
 		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			_ = s.Put(
-				ctx,
-				"agg-1",
-				int64(i+1),
-				[]byte{byte(i)},
-			)
-		}()
-		go func() {
-			defer wg.Done()
-			_, _, _ = s.Get(
-				ctx,
-				"agg-1",
-			)
-		}()
+		go putAsync(
+			t,
+			&wg,
+			s,
+			i,
+		)
+		go getAsync(
+			t,
+			&wg,
+			s,
+		)
 	}
 
 	wg.Wait()

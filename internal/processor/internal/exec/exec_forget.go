@@ -74,16 +74,11 @@ func (e *CommandExecutor[T]) Forget(
 	ctx context.Context,
 	aggregateID string,
 ) (err error) {
-	if e.dispatcher != nil &&
-		e.dispatcher.InHandler(
-			ctx,
-			aggregateID,
-		) {
-		return fmt.Errorf(
-			"%w: %s",
-			asynxmd.ErrForgetFromHandler,
-			aggregateID,
-		)
+	if err := e.refuseFromHandler(
+		ctx,
+		aggregateID,
+	); err != nil {
+		return err
 	}
 
 	ticket, err := e.writeTombstone(
@@ -95,18 +90,10 @@ func (e *CommandExecutor[T]) Forget(
 	}
 
 	defer func() {
-		if err == nil {
-			return
-		}
-
-		if e.dispatcher != nil {
-			e.dispatcher.Park(
-				aggregateID,
-				err,
-			)
-		}
-
-		e.clearForgetting(aggregateID)
+		e.abandonForget(
+			aggregateID,
+			err,
+		)
 	}()
 
 	if err := e.awaitTombstone(
@@ -120,6 +107,43 @@ func (e *CommandExecutor[T]) Forget(
 		context.WithoutCancel(ctx),
 		aggregateID,
 	)
+}
+
+func (e *CommandExecutor[T]) refuseFromHandler(
+	ctx context.Context,
+	aggregateID string,
+) error {
+	if e.dispatcher == nil ||
+		!e.dispatcher.InHandler(
+			ctx,
+			aggregateID,
+		) {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w: %s",
+		asynxmd.ErrForgetFromHandler,
+		aggregateID,
+	)
+}
+
+func (e *CommandExecutor[T]) abandonForget(
+	aggregateID string,
+	err error,
+) {
+	if err == nil {
+		return
+	}
+
+	if e.dispatcher != nil {
+		e.dispatcher.Park(
+			aggregateID,
+			err,
+		)
+	}
+
+	e.clearForgetting(aggregateID)
 }
 
 func (e *CommandExecutor[T]) erase(
@@ -140,7 +164,7 @@ func (e *CommandExecutor[T]) erase(
 
 	defer unlock()
 
-	if err := e.es.DeleteSnapshot(
+	if err := e.eraseStored(
 		ctx,
 		aggregateID,
 	); err != nil {
@@ -151,34 +175,52 @@ func (e *CommandExecutor[T]) erase(
 		)
 	}
 
-	erase := func(
+	e.clearForgetting(aggregateID)
+	return nil
+}
+
+func (e *CommandExecutor[T]) eraseStored(
+	ctx context.Context,
+	aggregateID string,
+) error {
+	if err := e.es.DeleteSnapshot(
+		ctx,
+		aggregateID,
+	); err != nil {
+		return err
+	}
+
+	drop := func(
 		tx asynxmd.Tx,
 	) error {
-		if err := tx.DeleteStream(
+		return dropAggregate(
 			ctx,
-			"events:"+aggregateID,
-		); err != nil {
-			return err
-		}
-
-		return tx.DropDeliveries(
-			ctx,
+			tx,
 			aggregateID,
 		)
 	}
-	if err := e.es.Store().Atomically(
+	return e.es.Store().Atomically(
 		ctx,
-		erase,
+		drop,
+	)
+}
+
+func dropAggregate(
+	ctx context.Context,
+	tx asynxmd.Tx,
+	aggregateID string,
+) error {
+	if err := tx.DeleteStream(
+		ctx,
+		"events:"+aggregateID,
 	); err != nil {
-		return fmt.Errorf(
-			"%w: %w",
-			asynxmd.ErrForgetFailed,
-			err,
-		)
+		return err
 	}
 
-	e.clearForgetting(aggregateID)
-	return nil
+	return tx.DropDeliveries(
+		ctx,
+		aggregateID,
+	)
 }
 
 func (e *CommandExecutor[T]) awaitTombstone(
@@ -334,34 +376,41 @@ func (e *CommandExecutor[T]) commitTombstone(
 	}
 
 	e.dispatcher.Supersede(aggregateID)
+	return e.enqueueTombstone(
+		ctx,
+		tombstone,
+	)
+}
+
+func (e *CommandExecutor[T]) enqueueTombstone(
+	ctx context.Context,
+	tombstone asynxmd.Event[T],
+) (asynxmd.Ticket, error) {
 	store := e.es.Store()
+	ack := func(
+		ctx context.Context,
+	) error {
+		return store.AckDelivery(
+			ctx,
+			tombstone.AggregateID,
+			tombstone.Version,
+		)
+	}
 	ticket, err := e.dispatcher.Enqueue(
 		ctx,
 		asynxmd.DispatchRequest[T]{
 			Event: tombstone,
-			Ack: func(
-				ctx context.Context,
-			) error {
-				return store.AckDelivery(
-					ctx,
-					tombstone.AggregateID,
-					tombstone.Version,
-				)
-			},
-			Kind: asynxmd.DispatchTombstone,
+			Ack:   ack,
+			Kind:  asynxmd.DispatchTombstone,
 		},
 	)
 	if err != nil {
 		e.dispatcher.Park(
-			aggregateID,
+			tombstone.AggregateID,
 			err,
 		)
 		return asynxmd.Ticket{},
-			fmt.Errorf(
-				"%w: %w",
-				asynxmd.ErrPipelineFailed,
-				err,
-			)
+			pipelineFailed(err)
 	}
 
 	return ticket,
@@ -374,20 +423,32 @@ func (e *CommandExecutor[T]) tombstoneHook() esmodels.TxHook[T] {
 		tx asynxmd.Tx,
 		evt asynxmd.Event[T],
 	) error {
-		if err := e.supersedeDeliveriesIfLogged(
-			ctx,
-			tx,
-			evt,
-		); err != nil {
-			return err
-		}
-
-		return e.runSyncProjections(
+		return e.tombstoneSteps(
 			ctx,
 			tx,
 			evt,
 		)
 	}
+}
+
+func (e *CommandExecutor[T]) tombstoneSteps(
+	ctx context.Context,
+	tx asynxmd.Tx,
+	evt asynxmd.Event[T],
+) error {
+	if err := e.supersedeDeliveriesIfLogged(
+		ctx,
+		tx,
+		evt,
+	); err != nil {
+		return err
+	}
+
+	return e.runSyncProjections(
+		ctx,
+		tx,
+		evt,
+	)
 }
 
 func (e *CommandExecutor[T]) supersedeDeliveriesIfLogged(

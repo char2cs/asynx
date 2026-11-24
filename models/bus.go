@@ -1,38 +1,8 @@
 package models
 
-import "context"
-
+// Bus delivers events to subscribed handlers.
 type Bus[T any] interface {
-	// Publish is called only after the event is durably written to the store.
-	// A non-nil error means dispatch failed, not that the event was lost.
-	Publish(
-		ctx context.Context,
-		event Event[T],
-	) error
-
-	// PublishSync fires all matching handlers synchronously — it blocks until every
-	// handler goroutine triggered by this specific event has completed. It does NOT
-	// wait for handlers from other concurrent events.
-	PublishSync(
-		ctx context.Context,
-		event Event[T],
-	) error
-
-	Subscribe(
-		pattern string,
-		handler ProjectionHandler[T],
-		opts ...SubscriptionOpt[T],
-	) (string, error)
-
-	Unsubscribe(
-		id string,
-	) error
-
-	Close(
-		ctx context.Context,
-	) error
-
-	// WaitForHandlers blocks until all in-flight handler executions complete.
-	// Only for use in tests; do not call in production code.
-	WaitForHandlers()
+	BusPublisher[T]
+	BusSubscriber[T]
+	BusLifecycle
 }

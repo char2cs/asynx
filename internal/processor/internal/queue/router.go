@@ -1,23 +1,33 @@
 package queue
 
-import "hash/fnv"
+import (
+	"errors"
+	"hash/fnv"
+)
 
+var errNoShards = errors.New("numShards must be > 0")
+
+// Router maps an aggregate ID to a shard index.
 type Router struct {
 	numShards int
 }
 
+// New builds a Router over numShards shards and fails when there are none.
 func New(
 	numShards int,
-) *Router {
-	if numShards == 0 {
-		panic("numShards must be > 0")
+) (*Router, error) {
+	if numShards <= 0 {
+		return nil,
+			errNoShards
 	}
 
 	return &Router{
-		numShards: numShards,
-	}
+			numShards: numShards,
+		},
+		nil
 }
 
+// Route returns the shard index that owns aggregateID.
 func (r *Router) Route(
 	aggregateID string,
 ) int {

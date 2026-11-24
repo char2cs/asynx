@@ -66,15 +66,16 @@ func TestNew_ReturnsANilProcessorWhenTheFactoryFails(
 	t *testing.T,
 ) {
 	boom := errors.New("boom")
+	failing := func(
+		asynxmd.DispatcherConfig[mocks.Order],
+	) (asynxmd.Dispatcher[mocks.Order], error) {
+		return nil,
+			boom
+	}
 	p, err := processor.New[mocks.Order](
 		newStore(),
 		nil,
-		models.WithDispatcherFactory(func(
-			asynxmd.DispatcherConfig[mocks.Order],
-		) (asynxmd.Dispatcher[mocks.Order], error) {
-			return nil,
-				boom
-		}),
+		models.WithDispatcherFactory(failing),
 	)
 	if !errors.Is(
 		err,

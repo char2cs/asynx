@@ -13,6 +13,7 @@ import (
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
+// Bus is the in-process channel-based event bus.
 type Bus[T any] struct {
 	subMu         sync.Mutex
 	subscriptions map[string]*models.Subscription[T]
@@ -52,6 +53,8 @@ func New[T any](
 	return b
 }
 
+// Subscribe registers handler for every event whose name matches pattern and
+// returns the subscription id.
 func (b *Bus[T]) Subscribe(
 	pattern string,
 	handler asynxmd.ProjectionHandler[T],
@@ -75,16 +78,32 @@ func (b *Bus[T]) Subscribe(
 	b.subMu.Lock()
 	defer b.subMu.Unlock()
 
-	b.publishMu.RLock()
-	closed := b.closed
-	b.publishMu.RUnlock()
-
-	if closed {
+	if b.isClosed() {
 		return "",
 			asynxmd.ErrBusClosed
 	}
 
-	subID = ids.New()
+	return b.register(
+			pattern,
+			handler,
+			cfg,
+		),
+		nil
+}
+
+func (b *Bus[T]) isClosed() bool {
+	b.publishMu.RLock()
+	defer b.publishMu.RUnlock()
+
+	return b.closed
+}
+
+func (b *Bus[T]) register(
+	pattern string,
+	handler asynxmd.ProjectionHandler[T],
+	cfg *asynxmd.SubscriptionConfig[T],
+) string {
+	subID := ids.New()
 	sub := &models.Subscription[T]{
 		Pattern:         pattern,
 		Handler:         handler,
@@ -98,10 +117,11 @@ func (b *Bus[T]) Subscribe(
 		sub,
 	))
 
-	return subID,
-		nil
+	return subID
 }
 
+// Unsubscribe removes the subscription with the given id. An unknown id is a
+// no-op.
 func (b *Bus[T]) Unsubscribe(
 	id string,
 ) error {
@@ -125,6 +145,8 @@ func (b *Bus[T]) Unsubscribe(
 	return nil
 }
 
+// Publish fires all matching handlers asynchronously and returns once they
+// are started.
 func (b *Bus[T]) Publish(
 	ctx context.Context,
 	event asynxmd.Event[T],
@@ -133,62 +155,21 @@ func (b *Bus[T]) Publish(
 		return err
 	}
 
-	idx := b.idx.Load()
-
-	exactMatches := idx.ExactSubs[event.EventName]
-
-	var regexMatches []*models.Subscription[T]
-	for _, sub := range idx.RegexSubs {
-		if b.matchesRegex(
-			event.EventName,
-			sub.Pattern,
-		) {
-			regexMatches = append(
-				regexMatches,
-				sub,
-			)
-		}
+	matched := b.matching(event.EventName)
+	err := b.reserve(
+		&b.inFlightWg,
+		len(matched),
+	)
+	if err != nil {
+		return err
 	}
 
-	total := len(exactMatches) + len(regexMatches)
-
-	b.publishMu.RLock()
-	if b.closed {
-		b.publishMu.RUnlock()
-		return asynxmd.ErrBusClosed
-	}
-
-	if total > 0 {
-		b.inFlightWg.Add(total)
-	}
-
-	b.publishMu.RUnlock()
-
-	for _, sub := range exactMatches {
-		go exec.Handler(
-			&b.inFlightWg,
-			exec.MakeJob(
-				sub,
-				event,
-				ctx,
-				b.onPanic,
-				b.onTimeout,
-			),
-		)
-	}
-
-	for _, sub := range regexMatches {
-		go exec.Handler(
-			&b.inFlightWg,
-			exec.MakeJob(
-				sub,
-				event,
-				ctx,
-				b.onPanic,
-				b.onTimeout,
-			),
-		)
-	}
+	b.launch(
+		ctx,
+		&b.inFlightWg,
+		event,
+		matched,
+	)
 
 	return nil
 }
@@ -205,69 +186,128 @@ func (b *Bus[T]) PublishSync(
 		return err
 	}
 
-	idx := b.idx.Load()
-
-	exactMatches := idx.ExactSubs[event.EventName]
-
-	var regexMatches []*models.Subscription[T]
-	for _, sub := range idx.RegexSubs {
-		if b.matchesRegex(
-			event.EventName,
-			sub.Pattern,
-		) {
-			regexMatches = append(
-				regexMatches,
-				sub,
-			)
-		}
-	}
-
-	total := len(exactMatches) + len(regexMatches)
-
-	b.publishMu.RLock()
-	if b.closed {
-		b.publishMu.RUnlock()
-		return asynxmd.ErrBusClosed
-	}
+	matched := b.matching(event.EventName)
 
 	var localWg sync.WaitGroup
-	if total > 0 {
-		localWg.Add(total)
+	err := b.reserve(
+		&localWg,
+		len(matched),
+	)
+	if err != nil {
+		return err
 	}
 
-	b.publishMu.RUnlock()
-
-	syncJob := func(
-		sub *models.Subscription[T],
-	) *exec.HandlerJob[T] {
-		job := exec.MakeJob(
-			sub,
-			event,
-			ctx,
-			b.onPanic,
-			b.onTimeout,
-		)
-		job.WaitAfterTimeout = true
-		return job
-	}
-	for _, sub := range exactMatches {
-		go exec.Handler(
-			&localWg,
-			syncJob(sub),
-		)
-	}
-
-	for _, sub := range regexMatches {
-		go exec.Handler(
-			&localWg,
-			syncJob(sub),
-		)
-	}
+	b.launchSync(
+		ctx,
+		&localWg,
+		event,
+		matched,
+	)
 
 	localWg.Wait()
 	return nil
 }
 
+func (b *Bus[T]) matching(
+	eventName string,
+) []*models.Subscription[T] {
+	idx := b.idx.Load()
+	matched := append(
+		[]*models.Subscription[T](nil),
+		idx.ExactSubs[eventName]...,
+	)
+
+	for _, sub := range idx.RegexSubs {
+		matched = b.appendIfMatch(
+			matched,
+			eventName,
+			sub,
+		)
+	}
+
+	return matched
+}
+
+func (b *Bus[T]) appendIfMatch(
+	matched []*models.Subscription[T],
+	eventName string,
+	sub *models.Subscription[T],
+) []*models.Subscription[T] {
+	if !b.matchesRegex(
+		eventName,
+		sub.Pattern,
+	) {
+		return matched
+	}
+
+	return append(
+		matched,
+		sub,
+	)
+}
+
+func (b *Bus[T]) reserve(
+	wg *sync.WaitGroup,
+	total int,
+) error {
+	b.publishMu.RLock()
+	defer b.publishMu.RUnlock()
+
+	if b.closed {
+		return asynxmd.ErrBusClosed
+	}
+
+	if total > 0 {
+		wg.Add(total)
+	}
+
+	return nil
+}
+
+func (b *Bus[T]) launch(
+	ctx context.Context,
+	wg *sync.WaitGroup,
+	event asynxmd.Event[T],
+	subs []*models.Subscription[T],
+) {
+	for _, sub := range subs {
+		go exec.Handler(
+			ctx,
+			wg,
+			exec.MakeJob(
+				sub,
+				event,
+				b.onPanic,
+				b.onTimeout,
+			),
+		)
+	}
+}
+
+func (b *Bus[T]) launchSync(
+	ctx context.Context,
+	wg *sync.WaitGroup,
+	event asynxmd.Event[T],
+	subs []*models.Subscription[T],
+) {
+	for _, sub := range subs {
+		job := exec.MakeJob(
+			sub,
+			event,
+			b.onPanic,
+			b.onTimeout,
+		)
+		job.WaitAfterTimeout = true
+		go exec.Handler(
+			ctx,
+			wg,
+			job,
+		)
+	}
+}
+
+// Close stops accepting new work and waits for in-flight handlers until ctx
+// is done.
 func (b *Bus[T]) Close(
 	ctx context.Context,
 ) error {

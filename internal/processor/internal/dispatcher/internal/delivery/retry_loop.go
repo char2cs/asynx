@@ -1,12 +1,17 @@
 package delivery
 
 import (
+	"errors"
 	"time"
 
 	asynxmd "github.com/char2cs/asynx/models"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/contracts"
 )
+
+const backoffFactor = 2
+
+var errRetrying = errors.New("delivery attempt failed, retrying")
 
 type retryLoop[T any] struct {
 	deliverer   *durableDeliverer[T]
@@ -16,10 +21,21 @@ type retryLoop[T any] struct {
 	pending     []asynxmd.DurableSub[T]
 	attempt     int
 	backoff     time.Duration
-	err         error
 }
 
-func (l *retryLoop[T]) step() bool {
+func (l *retryLoop[T]) run() error {
+	err := l.step()
+	for errors.Is(
+		err,
+		errRetrying,
+	) {
+		err = l.step()
+	}
+
+	return err
+}
+
+func (l *retryLoop[T]) step() error {
 	failed, last := l.deliverer.attempt(
 		l.job,
 		l.pending,
@@ -28,36 +44,35 @@ func (l *retryLoop[T]) step() bool {
 	l.settleAfterFirst()
 	l.pending = failed
 	if len(failed) == 0 {
-		return false
+		return nil
 	}
 
 	if l.attempt >= l.deliverer.maxAttempts {
-		l.err = l.deliverer.giveUp(
+		return l.deliverer.giveUp(
 			l.aggregateID,
 			l.halt,
 			l.job,
 			last,
 			l.attempt,
 		)
-		return false
 	}
 
-	l.err = l.deliverer.wait(
+	err := l.deliverer.wait(
 		l.aggregateID,
 		l.halt,
 		l.job,
 		l.backoff,
 	)
-	if l.err != nil {
-		return false
+	if err != nil {
+		return err
 	}
 
 	l.attempt++
 	l.backoff = min(
-		l.backoff*2,
+		l.backoff*backoffFactor,
 		l.deliverer.retryMax,
 	)
-	return true
+	return errRetrying
 }
 
 func (l *retryLoop[T]) settleAfterFirst() {

@@ -185,6 +185,23 @@ func TestOrderNotifier_Handle_MultipleEvents(
 	}
 }
 
+func handleCreated(
+	ctx context.Context,
+	notifier *OrderNotifier,
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
+	notifier.Handle(
+		ctx,
+		models.Event[domain.Order]{
+			EventName: "OrderCreated",
+			Aggregate: domain.Order{
+				ID: "ORD-001",
+			},
+		},
+	)
+}
+
 func TestOrderNotifier_Handle_Concurrent(
 	t *testing.T,
 ) {
@@ -192,23 +209,13 @@ func TestOrderNotifier_Handle_Concurrent(
 	ctx := context.Background()
 	wg := sync.WaitGroup{}
 
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		wg.Add(1)
-		go func(
-			index int,
-		) {
-			defer wg.Done()
-			event := models.Event[domain.Order]{
-				EventName: "OrderCreated",
-				Aggregate: domain.Order{
-					ID: "ORD-001",
-				},
-			}
-			notifier.Handle(
-				ctx,
-				event,
-			)
-		}(i)
+		go handleCreated(
+			ctx,
+			notifier,
+			&wg,
+		)
 	}
 
 	wg.Wait()

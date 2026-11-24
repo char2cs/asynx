@@ -13,6 +13,7 @@ type inflightTracker[T any] struct {
 	tickets  sync.Map
 }
 
+// Track registers job until it completes.
 func (t *inflightTracker[T]) Track(
 	job contracts.Job[T],
 ) {
@@ -34,6 +35,7 @@ func (t *inflightTracker[T]) Track(
 	})
 }
 
+// For returns the ticket of the job tracked for (aggregateID, version).
 func (t *inflightTracker[T]) For(
 	aggregateID string,
 	version int64,
@@ -44,23 +46,48 @@ func (t *inflightTracker[T]) For(
 			false
 	}
 
-	return found.(contracts.Job[T]).Ticket(),
+	job, isJob := found.(contracts.Job[T])
+	if !isJob {
+		return asynxmd.Ticket{},
+			false
+	}
+
+	return job.Ticket(),
 		true
 }
 
+// Idle blocks until every job tracked when it was called has completed.
 func (t *inflightTracker[T]) Idle() {
-	var tracked []contracts.Job[T]
+	for _, job := range t.tracked() {
+		<-job.Ticket().Final
+	}
+}
+
+func (t *inflightTracker[T]) tracked() (jobs []contracts.Job[T]) {
 	t.inflight.Range(func(
 		key any,
 		_ any,
 	) bool {
-		tracked = append(
-			tracked,
-			key.(contracts.Job[T]),
+		jobs = appendJob(
+			jobs,
+			key,
 		)
 		return true
 	})
-	for _, job := range tracked {
-		<-job.Ticket().Final
+	return jobs
+}
+
+func appendJob[T any](
+	jobs []contracts.Job[T],
+	key any,
+) []contracts.Job[T] {
+	job, isJob := key.(contracts.Job[T])
+	if !isJob {
+		return jobs
 	}
+
+	return append(
+		jobs,
+		job,
+	)
 }

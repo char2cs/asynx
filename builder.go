@@ -6,6 +6,7 @@ import (
 	"time"
 )
 
+// Builder configures and builds an Asynx instance.
 type Builder[T any] struct {
 	eventStore          models.Store
 	snapshotStore       models.SnapshotStore
@@ -28,14 +29,18 @@ type Builder[T any] struct {
 	dispatcherFactory   models.DispatcherFactory[T]
 }
 
+const defaultShards = 8
+
+// New returns a Builder with the default schema version and sharding options.
 func New[T any]() *Builder[T] {
 	return &Builder[T]{
 		schemaVersion: 1,
 		upcasters:     make(map[int]models.Upcaster),
-		shardingOpts:  ShardingOpts{Shards: 8},
+		shardingOpts:  ShardingOpts{Shards: defaultShards},
 	}
 }
 
+// WithEventStore sets the event store. Required: Build returns ErrMissingEventStore without it.
 func (b *Builder[T]) WithEventStore(
 	s models.Store,
 ) *Builder[T] {
@@ -56,6 +61,7 @@ func (b *Builder[T]) WithSnapshotStore(
 	return b
 }
 
+// WithBus replaces the default in-memory bus.
 func (b *Builder[T]) WithBus(
 	bus models.Bus[T],
 ) *Builder[T] {
@@ -63,6 +69,7 @@ func (b *Builder[T]) WithBus(
 	return b
 }
 
+// WithShardingOpts sets the processor's worker pool options.
 func (b *Builder[T]) WithShardingOpts(
 	opts ShardingOpts,
 ) *Builder[T] {
@@ -70,6 +77,7 @@ func (b *Builder[T]) WithShardingOpts(
 	return b
 }
 
+// WithSchemaVersion sets the schema version stamped on new events.
 func (b *Builder[T]) WithSchemaVersion(
 	v int,
 ) *Builder[T] {
@@ -77,6 +85,7 @@ func (b *Builder[T]) WithSchemaVersion(
 	return b
 }
 
+// WithUpcaster registers the migration from events of fromVersion to the next schema version.
 func (b *Builder[T]) WithUpcaster(
 	fromVersion int,
 	fn models.Upcaster,
@@ -85,6 +94,7 @@ func (b *Builder[T]) WithUpcaster(
 	return b
 }
 
+// WithPanicHandler sets the handler called when a projection or durable handler panics.
 func (b *Builder[T]) WithPanicHandler(
 	fn models.PanicHandler[T],
 ) *Builder[T] {

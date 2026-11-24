@@ -107,7 +107,9 @@ func (l *listener[T]) deliver(
 
 func (l *listener[T]) unsubscribeWhenPublished() {
 	<-l.subIDReady
-	_ = l.bus.Unsubscribe(l.subID)
+	if err := l.bus.Unsubscribe(l.subID); err != nil {
+		return
+	}
 }
 
 func (l *listener[T]) closeChLocked() {
@@ -137,8 +139,14 @@ func (l *listener[T]) unsubscribe() {
 	}
 
 	close(l.done)
-	_ = l.bus.Unsubscribe(l.subID)
+	defer l.closeBoundedChannel()
 
+	if err := l.bus.Unsubscribe(l.subID); err != nil {
+		return
+	}
+}
+
+func (l *listener[T]) closeBoundedChannel() {
 	isBounded := l.count > 0
 	if !isBounded {
 		return

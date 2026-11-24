@@ -142,39 +142,45 @@ func WithSnapshotErrorHandler[T any](
 	}
 }
 
+// WithShards sets the number of shards when count is positive.
 func WithShards[T any](
 	count int,
 ) Opt[T] {
 	return func(
 		cfg *Config[T],
 	) {
-		if count > 0 {
-			cfg.Shards = count
-		}
+		cfg.Shards = positiveInt(
+			count,
+			cfg.Shards,
+		)
 	}
 }
 
+// WithQueueDepth sets the per-shard queue depth when depth is positive.
 func WithQueueDepth[T any](
 	depth int,
 ) Opt[T] {
 	return func(
 		cfg *Config[T],
 	) {
-		if depth > 0 {
-			cfg.QueueDepth = depth
-		}
+		cfg.QueueDepth = positiveInt(
+			depth,
+			cfg.QueueDepth,
+		)
 	}
 }
 
+// WithWorkersPerShard sets the workers per shard when count is positive.
 func WithWorkersPerShard[T any](
 	count int,
 ) Opt[T] {
 	return func(
 		cfg *Config[T],
 	) {
-		if count > 0 {
-			cfg.WorkersPerShard = count
-		}
+		cfg.WorkersPerShard = positiveInt(
+			count,
+			cfg.WorkersPerShard,
+		)
 	}
 }
 
@@ -207,4 +213,15 @@ func WithDispatcherFactory[T any](
 	) {
 		cfg.DispatcherFactory = f
 	}
+}
+
+func positiveInt(
+	value int,
+	fallback int,
+) int {
+	if value > 0 {
+		return value
+	}
+
+	return fallback
 }

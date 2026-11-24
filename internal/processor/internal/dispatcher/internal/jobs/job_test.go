@@ -17,13 +17,14 @@ func newJob(
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	var cancels atomic.Int32
+	cancel2 := func() {
+		cancels.Add(1)
+		cancel()
+	}
 	job := jobs.New(
 		ctx,
 		request,
-		func() {
-			cancels.Add(1)
-			cancel()
-		},
+		cancel2,
 	)
 	return job,
 		&cancels
@@ -99,15 +100,40 @@ func TestNew_KindsDecideRouting(
 	for _, tt := range tests {
 		t.Run(
 			tt.name,
-			func(
-				t *testing.T,
-			) {
-				assertKindRouting(
-					t,
-					tt.request,
-					[3]bool{tt.durable, tt.forget, tt.skipLive},
-				)
-			},
+			kindRoutingCase(
+				tt.request,
+				[3]bool{tt.durable, tt.forget, tt.skipLive},
+			),
+		)
+	}
+}
+
+func kindRoutingCase(
+	request asynxmd.DispatchRequest[string],
+	want [3]bool,
+) func(*testing.T) {
+	return func(
+		t *testing.T,
+	) {
+		assertKindRouting(
+			t,
+			request,
+			want,
+		)
+	}
+}
+
+func routingCase[R comparable](
+	got R,
+	want R,
+) func(*testing.T) {
+	return func(
+		t *testing.T,
+	) {
+		assertRouting(
+			t,
+			got,
+			want,
 		)
 	}
 }
@@ -177,15 +203,10 @@ func TestEnqueue_TheKindSelectsWhoReceivesTheEvent(
 				c.kind,
 				c.name,
 			),
-			func(
-				t *testing.T,
-			) {
-				assertRouting(
-					t,
-					got,
-					c.want,
-				)
-			},
+			routingCase(
+				got,
+				c.want,
+			),
 		)
 	}
 }

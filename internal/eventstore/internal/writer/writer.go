@@ -42,11 +42,10 @@ func New[T any](
 // writers that validated against the same state target the same version, so one
 // wins and the other gets ErrPipelineFailed.
 //
-// The append runs in its own transaction; a snapshot is written afterwards if
-// shouldSnapshot is true. If the snapshot write fails, the append is not rolled
-// back (the event is durable) but the error is returned to the caller. The
-// command executor does not use this method: it composes AppendTx and Snapshot
-// itself so it can enlist projections and treat snapshot failures as non-fatal.
+// The append runs in its own transaction and no snapshot is written; see
+// WriteSnapshotted. The command executor does not use this method: it composes
+// AppendTx and Snapshot itself so it can enlist projections and treat snapshot
+// failures as non-fatal.
 func (w *Writer[T]) Write(
 	ctx context.Context,
 	aggregateID string,
@@ -54,40 +53,66 @@ func (w *Writer[T]) Write(
 	expectedVersion int64,
 	previousState T,
 	newState T,
-	shouldSnapshot bool,
-) (asynxmd.Event[T], error) {
-	var evt asynxmd.Event[T]
-	err := w.eventStore.Atomically(
+) (evt asynxmd.Event[T], err error) {
+	appendEvent := func(
+		tx asynxmd.Tx,
+	) (txErr error) {
+		evt, txErr = w.AppendTx(
+			ctx,
+			tx,
+			aggregateID,
+			eventName,
+			expectedVersion,
+			previousState,
+			newState,
+		)
+		return txErr
+	}
+
+	err = w.eventStore.Atomically(
 		ctx,
-		func(
-			tx asynxmd.Tx,
-		) error {
-			var err error
-			evt, err = w.AppendTx(
-				ctx,
-				tx,
-				aggregateID,
-				eventName,
-				expectedVersion,
-				previousState,
-				newState,
-			)
-			return err
-		},
+		appendEvent,
 	)
 	if err != nil {
 		return asynxmd.Event[T]{},
 			err
 	}
 
-	if shouldSnapshot {
-		if err := w.Snapshot(
-			ctx,
-			evt,
-		); err != nil {
-			return asynxmd.Event[T]{},
-				err
-		}
+	return evt,
+		nil
+}
+
+// WriteSnapshotted is Write followed by a snapshot of the new state. If the
+// snapshot write fails, the append is not rolled back (the event is durable)
+// but the error is returned to the caller.
+func (w *Writer[T]) WriteSnapshotted(
+	ctx context.Context,
+	aggregateID string,
+	eventName string,
+	expectedVersion int64,
+	previousState T,
+	newState T,
+) (asynxmd.Event[T], error) {
+	evt, err := w.Write(
+		ctx,
+		aggregateID,
+		eventName,
+		expectedVersion,
+		previousState,
+		newState,
+	)
+	if err != nil {
+		return asynxmd.Event[T]{},
+			err
+	}
+
+	err = w.Snapshot(
+		ctx,
+		evt,
+	)
+	if err != nil {
+		return asynxmd.Event[T]{},
+			err
 	}
 
 	return evt,
@@ -106,9 +131,7 @@ func (w *Writer[T]) AppendTx(
 	previousState T,
 	newState T,
 ) (asynxmd.Event[T], error) {
-	version := expectedVersion + 1
-
-	patch, err := jsondiff.Compare(
+	patchJSON, err := diffJSON(
 		previousState,
 		newState,
 	)
@@ -117,51 +140,97 @@ func (w *Writer[T]) AppendTx(
 			err
 	}
 
-	patchJSON, err := json.Marshal(patch)
+	evt := w.newInternalEvent(
+		eventName,
+		expectedVersion+1,
+		patchJSON,
+	)
+	err = appendInternal(
+		ctx,
+		tx,
+		aggregateID,
+		evt,
+	)
 	if err != nil {
 		return asynxmd.Event[T]{},
 			err
 	}
 
-	eventID := ids.New()
-	now := time.Now().UTC()
+	return publicEvent(
+			aggregateID,
+			evt,
+			previousState,
+			newState,
+		),
+		nil
+}
 
-	evt := esmodels.InternalEvent{
-		ID:            eventID,
+func (w *Writer[T]) newInternalEvent(
+	eventName string,
+	version int64,
+	patchJSON []byte,
+) esmodels.InternalEvent {
+	return esmodels.InternalEvent{
+		ID:            ids.New(),
 		EventName:     eventName,
 		Version:       version,
 		SchemaVersion: w.currentSchemaVersion,
-		OccurredAt:    now,
+		OccurredAt:    time.Now().UTC(),
 		Patches:       json.RawMessage(patchJSON),
 	}
+}
 
+func publicEvent[T any](
+	aggregateID string,
+	evt esmodels.InternalEvent,
+	previousState T,
+	newState T,
+) asynxmd.Event[T] {
+	return asynxmd.Event[T]{
+		ID:                evt.ID,
+		AggregateID:       aggregateID,
+		EventName:         evt.EventName,
+		Version:           evt.Version,
+		SchemaVersion:     evt.SchemaVersion,
+		OccurredAt:        evt.OccurredAt,
+		Aggregate:         newState,
+		PreviousAggregate: previousState,
+	}
+}
+
+func diffJSON[T any](
+	previousState T,
+	newState T,
+) ([]byte, error) {
+	patch, err := jsondiff.Compare(
+		previousState,
+		newState,
+	)
+	if err != nil {
+		return nil,
+			err
+	}
+
+	return json.Marshal(patch)
+}
+
+func appendInternal(
+	ctx context.Context,
+	tx asynxmd.Tx,
+	aggregateID string,
+	evt esmodels.InternalEvent,
+) error {
 	evtJSON, err := json.Marshal(evt)
 	if err != nil {
-		return asynxmd.Event[T]{},
-			err
+		return err
 	}
 
-	if err := tx.Append(
+	return tx.Append(
 		ctx,
 		"events:"+aggregateID,
-		version,
+		evt.Version,
 		evtJSON,
-	); err != nil {
-		return asynxmd.Event[T]{},
-			err
-	}
-
-	return asynxmd.Event[T]{
-			ID:                eventID,
-			AggregateID:       aggregateID,
-			EventName:         eventName,
-			Version:           version,
-			SchemaVersion:     w.currentSchemaVersion,
-			OccurredAt:        now,
-			Aggregate:         newState,
-			PreviousAggregate: previousState,
-		},
-		nil
+	)
 }
 
 // Snapshot upserts the snapshot of evt.Aggregate at evt.Version.

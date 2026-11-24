@@ -14,29 +14,32 @@ func TestNew_CallsTheHandlersItIsGiven(
 	t *testing.T,
 ) {
 	var publishes, deliveries, panics int
+	onPublishError := func(
+		context.Context,
+		asynxmd.Event[string],
+		error,
+	) {
+		publishes++
+	}
+	onDeliveryError := func(
+		context.Context,
+		asynxmd.Event[string],
+		error,
+		int,
+	) {
+		deliveries++
+	}
+	onPanic := func(
+		context.Context,
+		asynxmd.Event[string],
+		any,
+	) {
+		panics++
+	}
 	r := reporter.New(
-		func(
-			context.Context,
-			asynxmd.Event[string],
-			error,
-		) {
-			publishes++
-		},
-		func(
-			context.Context,
-			asynxmd.Event[string],
-			error,
-			int,
-		) {
-			deliveries++
-		},
-		func(
-			context.Context,
-			asynxmd.Event[string],
-			any,
-		) {
-			panics++
-		},
+		onPublishError,
+		onDeliveryError,
+		onPanic,
 	)
 	job := newJob()
 	r.PublishError(

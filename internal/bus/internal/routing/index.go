@@ -111,12 +111,14 @@ func withoutSub[T any](
 	subs []*models.Subscription[T],
 	sub *models.Subscription[T],
 ) []*models.Subscription[T] {
+	isSub := func(
+		s *models.Subscription[T],
+	) bool {
+		return s == sub
+	}
+
 	return slices.DeleteFunc(
 		slices.Clone(subs),
-		func(
-			s *models.Subscription[T],
-		) bool {
-			return s == sub
-		},
+		isSub,
 	)
 }

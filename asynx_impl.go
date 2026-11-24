@@ -13,6 +13,7 @@ type asynxImpl[T any] struct {
 	bus  models.Bus[T]
 }
 
+// Send validates and persists the command, then returns the resulting event.
 func (i *asynxImpl[T]) Send(
 	ctx context.Context,
 	cmd models.Command[T],
@@ -23,6 +24,7 @@ func (i *asynxImpl[T]) Send(
 	)
 }
 
+// SendWait behaves like Send and also waits for the matching projection handlers.
 func (i *asynxImpl[T]) SendWait(
 	ctx context.Context,
 	cmd models.Command[T],
@@ -33,12 +35,14 @@ func (i *asynxImpl[T]) SendWait(
 	)
 }
 
+// Shutdown stops the instance, waiting for in-flight work until ctx is done.
 func (i *asynxImpl[T]) Shutdown(
 	ctx context.Context,
 ) error {
 	return i.proc.Shutdown(ctx)
 }
 
+// Get returns the current state of the aggregate.
 func (i *asynxImpl[T]) Get(
 	ctx context.Context,
 	aggregateID string,
@@ -49,6 +53,7 @@ func (i *asynxImpl[T]) Get(
 	)
 }
 
+// Exists reports whether the aggregate exists.
 func (i *asynxImpl[T]) Exists(
 	ctx context.Context,
 	aggregateID string,
@@ -59,6 +64,7 @@ func (i *asynxImpl[T]) Exists(
 	)
 }
 
+// Preload loads the aggregate into the snapshot cache.
 func (i *asynxImpl[T]) Preload(
 	ctx context.Context,
 	aggregateID string,
@@ -69,6 +75,7 @@ func (i *asynxImpl[T]) Preload(
 	)
 }
 
+// Subscribe registers a projection handler for events matching pattern.
 func (i *asynxImpl[T]) Subscribe(
 	pattern string,
 	handler models.ProjectionHandler[T],
@@ -81,12 +88,14 @@ func (i *asynxImpl[T]) Subscribe(
 	)
 }
 
+// Unsubscribe removes the subscription with the given ID.
 func (i *asynxImpl[T]) Unsubscribe(
 	id string,
 ) error {
 	return i.bus.Unsubscribe(id)
 }
 
+// Listen opens a channel-based subscription for events matching pattern.
 func (i *asynxImpl[T]) Listen(
 	pattern string,
 	count int,
@@ -118,33 +127,33 @@ func (i *asynxImpl[T]) Listen(
 		nil
 }
 
+// SubscribeWait blocks until an event matching pattern arrives or ctx is done.
 func (i *asynxImpl[T]) SubscribeWait(
 	ctx context.Context,
 	pattern string,
-) (models.Event[T], error) {
+) (evt models.Event[T], err error) {
 	ch, unsub, err := i.Listen(
 		pattern,
 		1,
 	)
 	if err != nil {
-		var zero models.Event[T]
-		return zero,
+		return evt,
 			err
 	}
 
 	defer unsub()
 
 	select {
-	case evt := <-ch:
+	case evt = <-ch:
 		return evt,
 			nil
 	case <-ctx.Done():
-		var zero models.Event[T]
-		return zero,
+		return evt,
 			ctx.Err()
 	}
 }
 
+// Replay feeds the events of an aggregate between two versions to fn.
 func (i *asynxImpl[T]) Replay(
 	ctx context.Context,
 	aggregateID string,
@@ -168,6 +177,7 @@ func (i *asynxImpl[T]) WaitPublish() {
 	i.bus.WaitForHandlers()
 }
 
+// Forget tombstones the aggregate, notifies the forget handlers and durable subscribers, then erases it.
 func (i *asynxImpl[T]) Forget(
 	ctx context.Context,
 	aggregateID string,
@@ -178,16 +188,19 @@ func (i *asynxImpl[T]) Forget(
 	)
 }
 
+// PausedAggregates lists the aggregates whose durable delivery is parked.
 func (i *asynxImpl[T]) PausedAggregates() []string {
 	return i.proc.Paused()
 }
 
+// InspectDelivery reports why an aggregate is paused.
 func (i *asynxImpl[T]) InspectDelivery(
 	aggregateID string,
 ) models.DeliveryStatus {
 	return i.proc.Inspect(aggregateID)
 }
 
+// ResumeDeliveries redelivers the paused aggregates' pending events to the durable subscribers.
 func (i *asynxImpl[T]) ResumeDeliveries(
 	ctx context.Context,
 ) error {

@@ -42,6 +42,7 @@ type aggregatePool[T any] struct {
 	wg          sync.WaitGroup
 }
 
+// Spawn starts the worker of aggregateID and counts it.
 func (p *aggregatePool[T]) Spawn(
 	aggregateID string,
 ) {
@@ -49,10 +50,12 @@ func (p *aggregatePool[T]) Spawn(
 	go p.work(aggregateID)
 }
 
+// Stop tells every worker to drain its queue and exit.
 func (p *aggregatePool[T]) Stop() {
 	close(p.stop)
 }
 
+// Wait blocks until every worker has exited.
 func (p *aggregatePool[T]) Wait() {
 	p.wg.Wait()
 }
@@ -255,17 +258,18 @@ func (p *aggregatePool[T]) ack(
 		return nil
 	}
 
+	report := func() {
+		p.reports.PublishError(
+			job,
+			err,
+		)
+	}
 	p.deliverer.ParkThenReport(
 		aggregateID,
 		halt,
 		job,
 		err,
-		func() {
-			p.reports.PublishError(
-				job,
-				err,
-			)
-		},
+		report,
 	)
 	return err
 }

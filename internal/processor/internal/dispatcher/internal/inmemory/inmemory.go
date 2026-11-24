@@ -90,6 +90,7 @@ func (d *dispatcher[T]) spawn(
 	d.workers.Spawn(aggregateID)
 }
 
+// Enqueue queues request for its aggregate and returns its ticket.
 func (d *dispatcher[T]) Enqueue(
 	ctx context.Context,
 	request asynxmd.DispatchRequest[T],
@@ -135,6 +136,7 @@ func (d *dispatcher[T]) newJob(
 		release
 }
 
+// TicketFor returns the ticket of the tracked event at (aggregateID, version).
 func (d *dispatcher[T]) TicketFor(
 	aggregateID string,
 	version int64,
@@ -145,6 +147,7 @@ func (d *dispatcher[T]) TicketFor(
 	)
 }
 
+// Unrun reports why no handler ran for the event at (aggregateID, version).
 func (d *dispatcher[T]) Unrun(
 	aggregateID string,
 	version int64,
@@ -155,6 +158,7 @@ func (d *dispatcher[T]) Unrun(
 	)
 }
 
+// Park parks the aggregate's durable delivery for cause.
 func (d *dispatcher[T]) Park(
 	aggregateID string,
 	cause error,
@@ -167,16 +171,19 @@ func (d *dispatcher[T]) Park(
 	)
 }
 
+// Supersede abandons the aggregate's pending durable deliveries.
 func (d *dispatcher[T]) Supersede(
 	aggregateID string,
 ) {
 	d.registry.Supersede(aggregateID)
 }
 
+// Parks returns the parked aggregates with their generations.
 func (d *dispatcher[T]) Parks() map[string]uint64 {
 	return d.registry.Parks()
 }
 
+// ResumeUndelivered lifts the park of the given generation and returns its undelivered versions.
 func (d *dispatcher[T]) ResumeUndelivered(
 	aggregateID string,
 	generation uint64,
@@ -187,12 +194,14 @@ func (d *dispatcher[T]) ResumeUndelivered(
 	)
 }
 
+// Inspect reports the aggregate's delivery status.
 func (d *dispatcher[T]) Inspect(
 	aggregateID string,
 ) asynxmd.DeliveryStatus {
 	return d.registry.Inspect(aggregateID)
 }
 
+// InHandler reports whether ctx belongs to a handler running for aggregateID.
 func (d *dispatcher[T]) InHandler(
 	ctx context.Context,
 	aggregateID string,
@@ -201,14 +210,17 @@ func (d *dispatcher[T]) InHandler(
 	return ok && id == aggregateID
 }
 
+// Interrupt stops retries of every delivery in progress.
 func (d *dispatcher[T]) Interrupt() {
 	d.quitOnce.Do(func() { close(d.quit) })
 }
 
+// Interrupted returns the channel closed by Interrupt.
 func (d *dispatcher[T]) Interrupted() <-chan struct{} {
 	return d.quit
 }
 
+// Close closes the dispatcher and waits for its workers until ctx is done.
 func (d *dispatcher[T]) Close(
 	ctx context.Context,
 ) error {
@@ -235,6 +247,7 @@ func (d *dispatcher[T]) awaitWorkers(
 	close(done)
 }
 
+// WaitIdle blocks until every event tracked when it was called has completed.
 func (d *dispatcher[T]) WaitIdle() {
 	d.tracker.Idle()
 }

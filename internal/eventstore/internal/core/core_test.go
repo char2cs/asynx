@@ -141,29 +141,41 @@ func TestWrite_VersionsAreConsecutive(
 		1,
 		nil,
 	)
-	ctx := context.Background()
-
 	for i := int64(1); i <= 5; i++ {
-		evt, err := es.Write(
-			ctx,
-			cmdEmpty(),
+		assertConsecutiveVersion(
+			t,
+			es,
+			i,
 		)
-		if err != nil {
-			t.Fatalf(
-				"Write #%d: %v",
-				i,
-				err,
-			)
-		}
+	}
+}
 
-		if evt.Version != i {
-			t.Errorf(
-				"Write #%d: Version = %d, want %d",
-				i,
-				evt.Version,
-				i,
-			)
-		}
+func assertConsecutiveVersion(
+	t *testing.T,
+	es *EventStore[order],
+	i int64,
+) {
+	t.Helper()
+
+	evt, err := es.Write(
+		context.Background(),
+		cmdEmpty(),
+	)
+	if err != nil {
+		t.Fatalf(
+			"Write #%d: %v",
+			i,
+			err,
+		)
+	}
+
+	if evt.Version != i {
+		t.Errorf(
+			"Write #%d: Version = %d, want %d",
+			i,
+			evt.Version,
+			i,
+		)
 	}
 }
 
@@ -354,20 +366,21 @@ func TestReplay_VisitsAllEvents(
 	)
 
 	var got []asynxmd.Event[order]
+	replayFn := func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
+		got = append(
+			got,
+			e,
+		)
+	}
 	err := es.Replay(
 		ctx,
 		"agg1",
 		1,
 		0,
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) {
-			got = append(
-				got,
-				e,
-			)
-		},
+		replayFn,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -417,20 +430,21 @@ func TestReplay_WithVersionRange(
 	)
 
 	var got []asynxmd.Event[order]
+	replayFn := func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
+		got = append(
+			got,
+			e,
+		)
+	}
 	err := es.Replay(
 		ctx,
 		"agg1",
 		2,
 		3,
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) {
-			got = append(
-				got,
-				e,
-			)
-		},
+		replayFn,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -450,15 +464,16 @@ func TestReplay_WithVersionRange(
 func TestWrite_Get_WithUpcasting(
 	t *testing.T,
 ) {
+	fn := func(
+		_ context.Context,
+		_ string,
+		p []byte,
+	) ([]byte, error) {
+		return p,
+			nil
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(
-			_ context.Context,
-			_ string,
-			p []byte,
-		) ([]byte, error) {
-			return p,
-				nil
-		},
+		1: fn,
 	}
 	es := New[order](
 		store.New(),
@@ -488,17 +503,18 @@ func TestWrite_Get_WithUpcasting(
 	}
 
 	var rawBlobs [][]byte
+	replayFn := func(
+		ctx context.Context,
+		e asynxmd.Event[order],
+	) {
+		_ = e
+	}
 	esV1.Replay(
 		ctx,
 		"agg1",
 		1,
 		0,
-		func(
-			ctx context.Context,
-			e asynxmd.Event[order],
-		) {
-			_ = e
-		},
+		replayFn,
 	)
 
 	_ = rawBlobs
@@ -509,16 +525,44 @@ func TestWrite_ConcurrentConflict_AtLeastOneFails(
 	t *testing.T,
 ) {
 	const rounds = 50
-	for range rounds {
-		if concurrentWritesConflict(t) {
-			return
-		}
+	conflicted := false
+	for i := 0; i < rounds &&
+		!conflicted; i++ {
+		conflicted = concurrentWritesConflict(t)
 	}
 
-	t.Errorf(
-		"expected a concurrent write to fail with ErrPipelineFailed in at least one of %d rounds",
-		rounds,
-	)
+	if !conflicted {
+		t.Errorf(
+			"expected a concurrent write to fail with ErrPipelineFailed in at least one of %d rounds",
+			rounds,
+		)
+	}
+}
+
+func spawn(
+	wg *sync.WaitGroup,
+	work func(),
+) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		work()
+	}()
+}
+
+func writeWhenStarted(
+	ctx context.Context,
+	es *EventStore[order],
+	start <-chan struct{},
+	errOut *error,
+) func() {
+	return func() {
+		<-start
+		_, *errOut = es.Write(
+			ctx,
+			cmdEmpty(),
+		)
+	}
 }
 
 func concurrentWritesConflict(
@@ -543,32 +587,30 @@ func concurrentWritesConflict(
 
 	var wg sync.WaitGroup
 	for i := range n {
-		wg.Add(1)
-		go func(
-			i int,
-		) {
-			defer wg.Done()
-			<-start
-			_, errs[i] = es.Write(
+		spawn(
+			&wg,
+			writeWhenStarted(
 				ctx,
-				cmdEmpty(),
-			)
-		}(i)
+				es,
+				start,
+				&errs[i],
+			),
+		)
 	}
 
 	close(start)
 	wg.Wait()
-
+	containsFuncFn := func(
+		err error,
+	) bool {
+		return errors.Is(
+			err,
+			asynxmd.ErrPipelineFailed,
+		)
+	}
 	return slices.ContainsFunc(
 		errs,
-		func(
-			err error,
-		) bool {
-			return errors.Is(
-				err,
-				asynxmd.ErrPipelineFailed,
-			)
-		},
+		containsFuncFn,
 	)
 }
 
@@ -598,17 +640,22 @@ func TestGet_ErrNotFound_ForNewAggregate(
 	}
 }
 
+func failOnPanic(
+	t *testing.T,
+) {
+	r := recover()
+	if r != nil {
+		t.Fatalf(
+			"New panicked with nil upcasters: %v",
+			r,
+		)
+	}
+}
+
 func TestNew_NilUpcasters_DoesNotPanic(
 	t *testing.T,
 ) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf(
-				"New panicked with nil upcasters: %v",
-				r,
-			)
-		}
-	}()
+	defer failOnPanic(t)
 	es := New[order](
 		store.New(),
 		store.NewSnapshots(),
@@ -696,15 +743,16 @@ func TestWrite_Get_SharedStore_WithUpcasting(
 		)
 	}
 
+	fn := func(
+		_ context.Context,
+		_ string,
+		p []byte,
+	) ([]byte, error) {
+		return p,
+			nil
+	}
 	upcasters := map[int]asynxmd.Upcaster{
-		1: func(
-			_ context.Context,
-			_ string,
-			p []byte,
-		) ([]byte, error) {
-			return p,
-				nil
-		},
+		1: fn,
 	}
 	esV2 := New[order](
 		s,
@@ -766,16 +814,17 @@ func TestNew_WithCorruptionHook_CalledOnCorruptSnapshot(
 	)
 
 	var hookCalled bool
+	newFn := func(
+		err error,
+	) {
+		hookCalled = true
+	}
 	eventstore := New[order](
 		es,
 		ss,
 		nil,
 		1,
-		func(
-			err error,
-		) {
-			hookCalled = true
-		},
+		newFn,
 	)
 
 	_, _ = eventstore.Get(
@@ -1040,21 +1089,22 @@ func TestWriteTx_HookRunsInsideTheAppendTransaction(
 	ctx := context.Background()
 
 	var sawVersion int64
+	writeTxFn := func(
+		_ context.Context,
+		tx asynxmd.Tx,
+		e asynxmd.Event[order],
+	) error {
+		sawVersion = e.Version
+		return tx.EnqueueDelivery(
+			ctx,
+			e.AggregateID,
+			e.Version,
+		)
+	}
 	evt, err := es.WriteTx(
 		ctx,
 		cmd(order{ID: "agg1", Total: 3}),
-		func(
-			_ context.Context,
-			tx asynxmd.Tx,
-			e asynxmd.Event[order],
-		) error {
-			sawVersion = e.Version
-			return tx.EnqueueDelivery(
-				ctx,
-				e.AggregateID,
-				e.Version,
-			)
-		},
+		writeTxFn,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1093,17 +1143,17 @@ func TestWriteTx_HookErrorRollsBackTheEvent(
 	)
 	ctx := context.Background()
 	boom := errors.New("hook failed")
-
+	writeTxFn := func(
+		context.Context,
+		asynxmd.Tx,
+		asynxmd.Event[order],
+	) error {
+		return boom
+	}
 	_, err := es.WriteTx(
 		ctx,
 		cmd(order{ID: "agg1"}),
-		func(
-			context.Context,
-			asynxmd.Tx,
-			asynxmd.Event[order],
-		) error {
-			return boom
-		},
+		writeTxFn,
 	)
 	if !errors.Is(
 		err,
@@ -1235,17 +1285,18 @@ func TestWriteTx_ValidationFailureWritesNothingAndSkipsTheHook(
 		nil,
 	)
 	called := false
+	writeTxFn := func(
+		context.Context,
+		asynxmd.Tx,
+		asynxmd.Event[order],
+	) error {
+		called = true
+		return nil
+	}
 	_, err := es.WriteTx(
 		context.Background(),
 		mocks.CreateOrderCmd{ID: "agg1", Total: -1},
-		func(
-			context.Context,
-			asynxmd.Tx,
-			asynxmd.Event[order],
-		) error {
-			called = true
-			return nil
-		},
+		writeTxFn,
 	)
 	if !errors.Is(
 		err,
@@ -1279,13 +1330,14 @@ func TestGuardAutoSnapshots_InstallsTheGuardOnTheReader(
 		nil,
 	)
 	asked := 0
-	es.GuardAutoSnapshots(func(
+	guardAutoSnapshotsFn := func(
 		string,
 		func(),
 	) bool {
 		asked++
 		return false
-	})
+	}
+	es.GuardAutoSnapshots(guardAutoSnapshotsFn)
 	if _, err := es.Write(
 		ctx,
 		cmd(order{Total: 5}),
@@ -1311,6 +1363,33 @@ func TestGuardAutoSnapshots_InstallsTheGuardOnTheReader(
 	}
 }
 
+func incrementIf(
+	got string,
+	want string,
+	n *int,
+) {
+	if got != want {
+		return
+	}
+
+	*n++
+}
+
+func expectPending(
+	t *testing.T,
+	cur *order,
+) {
+	if cur != nil &&
+		cur.Status == "Pending" {
+		return
+	}
+
+	t.Errorf(
+		"B expected to load Pending, got %+v",
+		cur,
+	)
+}
+
 type gatedCancel struct {
 	id         string
 	onValidate func(
@@ -1318,10 +1397,16 @@ type gatedCancel struct {
 	)
 }
 
-func (c gatedCancel) AggregateID() string  { return c.id }
-func (c gatedCancel) EventName() string    { return "OrderCancelled" }
+// AggregateID returns the id of the aggregate being cancelled.
+func (c gatedCancel) AggregateID() string { return c.id }
+
+// EventName returns the name of the cancellation event.
+func (c gatedCancel) EventName() string { return "OrderCancelled" }
+
+// ShouldSnapshot reports that cancelling never requests a snapshot.
 func (c gatedCancel) ShouldSnapshot() bool { return false }
 
+// Validate runs the gate hook, then rejects a missing or cancelled order.
 func (c gatedCancel) Validate(
 	current *order,
 ) error {
@@ -1337,6 +1422,7 @@ func (c gatedCancel) Validate(
 	return nil
 }
 
+// EmitEvent returns the order in the cancelled state.
 func (c gatedCancel) EmitEvent(
 	current *order,
 ) order {
@@ -1370,21 +1456,17 @@ func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(
 
 	aCommitted := make(chan struct{})
 	bInValidate := make(chan struct{})
-
-	bCmd := gatedCancel{id: "X", onValidate: func(
+	onValidate2 := func(
 		cur *order,
 	) {
-		if cur == nil ||
-			cur.Status != "Pending" {
-			t.Errorf(
-				"B expected to load Pending, got %+v",
-				cur,
-			)
-		}
-
+		expectPending(
+			t,
+			cur,
+		)
 		close(bInValidate)
 		<-aCommitted
-	}}
+	}
+	bCmd := gatedCancel{id: "X", onValidate: onValidate2}
 
 	var bErr error
 	bDone := make(chan struct{})
@@ -1421,19 +1503,22 @@ func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(
 	}
 
 	cancels := 0
+	replayFn := func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) {
+		incrementIf(
+			e.EventName,
+			"OrderCancelled",
+			&cancels,
+		)
+	}
 	if err := es.Replay(
 		ctx,
 		"X",
 		1,
 		0,
-		func(
-			_ context.Context,
-			e asynxmd.Event[order],
-		) {
-			if e.EventName == "OrderCancelled" {
-				cancels++
-			}
-		},
+		replayFn,
 	); err != nil {
 		t.Fatalf(
 			"replay: %v",
@@ -1445,6 +1530,31 @@ func TestWrite_StaleValidation_ConflictsInsteadOfDoubleCommit(
 		t.Fatalf(
 			"order X cancelled %d times, want exactly 1",
 			cancels,
+		)
+	}
+}
+
+func writeSnapshotUpdate(
+	t *testing.T,
+	es *EventStore[order],
+	id string,
+	i int,
+) {
+	t.Helper()
+
+	_, err := es.Write(
+		context.Background(),
+		mocks.UpdateOrderCmd{
+			ID:       id,
+			NewState: order{ID: id, Total: float64(i), Status: "Pending"},
+			Snapshot: true,
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"write %d: %v",
+			i,
+			err,
 		)
 	}
 }
@@ -1464,20 +1574,12 @@ func TestSnapshotReadDoesNotScaleWithHistory(
 
 	const n = 500
 	for i := range n {
-		if _, err := es.Write(
-			ctx,
-			mocks.UpdateOrderCmd{
-				ID:       "agg-1",
-				NewState: order{ID: "agg-1", Total: float64(i), Status: "Pending"},
-				Snapshot: true,
-			},
-		); err != nil {
-			t.Fatalf(
-				"write %d: %v",
-				i,
-				err,
-			)
-		}
+		writeSnapshotUpdate(
+			t,
+			es,
+			"agg-1",
+			i,
+		)
 	}
 
 	snaps.Reset()
@@ -1522,20 +1624,12 @@ func TestWritePaysConstantSnapshotCost(
 
 	const n = 500
 	for i := range n {
-		if _, err := es.Write(
-			ctx,
-			mocks.UpdateOrderCmd{
-				ID:       "agg-2",
-				NewState: order{ID: "agg-2", Total: float64(i), Status: "Pending"},
-				Snapshot: true,
-			},
-		); err != nil {
-			t.Fatalf(
-				"write %d: %v",
-				i,
-				err,
-			)
-		}
+		writeSnapshotUpdate(
+			t,
+			es,
+			"agg-2",
+			i,
+		)
 	}
 
 	snaps.Reset()

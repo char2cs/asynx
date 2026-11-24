@@ -1,7 +1,6 @@
 package exec
 
 import (
-	"context"
 	asynxmd "github.com/char2cs/asynx/models"
 	"time"
 )
@@ -13,7 +12,6 @@ type HandlerJob[T any] struct {
 	FallbackHandler asynxmd.ProjectionHandler[T]
 	Timeout         time.Duration
 	Event           asynxmd.Event[T]
-	Ctx             context.Context
 
 	// Optional per-job callback overrides. When nil, the package-level
 	// OnHandlerPanic / OnHandlerTimeout functions are used instead.

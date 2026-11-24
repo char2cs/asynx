@@ -441,14 +441,15 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(
 	s := store.New()
 	b := bus.New[order]()
 	release := make(chan struct{})
+	blocked := func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		<-release
+	}
 	if _, err := b.Subscribe(
 		"OrderCreated",
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) {
-			<-release
-		},
+		blocked,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -494,28 +495,10 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(
 	first := send("order1")
 	select {
 	case res := <-first.ResultChan:
-		if res.Err != nil ||
-			res.Wait == nil {
-			t.Fatalf(
-				"result = %+v, want committed with a Wait",
-				res,
-			)
-		}
-
-		short, cancel := context.WithTimeout(
-			context.Background(),
-			20*time.Millisecond,
+		checkFirstResult(
+			t,
+			res,
 		)
-		defer cancel()
-		if err := res.Wait(short); !errors.Is(
-			err,
-			asynxmd.ErrContextCancelled,
-		) {
-			t.Fatalf(
-				"Wait returned %v while the handler is still blocked",
-				err,
-			)
-		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("worker is held by a blocked handler: first result never arrived")
 	}
@@ -523,14 +506,69 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(
 	second := send("order2")
 	select {
 	case res := <-second.ResultChan:
-		if res.Err != nil {
-			t.Fatal(res.Err)
-		}
+		failIf(
+			t,
+			res.Err,
+		)
 	case <-time.After(5 * time.Second):
 		t.Fatal("second aggregate stalled behind the first one's handler")
 	}
 
 	close(release)
+}
+
+func checkFirstResult(
+	t *testing.T,
+	res models.CommandResult[order],
+) {
+	t.Helper()
+	if res.Err != nil ||
+		res.Wait == nil {
+		t.Fatalf(
+			"result = %+v, want committed with a Wait",
+			res,
+		)
+	}
+
+	short, cancel := context.WithTimeout(
+		context.Background(),
+		20*time.Millisecond,
+	)
+	defer cancel()
+	if err := res.Wait(short); !errors.Is(
+		err,
+		asynxmd.ErrContextCancelled,
+	) {
+		t.Fatalf(
+			"Wait returned %v while the handler is still blocked",
+			err,
+		)
+	}
+}
+
+func failIf(
+	t *testing.T,
+	err error,
+) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func requireNil(
+	t *testing.T,
+	what string,
+	err error,
+) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf(
+			"%s: %v",
+			what,
+			err,
+		)
+	}
 }
 
 func TestPool_Drain_AnswersEnvelopesLeftInTheQueue(
@@ -593,14 +631,11 @@ func TestPool_Drain_AnswersEnvelopesLeftInTheQueue(
 	release()
 
 	for i, env := range envs {
-		select {
-		case <-env.ResultChan:
-		case <-time.After(5 * time.Second):
-			t.Fatalf(
-				"envelope %d never got a result",
-				i,
-			)
-		}
+		awaitEnvelope(
+			t,
+			i,
+			env,
+		)
 	}
 
 	if err := <-drained; err != nil {
@@ -611,12 +646,29 @@ func TestPool_Drain_AnswersEnvelopesLeftInTheQueue(
 	}
 }
 
+func awaitEnvelope(
+	t *testing.T,
+	i int,
+	env *models.CommandEnvelope[order],
+) {
+	t.Helper()
+	select {
+	case <-env.ResultChan:
+	case <-time.After(5 * time.Second):
+		t.Fatalf(
+			"envelope %d never got a result",
+			i,
+		)
+	}
+}
+
 type gatedUpdate struct {
 	mocks.UpdateOrderCmd
 	entered chan<- struct{}
 	gate    <-chan struct{}
 }
 
+// Validate is the test double implementation for the code under test.
 func (c gatedUpdate) Validate(
 	*order,
 ) error {
@@ -671,29 +723,27 @@ func TestShard_ABusyAggregateLeavesTheOtherWorkersFree(
 
 	select {
 	case res := <-cold.ResultChan:
-		if res.Err != nil {
-			t.Fatalf(
-				"cold aggregate: %v",
-				res.Err,
-			)
-		}
+		requireNil(
+			t,
+			"cold aggregate",
+			res.Err,
+		)
 	case <-time.After(5 * time.Second):
 		t.Fatal("an unrelated aggregate stalled behind the busy one")
 	}
 
 	release()
 	for name, env := range map[string]*models.CommandEnvelope[order]{"running": hot, "queued": queued} {
-		if res := resultWithin(
+		res := resultWithin(
 			t,
 			env,
 			name+" hot command",
-		); res.Err != nil {
-			t.Fatalf(
-				"%s hot command: %v",
-				name,
-				res.Err,
-			)
-		}
+		)
+		requireNil(
+			t,
+			name+" hot command",
+			res.Err,
+		)
 	}
 }
 
@@ -793,16 +843,29 @@ func TestShard_AMailboxKeepsTheOrderOfItsCommands(
 				i,
 			),
 		)
-		if res.Err != nil ||
-			res.Event.Version != int64(i+1) {
-			t.Fatalf(
-				"command %d = v%d, %v; want v%d",
-				i,
-				res.Event.Version,
-				res.Err,
-				i+1,
-			)
-		}
+		requireVersion(
+			t,
+			i,
+			res,
+		)
+	}
+}
+
+func requireVersion(
+	t *testing.T,
+	i int,
+	res models.CommandResult[order],
+) {
+	t.Helper()
+	if res.Err != nil ||
+		res.Event.Version != int64(i+1) {
+		t.Fatalf(
+			"command %d = v%d, %v; want v%d",
+			i,
+			res.Event.Version,
+			res.Err,
+			i+1,
+		)
 	}
 }
 
@@ -863,15 +926,10 @@ func TestShard_AMailboxRefusesWhatExceedsTheQueueDepth(
 	overflow := send(mocks.UpdateOrderCmd{ID: "hot", NewState: order{ID: "hot", Total: 9}})
 	select {
 	case res := <-overflow.ResultChan:
-		if !errors.Is(
+		requireQueueFull(
+			t,
 			res.Err,
-			asynxmd.ErrQueueFull,
-		) {
-			t.Fatalf(
-				"overflow = %v, want ErrQueueFull",
-				res.Err,
-			)
-		}
+		)
 	case <-time.After(5 * time.Second):
 		t.Fatal("overflow was neither queued nor refused")
 	}
@@ -881,12 +939,28 @@ func TestShard_AMailboxRefusesWhatExceedsTheQueueDepth(
 		waiting,
 		running,
 	) {
-		if res := <-env.ResultChan; res.Err != nil {
-			t.Fatalf(
-				"queued command: %v",
-				res.Err,
-			)
-		}
+		res := <-env.ResultChan
+		requireNil(
+			t,
+			"queued command",
+			res.Err,
+		)
+	}
+}
+
+func requireQueueFull(
+	t *testing.T,
+	err error,
+) {
+	t.Helper()
+	if !errors.Is(
+		err,
+		asynxmd.ErrQueueFull,
+	) {
+		t.Fatalf(
+			"overflow = %v, want ErrQueueFull",
+			err,
+		)
 	}
 }
 
@@ -935,10 +1009,15 @@ func TestShard_SkipsACommandWhoseContextEnded(
 		)
 	}
 
-	if exists, _ := es.Exists(
+	exists, err := es.Exists(
 		context.Background(),
 		"gone",
-	); exists {
+	)
+	failIf(
+		t,
+		err,
+	)
+	if exists {
 		t.Fatal("a cancelled command was executed")
 	}
 }
@@ -949,6 +1028,7 @@ type gatedCreate struct {
 	gate    <-chan struct{}
 }
 
+// Validate is the test double implementation for the code under test.
 func (c gatedCreate) Validate(
 	current *order,
 ) error {
@@ -965,14 +1045,26 @@ func waitForBacklog[T any](
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for s.Backlog() < n {
-		if time.Now().After(deadline) {
-			t.Fatalf(
-				"backlog stayed below %d",
-				n,
-			)
-		}
-
+		requireBefore(
+			t,
+			deadline,
+			n,
+		)
 		runtime.Gosched()
+	}
+}
+
+func requireBefore(
+	t *testing.T,
+	deadline time.Time,
+	n int,
+) {
+	t.Helper()
+	if time.Now().After(deadline) {
+		t.Fatalf(
+			"backlog stayed below %d",
+			n,
+		)
 	}
 }
 
@@ -1030,53 +1122,69 @@ func BenchmarkShard_MultipleWorkers(
 	for _, workers := range []int{1, 4, 8} {
 		b.Run(
 			"workers="+string(rune('0'+workers)),
-			func(
-				b *testing.B,
-			) {
-				s := store.New()
-				bu := bus.New[order]()
-				es := eventstore.New[order](
-					s,
-					store.NewSnapshots(),
-					nil,
-					1,
-					nil,
-				)
-				d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: bu})
-				defer d.Close(context.Background())
-				executor := exec.New(
-					es,
-					d,
-				)
-
-				p := pool.New(
-					executor,
-					1,
-					0,
-					workers,
-				)
-				defer p.Drain(context.Background())
-
-				ctx := context.Background()
-				shard := p.Shards()[0]
-
-				b.ReportAllocs()
-				b.ResetTimer()
-
-				for b.Loop() {
-					envelope := &models.CommandEnvelope[order]{
-						Cmd: mocks.CreateOrderCmd{ID: "order", Total: 100.0},
-						Ctx: ctx,
-						ResultChan: make(
-							chan models.CommandResult[order],
-							1,
-						),
-					}
-
-					shard.CommandChan() <- envelope
-					<-envelope.ResultChan
-				}
-			},
+			workersBench(workers),
 		)
+	}
+}
+
+func workersBench(
+	workers int,
+) func(*testing.B) {
+	return func(
+		b *testing.B,
+	) {
+		benchWorkers(
+			b,
+			workers,
+		)
+	}
+}
+
+func benchWorkers(
+	b *testing.B,
+	workers int,
+) {
+	s := store.New()
+	bu := bus.New[order]()
+	es := eventstore.New[order](
+		s,
+		store.NewSnapshots(),
+		nil,
+		1,
+		nil,
+	)
+	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: bu})
+	defer d.Close(context.Background())
+	executor := exec.New(
+		es,
+		d,
+	)
+
+	p := pool.New(
+		executor,
+		1,
+		0,
+		workers,
+	)
+	defer p.Drain(context.Background())
+
+	ctx := context.Background()
+	shard := p.Shards()[0]
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		envelope := &models.CommandEnvelope[order]{
+			Cmd: mocks.CreateOrderCmd{ID: "order", Total: 100.0},
+			Ctx: ctx,
+			ResultChan: make(
+				chan models.CommandResult[order],
+				1,
+			),
+		}
+
+		shard.CommandChan() <- envelope
+		<-envelope.ResultChan
 	}
 }

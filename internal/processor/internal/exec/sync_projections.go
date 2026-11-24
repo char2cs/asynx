@@ -14,21 +14,19 @@ func (e *CommandExecutor[T]) runSyncProjections(
 	tx asynxmd.Tx,
 	evt asynxmd.Event[T],
 ) error {
+	run := func(
+		p models.SyncProjection[T],
+	) error {
+		return runProjection(
+			ctx,
+			tx,
+			p,
+			evt,
+		)
+	}
 	err := firsterror.Of(
 		e.syncs,
-		func(
-			p models.SyncProjection[T],
-		) error {
-			if !p.Match(evt.EventName) {
-				return nil
-			}
-
-			return p.Fn(
-				ctx,
-				tx,
-				evt,
-			)
-		},
+		run,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -39,6 +37,23 @@ func (e *CommandExecutor[T]) runSyncProjections(
 	}
 
 	return nil
+}
+
+func runProjection[T any](
+	ctx context.Context,
+	tx asynxmd.Tx,
+	p models.SyncProjection[T],
+	evt asynxmd.Event[T],
+) error {
+	if !p.Match(evt.EventName) {
+		return nil
+	}
+
+	return p.Fn(
+		ctx,
+		tx,
+		evt,
+	)
 }
 
 func (e *CommandExecutor[T]) txHook(
@@ -55,33 +70,47 @@ func (e *CommandExecutor[T]) txHook(
 		tx asynxmd.Tx,
 		evt asynxmd.Event[T],
 	) error {
-		if err := e.runSyncProjections(
-			ctx,
-			tx,
-			evt,
-		); err != nil {
-			return err
-		}
-
-		if err := putAcceptedReceipt(
+		return e.commitHook(
 			ctx,
 			tx,
 			commandID,
 			evt,
-		); err != nil {
-			return err
-		}
-
-		if e.isDurable(evt.EventName) {
-			return tx.EnqueueDelivery(
-				ctx,
-				evt.AggregateID,
-				evt.Version,
-			)
-		}
-
-		return nil
+		)
 	}
+}
+
+func (e *CommandExecutor[T]) commitHook(
+	ctx context.Context,
+	tx asynxmd.Tx,
+	commandID string,
+	evt asynxmd.Event[T],
+) error {
+	if err := e.runSyncProjections(
+		ctx,
+		tx,
+		evt,
+	); err != nil {
+		return err
+	}
+
+	if err := putAcceptedReceipt(
+		ctx,
+		tx,
+		commandID,
+		evt,
+	); err != nil {
+		return err
+	}
+
+	if e.isDurable(evt.EventName) {
+		return tx.EnqueueDelivery(
+			ctx,
+			evt.AggregateID,
+			evt.Version,
+		)
+	}
+
+	return nil
 }
 
 func putAcceptedReceipt[T any](

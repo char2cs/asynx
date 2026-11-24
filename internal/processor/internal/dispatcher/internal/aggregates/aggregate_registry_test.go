@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates"
+	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates/contracts"
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
@@ -37,12 +38,16 @@ func liveItem(
 	return &fakeItem{aggregateID: aggregateID, version: version}
 }
 
+// AggregateID satisfies the interface that fakeItem fakes.
 func (f *fakeItem) AggregateID() string { return f.aggregateID }
 
+// Version satisfies the interface that fakeItem fakes.
 func (f *fakeItem) Version() int64 { return f.version }
 
+// Acked satisfies the interface that fakeItem fakes.
 func (f *fakeItem) Acked() bool { return f.durable }
 
+// MarkUnrun satisfies the interface that fakeItem fakes.
 func (f *fakeItem) MarkUnrun(
 	err error,
 ) {
@@ -52,6 +57,7 @@ func (f *fakeItem) MarkUnrun(
 	f.unrun = err
 }
 
+// Complete satisfies the interface that fakeItem fakes.
 func (f *fakeItem) Complete(
 	err error,
 ) {
@@ -119,7 +125,7 @@ func enqueue(
 	t *testing.T,
 	r aggregates.Registry[*fakeItem],
 	job *fakeItem,
-) aggregates.Admission {
+) contracts.Admission {
 	t.Helper()
 	admission, err := r.Enqueue(job)
 	if err != nil {
@@ -1211,7 +1217,6 @@ func TestParkIfCurrent_WithAnOpenHaltParksTheAggregate(
 	if !r.ParkIfCurrent(
 		"a",
 		halt,
-		true,
 		errHalted,
 	) {
 		t.Fatal("ParkIfCurrent under an open halt did not park")
@@ -1231,38 +1236,6 @@ func TestParkIfCurrent_WithAnOpenHaltParksTheAggregate(
 		r,
 		queued,
 	)
-}
-
-func TestParkIfCurrent_OfALiveOnlyJobDoesNothing(
-	t *testing.T,
-) {
-	r, _ := newRegistry()
-	enqueue(
-		t,
-		r,
-		liveItem(
-			"a",
-			1,
-		),
-	)
-	_, halt := pop(
-		t,
-		r,
-		"a",
-	)
-	if r.ParkIfCurrent(
-		"a",
-		halt,
-		false,
-		errHalted,
-	) {
-		t.Fatal("ParkIfCurrent parked for a live-only job")
-	}
-
-	if len(r.Parks()) != 0 ||
-		closed(halt) {
-		t.Fatal("ParkIfCurrent changed the aggregate for a live-only job")
-	}
 }
 
 func TestParkIfCurrent_WithAClosedHaltDoesNothing(
@@ -1296,7 +1269,6 @@ func TestParkIfCurrent_WithAClosedHaltDoesNothing(
 	if r.ParkIfCurrent(
 		"a",
 		halt,
-		true,
 		errHalted,
 	) {
 		t.Fatal("ParkIfCurrent with a closed halt reported a park")
@@ -1347,7 +1319,6 @@ func TestParkIfCurrent_AfterALiftDoesNotParkAgain(
 	if r.ParkIfCurrent(
 		"a",
 		halt,
-		true,
 		errHalted,
 	) ||
 		len(r.Parks()) != 0 {
@@ -2106,7 +2077,6 @@ func TestParkIfCurrent_RecordsTheCause(
 	r.ParkIfCurrent(
 		"a",
 		halt,
-		true,
 		errHalted,
 	)
 	if got := r.Inspect("a"); !got.Parked ||

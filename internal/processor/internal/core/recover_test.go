@@ -42,28 +42,14 @@ func TestProcessor_Recover_RedeliversEveryPendingEventAndAcksIt(
 	var live atomic.Int32
 	b.Subscribe(
 		"OrderCreated",
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) {
-			live.Add(1)
-		},
+		countingHandler(&live),
 	)
 	var got atomic.Int32
 	p := mustNew(
 		t,
 		es,
 		b,
-		models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-			Match: always,
-			Handler: func(
-				context.Context,
-				asynxmd.Event[order],
-			) error {
-				got.Add(1)
-				return nil
-			},
-		}}),
+		countingSubs(&got),
 	)
 	t.Cleanup(func() { p.Shutdown(context.Background()) })
 
@@ -191,25 +177,20 @@ func TestProcessor_Recover_ParksAnAggregateWhoseEventCannotBeRebuilt(
 		1,
 		[]byte("!!!"),
 	)
+	enqueueBad := func(
+		tx asynxmd.Tx,
+	) error {
+		return enqueueVersions(
+			ctx,
+			tx,
+			"bad",
+			1,
+			2,
+		)
+	}
 	s.Atomically(
 		ctx,
-		func(
-			tx asynxmd.Tx,
-		) error {
-			if err := tx.EnqueueDelivery(
-				ctx,
-				"bad",
-				1,
-			); err != nil {
-				return err
-			}
-
-			return tx.EnqueueDelivery(
-				ctx,
-				"bad",
-				2,
-			)
-		},
+		enqueueBad,
 	)
 
 	var got atomic.Int32
@@ -221,25 +202,11 @@ func TestProcessor_Recover_ParksAnAggregateWhoseEventCannotBeRebuilt(
 		t,
 		es,
 		bus.New[order](),
-		models.WithPublishErrorHandler(func(
-			_ context.Context,
-			e asynxmd.Event[order],
-			err error,
-		) {
-			if e.AggregateID == "bad" {
-				reported <- err
-			}
-		}),
-		models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-			Match: always,
-			Handler: func(
-				context.Context,
-				asynxmd.Event[order],
-			) error {
-				got.Add(1)
-				return nil
-			},
-		}}),
+		reportingAggregate(
+			"bad",
+			reported,
+		),
+		countingSubs(&got),
 	)
 	t.Cleanup(func() { p.Shutdown(ctx) })
 
@@ -318,10 +285,6 @@ func TestProcessor_Recover_ReportsAnUnrebuildableEventToThePublishErrorHandler(
 		"bad",
 	)
 
-	type report struct {
-		event asynxmd.Event[order]
-		err   error
-	}
 	reported := make(
 		chan report,
 		4,
@@ -330,22 +293,8 @@ func TestProcessor_Recover_ReportsAnUnrebuildableEventToThePublishErrorHandler(
 		t,
 		es,
 		bus.New[order](),
-		models.WithPublishErrorHandler(func(
-			_ context.Context,
-			e asynxmd.Event[order],
-			err error,
-		) {
-			reported <- report{e, err}
-		}),
-		models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-			Match: always,
-			Handler: func(
-				context.Context,
-				asynxmd.Event[order],
-			) error {
-				return nil
-			},
-		}}),
+		reporting(reported),
+		okSubs(),
 	)
 	t.Cleanup(func() { p.Shutdown(ctx) })
 
@@ -423,27 +372,8 @@ func TestProcessor_Recover_APanickingPublishErrorHandlerDoesNotCrash(
 		t,
 		es,
 		bus.New[order](),
-		models.WithPublishErrorHandler(func(
-			context.Context,
-			asynxmd.Event[order],
-			error,
-		) {
-			called.Add(1)
-			panic("publish error handler exploded")
-		}),
-		models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-			Match: always,
-			Handler: func(
-				_ context.Context,
-				e asynxmd.Event[order],
-			) error {
-				delivered.Store(
-					e.AggregateID,
-					true,
-				)
-				return nil
-			},
-		}}),
+		panickingReporter(&called),
+		storingSubs(&delivered),
 	)
 	t.Cleanup(func() { p.Shutdown(ctx) })
 
@@ -501,12 +431,7 @@ func TestProcessor_Recover_ReturnsWithoutWaitingForHandlers(
 	release := make(chan struct{})
 	b.Subscribe(
 		"OrderCreated",
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) {
-			<-release
-		},
+		blockingHandler(release),
 	)
 	p := mustNew(
 		t,
@@ -527,9 +452,10 @@ func TestProcessor_Recover_ReturnsWithoutWaitingForHandlers(
 	}()
 	select {
 	case err := <-returned:
-		if err != nil {
-			t.Fatal(err)
-		}
+		requireNoError(
+			t,
+			err,
+		)
 	case <-time.After(2 * time.Second):
 		t.Fatal("Recover waited for a blocked handler")
 	}
@@ -540,17 +466,19 @@ func TestProcessor_Recover_ReportsAnAckFailureForAVanishedEvent(
 ) {
 	s := ackErrStore{store.New()}
 	ctx := context.Background()
+	enqueueGhost := func(
+		tx asynxmd.Tx,
+	) error {
+		return enqueueVersions(
+			ctx,
+			tx,
+			"ghost",
+			1,
+		)
+	}
 	s.Atomically(
 		ctx,
-		func(
-			tx asynxmd.Tx,
-		) error {
-			return tx.EnqueueDelivery(
-				ctx,
-				"ghost",
-				1,
-			)
-		},
+		enqueueGhost,
 	)
 	es := eventstore.New[order](
 		s,
@@ -567,13 +495,7 @@ func TestProcessor_Recover_ReportsAnAckFailureForAVanishedEvent(
 		t,
 		es,
 		bus.New[order](),
-		models.WithPublishErrorHandler(func(
-			_ context.Context,
-			_ asynxmd.Event[order],
-			err error,
-		) {
-			reported <- err
-		}),
+		reportingErrors(reported),
 	)
 	t.Cleanup(func() { p.Shutdown(ctx) })
 
@@ -655,29 +577,26 @@ func TestProcessor_Recover_ReplaysAnAggregatesStreamOnce(
 	}
 
 	for i := 1; i < events; i++ {
-		if _, err := es.Write(
-			ctx,
-			updateCmd(
-				"a",
-				float64(i),
-			),
-		); err != nil {
-			t.Fatal(err)
-		}
+		mustWriteUpdate(
+			t,
+			es,
+			float64(i),
+		)
 	}
 
+	enqueueAll := func(
+		tx asynxmd.Tx,
+	) error {
+		return enqueueUpTo(
+			ctx,
+			tx,
+			"a",
+			events,
+		)
+	}
 	s.Atomically(
 		ctx,
-		func(
-			tx asynxmd.Tx,
-		) error {
-			return enqueueUpTo(
-				ctx,
-				tx,
-				"a",
-				events,
-			)
-		},
+		enqueueAll,
 	)
 
 	var mu sync.Mutex
@@ -686,21 +605,10 @@ func TestProcessor_Recover_ReplaysAnAggregatesStreamOnce(
 		t,
 		es,
 		bus.New[order](),
-		models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-			Match: always,
-			Handler: func(
-				_ context.Context,
-				e asynxmd.Event[order],
-			) error {
-				mu.Lock()
-				defer mu.Unlock()
-				delivered = append(
-					delivered,
-					e.Version,
-				)
-				return nil
-			},
-		}}),
+		versionSubs(
+			&mu,
+			&delivered,
+		),
 	)
 	t.Cleanup(func() { p.Shutdown(ctx) })
 
@@ -760,19 +668,16 @@ func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(
 		)...,
 	)
 	for i, id := range []string{"c-1", "c-2", "c-3"} {
-		if _, err := first.p.Send(
-			ctx,
-			idemOrderUpdate{updateCmd(
-				"o1",
-				float64(i+1),
-			), id},
-		); err != nil {
-			t.Fatal(err)
-		}
-
-		if i == 0 {
-			<-parked
-		}
+		sendIdempotent(
+			t,
+			first.p,
+			id,
+			float64(i+1),
+		)
+		awaitFirst(
+			i,
+			parked,
+		)
 	}
 
 	if err := first.p.Shutdown(ctx); err != nil {
@@ -785,20 +690,11 @@ func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(
 		_ string,
 		patches []byte,
 	) ([]byte, error) {
-		if upcasts.Add(1) != 3 {
-			return patches,
-				nil
-		}
-
-		for range 2 {
-			select {
-			case <-s.acked:
-			case <-time.After(5 * time.Second):
-			}
-		}
-
-		return nil,
-			errors.New("event cannot be upcast")
+		return failThirdUpcast(
+			&upcasts,
+			s.acked,
+			patches,
+		)
 	}
 	es := eventstore.New[order](
 		s,
@@ -815,27 +711,9 @@ func TestProcessor_Recover_PartialRecoveryDoesNotReportDeliveredEventsAsParked(
 		t,
 		es,
 		bus.New[order](),
-		models.WithDurableDelivery[order](func(
-			name string,
-		) bool {
-			return name == "OrderUpdated"
-		}),
-		models.WithPublishErrorHandler(func(
-			context.Context,
-			asynxmd.Event[order],
-			error,
-		) {
-			reported <- struct{}{}
-		}),
-		models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-			Match: always,
-			Handler: func(
-				context.Context,
-				asynxmd.Event[order],
-			) error {
-				return nil
-			},
-		}}),
+		models.WithDurableDelivery[order](isOrderUpdated),
+		signalingReporter(reported),
+		okSubs(),
 	)
 	t.Cleanup(func() { p.Shutdown(ctx) })
 
@@ -909,12 +787,11 @@ func TestProcessor_Recover_DeliversWhatPrecedesAnUnreadableEvent(
 		"a",
 		2,
 	)} {
-		if _, err := es.Write(
-			ctx,
+		mustWrite(
+			t,
+			es,
 			cmd,
-		); err != nil {
-			t.Fatal(err)
-		}
+		)
 	}
 
 	s.Append(
@@ -923,24 +800,20 @@ func TestProcessor_Recover_DeliversWhatPrecedesAnUnreadableEvent(
 		3,
 		[]byte("!!!"),
 	)
+	enqueueA := func(
+		tx asynxmd.Tx,
+	) error {
+		return enqueueVersions(
+			ctx,
+			tx,
+			"a",
+			1,
+			3,
+		)
+	}
 	s.Atomically(
 		ctx,
-		func(
-			tx asynxmd.Tx,
-		) error {
-			return errors.Join(
-				tx.EnqueueDelivery(
-					ctx,
-					"a",
-					1,
-				),
-				tx.EnqueueDelivery(
-					ctx,
-					"a",
-					3,
-				),
-			)
-		},
+		enqueueA,
 	)
 
 	var got atomic.Int32
@@ -952,23 +825,8 @@ func TestProcessor_Recover_DeliversWhatPrecedesAnUnreadableEvent(
 		t,
 		es,
 		bus.New[order](),
-		models.WithPublishErrorHandler(func(
-			_ context.Context,
-			_ asynxmd.Event[order],
-			err error,
-		) {
-			reported <- err
-		}),
-		models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
-			Match: always,
-			Handler: func(
-				context.Context,
-				asynxmd.Event[order],
-			) error {
-				got.Add(1)
-				return nil
-			},
-		}}),
+		reportingErrors(reported),
+		countingSubs(&got),
 	)
 	t.Cleanup(func() { p.Shutdown(ctx) })
 
@@ -1021,5 +879,303 @@ func TestProcessor_Recover_DeliversWhatPrecedesAnUnreadableEvent(
 			got.Load(),
 			versions,
 		)
+	}
+}
+
+type report struct {
+	event asynxmd.Event[order]
+	err   error
+}
+
+func okSubs() models.Opt[order] {
+	handle := func(
+		context.Context,
+		asynxmd.Event[order],
+	) error {
+		return nil
+	}
+	return durableSubs(handle)
+}
+
+func durableSubs(
+	handle func(context.Context, asynxmd.Event[order]) error,
+) models.Opt[order] {
+	return models.WithDurableSubscribers([]asynxmd.DurableSub[order]{{
+		Match:   always,
+		Handler: handle,
+	}})
+}
+
+func countingSubs(
+	n *atomic.Int32,
+) models.Opt[order] {
+	handle := func(
+		context.Context,
+		asynxmd.Event[order],
+	) error {
+		n.Add(1)
+		return nil
+	}
+	return durableSubs(handle)
+}
+
+func storingSubs(
+	delivered *sync.Map,
+) models.Opt[order] {
+	handle := func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) error {
+		delivered.Store(
+			e.AggregateID,
+			true,
+		)
+		return nil
+	}
+	return durableSubs(handle)
+}
+
+func versionSubs(
+	mu *sync.Mutex,
+	delivered *[]int64,
+) models.Opt[order] {
+	handle := func(
+		_ context.Context,
+		e asynxmd.Event[order],
+	) error {
+		mu.Lock()
+		defer mu.Unlock()
+		*delivered = append(
+			*delivered,
+			e.Version,
+		)
+		return nil
+	}
+	return durableSubs(handle)
+}
+
+func reporting(
+	reported chan report,
+) models.Opt[order] {
+	handle := func(
+		_ context.Context,
+		e asynxmd.Event[order],
+		err error,
+	) {
+		reported <- report{e, err}
+	}
+	return models.WithPublishErrorHandler(handle)
+}
+
+func reportingAggregate(
+	id string,
+	reported chan error,
+) models.Opt[order] {
+	handle := func(
+		_ context.Context,
+		e asynxmd.Event[order],
+		err error,
+	) {
+		forwardIfAggregate(
+			id,
+			e,
+			err,
+			reported,
+		)
+	}
+	return models.WithPublishErrorHandler(handle)
+}
+
+func forwardIfAggregate(
+	id string,
+	e asynxmd.Event[order],
+	err error,
+	reported chan error,
+) {
+	if e.AggregateID == id {
+		reported <- err
+	}
+}
+
+func reportingErrors(
+	reported chan error,
+) models.Opt[order] {
+	handle := func(
+		_ context.Context,
+		_ asynxmd.Event[order],
+		err error,
+	) {
+		reported <- err
+	}
+	return models.WithPublishErrorHandler(handle)
+}
+
+func panickingReporter(
+	called *atomic.Int32,
+) models.Opt[order] {
+	handle := func(
+		context.Context,
+		asynxmd.Event[order],
+		error,
+	) {
+		called.Add(1)
+		panic("publish error handler exploded")
+	}
+	return models.WithPublishErrorHandler(handle)
+}
+
+func signalingReporter(
+	reported chan struct{},
+) models.Opt[order] {
+	handle := func(
+		context.Context,
+		asynxmd.Event[order],
+		error,
+	) {
+		reported <- struct{}{}
+	}
+	return models.WithPublishErrorHandler(handle)
+}
+
+func countingHandler(
+	n *atomic.Int32,
+) func(context.Context, asynxmd.Event[order]) {
+	return func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		n.Add(1)
+	}
+}
+
+func blockingHandler(
+	release chan struct{},
+) func(context.Context, asynxmd.Event[order]) {
+	return func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		<-release
+	}
+}
+
+func isOrderUpdated(
+	name string,
+) bool {
+	return name == "OrderUpdated"
+}
+
+func enqueueVersions(
+	ctx context.Context,
+	tx asynxmd.Tx,
+	aggregateID string,
+	versions ...int64,
+) error {
+	var errs []error
+	for _, v := range versions {
+		errs = append(
+			errs,
+			tx.EnqueueDelivery(
+				ctx,
+				aggregateID,
+				v,
+			),
+		)
+	}
+
+	return errors.Join(errs...)
+}
+
+func mustWriteUpdate(
+	t *testing.T,
+	es eventstore.EventStore[order],
+	total float64,
+) {
+	t.Helper()
+	mustWrite(
+		t,
+		es,
+		updateCmd(
+			"a",
+			total,
+		),
+	)
+}
+
+func mustWrite(
+	t *testing.T,
+	es eventstore.EventStore[order],
+	cmd asynxmd.Command[order],
+) {
+	t.Helper()
+	if _, err := es.Write(
+		context.Background(),
+		cmd,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func sendIdempotent(
+	t *testing.T,
+	p *Processor[order],
+	id string,
+	total float64,
+) {
+	t.Helper()
+	if _, err := p.Send(
+		context.Background(),
+		idemOrderUpdate{updateCmd(
+			"o1",
+			total,
+		), id},
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func awaitFirst(
+	i int,
+	parked chan struct{},
+) {
+	if i == 0 {
+		<-parked
+	}
+}
+
+func failThirdUpcast(
+	upcasts *atomic.Int32,
+	acked chan struct{},
+	patches []byte,
+) ([]byte, error) {
+	if upcasts.Add(1) != 3 {
+		return patches,
+			nil
+	}
+
+	for range 2 {
+		awaitAck(acked)
+	}
+
+	return nil,
+		errors.New("event cannot be upcast")
+}
+
+func awaitAck(
+	acked chan struct{},
+) {
+	select {
+	case <-acked:
+	case <-time.After(5 * time.Second):
+	}
+}
+
+func requireNoError(
+	t *testing.T,
+	err error,
+) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
 	}
 }

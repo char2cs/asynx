@@ -25,10 +25,11 @@ func TestExecute_WaitHandlersTrue_HandlersDoneBeforeReturn(
 	)
 
 	var handlerDone atomic.Bool
+	markDone := func() {
+		handlerDone.Store(true)
+	}
 	callbackBus := &recordingBus[order]{
-		onPublishSync: func() {
-			handlerDone.Store(true)
-		},
+		onPublishSync: markDone,
 	}
 	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: callbackBus})
 	t.Cleanup(func() { d.Close(context.Background()) })
@@ -41,10 +42,9 @@ func TestExecute_WaitHandlersTrue_HandlersDoneBeforeReturn(
 	ctx := context.Background()
 	cmd := mocks.CreateOrderCmd{ID: "wait-order", Total: 10.0}
 
-	_, err := executor.Execute(
+	_, err := executor.ExecuteWait(
 		ctx,
 		cmd,
-		true,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -84,7 +84,6 @@ func TestExecute_WaitHandlersFalse_DispatchCalled(
 	_, err := executor.Execute(
 		ctx,
 		cmd,
-		false,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -121,10 +120,9 @@ func TestExecute_WaitHandlers_NilDispatcherNoPanic(
 	ctx := context.Background()
 	cmd := mocks.CreateOrderCmd{ID: "nil-bus-order", Total: 5.0}
 
-	event, err := executor.Execute(
+	event, err := executor.ExecuteWait(
 		ctx,
 		cmd,
-		true,
 	)
 	if err != nil {
 		t.Fatalf(
@@ -148,15 +146,16 @@ func TestExecute_WaitingForHandlersGivesUpWithTheCommittedEvent(
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
+	block := func(
+		context.Context,
+		asynxmd.Event[order],
+	) {
+		close(entered)
+		<-release
+	}
 	b.Subscribe(
 		"OrderUpdated",
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) {
-			close(entered)
-			<-release
-		},
+		block,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -168,17 +167,17 @@ func TestExecute_WaitingForHandlersGivesUpWithTheCommittedEvent(
 		chan result,
 		1,
 	)
-	go func() {
-		evt, err := ex.Execute(
+	run := func() {
+		evt, err := ex.ExecuteWait(
 			ctx,
 			update(
 				"agg",
 				1,
 			),
-			true,
 		)
 		got <- result{evt, err}
-	}()
+	}
+	go run()
 	<-entered
 	cancel()
 	r := <-got
@@ -198,27 +197,27 @@ func TestExecute_WaitingForHandlersGivesUpWithTheCommittedEvent(
 func TestExecute_WaitingOnAParkedAggregateReportsNoHandlerRan(
 	t *testing.T,
 ) {
+	succeed := func(
+		context.Context,
+		asynxmd.Event[order],
+	) error {
+		return nil
+	}
 	ex := durableEnv(
 		t,
-		func(
-			context.Context,
-			asynxmd.Event[order],
-		) error {
-			return nil
-		},
+		succeed,
 	)
 	ex.dispatcher.Park(
 		"agg",
 		errors.New("parked by the test"),
 	)
 
-	evt, err := ex.Execute(
+	evt, err := ex.ExecuteWait(
 		context.Background(),
 		update(
 			"agg",
 			1,
 		),
-		true,
 	)
 	if !errors.Is(
 		err,
@@ -238,7 +237,6 @@ func TestExecute_WaitingOnAParkedAggregateReportsNoHandlerRan(
 			"agg",
 			2,
 		),
-		false,
 	); err != nil {
 		t.Fatalf(
 			"Execute without waiting: %v",

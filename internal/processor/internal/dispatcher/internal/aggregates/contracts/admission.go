@@ -1,4 +1,4 @@
-package aggregates
+package contracts
 
 // Admission tells the caller of Enqueue what became of the job.
 type Admission struct {
