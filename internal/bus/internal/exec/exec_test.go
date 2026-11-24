@@ -1467,7 +1467,7 @@ func TestHandler_TimeoutRunsTheFallbackAndAbandonsThePrimary(
 	)
 }
 
-func TestHandler_TimeoutWithWaitAfterTimeoutWaitsForPrimaryAndFallback(
+func TestHandler_TimeoutWithWaitAfterTimeoutRunsFallbackOnlyAfterPrimaryReturns(
 	t *testing.T,
 ) {
 	baseline := runtime.NumGoroutine()
@@ -1491,7 +1491,14 @@ func TestHandler_TimeoutWithWaitAfterTimeoutWaitsForPrimaryAndFallback(
 		job,
 	)
 
-	<-probe.events
+	time.Sleep(100 * time.Millisecond)
+	if got := probe.calls.Load(); got != 0 {
+		t.Errorf(
+			"fallback ran %d times while the primary still runs, want 0",
+			got,
+		)
+	}
+
 	assertStillOpen(
 		t,
 		finished,
@@ -1499,6 +1506,7 @@ func TestHandler_TimeoutWithWaitAfterTimeoutWaitsForPrimaryAndFallback(
 	)
 
 	close(release)
+	<-probe.events
 	awaitClosed(
 		t,
 		finished,
@@ -1544,8 +1552,8 @@ func TestHandler_PrimaryPanicAfterTimeoutIsReportedWithoutASecondFallback(
 		job,
 	)
 
-	<-probe.events
 	close(release)
+	<-probe.events
 	awaitClosed(
 		t,
 		finished,

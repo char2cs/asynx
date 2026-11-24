@@ -26,11 +26,11 @@ import (
 // job.FallbackHandler, when set, runs once when the primary handler failed:
 // when it panicked, with or without a timeout, or when it exceeded
 // job.Timeout. The fallback gets the same context, event, timeout and wait
-// mode. After a timeout it starts right after the timeout is reported, while
-// the abandoned primary may still be running, so the two can overlap; with
-// job.WaitAfterTimeout Handler returns only after both have finished, and
-// otherwise after the fallback alone, exactly as the timeout of a handler
-// without a fallback behaves. A panic in the fallback is reported through the
+// mode. After a timeout it starts right after the timeout is reported. With
+// job.WaitAfterTimeout it starts only once the primary has finished, so the two
+// never overlap and a hung primary holds the job exactly as it does without a
+// fallback; otherwise the primary is abandoned and the fallback runs at once,
+// possibly while the primary is still running. A panic in the fallback is reported through the
 // same callback and ends the job, so there is no second fallback, and a panic
 // the primary raises after its timeout is reported but triggers nothing more.
 //
@@ -61,21 +61,20 @@ func Handler[T any](
 		panicFn,
 		timeoutFn,
 	)
-	onTimeout := func() {
-		timeoutFn()
-		fallback()
-	}
-
 	result := runWithDeadline(
 		ctx,
 		job.Handler,
 		job.Event,
 		job.Timeout,
 		panicFn,
-		onTimeout,
+		timeoutFn,
 		job.waitMode(),
 	)
 	if result == panicked {
+		fallback()
+	}
+
+	if result == timedOut {
 		fallback()
 	}
 }
