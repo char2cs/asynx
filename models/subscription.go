@@ -5,9 +5,10 @@ import (
 )
 
 // WithFallback registers a secondary handler invoked, with the same context and
-// event, when the primary handler panics, so a subscriber can degrade to a
-// simpler action instead of losing the event. The panic is still reported to
-// the bus's PanicHandler. The fallback is not retried. Durable subscribers
+// event, when the primary handler panics or exceeds its handler timeout, so a
+// subscriber can degrade to a simpler action instead of losing the event. The
+// panic or timeout is still reported to the bus's PanicHandler or timeout
+// handler. The fallback is not retried. Durable subscribers
 // retry instead of falling back, and Build rejects the option on them with
 // ErrFallbackUnsupported.
 func WithFallback[T any](

@@ -148,7 +148,7 @@ func (b *ChannelBus[T]) Subscribe(
 - Pattern can be exact match (e.g., "OrderPlaced") or regex (e.g., "^Order.*")
 - Handler must not be nil
 - Subscription ID is unique (counter-based, guaranteed unique within process)
-- Fallback handler optional (runs if primary panics)
+- Fallback handler optional (runs once if the primary panics, with or without a timeout, or times out)
 - Timeout optional (0 = no timeout)
 
 ### Unsubscribe Method
@@ -302,7 +302,9 @@ func (b *ChannelBus[T]) executeHandler(job *handlerJob[T]) {
         }
     }()
 
-    // Execute handler with optional timeout
+    // Execute handler with optional timeout. The shipped implementation also
+    // starts the fallback when the primary times out, and when the primary
+    // panics on its timeout goroutine (see internal/bus/internal/exec).
     b.executeWithTimeout(job.handler, job.event, job.timeout)
 }
 
@@ -762,7 +764,7 @@ func (b *ChannelBus[T]) Publish(ctx context.Context, event Event[T]) error {
 | Scenario | Handling | Visibility |
 |----------|----------|----------|
 | Handler panics | Caught via defer/recover | Logged to stderr; fallback handler runs if available |
-| Handler timeout | Select expires | Logged to stderr |
+| Handler timeout | Select expires | Logged to stderr; fallback handler runs if available |
 | Pattern regex fails | Silent | Handler doesn't run for that subscription |
 
 **Design Rationale:**

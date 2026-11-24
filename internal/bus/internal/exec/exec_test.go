@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1216,4 +1217,456 @@ func BenchmarkWithTimeout_WithTimer(
 			nil,
 		)
 	}
+}
+
+type fallbackProbe struct {
+	calls  atomic.Int32
+	panics atomic.Int32
+	events chan string
+	values chan any
+}
+
+func newFallbackProbe() *fallbackProbe {
+	return &fallbackProbe{
+		events: make(
+			chan string,
+			4,
+		),
+		values: make(
+			chan any,
+			4,
+		),
+	}
+}
+
+func (p *fallbackProbe) fallback(
+	ctx context.Context,
+	event models.Event[string],
+) {
+	p.calls.Add(1)
+	p.events <- event.EventName
+	p.values <- ctx.Value(ctxKey{})
+}
+
+func (p *fallbackProbe) onPanic(
+	_ context.Context,
+	_ models.Event[string],
+	_ any,
+) {
+	p.panics.Add(1)
+}
+
+func startHandler(
+	ctx context.Context,
+	job *exec.HandlerJob[string],
+) <-chan struct{} {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go exec.Handler(
+		ctx,
+		&wg,
+		job,
+	)
+
+	finished := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(finished)
+	}()
+
+	return finished
+}
+
+func awaitClosed(
+	t *testing.T,
+	ch <-chan struct{},
+	what string,
+) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf(
+			"timed out waiting for %s",
+			what,
+		)
+	}
+}
+
+func assertStillOpen(
+	t *testing.T,
+	ch <-chan struct{},
+	what string,
+) {
+	t.Helper()
+	select {
+	case <-ch:
+		t.Fatalf(
+			"%s finished too early",
+			what,
+		)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func assertNoGoroutineLeak(
+	t *testing.T,
+	baseline int,
+) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.NumGoroutine() > baseline &&
+		time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if got := runtime.NumGoroutine(); got > baseline {
+		t.Fatalf(
+			"goroutines leaked: %d > baseline %d",
+			got,
+			baseline,
+		)
+	}
+}
+
+func assertFallbackSaw(
+	t *testing.T,
+	probe *fallbackProbe,
+	want string,
+) {
+	t.Helper()
+	if got := probe.calls.Load(); got != 1 {
+		t.Fatalf(
+			"fallback ran %d times, want 1",
+			got,
+		)
+	}
+
+	if got := <-probe.events; got != "test" {
+		t.Errorf(
+			"fallback got event %q, want test",
+			got,
+		)
+	}
+
+	if got := <-probe.values; got != want {
+		t.Errorf(
+			"fallback got context value %v, want %q",
+			got,
+			want,
+		)
+	}
+}
+
+func TestHandler_PanicUnderTimeoutRunsTheFallback(
+	t *testing.T,
+) {
+	baseline := runtime.NumGoroutine()
+	ctx := context.WithValue(
+		context.Background(),
+		ctxKey{},
+		"caller",
+	)
+	probe := newFallbackProbe()
+	handle := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		panic("boom")
+	}
+	job := newJob(
+		handle,
+		probe.fallback,
+		5*time.Second,
+	)
+	job.OnPanic = probe.onPanic
+
+	awaitClosed(
+		t,
+		startHandler(
+			ctx,
+			job,
+		),
+		"the job",
+	)
+
+	assertFallbackSaw(
+		t,
+		probe,
+		"caller",
+	)
+	if got := probe.panics.Load(); got != 1 {
+		t.Errorf(
+			"panic reported %d times, want 1",
+			got,
+		)
+	}
+
+	assertNoGoroutineLeak(
+		t,
+		baseline,
+	)
+}
+
+func TestHandler_TimeoutRunsTheFallbackAndAbandonsThePrimary(
+	t *testing.T,
+) {
+	baseline := runtime.NumGoroutine()
+	ctx := context.WithValue(
+		context.Background(),
+		ctxKey{},
+		"caller",
+	)
+	probe := newFallbackProbe()
+	release := make(chan struct{})
+	handle := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		<-release
+	}
+	var timeouts atomic.Int32
+	job := newJob(
+		handle,
+		probe.fallback,
+		10*time.Millisecond,
+	)
+	job.OnTimeout = func(
+		_ context.Context,
+		_ models.Event[string],
+		_ time.Duration,
+	) {
+		timeouts.Add(1)
+	}
+
+	awaitClosed(
+		t,
+		startHandler(
+			ctx,
+			job,
+		),
+		"the job",
+	)
+
+	assertFallbackSaw(
+		t,
+		probe,
+		"caller",
+	)
+	if got := timeouts.Load(); got != 1 {
+		t.Errorf(
+			"timeout reported %d times, want 1",
+			got,
+		)
+	}
+
+	close(release)
+	assertNoGoroutineLeak(
+		t,
+		baseline,
+	)
+}
+
+func TestHandler_TimeoutWithWaitAfterTimeoutWaitsForPrimaryAndFallback(
+	t *testing.T,
+) {
+	baseline := runtime.NumGoroutine()
+	probe := newFallbackProbe()
+	release := make(chan struct{})
+	handle := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		<-release
+	}
+	job := newJob(
+		handle,
+		probe.fallback,
+		10*time.Millisecond,
+	)
+	job.WaitAfterTimeout = true
+
+	finished := startHandler(
+		context.Background(),
+		job,
+	)
+
+	<-probe.events
+	assertStillOpen(
+		t,
+		finished,
+		"the job while the primary still runs",
+	)
+
+	close(release)
+	awaitClosed(
+		t,
+		finished,
+		"the job after the primary returned",
+	)
+
+	if got := probe.calls.Load(); got != 1 {
+		t.Errorf(
+			"fallback ran %d times, want 1",
+			got,
+		)
+	}
+
+	assertNoGoroutineLeak(
+		t,
+		baseline,
+	)
+}
+
+func TestHandler_PrimaryPanicAfterTimeoutIsReportedWithoutASecondFallback(
+	t *testing.T,
+) {
+	baseline := runtime.NumGoroutine()
+	probe := newFallbackProbe()
+	release := make(chan struct{})
+	handle := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		<-release
+		panic("late")
+	}
+	job := newJob(
+		handle,
+		probe.fallback,
+		10*time.Millisecond,
+	)
+	job.WaitAfterTimeout = true
+	job.OnPanic = probe.onPanic
+
+	finished := startHandler(
+		context.Background(),
+		job,
+	)
+
+	<-probe.events
+	close(release)
+	awaitClosed(
+		t,
+		finished,
+		"the job",
+	)
+
+	if got := probe.calls.Load(); got != 1 {
+		t.Errorf(
+			"fallback ran %d times, want 1",
+			got,
+		)
+	}
+
+	if got := probe.panics.Load(); got != 1 {
+		t.Errorf(
+			"late panic reported %d times, want 1",
+			got,
+		)
+	}
+
+	assertNoGoroutineLeak(
+		t,
+		baseline,
+	)
+}
+
+func TestHandler_FallbackPanicUnderTimeoutIsReportedOnceWithoutASecondFallback(
+	t *testing.T,
+) {
+	baseline := runtime.NumGoroutine()
+	var fallbackCalls atomic.Int32
+	handle := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		panic("primary")
+	}
+	fallback := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+		fallbackCalls.Add(1)
+		panic("fallback")
+	}
+	probe := newFallbackProbe()
+	job := newJob(
+		handle,
+		fallback,
+		5*time.Second,
+	)
+	job.OnPanic = probe.onPanic
+
+	awaitClosed(
+		t,
+		startHandler(
+			context.Background(),
+			job,
+		),
+		"the job",
+	)
+
+	if got := fallbackCalls.Load(); got != 1 {
+		t.Errorf(
+			"fallback ran %d times, want 1",
+			got,
+		)
+	}
+
+	if got := probe.panics.Load(); got != 2 {
+		t.Errorf(
+			"panics reported %d times, want 2 (primary and fallback)",
+			got,
+		)
+	}
+
+	assertNoGoroutineLeak(
+		t,
+		baseline,
+	)
+}
+
+func TestHandler_NoFallbackWhenThePrimarySucceeds(
+	t *testing.T,
+) {
+	baseline := runtime.NumGoroutine()
+	probe := newFallbackProbe()
+	handle := func(
+		_ context.Context,
+		_ models.Event[string],
+	) {
+	}
+	for _, timeout := range []time.Duration{
+		0,
+		5 * time.Second,
+	} {
+		job := newJob(
+			handle,
+			probe.fallback,
+			timeout,
+		)
+		job.OnPanic = probe.onPanic
+
+		awaitClosed(
+			t,
+			startHandler(
+				context.Background(),
+				job,
+			),
+			"the job",
+		)
+	}
+
+	if got := probe.calls.Load(); got != 0 {
+		t.Errorf(
+			"fallback ran %d times, want 0",
+			got,
+		)
+	}
+
+	assertNoGoroutineLeak(
+		t,
+		baseline,
+	)
 }

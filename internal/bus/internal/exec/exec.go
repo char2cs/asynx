@@ -17,18 +17,22 @@ import (
 //
 // job.Handler runs inline on the calling goroutine when job.Timeout is zero,
 // and on a separate goroutine bounded by the timeout otherwise. A panic in the
-// handler never escapes Handler: it is reported through job.OnPanic (the
-// default OnHandlerPanic when nil). A timeout is reported through
-// job.OnTimeout (the default OnHandlerTimeout when nil); the handler goroutine
-// is then abandoned, unless job.WaitAfterTimeout is set, in which case Handler
-// still waits for it to finish before returning.
+// handler never escapes Handler, with or without a timeout: it is reported
+// through job.OnPanic (the default OnHandlerPanic when nil). A timeout is
+// reported through job.OnTimeout (the default OnHandlerTimeout when nil); the
+// handler goroutine is then abandoned, unless job.WaitAfterTimeout is set, in
+// which case Handler still waits for it to finish before returning.
 //
-// job.FallbackHandler, when set, runs after the primary handler panicked on the
-// calling goroutine, which happens only when no timeout is configured: a
-// handler running under a timeout has its panic recovered and reported on its
-// own goroutine and the fallback is not started. The fallback gets the same
-// event, timeout and wait mode; a panic in it is reported through the same
-// callback and ends the job, so there is no second fallback.
+// job.FallbackHandler, when set, runs once when the primary handler failed:
+// when it panicked, with or without a timeout, or when it exceeded
+// job.Timeout. The fallback gets the same context, event, timeout and wait
+// mode. After a timeout it starts right after the timeout is reported, while
+// the abandoned primary may still be running, so the two can overlap; with
+// job.WaitAfterTimeout Handler returns only after both have finished, and
+// otherwise after the fallback alone, exactly as the timeout of a handler
+// without a fallback behaves. A panic in the fallback is reported through the
+// same callback and ends the job, so there is no second fallback, and a panic
+// the primary raises after its timeout is reported but triggers nothing more.
 //
 // The panic and timeout callbacks run on goroutines nobody recovers, so a
 // panic raised inside one is contained, never propagated: a misbehaving
@@ -51,22 +55,29 @@ func Handler[T any](
 		ctx,
 		job,
 	)
-	defer recoverAndFallBack(
+	fallback := fallbackRunner(
 		ctx,
 		job,
 		panicFn,
 		timeoutFn,
 	)
+	onTimeout := func() {
+		timeoutFn()
+		fallback()
+	}
 
-	runWithDeadline(
+	result := runWithDeadline(
 		ctx,
 		job.Handler,
 		job.Event,
 		job.Timeout,
 		panicFn,
-		timeoutFn,
+		onTimeout,
 		job.waitMode(),
 	)
+	if result == panicked {
+		fallback()
+	}
 }
 
 func containObserverPanic() {
@@ -80,17 +91,6 @@ func containObserverPanic() {
 		"asynx: a panic observer panicked and was contained: %v\n",
 		recovered,
 	)
-}
-
-func forwardPanic(
-	panicFn func(any),
-) {
-	recovered := recover()
-	if recovered == nil {
-		return
-	}
-
-	panicFn(recovered)
 }
 
 func panicNotifier[T any](
@@ -161,37 +161,32 @@ func notifyTimeout[T any](
 	)
 }
 
-func recoverAndFallBack[T any](
+func fallbackRunner[T any](
+	ctx context.Context,
+	job *HandlerJob[T],
+	panicFn func(any),
+	timeoutFn func(),
+) func() {
+	return func() {
+		runFallback(
+			ctx,
+			job,
+			panicFn,
+			timeoutFn,
+		)
+	}
+}
+
+func runFallback[T any](
 	ctx context.Context,
 	job *HandlerJob[T],
 	panicFn func(any),
 	timeoutFn func(),
 ) {
-	recovered := recover()
-	if recovered == nil {
-		return
-	}
-
-	panicFn(recovered)
 	if job.FallbackHandler == nil {
 		return
 	}
 
-	runFallbackHandler(
-		ctx,
-		job,
-		panicFn,
-		timeoutFn,
-	)
-}
-
-func runFallbackHandler[T any](
-	ctx context.Context,
-	job *HandlerJob[T],
-	panicFn func(any),
-	timeoutFn func(),
-) {
-	defer forwardPanic(panicFn)
 	runWithDeadline(
 		ctx,
 		job.FallbackHandler,
@@ -223,6 +218,14 @@ func WithTimeout[T any](
 	onPanic func(any),
 	onTimeout func(),
 ) {
+	if timeout == 0 {
+		handler(
+			ctx,
+			event,
+		)
+		return
+	}
+
 	runWithDeadline(
 		ctx,
 		handler,
@@ -242,16 +245,20 @@ func runWithDeadline[T any](
 	onPanic func(any),
 	onTimeout func(),
 	mode waitMode,
-) {
+) outcome {
 	if timeout == 0 {
-		handler(
+		return callRecovering(
 			ctx,
+			handler,
 			event,
+			onPanic,
 		)
-		return
 	}
 
-	done := make(chan struct{})
+	done := make(
+		chan outcome,
+		1,
+	)
 	go runRecovering(
 		ctx,
 		handler,
@@ -260,17 +267,33 @@ func runWithDeadline[T any](
 		done,
 	)
 
+	return awaitOutcome(
+		done,
+		timeout,
+		onTimeout,
+		mode,
+	)
+}
+
+func awaitOutcome(
+	done <-chan outcome,
+	timeout time.Duration,
+	onTimeout func(),
+	mode waitMode,
+) outcome {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
 	select {
-	case <-done:
+	case result := <-done:
+		return result
 	case <-timer.C:
 		handleTimeout(
 			onTimeout,
 			mode,
 			done,
 		)
+		return timedOut
 	}
 }
 
@@ -279,22 +302,45 @@ func runRecovering[T any](
 	handler asynxmd.ProjectionHandler[T],
 	event asynxmd.Event[T],
 	onPanic func(any),
-	done chan<- struct{},
+	done chan<- outcome,
 ) {
-	defer close(done)
-	defer reportRecoveredPanic(onPanic)
+	done <- callRecovering(
+		ctx,
+		handler,
+		event,
+		onPanic,
+	)
+}
+
+func callRecovering[T any](
+	ctx context.Context,
+	handler asynxmd.ProjectionHandler[T],
+	event asynxmd.Event[T],
+	onPanic func(any),
+) (result outcome) {
+	defer reportRecoveredPanic(
+		onPanic,
+		&result,
+	)
 	handler(
 		ctx,
 		event,
 	)
+
+	return completed
 }
 
 func reportRecoveredPanic(
 	onPanic func(any),
+	result *outcome,
 ) {
 	recovered := recover()
-	if recovered == nil ||
-		onPanic == nil {
+	if recovered == nil {
+		return
+	}
+
+	*result = panicked
+	if onPanic == nil {
 		return
 	}
 
@@ -305,7 +351,7 @@ func reportRecoveredPanic(
 func handleTimeout(
 	onTimeout func(),
 	mode waitMode,
-	done <-chan struct{},
+	done <-chan outcome,
 ) {
 	if onTimeout != nil {
 		onTimeout()
