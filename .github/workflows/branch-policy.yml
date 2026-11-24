@@ -19,27 +19,20 @@ jobs:
         run: |
           echo "Source: $HEAD → Target: $BASE"
 
-          # Branches that MUST target master
-          if [[ "$HEAD" == release/* || "$HEAD" == hotfix/* ]]; then
-            if [[ "$BASE" != "master" ]]; then
-              echo "::error::Branch '$HEAD' must target 'master', not '$BASE'"
+          # Every branch targets develop: merging to it cuts the release.
+          case "${HEAD%%/*}" in
+            feature|enhancement|fix|hotfix|refactor|docs|chore|ci|test|dependabot) ;;
+            *)
+              echo "::error::Branch '$HEAD' does not match any allowed pattern"
+              echo "::error::Allowed: feature/*, enhancement/* (minor release), fix/*, hotfix/* (patch release)"
+              echo "::error::Allowed without a release: refactor/*, docs/*, chore/*, ci/*, test/*"
+              echo "::error::Add the 'breaking-change' label for a major bump."
               exit 1
-            fi
-            echo "✓ $HEAD → master"
-            exit 0
-          fi
+              ;;
+          esac
 
-          # Branches that MUST target develop
-          if [[ "$HEAD" == feature/* || "$HEAD" == fix/* || "$HEAD" == refactor/* || "$HEAD" == enhancement/* ]]; then
-            if [[ "$BASE" != "develop" ]]; then
-              echo "::error::Branch '$HEAD' must target 'develop', not '$BASE'"
-              exit 1
-            fi
-            echo "✓ $HEAD → develop"
-            exit 0
+          if [[ "$BASE" != "develop" ]]; then
+            echo "::error::Branch '$HEAD' must target 'develop', not '$BASE'"
+            exit 1
           fi
-
-          # Unknown branch pattern
-          echo "::error::Branch '$HEAD' does not match any allowed pattern"
-          echo "::error::Allowed: release/*, hotfix/*, feature/*, fix/*, refactor/*, enhancement/*"
-          exit 1
+          echo "✓ $HEAD → develop"

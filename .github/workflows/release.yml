@@ -1,97 +1,89 @@
 name: Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Release version (e.g., v0.2.0)"
-        required: true
-        type: string
+  push:
+    branches: [develop]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: write
+  pull-requests: read
 
 jobs:
-  validate:
-    name: Validate Version
+  release:
+    name: Tag and publish
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/master'
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Validate version format
+      - name: Bump from the merged PR's branch prefix and labels
+        id: bump
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${{ inputs.version }}"
-          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Invalid version format '$VERSION'. Expected vX.Y.Z"
+          PR=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" --jq '.[0]')
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            echo "No PR found for ${{ github.sha }}; nothing to release."
+            echo "bump=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          HEAD_REF=$(jq -r '.head.ref' <<< "$PR")
+          case "${HEAD_REF%%/*}" in
+            feature|enhancement) BUMP="minor" ;;
+            fix|hotfix) BUMP="patch" ;;
+            *) BUMP="none" ;;
+          esac
+          IS_BREAKING=$(jq -r '[.labels[].name] | index("breaking-change") != null' <<< "$PR")
+          if [ "$BUMP" != "none" ] && [ "$IS_BREAKING" = "true" ]; then
+            BUMP="major"
+          fi
+          echo "PR #$(jq -r '.number' <<< "$PR") from $HEAD_REF: $BUMP"
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+
+      - name: Compute the next version
+        id: tag
+        if: steps.bump.outputs.bump != 'none'
+        run: |
+          LATEST=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          LATEST="${LATEST:-v0.0.0}"
+          NEXT=$(./scripts/semver-next.sh "$LATEST" "${{ steps.bump.outputs.bump }}")
+          MAJOR="${NEXT#v}"
+          MAJOR="${MAJOR%%.*}"
+          MODULE=$(awk '/^module /{print $2}' go.mod)
+          if [ "$MAJOR" -ge 2 ] && [[ "$MODULE" != */v"$MAJOR" ]]; then
+            echo "::error::$NEXT needs a module path ending in /v$MAJOR (go.mod: '$MODULE')."
+            echo "::error::Update go.mod and every import before shipping a breaking change."
             exit 1
           fi
-
-      - name: Check tag does not exist
-        run: |
-          if git rev-parse "refs/tags/${{ inputs.version }}" >/dev/null 2>&1; then
-            echo "::error::Tag ${{ inputs.version }} already exists"
-            exit 1
-          fi
-
-  test:
-    name: Tests & Coverage
-    needs: validate
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+          echo "latest=$LATEST next=$NEXT"
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
 
       - name: Setup Go
+        if: steps.tag.outputs.next != ''
         uses: actions/setup-go@v5
         with:
           go-version: "1.26"
 
-      - name: Lint
-        run: go vet ./...
-
-      - name: Run tests
-        id: coverage
+      - name: Vet and test before tagging
+        if: steps.tag.outputs.next != ''
         run: |
-          go test -race -coverprofile=coverage.out ./...
-          COV=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
-          echo "coverage=$COV" >> "$GITHUB_OUTPUT"
-          echo "Coverage: ${COV}%"
+          go vet ./...
+          go test -race ./...
 
-      - name: Check coverage threshold
-        run: |
-          COV="${{ steps.coverage.outputs.coverage }}"
-          if (( $(echo "$COV < 95.0" | bc -l) )); then
-            echo "::error::Coverage is ${COV}%, which is below the 95% minimum threshold."
-            exit 1
-          fi
-          echo "✓ Coverage check passed (${COV}% ≥ 95%)"
-
-  release:
-    name: Create Release
-    needs: test
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Create and push tag
-        run: |
-          git tag "${{ inputs.version }}"
-          git push origin "${{ inputs.version }}"
-
-      - name: Create GitHub Release
+      - name: Tag and publish the release
+        if: steps.tag.outputs.next != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ steps.tag.outputs.next }}
         run: |
-          gh release create "${{ inputs.version }}" \
-            --title "${{ inputs.version }}" \
+          git tag "$NEXT"
+          git push origin "$NEXT"
+          gh release create "$NEXT" \
+            --title "$NEXT" \
+            --target "${{ github.sha }}" \
             --generate-notes

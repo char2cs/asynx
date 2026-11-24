@@ -677,6 +677,30 @@ Battle-tested patterns for running asynx in real applications — optimistic-con
 
 For detailed design rationale, consistency guarantees, and advanced patterns, see the [docs/](./docs/spec).
 
+## Contributing
+
+All work happens on `develop`. Branch off it with a typed prefix and open a pull request back to it; the prefix
+decides the release that merging cuts:
+
+| Branch prefix | Release |
+|---|---|
+| `feature/*`, `enhancement/*` | minor |
+| `fix/*`, `hotfix/*` | patch |
+| `refactor/*`, `docs/*`, `chore/*`, `ci/*`, `test/*` | none |
+
+Add the `breaking-change` label for a major bump (a `v2` release also needs the module path to end in `/v2`).
+
+Code must pass [Agent Protection](https://github.com/rabbytesoftware/agent-protection), the Rabbyte coding-standards
+gate, both in CI and before every commit. Install the pinned `ap` binary and the git hook once per clone:
+
+```bash
+make hooks   # installs the ap version pinned in .ap.yaml and runs `lefthook install`
+make ap      # run the gate by hand
+```
+
+The hook is a fast-feedback layer; CI is the enforcement. Agent sessions (`.claude/settings.json`) are denied
+`--no-verify` and any change to the hook setup.
+
 ## License
 
 See [LICENSE](./LICENSE).

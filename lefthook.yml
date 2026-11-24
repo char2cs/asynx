@@ -1,0 +1,14 @@
+# Agent Protection pre-commit gate. Vendored as-is from
+# rabbytesoftware/agent-protection; the pinned `ap` version is read from this
+# repo's own .ap.yaml, never hardcoded here.
+pre-commit:
+  parallel: false
+  commands:
+    agent-protection:
+      run: ap check .
+      fail_text: >
+        Agent Protection found violations. This is not optional and cannot
+        be bypassed with --no-verify. Fix every finding above, or if a
+        finding is genuinely wrong, open an issue against the
+        agent-protection repo itself -- the rule is fixed upstream for
+        everyone, never suppressed locally.
