@@ -20,7 +20,7 @@ type ParkSetter[J any] interface {
 	)
 
 	// ParkIfCurrent parks the aggregate for cause as Park does, unless halt
-	// (the channel Pop returned with the job) has been closed since: then
+	// (the channel Begin returned with the job) has been closed since: then
 	// someone else has already settled the aggregate's fate (a Supersede
 	// abandoned the delivery, a park was imposed and possibly lifted). It
 	// reports whether halt was still open, so the park call took effect.

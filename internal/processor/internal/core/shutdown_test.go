@@ -862,3 +862,98 @@ func TestProcessor_IntegrationShutdownGraceful(
 		successVal,
 	)
 }
+
+func TestProcessor_Shutdown_DoesNotHangOnACallerWaitingForItsTurn(
+	t *testing.T,
+) {
+	p := newProcessor(
+		t,
+		models.WithShards[order](1),
+		models.WithWorkersPerShard[order](1),
+	)
+	gate := make(chan struct{})
+	entered := make(
+		chan struct{},
+		1,
+	)
+	results := make(
+		chan error,
+		2,
+	)
+	go func() {
+		_, err := p.Send(
+			context.Background(),
+			gatedCmd{
+				UpdateOrderCmd: updateCmd(
+					"agg",
+					1,
+				),
+				entered: entered,
+				gate:    gate,
+			},
+		)
+		results <- err
+	}()
+	<-entered
+
+	pending := make(
+		chan struct{},
+		1,
+	)
+	p.SetOnSendPending(func() { pending <- struct{}{} })
+	go func() {
+		_, err := p.Send(
+			context.Background(),
+			mocks.CreateOrderCmd{ID: "waiting", Total: 1},
+		)
+		results <- err
+	}()
+	<-pending
+
+	done := make(
+		chan error,
+		1,
+	)
+	go func() { done <- p.Shutdown(context.Background()) }()
+	close(gate)
+
+	requireShutdownDone(
+		t,
+		done,
+	)
+
+	awaitSendResults(
+		t,
+		results,
+		2,
+	)
+}
+
+func requireShutdownDone(
+	t *testing.T,
+	done <-chan error,
+) {
+	t.Helper()
+	select {
+	case err := <-done:
+		requireNoShutdownError(
+			t,
+			err,
+		)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown hung on a caller waiting for its turn")
+	}
+}
+
+func requireNoShutdownError(
+	t *testing.T,
+	err error,
+) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf(
+			"Shutdown = %v, want nil",
+			err,
+		)
+	}
+}

@@ -1,0 +1,198 @@
+package models_test
+
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/char2cs/asynx/internal/mocks"
+	"github.com/char2cs/asynx/internal/processor/models"
+	asynxmd "github.com/char2cs/asynx/models"
+)
+
+type countingExecutor struct {
+	calls atomic.Int32
+	panic bool
+}
+
+// ExecuteAsync is the test double implementation for the code under test.
+func (c *countingExecutor) ExecuteAsync(
+	_ context.Context,
+	_ asynxmd.Command[mocks.Order],
+) (asynxmd.Event[mocks.Order], func(context.Context) error, error) {
+	c.calls.Add(1)
+	if c.panic {
+		panic("boom")
+	}
+
+	return asynxmd.Event[mocks.Order]{},
+		noWait,
+		nil
+}
+
+func newEnvelope() *models.CommandEnvelope[mocks.Order] {
+	return models.NewCommandEnvelope[mocks.Order](
+		mocks.CreateOrderCmd{ID: "o", Total: 1},
+	)
+}
+
+func requireClosed(
+	t *testing.T,
+	ch <-chan struct{},
+	what string,
+) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf(
+			"%s never closed",
+			what,
+		)
+	}
+}
+
+func TestCommandEnvelope_ExecuteRunsOnceAndReleasesTheWorker(
+	t *testing.T,
+) {
+	envelope := newEnvelope()
+	executor := &countingExecutor{}
+	granted := make(chan struct{})
+	go func() {
+		envelope.GrantTurn()
+		close(granted)
+	}()
+
+	requireClosed(
+		t,
+		envelope.Turn,
+		"Turn",
+	)
+	envelope.Execute(
+		context.Background(),
+		executor,
+	)
+	requireClosed(
+		t,
+		granted,
+		"GrantTurn return",
+	)
+
+	result := <-envelope.ResultChan
+	if result.Err != nil ||
+		result.Wait != nil {
+		t.Fatalf(
+			"result = %+v, want no error and no Wait",
+			result,
+		)
+	}
+
+	if got := executor.calls.Load(); got != 1 {
+		t.Fatalf(
+			"executor ran %d times, want 1",
+			got,
+		)
+	}
+}
+
+func TestCommandEnvelope_ExecuteKeepsWaitOnlyForWaitHandlers(
+	t *testing.T,
+) {
+	envelope := newEnvelope()
+	envelope.WaitHandlers = true
+	close(envelope.Turn)
+	envelope.Execute(
+		context.Background(),
+		&countingExecutor{},
+	)
+
+	if result := <-envelope.ResultChan; result.Wait == nil {
+		t.Fatal("Wait dropped for a WaitHandlers envelope")
+	}
+}
+
+func TestCommandEnvelope_ExecuteSkipsACommandWhoseContextEnded(
+	t *testing.T,
+) {
+	envelope := newEnvelope()
+	executor := &countingExecutor{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	close(envelope.Turn)
+
+	envelope.Execute(
+		ctx,
+		executor,
+	)
+
+	result := <-envelope.ResultChan
+	if !errors.Is(
+		result.Err,
+		asynxmd.ErrContextCancelled,
+	) {
+		t.Fatalf(
+			"result = %v, want ErrContextCancelled",
+			result.Err,
+		)
+	}
+
+	if got := executor.calls.Load(); got != 0 {
+		t.Fatalf(
+			"executor ran %d times for a cancelled command",
+			got,
+		)
+	}
+
+	requireClosed(
+		t,
+		envelope.Done,
+		"Done",
+	)
+}
+
+func TestCommandEnvelope_AbandonLetsALaterGrantMoveOn(
+	t *testing.T,
+) {
+	envelope := newEnvelope()
+	envelope.Abandon()
+
+	granted := make(chan struct{})
+	go func() {
+		envelope.GrantTurn()
+		close(granted)
+	}()
+
+	requireClosed(
+		t,
+		granted,
+		"GrantTurn return",
+	)
+}
+
+func TestCommandEnvelope_APanickingExecutorStillReleasesTheWorker(
+	t *testing.T,
+) {
+	envelope := newEnvelope()
+	close(envelope.Turn)
+	func() {
+		defer func() { _ = recover() }()
+		envelope.Execute(
+			context.Background(),
+			&countingExecutor{panic: true},
+		)
+	}()
+
+	requireClosed(
+		t,
+		envelope.Done,
+		"Done",
+	)
+}
+
+func noWait(
+	context.Context,
+) error {
+	return nil
+}

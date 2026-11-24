@@ -1,129 +1,66 @@
 package workers
 
 import (
+	"context"
 	"fmt"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/delivery"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/reporter"
 	asynxmd "github.com/char2cs/asynx/models"
-	"sync"
-	"time"
 )
 
-// New creates a Pool whose workers pop jobs from registry, publish them
+// New creates a Pool whose runs begin their jobs in registry, publish them
 // through bus (nil publishes nothing), run their durable delivery through
-// deliverer and report errors through reports. A worker with nothing to do
-// for idleTimeout retires.
+// deliverer and report errors through reports.
 func New[T any](
 	bus asynxmd.Bus[T],
 	registry aggregates.Registry[jobs.Job[T]],
 	deliverer delivery.Deliverer[T],
 	reports reporter.Reporter[T],
-	idleTimeout time.Duration,
 ) Pool[T] {
 	return &aggregatePool[T]{
-		bus:         bus,
-		registry:    registry,
-		deliverer:   deliverer,
-		reports:     reports,
-		idleTimeout: idleTimeout,
-		stop:        make(chan struct{}),
+		bus:       bus,
+		registry:  registry,
+		deliverer: deliverer,
+		reports:   reports,
 	}
 }
 
 type aggregatePool[T any] struct {
-	bus         asynxmd.Bus[T]
-	registry    aggregates.Registry[jobs.Job[T]]
-	deliverer   delivery.Deliverer[T]
-	reports     reporter.Reporter[T]
-	idleTimeout time.Duration
-	stop        chan struct{}
-	wg          sync.WaitGroup
+	bus       asynxmd.Bus[T]
+	registry  aggregates.Registry[jobs.Job[T]]
+	deliverer delivery.Deliverer[T]
+	reports   reporter.Reporter[T]
 }
 
-// Spawn starts the worker of aggregateID and counts it.
-func (p *aggregatePool[T]) Spawn(
-	aggregateID string,
+// Run waits for turn, delivers job and hands the turn on through done.
+func (p *aggregatePool[T]) Run(
+	ctx context.Context,
+	job jobs.Job[T],
+	turn <-chan struct{},
+	done chan<- struct{},
 ) {
-	p.wg.Add(1)
-	go p.work(aggregateID)
-}
-
-// Stop tells every worker to drain its queue and exit.
-func (p *aggregatePool[T]) Stop() {
-	close(p.stop)
-}
-
-// Wait blocks until every worker has exited.
-func (p *aggregatePool[T]) Wait() {
-	p.wg.Wait()
-}
-
-func (p *aggregatePool[T]) work(
-	aggregateID string,
-) {
-	defer p.wg.Done()
-	wake := p.registry.Wake(aggregateID)
-	for p.cycle(
-		aggregateID,
-		wake,
-	) {
-	}
-}
-
-func (p *aggregatePool[T]) cycle(
-	aggregateID string,
-	wake <-chan struct{},
-) bool {
-	p.drain(aggregateID)
-	return !p.await(
-		aggregateID,
-		wake,
+	<-turn
+	defer p.registry.Finish(
+		job.AggregateID(),
+		done,
 	)
-}
-
-func (p *aggregatePool[T]) await(
-	aggregateID string,
-	wake <-chan struct{},
-) bool {
-	idle := time.NewTimer(p.idleTimeout)
-	defer idle.Stop()
-	select {
-	case <-wake:
-		return false
-	case <-p.stop:
-		p.drain(aggregateID)
-		return true
-	case <-idle.C:
-		return p.registry.Retire(aggregateID)
-	}
-}
-
-func (p *aggregatePool[T]) drain(
-	aggregateID string,
-) {
-	for p.next(aggregateID) {
-	}
-}
-
-func (p *aggregatePool[T]) next(
-	aggregateID string,
-) bool {
-	job, halt, ok := p.registry.Pop(aggregateID)
+	halt, ok := p.registry.Begin(job)
 	if !ok {
-		return false
+		return
 	}
 
 	p.handle(
-		aggregateID,
+		ctx,
+		job.AggregateID(),
 		halt,
 		job,
 	)
-	return true
 }
 
 func (p *aggregatePool[T]) handle(
+	ctx context.Context,
 	aggregateID string,
 	halt <-chan struct{},
 	job jobs.Job[T],
@@ -134,10 +71,12 @@ func (p *aggregatePool[T]) handle(
 		&outcome,
 	)
 	defer p.recoverDispatcherPanic(
+		ctx,
 		job,
 		&outcome,
 	)
 	outcome = p.deliver(
+		ctx,
 		aggregateID,
 		halt,
 		job,
@@ -145,6 +84,7 @@ func (p *aggregatePool[T]) handle(
 }
 
 func (p *aggregatePool[T]) recoverDispatcherPanic(
+	ctx context.Context,
 	job jobs.Job[T],
 	outcome *error,
 ) {
@@ -158,6 +98,7 @@ func (p *aggregatePool[T]) recoverDispatcherPanic(
 		recovered,
 	)
 	p.reports.PublishError(
+		ctx,
 		job,
 		err,
 	)
@@ -165,6 +106,7 @@ func (p *aggregatePool[T]) recoverDispatcherPanic(
 }
 
 func (p *aggregatePool[T]) deliver(
+	ctx context.Context,
 	aggregateID string,
 	halt <-chan struct{},
 	job jobs.Job[T],
@@ -177,12 +119,16 @@ func (p *aggregatePool[T]) deliver(
 		return asynxmd.ErrDeliveryParked
 	}
 
-	p.publishLive(job)
+	p.publishLive(
+		ctx,
+		job,
+	)
 	if !job.Durable() {
 		return nil
 	}
 
 	err := p.deliverer.Deliver(
+		ctx,
 		aggregateID,
 		halt,
 		job,
@@ -192,6 +138,7 @@ func (p *aggregatePool[T]) deliver(
 	}
 
 	return p.ack(
+		ctx,
 		aggregateID,
 		halt,
 		job,
@@ -215,6 +162,7 @@ func (p *aggregatePool[T]) heldByPark(
 }
 
 func (p *aggregatePool[T]) publishLive(
+	ctx context.Context,
 	job jobs.Job[T],
 ) {
 	if p.bus == nil ||
@@ -222,28 +170,34 @@ func (p *aggregatePool[T]) publishLive(
 		return
 	}
 
-	err := p.publish(job)
+	err := p.publish(
+		ctx,
+		job,
+	)
 	if err == nil {
 		return
 	}
 
 	p.reports.PublishError(
+		ctx,
 		job,
 		err,
 	)
 }
 
 func (p *aggregatePool[T]) publish(
+	ctx context.Context,
 	job jobs.Job[T],
 ) (err error) {
 	defer recoverBusPanic(&err)
 	return p.bus.PublishSync(
-		job.Context(),
+		ctx,
 		job.Event(),
 	)
 }
 
 func (p *aggregatePool[T]) ack(
+	ctx context.Context,
 	aggregateID string,
 	halt <-chan struct{},
 	job jobs.Job[T],
@@ -253,18 +207,22 @@ func (p *aggregatePool[T]) ack(
 		return nil
 	}
 
-	err := ack(job.Context())
+	err := ack(ctx)
 	if err == nil {
 		return nil
 	}
 
-	report := func() {
+	report := func(
+		ctx context.Context,
+	) {
 		p.reports.PublishError(
+			ctx,
 			job,
 			err,
 		)
 	}
 	p.deliverer.ParkThenReport(
+		ctx,
 		aggregateID,
 		halt,
 		job,

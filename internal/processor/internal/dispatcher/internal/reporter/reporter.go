@@ -1,6 +1,8 @@
 package reporter
 
 import (
+	"context"
+
 	asynxmd "github.com/char2cs/asynx/models"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/jobs"
@@ -14,6 +16,7 @@ type Reporter[T any] interface {
 	// PublishError reports an error from publishing job's event to the live
 	// subscribers.
 	PublishError(
+		ctx context.Context,
 		job jobs.Job[T],
 		err error,
 	)
@@ -21,6 +24,7 @@ type Reporter[T any] interface {
 	// DeliveryError reports a failed durable delivery attempt of job's event.
 	// attempt counts from 1.
 	DeliveryError(
+		ctx context.Context,
 		job jobs.Job[T],
 		err error,
 		attempt int,
@@ -29,6 +33,7 @@ type Reporter[T any] interface {
 	// Panic reports the value recovered from a handler that panicked while
 	// handling job's event.
 	Panic(
+		ctx context.Context,
 		job jobs.Job[T],
 		recovered any,
 	)

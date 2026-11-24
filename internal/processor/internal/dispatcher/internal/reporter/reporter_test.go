@@ -43,15 +43,18 @@ func TestNew_CallsTheHandlersItIsGiven(
 	)
 	job := newJob()
 	r.PublishError(
+		markedContext(),
 		job,
 		errors.New("down"),
 	)
 	r.DeliveryError(
+		markedContext(),
 		job,
 		errors.New("down"),
 		1,
 	)
 	r.Panic(
+		markedContext(),
 		job,
 		"boom",
 	)

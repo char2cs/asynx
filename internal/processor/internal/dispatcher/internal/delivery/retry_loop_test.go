@@ -34,12 +34,13 @@ func TestRetryLoop_SettlesTheJobAfterTheFirstAttempt(
 			&job,
 		),
 	}}})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		acked("test.event"),
 	)
 
 	if err := f.deliverer.Deliver(
+		context.Background(),
 		"a",
 		halt,
 		job,
@@ -80,12 +81,13 @@ func TestRetryLoop_RetriesOnlyTheFailedSubscribers(
 		{Match: match2, Handler: handler},
 		{Match: match3, Handler: makeHandler3(&flakyRuns)},
 	}})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		acked("test.event"),
 	)
 
 	if err := f.deliverer.Deliver(
+		context.Background(),
 		"a",
 		halt,
 		job,
@@ -126,12 +128,13 @@ func TestRetryLoop_StopsAtTheAttemptCap(
 		Match:   match4,
 		Handler: handler2,
 	}}})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		acked("test.event"),
 	)
 
 	if err := f.deliverer.Deliver(
+		context.Background(),
 		"a",
 		halt,
 		job,
@@ -158,7 +161,7 @@ func stepRetrying(
 	loop *retryLoop[int],
 ) {
 	t.Helper()
-	err := loop.step()
+	err := loop.step(context.Background())
 	if errors.Is(
 		err,
 		errRetrying,
@@ -177,7 +180,7 @@ func TestRetryLoop_DoublesTheBackoffUpToTheMaximum(
 	t *testing.T,
 ) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{RetryInitial: time.Millisecond, RetryMax: 3 * time.Millisecond})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		acked("test.event"),
 	)
@@ -232,7 +235,7 @@ func TestRetryLoop_AParkedJobIsNotRetriedWhenItsBackoffEnds(
 	t *testing.T,
 ) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{})
-	job, _ := f.pop(
+	job, _ := f.begin(
 		t,
 		acked("test.event"),
 	)
@@ -258,6 +261,7 @@ func requireParkedWait(
 ) {
 	t.Helper()
 	err := deliverer.wait(
+		context.Background(),
 		"a",
 		parked,
 		job,

@@ -61,16 +61,19 @@ func TestParkThenReport_ParksTheAggregateBeforeReporting(
 	t *testing.T,
 ) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		acked("test.event"),
 	)
 
 	var parkedWhenTold []string
-	report2 := func() {
+	report2 := func(
+		context.Context,
+	) {
 		parkedWhenTold = slices.Sorted(maps.Keys(f.registry.Parks()))
 	}
 	f.deliverer.ParkThenReport(
+		context.Background(),
 		"a",
 		halt,
 		job,
@@ -91,21 +94,32 @@ func TestParkThenReport_ParksTheAggregateBeforeReporting(
 
 var errStopped = errors.New("stopped")
 
+type reportFlag struct {
+	called bool
+}
+
+func (r *reportFlag) report(
+	context.Context,
+) {
+	r.called = true
+}
+
 func TestParkThenReport_RecordsTheCause(
 	t *testing.T,
 ) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		acked("test.event"),
 	)
 
 	f.deliverer.ParkThenReport(
+		context.Background(),
 		"a",
 		halt,
 		job,
 		errStopped,
-		func() {},
+		noReport,
 	)
 
 	if got := f.registry.Inspect("a"); !got.Parked ||
@@ -125,19 +139,20 @@ func TestParkThenReport_LeavesASettledAggregateAloneButStillReports(
 	t *testing.T,
 ) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		acked("test.event"),
 	)
 	f.registry.Supersede("a")
 
-	reported := false
+	reported := &reportFlag{}
 	f.deliverer.ParkThenReport(
+		context.Background(),
 		"a",
 		halt,
 		job,
 		errStopped,
-		func() { reported = true },
+		reported.report,
 	)
 
 	if len(f.registry.Parks()) != 0 {
@@ -147,7 +162,7 @@ func TestParkThenReport_LeavesASettledAggregateAloneButStillReports(
 		)
 	}
 
-	if !reported {
+	if !reported.called {
 		t.Fatal("the report was skipped")
 	}
 }
@@ -156,17 +171,18 @@ func TestParkThenReport_NeverParksForAJobWithoutAnAck(
 	t *testing.T,
 ) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		tombstone(nil),
 	)
 
 	f.deliverer.ParkThenReport(
+		context.Background(),
 		"a",
 		halt,
 		job,
 		errStopped,
-		func() {},
+		noReport,
 	)
 
 	if len(f.registry.Parks()) != 0 {
@@ -185,12 +201,13 @@ func TestDeliver_GiveUpParksBeforeTheParkedErrorIsReported(
 		DurableSubs: []asynxmd.DurableSub[int]{failing(down)},
 		MaxAttempts: 2,
 	})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		acked("test.event"),
 	)
 
 	err := f.deliverer.Deliver(
+		context.Background(),
 		"a",
 		halt,
 		job,
@@ -253,13 +270,14 @@ func TestDeliver_AnAckedJobUnderAClosedHaltRunsNothing(
 		Match:   match,
 		Handler: handler,
 	}}})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		acked("test.event"),
 	)
 	f.registry.Supersede("a")
 
 	if err := f.deliverer.Deliver(
+		context.Background(),
 		"a",
 		halt,
 		job,
@@ -303,12 +321,13 @@ func TestDeliver_ATombstoneIsNeverDeadLettered(
 	) error {
 		return nil
 	}
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		tombstone(ack),
 	)
 
 	if err := f.deliverer.Deliver(
+		context.Background(),
 		"a",
 		halt,
 		job,
@@ -347,12 +366,13 @@ func TestDeliver_AJobWithoutAnAckIsNeverDeadLetteredNorParked(
 		MaxAttempts: 1,
 		DeadLetter:  deadLetter2,
 	})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		tombstone(nil),
 	)
 
 	if err := f.deliverer.Deliver(
+		context.Background(),
 		"a",
 		halt,
 		job,
@@ -396,12 +416,13 @@ func TestDeliver_ATombstoneReachesEverySubscriber(
 		Match:   match2,
 		Handler: handler2,
 	}}})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		tombstone(nil),
 	)
 
 	if err := f.deliverer.Deliver(
+		context.Background(),
 		"a",
 		halt,
 		job,
@@ -429,13 +450,14 @@ func TestDeliver_InterruptParksWithoutReportingAndEndsClosed(
 		RetryInitial: time.Hour,
 		RetryMax:     time.Hour,
 	})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		acked("test.event"),
 	)
 	close(f.interrupted)
 
 	if err := f.deliverer.Deliver(
+		context.Background(),
 		"a",
 		halt,
 		job,
@@ -470,7 +492,7 @@ func TestDeliver_AParkDuringTheBackoffEndsTheDelivery(
 		RetryInitial: time.Hour,
 		RetryMax:     time.Hour,
 	})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		acked("test.event"),
 	)
@@ -480,6 +502,7 @@ func TestDeliver_AParkDuringTheBackoffEndsTheDelivery(
 	)
 	go func() {
 		done <- f.deliverer.Deliver(
+			context.Background(),
 			"a",
 			halt,
 			job,
@@ -521,12 +544,13 @@ func TestDeliver_ADeadLetterHandlerPanicParksTheAggregate(
 		MaxAttempts: 1,
 		DeadLetter:  deadLetter3,
 	})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		acked("test.event"),
 	)
 
 	if err := f.deliverer.Deliver(
+		context.Background(),
 		"a",
 		halt,
 		job,
@@ -566,12 +590,13 @@ func TestDeliver_AHandlerPanicIsReportedAndRetried(
 		Match:   match3,
 		Handler: makeHandler(&runs),
 	}}})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		acked("test.event"),
 	)
 
 	if err := f.deliverer.Deliver(
+		context.Background(),
 		"a",
 		halt,
 		job,
@@ -614,7 +639,7 @@ func TestDeliver_ATimedOutHandlerIsReportedAndWaitedFor(
 		Timeout: time.Millisecond,
 		Handler: handler3,
 	}}})
-	job, halt := f.pop(
+	job, halt := f.begin(
 		t,
 		acked("test.event"),
 	)
@@ -624,6 +649,7 @@ func TestDeliver_ATimedOutHandlerIsReportedAndWaitedFor(
 	)
 	go func() {
 		done <- f.deliverer.Deliver(
+			context.Background(),
 			"a",
 			halt,
 			job,
@@ -720,21 +746,20 @@ func newFixture(
 	return f
 }
 
-func (f *fixture) pop(
+func (f *fixture) begin(
 	t *testing.T,
 	request asynxmd.DispatchRequest[int],
 ) (jobs.Job[int], <-chan struct{}) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	if _, err := f.registry.Enqueue(jobs.New(
-		ctx,
+	job := jobs.New(
 		request,
-		cancel,
-	)); err != nil {
+		func() {},
+	)
+	if _, err := f.registry.Enqueue(job); err != nil {
 		t.Fatal(err)
 	}
 
-	job, halt, ok := f.registry.Pop(request.Event.AggregateID)
+	halt, ok := f.registry.Begin(job)
 	if !ok {
 		t.Fatal("the job was not queued")
 	}
@@ -810,6 +835,7 @@ func (r *recordingReporter) record(
 
 // PublishError satisfies the interface that recordingReporter fakes.
 func (r *recordingReporter) PublishError(
+	_ context.Context,
 	_ jobs.Job[int],
 	err error,
 ) {
@@ -821,6 +847,7 @@ func (r *recordingReporter) PublishError(
 
 // DeliveryError satisfies the interface that recordingReporter fakes.
 func (r *recordingReporter) DeliveryError(
+	_ context.Context,
 	_ jobs.Job[int],
 	err error,
 	_ int,
@@ -833,6 +860,7 @@ func (r *recordingReporter) DeliveryError(
 
 // Panic satisfies the interface that recordingReporter fakes.
 func (r *recordingReporter) Panic(
+	_ context.Context,
 	_ jobs.Job[int],
 	recovered any,
 ) {

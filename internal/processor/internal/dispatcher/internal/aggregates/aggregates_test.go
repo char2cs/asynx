@@ -10,12 +10,11 @@ func TestNew_KnowsNoAggregate(
 	t *testing.T,
 ) {
 	r, _ := newRegistry()
-	if _, _, ok := r.Pop("a"); ok {
-		t.Fatal("Pop on an empty registry found a job")
-	}
-
-	if r.Wake("a") != nil {
-		t.Fatal("Wake of an unknown aggregate is not nil")
+	if _, ok := r.Begin(liveItem(
+		"a",
+		1,
+	)); ok {
+		t.Fatal("Begin on an empty registry found a job")
 	}
 
 	if len(r.Parks()) != 0 {
@@ -31,10 +30,6 @@ func TestNew_KnowsNoAggregate(
 	) != nil {
 		t.Fatal("Unrun of an unknown aggregate is not nil")
 	}
-
-	if !r.Retire("a") {
-		t.Fatal("Retire of an unknown aggregate refused")
-	}
 }
 
 func TestNew_AcceptsNilHooks(
@@ -46,7 +41,7 @@ func TestNew_AcceptsNilHooks(
 		1,
 	))
 	if err != nil ||
-		!admission.Spawned {
+		!closed(admission.Turn) {
 		t.Fatalf(
 			"Enqueue = %+v, %v",
 			admission,

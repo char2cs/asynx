@@ -3,8 +3,6 @@ package pool
 import (
 	"context"
 	"sync"
-
-	"github.com/char2cs/asynx/internal/processor/models"
 )
 
 // ShardPool owns the shards and the goroutines that serve them.
@@ -18,7 +16,6 @@ type ShardPool[T any] struct {
 
 // New starts a pool of numShards shards served by workersPerShard workers each.
 func New[T any](
-	executor models.Executor[T],
 	numShards int,
 	queueDepth int,
 	workersPerShard int,
@@ -41,7 +38,7 @@ func New[T any](
 		workersPerShard: workersPerShard,
 	}
 
-	pool.start(executor)
+	pool.start()
 	return pool
 }
 
@@ -50,20 +47,14 @@ func (p *ShardPool[T]) Shards() []*Shard[T] {
 	return p.shards
 }
 
-func (p *ShardPool[T]) start(
-	executor models.Executor[T],
-) {
+func (p *ShardPool[T]) start() {
 	for _, shard := range p.shards {
-		p.startShard(
-			shard,
-			executor,
-		)
+		p.startShard(shard)
 	}
 }
 
 func (p *ShardPool[T]) startShard(
 	shard *Shard[T],
-	executor models.Executor[T],
 ) {
 	p.dispatcherDoneWg.Add(1)
 	go shard.dispatchCommands(
@@ -72,10 +63,7 @@ func (p *ShardPool[T]) startShard(
 
 	for range p.workersPerShard {
 		p.doneWg.Add(1)
-		go shard.workerLoop(
-			executor,
-			&p.doneWg,
-		)
+		go shard.workerLoop(&p.doneWg)
 	}
 }
 

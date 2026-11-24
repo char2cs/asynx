@@ -1,15 +1,16 @@
 package contracts
 
-// Winddown ends the workers of aggregates and closes the registry.
+// Winddown ends the turns of jobs and closes the registry.
 type Winddown interface {
-	// Retire ends the aggregate's worker and reports whether it may exit. It is
-	// false, and nothing changes, while jobs are queued: a job enqueued under
-	// the mutex keeps the worker alive. Otherwise the worker is released (the
-	// next Enqueue spawns a new one) and the record itself is removed unless
-	// it holds a park or undelivered versions, which survive the retirement.
-	Retire(
+	// Finish ends the turn of the aggregate's job that holds done: it closes
+	// done, which lets the aggregate's next job begin, and releases the job's
+	// hold on the aggregate's record, which is removed unless it holds a park,
+	// undelivered versions or other jobs. Every job Enqueue admitted is
+	// finished exactly once, whether it ran or was dropped by a park.
+	Finish(
 		aggregateID string,
-	) bool
+		done chan<- struct{},
+	)
 
 	// Close makes every later Enqueue fail with ErrDispatcherClosed. It
 	// reports whether this call closed the registry (false when it was

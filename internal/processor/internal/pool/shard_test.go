@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,8 +40,7 @@ func TestShard_SingleCommandSuccess(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -50,14 +50,11 @@ func TestShard_SingleCommandSuccess(
 	ctx := context.Background()
 	shard := p.Shards()[0]
 
-	envelope := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
+	)
 
 	shard.CommandChan() <- envelope
 
@@ -89,8 +86,7 @@ func TestShard_ValidationErrorDecrementVersionSingleWorker(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -100,36 +96,27 @@ func TestShard_ValidationErrorDecrementVersionSingleWorker(
 	ctx := context.Background()
 	shard := p.Shards()[0]
 
-	envelope1 := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope1 := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
+	)
 	shard.CommandChan() <- envelope1
 	<-envelope1.ResultChan
 
-	envelope2 := &models.CommandEnvelope[order]{
-		Cmd: mocks.CancelOrderCmd{ID: "order1"},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope2 := newEnvelope(
+		executor,
+		ctx,
+		mocks.CancelOrderCmd{ID: "order1"},
+	)
 	shard.CommandChan() <- envelope2
 	<-envelope2.ResultChan
 
-	envelope3 := &models.CommandEnvelope[order]{
-		Cmd: mocks.CancelOrderCmd{ID: "order2"},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope3 := newEnvelope(
+		executor,
+		ctx,
+		mocks.CancelOrderCmd{ID: "order2"},
+	)
 	shard.CommandChan() <- envelope3
 	result3 := <-envelope3.ResultChan
 	if result3.Err != asynxmd.ErrValidation {
@@ -139,14 +126,11 @@ func TestShard_ValidationErrorDecrementVersionSingleWorker(
 		)
 	}
 
-	envelope4 := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order3", Total: 200.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope4 := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order3", Total: 200.0},
+	)
 	shard.CommandChan() <- envelope4
 	result4 := <-envelope4.ResultChan
 	if result4.Err != nil {
@@ -176,8 +160,7 @@ func TestShard_ContextCancelledDuringExecution(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -187,14 +170,11 @@ func TestShard_ContextCancelledDuringExecution(
 	ctx, cancel := context.WithCancel(context.Background())
 	shard := p.Shards()[0]
 
-	envelope := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
+	)
 
 	shard.CommandChan() <- envelope
 	cancel()
@@ -225,8 +205,7 @@ func TestShard_MultipleWorkersNoCorrection(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		2,
@@ -236,25 +215,19 @@ func TestShard_MultipleWorkersNoCorrection(
 	ctx := context.Background()
 	shard := p.Shards()[0]
 
-	envelope1 := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope1 := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
+	)
 	shard.CommandChan() <- envelope1
 	<-envelope1.ResultChan
 
-	envelope2 := &models.CommandEnvelope[order]{
-		Cmd: mocks.CancelOrderCmd{ID: "order2"},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope2 := newEnvelope(
+		executor,
+		ctx,
+		mocks.CancelOrderCmd{ID: "order2"},
+	)
 	shard.CommandChan() <- envelope2
 	result2 := <-envelope2.ResultChan
 	if result2.Err != asynxmd.ErrValidation {
@@ -264,14 +237,11 @@ func TestShard_MultipleWorkersNoCorrection(
 		)
 	}
 
-	envelope3 := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order3", Total: 100.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope3 := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order3", Total: 100.0},
+	)
 	shard.CommandChan() <- envelope3
 	result3 := <-envelope3.ResultChan
 	if result3.Err != nil {
@@ -301,8 +271,7 @@ func TestShard_ResultCarriesEvent(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -312,14 +281,11 @@ func TestShard_ResultCarriesEvent(
 	ctx := context.Background()
 	shard := p.Shards()[0]
 
-	envelope := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order-evt", Total: 50.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order-evt", Total: 50.0},
+	)
 	shard.CommandChan() <- envelope
 
 	result := <-envelope.ResultChan
@@ -361,8 +327,7 @@ func TestShard_ResultUsesCommandResult(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -372,14 +337,11 @@ func TestShard_ResultUsesCommandResult(
 	ctx := context.Background()
 	shard := p.Shards()[0]
 
-	envelope := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order-result", Total: 50.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order-result", Total: 50.0},
+	)
 	shard.CommandChan() <- envelope
 
 	result := <-envelope.ResultChan
@@ -394,24 +356,7 @@ func TestShard_ResultUsesCommandResult(
 func TestShard_NilEnvelopeClosesJobQueue(
 	t *testing.T,
 ) {
-	s := store.New()
-	b := bus.New[order]()
-	es := eventstore.New[order](
-		s,
-		store.NewSnapshots(),
-		nil,
-		1,
-		nil,
-	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
-	t.Cleanup(func() { d.Close(context.Background()) })
-	executor := exec.New(
-		es,
-		d,
-	)
-
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -468,8 +413,7 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -479,15 +423,11 @@ func TestShard_WaitingForHandlersDoesNotHoldTheWorker(
 	send := func(
 		id string,
 	) *models.CommandEnvelope[order] {
-		env := &models.CommandEnvelope[order]{
-			Cmd: mocks.CreateOrderCmd{ID: id, Total: 1},
-			Ctx: context.Background(),
-			ResultChan: make(
-				chan models.CommandResult[order],
-				1,
-			),
-			WaitHandlers: true,
-		}
+		env := newWaitingEnvelope(
+			executor,
+			context.Background(),
+			mocks.CreateOrderCmd{ID: id, Total: 1},
+		)
 		p.Shards()[0].CommandChan() <- env
 		return env
 	}
@@ -586,8 +526,7 @@ func TestPool_Drain_AnswersEnvelopesLeftInTheQueue(
 		es,
 		nil,
 	)
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		8,
 		1,
@@ -601,10 +540,11 @@ func TestPool_Drain_AnswersEnvelopesLeftInTheQueue(
 	send := func(
 		cmd asynxmd.Command[order],
 	) *models.CommandEnvelope[order] {
-		env := &models.CommandEnvelope[order]{Cmd: cmd, Ctx: context.Background(), ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		)}
+		env := newEnvelope(
+			executor,
+			context.Background(),
+			cmd,
+		)
 		p.Shards()[0].CommandChan() <- env
 		return env
 	}
@@ -692,8 +632,7 @@ func TestShard_ABusyAggregateLeavesTheOtherWorkersFree(
 		es,
 		nil,
 	)
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		8,
 		2,
@@ -708,10 +647,11 @@ func TestShard_ABusyAggregateLeavesTheOtherWorkersFree(
 	send := func(
 		cmd asynxmd.Command[order],
 	) *models.CommandEnvelope[order] {
-		env := &models.CommandEnvelope[order]{Cmd: cmd, Ctx: context.Background(), ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		)}
+		env := newEnvelope(
+			executor,
+			context.Background(),
+			cmd,
+		)
 		p.Shards()[0].CommandChan() <- env
 		return env
 	}
@@ -792,8 +732,7 @@ func TestShard_AMailboxKeepsTheOrderOfItsCommands(
 		es,
 		nil,
 	)
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		8,
 		4,
@@ -808,10 +747,11 @@ func TestShard_AMailboxKeepsTheOrderOfItsCommands(
 	send := func(
 		cmd asynxmd.Command[order],
 	) *models.CommandEnvelope[order] {
-		env := &models.CommandEnvelope[order]{Cmd: cmd, Ctx: context.Background(), ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		)}
+		env := newEnvelope(
+			executor,
+			context.Background(),
+			cmd,
+		)
 		p.Shards()[0].CommandChan() <- env
 		return env
 	}
@@ -884,8 +824,7 @@ func TestShard_AMailboxRefusesWhatExceedsTheQueueDepth(
 		es,
 		nil,
 	)
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		2,
 		2,
@@ -900,10 +839,11 @@ func TestShard_AMailboxRefusesWhatExceedsTheQueueDepth(
 	send := func(
 		cmd asynxmd.Command[order],
 	) *models.CommandEnvelope[order] {
-		env := &models.CommandEnvelope[order]{Cmd: cmd, Ctx: context.Background(), ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		)}
+		env := newEnvelope(
+			executor,
+			context.Background(),
+			cmd,
+		)
 		p.Shards()[0].CommandChan() <- env
 		return env
 	}
@@ -979,8 +919,7 @@ func TestShard_SkipsACommandWhoseContextEnded(
 		es,
 		nil,
 	)
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		8,
 		1,
@@ -989,14 +928,11 @@ func TestShard_SkipsACommandWhoseContextEnded(
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	env := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "gone", Total: 1},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	env := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "gone", Total: 1},
+	)
 	p.Shards()[0].CommandChan() <- env
 
 	if res := <-env.ResultChan; !errors.Is(
@@ -1087,8 +1023,7 @@ func BenchmarkShard_SingleWorker(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -1102,14 +1037,11 @@ func BenchmarkShard_SingleWorker(
 	b.ResetTimer()
 
 	for b.Loop() {
-		envelope := &models.CommandEnvelope[order]{
-			Cmd: mocks.CreateOrderCmd{ID: "order", Total: 100.0},
-			Ctx: ctx,
-			ResultChan: make(
-				chan models.CommandResult[order],
-				1,
-			),
-		}
+		envelope := newEnvelope(
+			executor,
+			ctx,
+			mocks.CreateOrderCmd{ID: "order", Total: 100.0},
+		)
 
 		shard.CommandChan() <- envelope
 		<-envelope.ResultChan
@@ -1160,8 +1092,7 @@ func benchWorkers(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		workers,
@@ -1175,16 +1106,310 @@ func benchWorkers(
 	b.ResetTimer()
 
 	for b.Loop() {
-		envelope := &models.CommandEnvelope[order]{
-			Cmd: mocks.CreateOrderCmd{ID: "order", Total: 100.0},
-			Ctx: ctx,
-			ResultChan: make(
-				chan models.CommandResult[order],
-				1,
-			),
-		}
+		envelope := newEnvelope(
+			executor,
+			ctx,
+			mocks.CreateOrderCmd{ID: "order", Total: 100.0},
+		)
 
 		shard.CommandChan() <- envelope
 		<-envelope.ResultChan
 	}
+}
+
+func newEnvelope(
+	executor models.Executor[order],
+	ctx context.Context,
+	cmd asynxmd.Command[order],
+) *models.CommandEnvelope[order] {
+	envelope := models.NewCommandEnvelope(cmd)
+	go takeTurn(
+		executor,
+		ctx,
+		envelope,
+	)
+	return envelope
+}
+
+func newWaitingEnvelope(
+	executor models.Executor[order],
+	ctx context.Context,
+	cmd asynxmd.Command[order],
+) *models.CommandEnvelope[order] {
+	envelope := models.NewCommandEnvelope(cmd)
+	envelope.WaitHandlers = true
+	go takeTurn(
+		executor,
+		ctx,
+		envelope,
+	)
+	return envelope
+}
+
+func takeTurn(
+	executor models.Executor[order],
+	ctx context.Context,
+	envelope *models.CommandEnvelope[order],
+) {
+	<-envelope.Turn
+	envelope.Execute(
+		ctx,
+		executor,
+	)
+}
+
+type recordingExecutor struct {
+	mu       sync.Mutex
+	order    []float64
+	inFlight atomic.Int32
+	overlap  atomic.Bool
+	started  atomic.Bool
+	entered  chan struct{}
+	gate     chan struct{}
+}
+
+// ExecuteAsync is the test double implementation for the code under test.
+func (r *recordingExecutor) ExecuteAsync(
+	_ context.Context,
+	cmd asynxmd.Command[order],
+) (asynxmd.Event[order], func(context.Context) error, error) {
+	if r.inFlight.Add(1) > 1 {
+		r.overlap.Store(true)
+	}
+
+	defer r.inFlight.Add(-1)
+	if r.started.CompareAndSwap(
+		false,
+		true,
+	) {
+		r.entered <- struct{}{}
+		<-r.gate
+	}
+
+	update, _ := cmd.(mocks.UpdateOrderCmd)
+	runtime.Gosched()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.order = append(
+		r.order,
+		update.NewState.Total,
+	)
+	return asynxmd.Event[order]{},
+		nil,
+		nil
+}
+
+func TestShard_RunsEachCommandOnceInOrderPerAggregate(
+	t *testing.T,
+) {
+	executor := &recordingExecutor{
+		entered: make(
+			chan struct{},
+			1,
+		),
+		gate: make(chan struct{}),
+	}
+	p := pool.New[order](
+		1,
+		64,
+		4,
+	)
+	t.Cleanup(func() { p.Drain(context.Background()) })
+
+	const total = 40
+	envs := make(
+		[]*models.CommandEnvelope[order],
+		0,
+		total,
+	)
+	for i := range total {
+		env := newEnvelope(
+			executor,
+			context.Background(),
+			mocks.UpdateOrderCmd{
+				ID:       "agg",
+				NewState: order{ID: "agg", Total: float64(i)},
+			},
+		)
+		p.Shards()[0].CommandChan() <- env
+		envs = append(
+			envs,
+			env,
+		)
+		awaitQueued(
+			t,
+			executor,
+			p.Shards()[0],
+			i,
+		)
+	}
+
+	close(executor.gate)
+	for _, env := range envs {
+		requireNil(
+			t,
+			"command",
+			resultWithin(
+				t,
+				env,
+				"command",
+			).Err,
+		)
+	}
+
+	requireRanInOrder(
+		t,
+		executor,
+		total,
+	)
+}
+
+func requireRanInOrder(
+	t *testing.T,
+	executor *recordingExecutor,
+	total int,
+) {
+	t.Helper()
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if len(executor.order) != total {
+		t.Fatalf(
+			"ran %d commands, want %d, each once",
+			len(executor.order),
+			total,
+		)
+	}
+
+	for i, got := range executor.order {
+		requireNumber(
+			t,
+			i,
+			got,
+		)
+	}
+
+	if executor.overlap.Load() {
+		t.Fatal("two commands of one aggregate ran at the same time")
+	}
+}
+
+func TestShard_SkipsACommandItsCallerAbandonedBeforeTheTurn(
+	t *testing.T,
+) {
+	es := eventstore.New[order](
+		store.New(),
+		store.NewSnapshots(),
+		nil,
+		1,
+		nil,
+	)
+	executor := exec.New[order](
+		es,
+		nil,
+	)
+	p := pool.New[order](
+		1,
+		8,
+		1,
+	)
+	t.Cleanup(func() { p.Drain(context.Background()) })
+	gate, release := gateReleasedOnCleanup(t)
+	entered := make(
+		chan struct{},
+		1,
+	)
+
+	holder := newEnvelope(
+		executor,
+		context.Background(),
+		gatedCreate{
+			CreateOrderCmd: mocks.CreateOrderCmd{ID: "holder", Total: 1},
+			entered:        entered,
+			gate:           gate,
+		},
+	)
+	p.Shards()[0].CommandChan() <- holder
+	<-entered
+
+	abandoned := models.NewCommandEnvelope[order](mocks.CreateOrderCmd{ID: "abandoned", Total: 1})
+	p.Shards()[0].CommandChan() <- abandoned
+	abandoned.Abandon()
+	last := newEnvelope(
+		executor,
+		context.Background(),
+		mocks.CreateOrderCmd{ID: "last", Total: 1},
+	)
+	p.Shards()[0].CommandChan() <- last
+	release()
+
+	requireNil(
+		t,
+		"last command",
+		resultWithin(
+			t,
+			last,
+			"last command",
+		).Err,
+	)
+	requireMissing(
+		t,
+		es,
+		"abandoned",
+	)
+}
+
+func requireMissing(
+	t *testing.T,
+	es eventstore.EventStore[order],
+	id string,
+) {
+	t.Helper()
+	exists, err := es.Exists(
+		context.Background(),
+		id,
+	)
+	failIf(
+		t,
+		err,
+	)
+	if exists {
+		t.Fatalf(
+			"%s was executed although its caller gave up",
+			id,
+		)
+	}
+}
+
+func requireNumber(
+	t *testing.T,
+	i int,
+	got float64,
+) {
+	t.Helper()
+	if got != float64(i) {
+		t.Fatalf(
+			"command %d ran as number %v: order lost",
+			i,
+			got,
+		)
+	}
+}
+
+func awaitQueued(
+	t *testing.T,
+	executor *recordingExecutor,
+	shard *pool.Shard[order],
+	i int,
+) {
+	t.Helper()
+	if i == 0 {
+		<-executor.entered
+		return
+	}
+
+	waitForBacklog(
+		t,
+		shard,
+		i,
+	)
 }

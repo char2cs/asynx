@@ -1,10 +1,11 @@
 package contracts
 
-// Backlog is the FIFO of jobs queued for each aggregate.
+// Backlog is the FIFO of jobs queued for each aggregate, and the chain of
+// turns that runs them one at a time.
 type Backlog[J any] interface {
-	// Enqueue appends job to its aggregate's FIFO and signals the aggregate's
-	// wake channel. It never blocks on handlers and never fails for a full
-	// queue.
+	// Enqueue appends job to its aggregate's FIFO and chains it behind the
+	// aggregate's previous job: Admission.Turn closes when that one has
+	// finished. It never blocks on handlers and never fails for a full queue.
 	//
 	// After Close it returns ErrDispatcherClosed and does nothing else.
 	//
@@ -15,26 +16,20 @@ type Backlog[J any] interface {
 	// with ErrDeliveryParked, and Admission.Parked is true. Live-only jobs are
 	// queued whatever the park.
 	//
-	// A queued job is first passed to Hooks.Admit. If the aggregate has no
-	// worker, Enqueue gives it fresh wake and halt channels, calls Hooks.Spawn
-	// and reports Admission.Spawned.
+	// A queued job is first passed to Hooks.Admit. The caller owes the job a
+	// Begin once its Turn has closed, and then a Finish with its Done.
 	Enqueue(
 		job J,
 	) (Admission, error)
 
-	// Pop removes and returns the oldest job queued for the aggregate, together
-	// with the halt channel it is delivered under. Reading both under one hold
-	// of the mutex is what lets a park or supersede that follows be recognised
-	// as concerning this job: a halt channel read later could already be the
-	// next generation's. ok is false when nothing is queued.
-	Pop(
-		aggregateID string,
-	) (job J, halt <-chan struct{}, ok bool)
-
-	// Wake returns the channel (capacity 1) that Enqueue signals when it
-	// queues a job for the aggregate. It is nil for an aggregate the registry
-	// holds no record of. Only the aggregate's worker waits on it.
-	Wake(
-		aggregateID string,
-	) <-chan struct{}
+	// Begin starts job's turn: it removes job from its aggregate's FIFO and
+	// returns the halt channel it is delivered under. Reading both under one
+	// hold of the mutex is what lets a park or supersede that follows be
+	// recognised as concerning this job: a halt channel read later could
+	// already be the next generation's. ok is false when a park dropped job
+	// from the FIFO meanwhile: it has been settled and completed, and has
+	// nothing left to run.
+	Begin(
+		job J,
+	) (halt <-chan struct{}, ok bool)
 }

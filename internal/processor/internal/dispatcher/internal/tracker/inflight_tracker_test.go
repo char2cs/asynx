@@ -1,7 +1,6 @@
 package tracker_test
 
 import (
-	"context"
 	"sync"
 	"testing"
 	"time"
@@ -19,7 +18,6 @@ func newJob(
 		Event: asynxmd.Event[string]{AggregateID: aggregateID, Version: version},
 	}
 	return jobs.New(
-		context.Background(),
 		request,
 		func() {},
 	)

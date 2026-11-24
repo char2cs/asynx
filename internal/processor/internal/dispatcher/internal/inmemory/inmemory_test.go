@@ -22,10 +22,7 @@ func TestNew_WiresADispatcherThatDeliversThroughTheBus(
 	t *testing.T,
 ) {
 	bus := &recordingBus{}
-	d := New(
-		asynxmd.DispatcherConfig[int]{Bus: bus},
-		WithIdleTimeout[int](time.Minute),
-	)
+	d := New(asynxmd.DispatcherConfig[int]{Bus: bus})
 
 	ticket, err := d.Enqueue(
 		context.Background(),
@@ -65,20 +62,13 @@ func TestNew_WiresADispatcherThatDeliversThroughTheBus(
 			len(got),
 		)
 	}
-
-	if d.(*dispatcher[int]).idleTimeout != time.Minute {
-		t.Fatal("New did not apply its options")
-	}
 }
 
-func TestDispatch_IdleCleanup(
+func TestDispatch_AnAggregateThatWentIdleTakesNewEvents(
 	t *testing.T,
 ) {
 	bus := &recordingBus{}
-	d := newTestDispatcher[int](
-		bus,
-		withIdleTimeout[int](10*time.Millisecond),
-	)
+	d := newTestDispatcher[int](bus)
 	ctx := context.Background()
 
 	_ = dispatch(
@@ -92,12 +82,7 @@ func TestDispatch_IdleCleanup(
 	)
 
 	d.WaitIdle()
-	d.workers.Wait()
-
-	exists := d.registry.Wake("agg-1") != nil
-	if exists {
-		t.Error("expected queue to be cleaned up after idle timeout")
-	}
+	d.running.Wait()
 
 	if err := dispatch(
 		ctx,
@@ -109,7 +94,7 @@ func TestDispatch_IdleCleanup(
 		true,
 	); err != nil {
 		t.Fatalf(
-			"dispatch after idle cleanup: %v",
+			"dispatch after the aggregate went idle: %v",
 			err,
 		)
 	}
@@ -124,7 +109,6 @@ func TestDispatch_IdleCleanup(
 
 	_ = d.Close(ctx)
 }
-
 func TestClose_DrainsAllEvents(
 	t *testing.T,
 ) {
@@ -262,36 +246,6 @@ func TestClose_ContextTimeout(
 			err,
 		)
 	}
-}
-
-func TestDispatch_WithIdleTimeoutOption(
-	t *testing.T,
-) {
-	bus := &recordingBus{}
-	d := newTestDispatcher[int](
-		bus,
-		withIdleTimeout[int](10*time.Millisecond),
-	)
-	ctx := context.Background()
-
-	_ = dispatch(
-		ctx,
-		d,
-		makeEvent(
-			"agg-1",
-			1,
-		),
-		true,
-	)
-
-	d.WaitIdle()
-	d.workers.Wait()
-
-	if d.registry.Wake("agg-1") != nil {
-		t.Errorf("expected 0 queues after idle timeout, got the queue of agg-1")
-	}
-
-	_ = d.Close(ctx)
 }
 
 func TestEnqueue_NeverBlocksBehindASlowHandler(
@@ -2311,23 +2265,7 @@ func newTestDispatcher[T any](
 		opt(&c)
 	}
 
-	return newDispatcher(
-		c.cfg,
-		c.opts...,
-	)
-}
-
-func withIdleTimeout[T any](
-	t time.Duration,
-) testOpt[T] {
-	return func(
-		c *testConfig[T],
-	) {
-		c.opts = append(
-			c.opts,
-			WithIdleTimeout[T](t),
-		)
-	}
+	return newDispatcher(c.cfg)
 }
 
 func withDurableSubs[T any](
@@ -2813,8 +2751,7 @@ func (r *deliveries) list() []string {
 }
 
 type testConfig[T any] struct {
-	cfg  asynxmd.DispatcherConfig[T]
-	opts []Opt[T]
+	cfg asynxmd.DispatcherConfig[T]
 }
 
 type testOpt[T any] func(
@@ -13723,10 +13660,7 @@ func newDeliveryTestDispatcher[T any](
 		opt(&c)
 	}
 
-	return New(
-		c.cfg,
-		c.opts...,
-	)
+	return New(c.cfg)
 }
 
 func withDeliveryDurableSubs[T any](
@@ -14132,8 +14066,7 @@ func (r *deliveriesDelivery) list() []string {
 }
 
 type testDeliveryConfig[T any] struct {
-	cfg  asynxmd.DispatcherConfig[T]
-	opts []Opt[T]
+	cfg asynxmd.DispatcherConfig[T]
 }
 
 type testDeliveryOpt[T any] func(
@@ -14611,12 +14544,11 @@ func TestEnqueue_AckErrorIsReported(
 	}
 }
 
-func TestEnqueue_NeverStrandedByIdleWorkerRetirement(
+func TestEnqueue_NeverStrandedWhenItFollowsTheAggregateGoingIdle(
 	t *testing.T,
 ) {
 	d := newWorkerTestDispatcher[int](
 		&recordingWorkerBus{},
-		withWorkerIdleTimeout[int](time.Millisecond),
 	)
 	defer d.Close(context.Background())
 
@@ -15298,23 +15230,7 @@ func newWorkerTestDispatcher[T any](
 		opt(&c)
 	}
 
-	return New(
-		c.cfg,
-		c.opts...,
-	)
-}
-
-func withWorkerIdleTimeout[T any](
-	t time.Duration,
-) testWorkerOpt[T] {
-	return func(
-		c *testWorkerConfig[T],
-	) {
-		c.opts = append(
-			c.opts,
-			WithIdleTimeout[T](t),
-		)
-	}
+	return New(c.cfg)
 }
 
 func withPublishErrorHandler[T any](
@@ -15882,8 +15798,7 @@ func (b *recordingWorkerBus) snapshot() []asynxmd.Event[int] {
 }
 
 type testWorkerConfig[T any] struct {
-	cfg  asynxmd.DispatcherConfig[T]
-	opts []Opt[T]
+	cfg asynxmd.DispatcherConfig[T]
 }
 
 type testWorkerOpt[T any] func(
@@ -16730,4 +16645,287 @@ func runHandler17(
 	}
 
 	return nil
+}
+
+type senderKey struct{}
+
+type observedContext struct {
+	value any
+	err   error
+	in    bool
+}
+
+func observe(
+	d *dispatcher[int],
+	ctx context.Context,
+) observedContext {
+	return observedContext{
+		value: ctx.Value(senderKey{}),
+		err:   ctx.Err(),
+		in: d.InHandler(
+			ctx,
+			"a",
+		),
+	}
+}
+
+func TestEnqueue_HandlersKeepTheSendersValuesButNotItsCancellation(
+	t *testing.T,
+) {
+	release := make(chan struct{})
+	busSeen := make(
+		chan observedContext,
+		2,
+	)
+	handlerSeen := make(
+		chan observedContext,
+		2,
+	)
+	ackSeen := make(
+		chan observedContext,
+		2,
+	)
+	var d *dispatcher[int]
+	bus := &callbackBus{fn: func(
+		ctx context.Context,
+		_ asynxmd.Event[int],
+	) error {
+		busSeen <- observe(
+			d,
+			ctx,
+		)
+		<-release
+		return nil
+	}}
+	handler := func(
+		ctx context.Context,
+		_ asynxmd.Event[int],
+	) error {
+		handlerSeen <- observe(
+			d,
+			ctx,
+		)
+		return nil
+	}
+	ack := func(
+		ctx context.Context,
+	) error {
+		ackSeen <- observe(
+			d,
+			ctx,
+		)
+		return nil
+	}
+	d = newTestDispatcher[int](
+		bus,
+		withDurableSubs([]asynxmd.DurableSub[int]{{Match: always, Handler: handler}}),
+	)
+	t.Cleanup(func() { d.Close(context.Background()) })
+	sender, cancel := context.WithCancel(context.WithValue(
+		context.Background(),
+		senderKey{},
+		"trace-1",
+	))
+	first, _ := enqueueTicket(
+		sender,
+		d,
+		makeEvent(
+			"a",
+			1,
+		),
+		ack,
+	)
+	second, _ := enqueueTicket(
+		sender,
+		d,
+		makeEvent(
+			"a",
+			2,
+		),
+		ack,
+	)
+
+	cancel()
+	close(release)
+	final(
+		t,
+		first,
+		"first",
+	)
+	final(
+		t,
+		second,
+		"second",
+	)
+
+	assertSenderContext(
+		t,
+		"bus",
+		busSeen,
+	)
+	assertSenderContext(
+		t,
+		"handler",
+		handlerSeen,
+	)
+	assertSenderContext(
+		t,
+		"ack",
+		ackSeen,
+	)
+}
+
+func assertSenderContext(
+	t *testing.T,
+	step string,
+	seen <-chan observedContext,
+) {
+	t.Helper()
+	want := observedContext{value: "trace-1", in: true}
+	for range 2 {
+		got := recv(
+			t,
+			seen,
+			step,
+		)
+		assertObserved(
+			t,
+			step,
+			got,
+			want,
+		)
+	}
+}
+
+func assertObserved(
+	t *testing.T,
+	step string,
+	got observedContext,
+	want observedContext,
+) {
+	t.Helper()
+	if got != want {
+		t.Fatalf(
+			"%s saw %+v, want the sender's values, no cancellation and the in-handler mark: %+v",
+			step,
+			got,
+			want,
+		)
+	}
+}
+
+func enqueueBurst(
+	t *testing.T,
+	d *dispatcher[int],
+	aggregates int,
+	versions int64,
+) {
+	t.Helper()
+	for agg := range aggregates {
+		enqueueRun(
+			t,
+			d,
+			fmt.Sprintf(
+				"agg-%d",
+				agg,
+			),
+			versions,
+		)
+	}
+}
+
+func enqueueRun(
+	t *testing.T,
+	d *dispatcher[int],
+	aggregateID string,
+	versions int64,
+) {
+	t.Helper()
+	for version := int64(1); version <= versions; version++ {
+		enqueueVersion(
+			t,
+			d,
+			aggregateID,
+			version,
+		)
+	}
+}
+
+func enqueueVersion(
+	t *testing.T,
+	d *dispatcher[int],
+	aggregateID string,
+	version int64,
+) {
+	t.Helper()
+	_, err := d.Enqueue(
+		context.Background(),
+		asynxmd.DispatchRequest[int]{Event: makeEvent(
+			aggregateID,
+			version,
+		)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func goroutinesBackTo(
+	t *testing.T,
+	what string,
+	baseline int,
+) {
+	t.Helper()
+	waitFor(
+		t,
+		what,
+		func() bool { return runtime.NumGoroutine() <= baseline },
+	)
+}
+
+func TestClose_LeavesNoGoroutineBehind(
+	t *testing.T,
+) {
+	before := runtime.NumGoroutine()
+	d := newTestDispatcher[int](&recordingBus{})
+	enqueueBurst(
+		t,
+		d,
+		20,
+		10,
+	)
+
+	if err := d.Close(context.Background()); err != nil {
+		t.Fatalf(
+			"Close: %v",
+			err,
+		)
+	}
+
+	goroutinesBackTo(
+		t,
+		"the delivery goroutines to exit",
+		before,
+	)
+}
+
+func TestWaitIdle_ReleasesTheDeliveryGoroutines(
+	t *testing.T,
+) {
+	before := runtime.NumGoroutine()
+	d := newTestDispatcher[int](&recordingBus{})
+	t.Cleanup(func() { d.Close(context.Background()) })
+	enqueueRun(
+		t,
+		d,
+		"a",
+		50,
+	)
+
+	d.WaitIdle()
+	goroutinesBackTo(
+		t,
+		"the delivery goroutines to exit once idle",
+		before,
+	)
 }

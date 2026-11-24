@@ -143,10 +143,6 @@ func TestJob_CompleteRunsOnce(
 			cancels.Load(),
 		)
 	}
-
-	if job.Context().Err() == nil {
-		t.Fatal("context not cancelled")
-	}
 }
 
 func TestJob_CompleteWithoutCallback(

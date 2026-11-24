@@ -9,7 +9,6 @@ import (
 
 type dispatchJob[T any] struct {
 	event      asynxmd.Event[T]
-	ctx        context.Context
 	cancel     context.CancelFunc
 	ack        func(context.Context) error
 	forget     bool
@@ -36,11 +35,6 @@ func (j *dispatchJob[T]) Version() int64 {
 // Event returns the event being delivered.
 func (j *dispatchJob[T]) Event() asynxmd.Event[T] {
 	return j.event
-}
-
-// Context returns the context the job's handlers run with.
-func (j *dispatchJob[T]) Context() context.Context {
-	return j.ctx
 }
 
 // Durable reports whether the job runs durable subscribers.

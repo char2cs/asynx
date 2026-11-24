@@ -1,9 +1,13 @@
 package delivery
 
-import "github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/contracts"
+import (
+	"context"
 
-// Deliverer runs a job's durable delivery on behalf of its aggregate's worker.
-// It is safe for concurrent use by the workers of different aggregates.
+	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/contracts"
+)
+
+// Deliverer runs a job's durable delivery on behalf of the delivery goroutine of its aggregate's turn.
+// It is safe for concurrent use by the deliveries of different aggregates.
 type Deliverer[T any] interface {
 	// Deliver hands job's event to every durable subscriber that receives it
 	// (all of them for a deletion marker, the matching ones otherwise) and
@@ -29,6 +33,7 @@ type Deliverer[T any] interface {
 	// the aggregate likewise). A job that carries an Ack and whose halt is
 	// already closed returns ErrDeliveryParked without running anything.
 	Deliver(
+		ctx context.Context,
 		aggregateID string,
 		halt <-chan struct{},
 		job contracts.Job[T],
@@ -43,10 +48,11 @@ type Deliverer[T any] interface {
 	// wrapping the last handler error and the attempt count), a failed ack
 	// (the ack error), an interrupt (ErrDispatcherClosed).
 	ParkThenReport(
+		ctx context.Context,
 		aggregateID string,
 		halt <-chan struct{},
 		job contracts.Job[T],
 		cause error,
-		report func(),
+		report func(context.Context),
 	)
 }

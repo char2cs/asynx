@@ -25,10 +25,7 @@ func (p *Processor[T]) Send(
 			asynxmd.ErrContextCancelled
 	}
 
-	commands, envelope := p.enqueueTarget(
-		ctx,
-		cmd,
-	)
+	commands, envelope := p.enqueueTarget(cmd)
 	return p.sendAndWait(
 		ctx,
 		commands,
@@ -56,10 +53,7 @@ func (p *Processor[T]) SendWait(
 			err
 	}
 
-	commands, envelope := p.enqueueTarget(
-		ctx,
-		cmd,
-	)
+	commands, envelope := p.enqueueTarget(cmd)
 	envelope.WaitHandlers = true
 	return p.sendAndWait(
 		ctx,
@@ -88,24 +82,14 @@ func (p *Processor[T]) refuseSendWait(
 }
 
 func (p *Processor[T]) enqueueTarget(
-	ctx context.Context,
 	cmd asynxmd.Command[T],
 ) (chan<- *models.CommandEnvelope[T], *models.CommandEnvelope[T]) {
 	shardIndex := p.router.Route(
 		cmd.AggregateID(),
 	)
 	commands := p.pool.Shards()[shardIndex].CommandChan()
-	envelope := &models.CommandEnvelope[T]{
-		Cmd: cmd,
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[T],
-			1,
-		),
-	}
-
 	return commands,
-		envelope
+		models.NewCommandEnvelope(cmd)
 }
 
 func (p *Processor[T]) isShuttingDown() bool {
@@ -142,6 +126,32 @@ func (p *Processor[T]) sendAndWait(
 		p.onSendPending()
 	}
 
+	select {
+	case result := <-envelope.ResultChan:
+		return awaitHandlers(
+			ctx,
+			result,
+		)
+	case <-envelope.Turn:
+		go envelope.Execute(
+			ctx,
+			p.executor,
+		)
+		return awaitResult(
+			ctx,
+			envelope,
+		)
+	case <-ctx.Done():
+		envelope.Abandon()
+		return asynxmd.Event[T]{},
+			asynxmd.ErrContextCancelled
+	}
+}
+
+func awaitResult[T any](
+	ctx context.Context,
+	envelope *models.CommandEnvelope[T],
+) (asynxmd.Event[T], error) {
 	select {
 	case result := <-envelope.ResultChan:
 		return awaitHandlers(

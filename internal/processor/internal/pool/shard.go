@@ -132,21 +132,16 @@ func (s *Shard[T]) dispatchJob(
 }
 
 func (s *Shard[T]) workerLoop(
-	executor models.Executor[T],
 	doneWg *sync.WaitGroup,
 ) {
 	defer doneWg.Done()
 
 	for job := range s.jobQueue {
-		s.serve(
-			executor,
-			job,
-		)
+		s.serve(job)
 	}
 }
 
 func (s *Shard[T]) serve(
-	executor models.Executor[T],
 	job *models.CommandJob[T],
 ) {
 	aggregateID := job.Envelope.Cmd.AggregateID()
@@ -158,10 +153,7 @@ func (s *Shard[T]) serve(
 	}
 
 	for job != nil {
-		s.executeJob(
-			executor,
-			job,
-		)
+		s.executeJob(job)
 		job = s.next(aggregateID)
 	}
 }
@@ -219,31 +211,9 @@ func (s *Shard[T]) next(
 }
 
 func (s *Shard[T]) executeJob(
-	executor models.Executor[T],
 	job *models.CommandJob[T],
 ) {
-	if err := job.Envelope.Ctx.Err(); err != nil {
-		s.sendResult(
-			job.Envelope.ResultChan,
-			models.CommandResult[T]{Err: asynxmd.ErrContextCancelled},
-		)
-		return
-	}
-
-	event, wait, err := executor.ExecuteAsync(
-		job.Envelope.Ctx,
-		job.Envelope.Cmd,
-	)
-
-	result := models.CommandResult[T]{Event: event, Err: err}
-	if job.Envelope.WaitHandlers {
-		result.Wait = wait
-	}
-
-	s.sendResult(
-		job.Envelope.ResultChan,
-		result,
-	)
+	job.Envelope.GrantTurn()
 }
 
 func (s *Shard[T]) sendResult(

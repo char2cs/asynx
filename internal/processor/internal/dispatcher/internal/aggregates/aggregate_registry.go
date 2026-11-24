@@ -56,81 +56,64 @@ func (r *aggregateRegistry[J]) enqueue(
 	}
 
 	rec := r.recordOf(agg)
-	spawned := !rec.worker
-	r.ensureWorker(
-		agg,
-		rec,
-	)
+	done := make(chan struct{})
+	admission := contracts.Admission{
+		Turn: rec.tail,
+		Done: done,
+	}
+	rec.tail = done
+	rec.active++
 	r.admit(job)
 	rec.jobs = append(
 		rec.jobs,
 		job,
 	)
-	signal(rec.wake)
-	return contracts.Admission{Spawned: spawned},
+	return admission,
 		nil
 }
 
-// Pop removes and returns the aggregate's oldest queued job with the halt
-// channel it is delivered under (see Registry.Pop).
-func (r *aggregateRegistry[J]) Pop(
-	aggregateID string,
-) (job J, halt <-chan struct{}, ok bool) {
+// Begin removes job from its aggregate's queue and returns the halt channel
+// it is delivered under (see Registry.Begin).
+func (r *aggregateRegistry[J]) Begin(
+	job J,
+) (halt <-chan struct{}, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	rec, found := r.records[aggregateID]
+	rec, found := r.records[job.AggregateID()]
 	if !found ||
-		len(rec.jobs) == 0 {
-		return job,
-			nil,
+		!headOf(
+			rec,
+			job,
+		) {
+		return nil,
 			false
 	}
 
-	job = rec.jobs[0]
 	clear(rec.jobs[:1])
 	rec.jobs = rec.jobs[1:]
-	return job,
-		rec.halt,
+	return rec.halt,
 		true
 }
 
-// Wake returns the aggregate's wake channel, nil when it has no record (see
-// Registry.Wake).
-func (r *aggregateRegistry[J]) Wake(
+// Finish ends the turn of the aggregate's job that holds done (see
+// Registry.Finish).
+func (r *aggregateRegistry[J]) Finish(
 	aggregateID string,
-) <-chan struct{} {
+	done chan<- struct{},
+) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	close(done)
 	rec, ok := r.records[aggregateID]
 	if !ok {
-		return nil
+		return
 	}
 
-	return rec.wake
-}
-
-// Retire releases the aggregate's idle worker, keeping a record that holds a
-// park or undelivered versions (see Registry.Retire).
-func (r *aggregateRegistry[J]) Retire(
-	aggregateID string,
-) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	rec, ok := r.records[aggregateID]
-	if !ok {
-		return true
-	}
-
-	if len(rec.jobs) > 0 {
-		return false
-	}
-
-	rec.worker = false
+	rec.active--
 	r.discardIfEmpty(
 		aggregateID,
 		rec,
 	)
-	return true
 }
 
 // Park parks the aggregate for cause and records the given versions as
@@ -315,38 +298,12 @@ func (r *aggregateRegistry[J]) recordOf(
 	}
 
 	rec = &record[J]{
+		tail:        turnReady(),
 		halt:        make(chan struct{}),
 		undelivered: make(map[int64]error),
 	}
 	r.records[agg] = rec
 	return rec
-}
-
-func (r *aggregateRegistry[J]) ensureWorker(
-	agg string,
-	rec *record[J],
-) {
-	if rec.worker {
-		return
-	}
-
-	rec.worker = true
-	rec.wake = make(
-		chan struct{},
-		1,
-	)
-	rec.halt = make(chan struct{})
-	r.spawn(agg)
-}
-
-func (r *aggregateRegistry[J]) spawn(
-	agg string,
-) {
-	if r.hooks.Spawn == nil {
-		return
-	}
-
-	r.hooks.Spawn(agg)
 }
 
 func (r *aggregateRegistry[J]) admit(
@@ -440,7 +397,7 @@ func (r *aggregateRegistry[J]) discardIfEmpty(
 	agg string,
 	rec *record[J],
 ) {
-	busy := rec.worker || len(rec.jobs) > 0
+	busy := rec.active > 0
 	held := rec.parked || len(rec.undelivered) > 0
 	if busy ||
 		held {
@@ -475,13 +432,21 @@ func undeliveredOf[J Item](
 	return slices.Sorted(maps.Keys(rec.undelivered))
 }
 
-func signal(
-	ch chan struct{},
-) {
-	select {
-	case ch <- struct{}{}:
-	default:
+func headOf[J Item](
+	rec *record[J],
+	job J,
+) bool {
+	if len(rec.jobs) == 0 {
+		return false
 	}
+
+	return any(rec.jobs[0]) == any(job)
+}
+
+func turnReady() <-chan struct{} {
+	ready := make(chan struct{})
+	close(ready)
+	return ready
 }
 
 func isClosed(

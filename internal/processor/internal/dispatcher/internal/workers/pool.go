@@ -1,9 +1,16 @@
 package workers
 
-// Pool owns the per-aggregate worker goroutines.
+import (
+	"context"
+
+	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/contracts"
+)
+
+// Pool runs the deliveries of jobs, one goroutine per job, which the dispatcher
+// starts and which take their turn on their aggregate.
 //
-// A worker handles each job it pops as follows. A job that carries an Ack and
-// whose aggregate is parked, or was parked since the job was popped, is
+// A run handles its job as follows. A job that carries an Ack and
+// whose aggregate is parked, or was parked since the job began, is
 // settled unrun and ends with ErrDeliveryParked without running anything.
 // Otherwise the event is published to the live subscribers, unless the job
 // skips them; a bus error, or a panic in the bus, is reported to the publish
@@ -12,24 +19,21 @@ package workers
 // once every durable subscriber has succeeded. A failed ack parks the
 // aggregate before the error is reported to the publish error handler, so the
 // aggregate's next event cannot overtake this one. A panic in the dispatcher
-// itself never kills the worker: it is reported to the publish error handler
+// itself never kills the run: it is reported to the publish error handler
 // and ends the job with that error. Whatever happens, the job is settled and
-// completed when the worker is done with it.
+// completed when the run is done with it, and the aggregate's next job is
+// then let in.
 type Pool[T any] interface {
-	// Spawn starts the worker of aggregateID. The registry calls it, under its
-	// mutex, when it queues a job for an aggregate without a worker; the
-	// worker is counted before Spawn returns, so a Wait that follows a Close
-	// of the registry also waits for it.
-	Spawn(
-		aggregateID string,
+	// Run delivers job. It blocks until turn is closed, which is when the
+	// aggregate's previous job has finished, then begins job in the registry:
+	// a job a park dropped meanwhile has been settled and completed by the
+	// park and runs nothing. ctx is the context the job's handlers run with;
+	// it is passed down the call chain and kept nowhere. Run closes done when
+	// it is over, even after a panic, and the dispatcher counts it for Close.
+	Run(
+		ctx context.Context,
+		job contracts.Job[T],
+		turn <-chan struct{},
+		done chan<- struct{},
 	)
-
-	// Stop tells every worker to drain its queue and exit instead of waiting
-	// for more work. Call it once, after the registry has been closed so no
-	// new worker is spawned.
-	Stop()
-
-	// Wait blocks until every worker has exited: after Stop once they have
-	// drained, otherwise as they retire after their idle timeout.
-	Wait()
 }

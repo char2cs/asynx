@@ -87,8 +87,7 @@ func TestPool_SingleCommandSuccess(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -98,14 +97,11 @@ func TestPool_SingleCommandSuccess(
 	ctx := context.Background()
 	shard := p.Shards()[0]
 
-	envelope := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
+	)
 
 	shard.CommandChan() <- envelope
 
@@ -156,8 +152,7 @@ func TestPool_SerialOrderingSameAggregate(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -168,17 +163,14 @@ func TestPool_SerialOrderingSameAggregate(
 	shard := p.Shards()[0]
 
 	for i := 1; i <= 10; i++ {
-		envelope := &models.CommandEnvelope[order]{
-			Cmd: mocks.UpdateOrderCmd{
+		envelope := newEnvelope(
+			executor,
+			ctx,
+			mocks.UpdateOrderCmd{
 				ID:       "order1",
 				NewState: order{ID: "order1", Total: float64(i * 10), Status: "Pending"},
 			},
-			Ctx: ctx,
-			ResultChan: make(
-				chan models.CommandResult[order],
-				1,
-			),
-		}
+		)
 
 		shard.CommandChan() <- envelope
 
@@ -228,8 +220,7 @@ func TestPool_ParallelDifferentAggregates(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		8,
 		0,
 		1,
@@ -246,6 +237,7 @@ func TestPool_ParallelDifferentAggregates(
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go submitCreate(
+			executor,
 			ctx,
 			&wg,
 			errs,
@@ -291,8 +283,7 @@ func TestPool_ValidationFailureNoWrite(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -302,14 +293,11 @@ func TestPool_ValidationFailureNoWrite(
 	ctx := context.Background()
 	shard := p.Shards()[0]
 
-	envelope := &models.CommandEnvelope[order]{
-		Cmd: mocks.CancelOrderCmd{ID: "order1"},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope := newEnvelope(
+		executor,
+		ctx,
+		mocks.CancelOrderCmd{ID: "order1"},
+	)
 
 	shard.CommandChan() <- envelope
 
@@ -349,8 +337,7 @@ func TestPool_DrainWaitsForInflight(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -368,6 +355,7 @@ func TestPool_DrainWaitsForInflight(
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go submitCreate(
+			executor,
 			ctx,
 			&wg,
 			errs,
@@ -406,24 +394,7 @@ func TestPool_DrainWaitsForInflight(
 func TestPool_DrainTimeout(
 	t *testing.T,
 ) {
-	s := store.New()
-	b := bus.New[order]()
-	es := eventstore.New[order](
-		s,
-		store.NewSnapshots(),
-		nil,
-		1,
-		nil,
-	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
-	t.Cleanup(func() { d.Close(context.Background()) })
-	executor := exec.New(
-		es,
-		d,
-	)
-
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -464,8 +435,7 @@ func TestPool_QueueFullBlocksSender(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		1,
 		1,
@@ -496,14 +466,11 @@ func TestPool_QueueFullBlocksSender(
 		1,
 	)
 	go func() {
-		envelope := &models.CommandEnvelope[order]{
-			Cmd: blockingCmd,
-			Ctx: ctx,
-			ResultChan: make(
-				chan models.CommandResult[order],
-				1,
-			),
-		}
+		envelope := newEnvelope(
+			executor,
+			ctx,
+			blockingCmd,
+		)
 		shard.CommandChan() <- envelope
 		close(blocked)
 		result := <-envelope.ResultChan
@@ -513,14 +480,11 @@ func TestPool_QueueFullBlocksSender(
 	<-blocked
 	<-dispatched
 
-	normalEnvelope := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order2", Total: 100.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	normalEnvelope := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order2", Total: 100.0},
+	)
 
 	sendDone := make(chan struct{})
 	go func() {
@@ -558,8 +522,7 @@ func TestPool_MultipleWorkers(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		4,
 		0,
 		4,
@@ -577,6 +540,7 @@ func TestPool_MultipleWorkers(
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go submitCreate(
+			executor,
 			ctx,
 			&wg,
 			errs,
@@ -613,8 +577,7 @@ func TestPool_ValidationErrorDecrementVersionSingleWorker(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -624,14 +587,11 @@ func TestPool_ValidationErrorDecrementVersionSingleWorker(
 	ctx := context.Background()
 	shard := p.Shards()[0]
 
-	envelope1 := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope1 := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
+	)
 	shard.CommandChan() <- envelope1
 	result1 := <-envelope1.ResultChan
 	if result1.Err != nil {
@@ -641,14 +601,11 @@ func TestPool_ValidationErrorDecrementVersionSingleWorker(
 		)
 	}
 
-	envelope2 := &models.CommandEnvelope[order]{
-		Cmd: mocks.CancelOrderCmd{ID: "order1"},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope2 := newEnvelope(
+		executor,
+		ctx,
+		mocks.CancelOrderCmd{ID: "order1"},
+	)
 	shard.CommandChan() <- envelope2
 	result2 := <-envelope2.ResultChan
 	if result2.Err != nil {
@@ -658,14 +615,11 @@ func TestPool_ValidationErrorDecrementVersionSingleWorker(
 		)
 	}
 
-	envelope3 := &models.CommandEnvelope[order]{
-		Cmd: mocks.CancelOrderCmd{ID: "order2"},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope3 := newEnvelope(
+		executor,
+		ctx,
+		mocks.CancelOrderCmd{ID: "order2"},
+	)
 	shard.CommandChan() <- envelope3
 	result3 := <-envelope3.ResultChan
 	if result3.Err != asynxmd.ErrValidation {
@@ -675,14 +629,11 @@ func TestPool_ValidationErrorDecrementVersionSingleWorker(
 		)
 	}
 
-	envelope4 := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order3", Total: 200.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope4 := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order3", Total: 200.0},
+	)
 	shard.CommandChan() <- envelope4
 	result4 := <-envelope4.ResultChan
 	if result4.Err != nil {
@@ -712,8 +663,7 @@ func TestPool_ContextCancelledDuringExecution(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -723,14 +673,11 @@ func TestPool_ContextCancelledDuringExecution(
 	ctx, cancel := context.WithCancel(context.Background())
 	shard := p.Shards()[0]
 
-	envelope := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
+	)
 
 	shard.CommandChan() <- envelope
 
@@ -746,24 +693,7 @@ func TestPool_ContextCancelledDuringExecution(
 func TestPool_DrainWithNoCommands(
 	t *testing.T,
 ) {
-	s := store.New()
-	b := bus.New[order]()
-	es := eventstore.New[order](
-		s,
-		store.NewSnapshots(),
-		nil,
-		1,
-		nil,
-	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
-	t.Cleanup(func() { d.Close(context.Background()) })
-	executor := exec.New(
-		es,
-		d,
-	)
-
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		2,
 		0,
 		2,
@@ -781,24 +711,7 @@ func TestPool_DrainWithNoCommands(
 func TestPool_DrainTimeoutBothPhases(
 	t *testing.T,
 ) {
-	s := store.New()
-	b := bus.New[order]()
-	es := eventstore.New[order](
-		s,
-		store.NewSnapshots(),
-		nil,
-		1,
-		nil,
-	)
-	d := dispatcher.Dispatcher(asynxmd.DispatcherConfig[order]{Bus: b})
-	t.Cleanup(func() { d.Close(context.Background()) })
-	executor := exec.New(
-		es,
-		d,
-	)
-
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -839,8 +752,7 @@ func TestPool_DispatcherMultipleCorrections(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		2,
@@ -850,25 +762,19 @@ func TestPool_DispatcherMultipleCorrections(
 	ctx := context.Background()
 	shard := p.Shards()[0]
 
-	envelope1 := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope1 := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order1", Total: 100.0},
+	)
 	shard.CommandChan() <- envelope1
 	<-envelope1.ResultChan
 
-	envelope2 := &models.CommandEnvelope[order]{
-		Cmd: mocks.CancelOrderCmd{ID: "order2"},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope2 := newEnvelope(
+		executor,
+		ctx,
+		mocks.CancelOrderCmd{ID: "order2"},
+	)
 	shard.CommandChan() <- envelope2
 	result2 := <-envelope2.ResultChan
 	if result2.Err != asynxmd.ErrValidation {
@@ -878,14 +784,11 @@ func TestPool_DispatcherMultipleCorrections(
 		)
 	}
 
-	envelope3 := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order3", Total: 100.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope3 := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order3", Total: 100.0},
+	)
 	shard.CommandChan() <- envelope3
 	result3 := <-envelope3.ResultChan
 	if result3.Err != nil {
@@ -916,8 +819,7 @@ func TestPool_WaitWorkers_ContextCancelledAfterDispatch(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -926,15 +828,11 @@ func TestPool_WaitWorkers_ContextCancelledAfterDispatch(
 	ctx := context.Background()
 	shard := p.Shards()[0]
 
-	envelope := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "blocking-order", Total: 10.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-		WaitHandlers: true,
-	}
+	envelope := newWaitingEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "blocking-order", Total: 10.0},
+	)
 	shard.CommandChan() <- envelope
 
 	drainCtx, cancel := context.WithTimeout(
@@ -979,8 +877,7 @@ func BenchmarkPool_Send_SingleShard(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		1,
 		0,
 		1,
@@ -994,14 +891,11 @@ func BenchmarkPool_Send_SingleShard(
 	b.ResetTimer()
 
 	for b.Loop() {
-		envelope := &models.CommandEnvelope[order]{
-			Cmd: mocks.CreateOrderCmd{ID: "order", Total: 100.0},
-			Ctx: ctx,
-			ResultChan: make(
-				chan models.CommandResult[order],
-				1,
-			),
-		}
+		envelope := newEnvelope(
+			executor,
+			ctx,
+			mocks.CreateOrderCmd{ID: "order", Total: 100.0},
+		)
 
 		shard.CommandChan() <- envelope
 		<-envelope.ResultChan
@@ -1055,8 +949,7 @@ func benchMultiShard(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		shards,
 		0,
 		1,
@@ -1070,6 +963,7 @@ func benchMultiShard(
 
 	for b.Loop() {
 		benchSend(
+			executor,
 			ctx,
 			p.Shards()[b.N%shards],
 		)
@@ -1095,8 +989,7 @@ func BenchmarkPool_Send_Parallel(
 		d,
 	)
 
-	p := pool.New(
-		executor,
+	p := pool.New[order](
 		8,
 		0,
 		1,
@@ -1112,6 +1005,7 @@ func BenchmarkPool_Send_Parallel(
 		pb *testing.PB,
 	) {
 		benchParallel(
+			executor,
 			ctx,
 			pb,
 			p,
@@ -1121,6 +1015,7 @@ func BenchmarkPool_Send_Parallel(
 }
 
 func benchParallel(
+	executor models.Executor[order],
 	ctx context.Context,
 	pb *testing.PB,
 	p *pool.ShardPool[order],
@@ -1128,6 +1023,7 @@ func benchParallel(
 	idx := 0
 	for pb.Next() {
 		benchSend(
+			executor,
 			ctx,
 			p.Shards()[idx%8],
 		)
@@ -1136,23 +1032,22 @@ func benchParallel(
 }
 
 func benchSend(
+	executor models.Executor[order],
 	ctx context.Context,
 	shard *pool.Shard[order],
 ) {
-	envelope := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order", Total: 100.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order", Total: 100.0},
+	)
 
 	shard.CommandChan() <- envelope
 	<-envelope.ResultChan
 }
 
 func submitCreate(
+	executor models.Executor[order],
 	ctx context.Context,
 	wg *sync.WaitGroup,
 	errs chan<- error,
@@ -1160,14 +1055,11 @@ func submitCreate(
 	idx int,
 ) {
 	defer wg.Done()
-	envelope := &models.CommandEnvelope[order]{
-		Cmd: mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0},
-		Ctx: ctx,
-		ResultChan: make(
-			chan models.CommandResult[order],
-			1,
-		),
-	}
+	envelope := newEnvelope(
+		executor,
+		ctx,
+		mocks.CreateOrderCmd{ID: "order" + string(rune(idx)), Total: 100.0},
+	)
 
 	shard.CommandChan() <- envelope
 	result := <-envelope.ResultChan

@@ -12,17 +12,19 @@ import (
 
 type ctxKey struct{}
 
-func newJob() jobs.Job[string] {
-	ctx := context.WithValue(
+func markedContext() context.Context {
+	return context.WithValue(
 		context.Background(),
 		ctxKey{},
 		"marker",
 	)
+}
+
+func newJob() jobs.Job[string] {
 	request := asynxmd.DispatchRequest[string]{
 		Event: asynxmd.Event[string]{AggregateID: "agg", Version: 1},
 	}
 	return jobs.New(
-		ctx,
 		request,
 		func() {},
 	)
@@ -49,6 +51,7 @@ func TestReporter_PublishErrorCallsHandler(
 	)
 
 	rep.PublishError(
+		markedContext(),
 		newJob(),
 		want,
 	)
@@ -91,6 +94,7 @@ func TestReporter_DeliveryErrorCallsHandler(
 	)
 
 	rep.DeliveryError(
+		markedContext(),
 		newJob(),
 		want,
 		4,
@@ -127,6 +131,7 @@ func TestReporter_PanicCallsHandler(
 	)
 
 	rep.Panic(
+		markedContext(),
 		newJob(),
 		"oops",
 	)
@@ -150,15 +155,18 @@ func TestReporter_NilHandlersAreNoOps(
 	job := newJob()
 
 	rep.PublishError(
+		markedContext(),
 		job,
 		errors.New("x"),
 	)
 	rep.DeliveryError(
+		markedContext(),
 		job,
 		errors.New("x"),
 		1,
 	)
 	rep.Panic(
+		markedContext(),
 		job,
 		"x",
 	)
@@ -197,15 +205,18 @@ func TestReporter_SwallowsHandlerPanics(
 	job := newJob()
 
 	rep.PublishError(
+		markedContext(),
 		job,
 		errors.New("x"),
 	)
 	rep.DeliveryError(
+		markedContext(),
 		job,
 		errors.New("x"),
 		1,
 	)
 	rep.Panic(
+		markedContext(),
 		job,
 		"x",
 	)

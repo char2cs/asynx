@@ -887,3 +887,89 @@ func BenchmarkSend_WithBusFanout(
 		)
 	}
 }
+
+func TestProcessor_Send_ACommandCancelledBeforeItsTurnNeverRuns(
+	t *testing.T,
+) {
+	p := newProcessor(
+		t,
+		models.WithShards[order](1),
+		models.WithWorkersPerShard[order](1),
+	)
+	gate := make(chan struct{})
+	entered := make(
+		chan struct{},
+		1,
+	)
+	holder := make(
+		chan error,
+		1,
+	)
+	go func() {
+		_, err := p.Send(
+			context.Background(),
+			gatedCmd{
+				UpdateOrderCmd: updateCmd(
+					"agg",
+					1,
+				),
+				entered: entered,
+				gate:    gate,
+			},
+		)
+		holder <- err
+	}()
+	<-entered
+
+	pending := make(
+		chan struct{},
+		1,
+	)
+	p.SetOnSendPending(func() { pending <- struct{}{} })
+	ctx, cancel := context.WithCancel(context.Background())
+	victim := make(
+		chan error,
+		1,
+	)
+	go func() {
+		_, err := p.Send(
+			ctx,
+			mocks.CreateOrderCmd{ID: "victim", Total: 1},
+		)
+		victim <- err
+	}()
+	<-pending
+	p.SetOnSendPending(nil)
+	cancel()
+	if err := <-victim; !errors.Is(
+		err,
+		asynxmd.ErrContextCancelled,
+	) {
+		t.Fatalf(
+			"Send = %v, want ErrContextCancelled",
+			err,
+		)
+	}
+
+	close(gate)
+	<-holder
+	mustSendOrder(
+		t,
+		p,
+		context.Background(),
+		"after",
+		0,
+	)
+
+	exists, err := p.es.Exists(
+		context.Background(),
+		"victim",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if exists {
+		t.Fatal("a command whose Send reported ErrContextCancelled ran")
+	}
+}

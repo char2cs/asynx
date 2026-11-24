@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/aggregates"
@@ -46,6 +47,7 @@ type durableDeliverer[T any] struct {
 // Deliver runs job's durable delivery with retries, as documented on
 // Deliverer.Deliver.
 func (d *durableDeliverer[T]) Deliver(
+	ctx context.Context,
 	aggregateID string,
 	halt <-chan struct{},
 	job jobs.Job[T],
@@ -69,17 +71,18 @@ func (d *durableDeliverer[T]) Deliver(
 		attempt:     1,
 		backoff:     d.retryInitial,
 	}
-	return loop.run()
+	return loop.run(ctx)
 }
 
 // ParkThenReport parks the aggregate of an acked job, then calls report, as
 // documented on Deliverer.ParkThenReport.
 func (d *durableDeliverer[T]) ParkThenReport(
+	ctx context.Context,
 	aggregateID string,
 	halt <-chan struct{},
 	job jobs.Job[T],
 	cause error,
-	report func(),
+	report func(context.Context),
 ) {
 	if job.Acked() {
 		d.registry.ParkIfCurrent(
@@ -89,7 +92,7 @@ func (d *durableDeliverer[T]) ParkThenReport(
 		)
 	}
 
-	report()
+	report(ctx)
 }
 
 func (d *durableDeliverer[T]) subscribersFor(
@@ -107,6 +110,7 @@ func (d *durableDeliverer[T]) subscribersFor(
 }
 
 func (d *durableDeliverer[T]) attempt(
+	ctx context.Context,
 	job jobs.Job[T],
 	pending []asynxmd.DurableSub[T],
 	attempt int,
@@ -114,6 +118,7 @@ func (d *durableDeliverer[T]) attempt(
 	var errs []error
 	for _, sub := range pending {
 		failed, errs = d.try(
+			ctx,
 			job,
 			sub,
 			attempt,
@@ -127,6 +132,7 @@ func (d *durableDeliverer[T]) attempt(
 }
 
 func (d *durableDeliverer[T]) try(
+	ctx context.Context,
 	job jobs.Job[T],
 	sub asynxmd.DurableSub[T],
 	attempt int,
@@ -134,6 +140,7 @@ func (d *durableDeliverer[T]) try(
 	errs []error,
 ) ([]asynxmd.DurableSub[T], []error) {
 	err := d.runDurable(
+		ctx,
 		job,
 		sub,
 		attempt,
@@ -145,6 +152,7 @@ func (d *durableDeliverer[T]) try(
 
 	failure := &asynxmd.SubscriberError{Subscriber: sub.Name, Err: err}
 	d.reports.DeliveryError(
+		ctx,
 		job,
 		failure,
 		attempt,
@@ -160,12 +168,14 @@ func (d *durableDeliverer[T]) try(
 }
 
 func (d *durableDeliverer[T]) runDurable(
+	ctx context.Context,
 	job jobs.Job[T],
 	sub asynxmd.DurableSub[T],
 	attempt int,
 ) error {
 	if sub.Timeout <= 0 {
 		return d.callRecovering(
+			ctx,
 			job,
 			sub,
 		)
@@ -176,6 +186,7 @@ func (d *durableDeliverer[T]) runDurable(
 		1,
 	)
 	go d.callInto(
+		ctx,
 		result,
 		job,
 		sub,
@@ -187,6 +198,7 @@ func (d *durableDeliverer[T]) runDurable(
 		return err
 	case <-timer.C:
 		d.reportTimeout(
+			ctx,
 			job,
 			sub,
 			attempt,
@@ -196,6 +208,7 @@ func (d *durableDeliverer[T]) runDurable(
 }
 
 func (d *durableDeliverer[T]) reportTimeout(
+	ctx context.Context,
 	job jobs.Job[T],
 	sub asynxmd.DurableSub[T],
 	attempt int,
@@ -209,6 +222,7 @@ func (d *durableDeliverer[T]) reportTimeout(
 		),
 	}
 	d.reports.DeliveryError(
+		ctx,
 		job,
 		timedOut,
 		attempt,
@@ -216,31 +230,36 @@ func (d *durableDeliverer[T]) reportTimeout(
 }
 
 func (d *durableDeliverer[T]) callInto(
+	ctx context.Context,
 	result chan<- error,
 	job jobs.Job[T],
 	sub asynxmd.DurableSub[T],
 ) {
 	result <- d.callRecovering(
+		ctx,
 		job,
 		sub,
 	)
 }
 
 func (d *durableDeliverer[T]) callRecovering(
+	ctx context.Context,
 	job jobs.Job[T],
 	sub asynxmd.DurableSub[T],
 ) (err error) {
 	defer d.recoverHandlerPanic(
+		ctx,
 		job,
 		&err,
 	)
 	return sub.Handler(
-		job.Context(),
+		ctx,
 		job.Event(),
 	)
 }
 
 func (d *durableDeliverer[T]) recoverHandlerPanic(
+	ctx context.Context,
 	job jobs.Job[T],
 	err *error,
 ) {
@@ -250,6 +269,7 @@ func (d *durableDeliverer[T]) recoverHandlerPanic(
 	}
 
 	d.reports.Panic(
+		ctx,
 		job,
 		recovered,
 	)
@@ -261,6 +281,7 @@ func (d *durableDeliverer[T]) recoverHandlerPanic(
 }
 
 func (d *durableDeliverer[T]) wait(
+	ctx context.Context,
 	aggregateID string,
 	halt <-chan struct{},
 	job jobs.Job[T],
@@ -271,11 +292,12 @@ func (d *durableDeliverer[T]) wait(
 	select {
 	case <-d.interrupted:
 		d.ParkThenReport(
+			ctx,
 			aggregateID,
 			halt,
 			job,
 			asynxmd.ErrDispatcherClosed,
-			func() {},
+			noReport,
 		)
 		return asynxmd.ErrDispatcherClosed
 	case <-halt:
@@ -286,6 +308,11 @@ func (d *durableDeliverer[T]) wait(
 			halt,
 		)
 	}
+}
+
+func noReport(
+	context.Context,
+) {
 }
 
 func backoffEnded[T any](
@@ -301,6 +328,7 @@ func backoffEnded[T any](
 }
 
 func (d *durableDeliverer[T]) giveUp(
+	ctx context.Context,
 	aggregateID string,
 	halt <-chan struct{},
 	job jobs.Job[T],
@@ -312,6 +340,7 @@ func (d *durableDeliverer[T]) giveUp(
 	}
 
 	if d.deadLettered(
+		ctx,
 		job,
 		last,
 		attempt,
@@ -319,20 +348,42 @@ func (d *durableDeliverer[T]) giveUp(
 		return nil
 	}
 
+	return d.parkExhausted(
+		ctx,
+		aggregateID,
+		halt,
+		job,
+		last,
+		attempt,
+	)
+}
+
+func (d *durableDeliverer[T]) parkExhausted(
+	ctx context.Context,
+	aggregateID string,
+	halt <-chan struct{},
+	job jobs.Job[T],
+	last error,
+	attempt int,
+) error {
 	parked := fmt.Errorf(
 		"%w after %d attempts: %w",
 		asynxmd.ErrDeliveryParked,
 		attempt,
 		last,
 	)
-	report := func() {
+	report := func(
+		ctx context.Context,
+	) {
 		d.reports.DeliveryError(
+			ctx,
 			job,
 			parked,
 			attempt,
 		)
 	}
 	d.ParkThenReport(
+		ctx,
 		aggregateID,
 		halt,
 		job,
@@ -343,6 +394,7 @@ func (d *durableDeliverer[T]) giveUp(
 }
 
 func (d *durableDeliverer[T]) deadLettered(
+	ctx context.Context,
 	job jobs.Job[T],
 	last error,
 	attempt int,
@@ -352,11 +404,13 @@ func (d *durableDeliverer[T]) deadLettered(
 	}
 
 	err := d.callDeadLetter(
+		ctx,
 		job,
 		last,
 	)
 	if err != nil {
 		d.reports.DeliveryError(
+			ctx,
 			job,
 			fmt.Errorf(
 				"dead-letter handler: %w",
@@ -368,6 +422,7 @@ func (d *durableDeliverer[T]) deadLettered(
 	}
 
 	d.reports.DeliveryError(
+		ctx,
 		job,
 		fmt.Errorf(
 			"dead-lettered after %d attempts: %w",
@@ -390,12 +445,13 @@ func (d *durableDeliverer[T]) deadLetters(
 }
 
 func (d *durableDeliverer[T]) callDeadLetter(
+	ctx context.Context,
 	job jobs.Job[T],
 	last error,
 ) (err error) {
 	defer recoverAsError(&err)
 	return d.deadLetter(
-		job.Context(),
+		ctx,
 		job.Event(),
 		last,
 	)

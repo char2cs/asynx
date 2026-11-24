@@ -15,16 +15,13 @@ func newJob(
 	request asynxmd.DispatchRequest[string],
 ) (jobs.Job[string], *atomic.Int32) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
 	var cancels atomic.Int32
-	cancel2 := func() {
+	cancel := func() {
 		cancels.Add(1)
-		cancel()
 	}
 	job := jobs.New(
-		ctx,
 		request,
-		cancel2,
+		cancel,
 	)
 	return job,
 		&cancels
@@ -68,10 +65,6 @@ func TestNew_ExposesTheEvent(
 			"event name = %q",
 			job.Event().EventName,
 		)
-	}
-
-	if job.Context() == nil {
-		t.Fatal("context is nil")
 	}
 }
 

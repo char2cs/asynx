@@ -14,37 +14,21 @@ import (
 	"time"
 )
 
-func TestNew_KeepsItsCollaboratorsAndStartsWithNoWorker(
+func TestNew_KeepsItsCollaborators(
 	t *testing.T,
 ) {
-	f := newFixture(
-		t,
-		3*time.Second,
-	)
+	f := newFixture(t)
 	pool := f.pool.(*aggregatePool[int])
 
 	collaborators := [4]any{pool.bus, pool.registry, pool.deliverer, pool.reports}
 	if collaborators != [4]any{f.bus, f.registry, f.deliverer, f.reports} {
 		t.Fatal("New did not keep its collaborators")
 	}
-
-	if pool.idleTimeout != 3*time.Second {
-		t.Fatalf(
-			"idle timeout = %v, want 3s",
-			pool.idleTimeout,
-		)
-	}
-
-	f.pool.Wait()
 }
-
 func TestPool_PublishesLiveThenDeliversThenAcks(
 	t *testing.T,
 ) {
-	f := newFixture(
-		t,
-		time.Second,
-	)
+	f := newFixture(t)
 	ack := func(
 		context.Context,
 	) error {
@@ -83,10 +67,7 @@ func TestPool_PublishesLiveThenDeliversThenAcks(
 func TestPool_NeverAcksADeliveryThatDidNotSucceed(
 	t *testing.T,
 ) {
-	f := newFixture(
-		t,
-		time.Second,
-	)
+	f := newFixture(t)
 	down := errors.New("down")
 	f.deliverer.deliver = func(
 		jobs.Job[int],
@@ -129,10 +110,7 @@ func TestPool_NeverAcksADeliveryThatDidNotSucceed(
 func TestPool_AnAckFailureParksBeforeItIsReported(
 	t *testing.T,
 ) {
-	f := newFixture(
-		t,
-		time.Second,
-	)
+	f := newFixture(t)
 	storeDown := errors.New("store down")
 	ack3 := func(
 		context.Context,
@@ -178,10 +156,7 @@ func TestPool_AnAckFailureParksBeforeItIsReported(
 func TestPool_ALiveJobRunsNoDurableDelivery(
 	t *testing.T,
 ) {
-	f := newFixture(
-		t,
-		time.Second,
-	)
+	f := newFixture(t)
 	ticket := f.enqueue(
 		t,
 		event(
@@ -214,10 +189,7 @@ func TestPool_ALiveJobRunsNoDurableDelivery(
 func TestPool_ATombstoneWithoutAnAckIsDeliveredAndNeverAcked(
 	t *testing.T,
 ) {
-	f := newFixture(
-		t,
-		time.Second,
-	)
+	f := newFixture(t)
 	request := event(
 		1,
 		nil,
@@ -252,10 +224,7 @@ func TestPool_ATombstoneWithoutAnAckIsDeliveredAndNeverAcked(
 func TestPool_ARedeliverySkipsTheLiveSubscribers(
 	t *testing.T,
 ) {
-	f := newFixture(
-		t,
-		time.Second,
-	)
+	f := newFixture(t)
 	ack4 := func(
 		context.Context,
 	) error {
@@ -295,10 +264,7 @@ func TestPool_ARedeliverySkipsTheLiveSubscribers(
 func TestPool_ABusPanicIsReportedAndTheDeliveryGoesOn(
 	t *testing.T,
 ) {
-	f := newFixture(
-		t,
-		time.Second,
-	)
+	f := newFixture(t)
 	f.bus.publish = func(
 		asynxmd.Event[int],
 	) error {
@@ -353,10 +319,7 @@ func TestPool_ABusPanicIsReportedAndTheDeliveryGoesOn(
 func TestPool_ADispatcherPanicIsReportedAndEndsTheJob(
 	t *testing.T,
 ) {
-	f := newFixture(
-		t,
-		time.Second,
-	)
+	f := newFixture(t)
 	f.deliverer.deliver = func(
 		jobs.Job[int],
 	) error {
@@ -414,28 +377,24 @@ func TestPool_ADispatcherPanicIsReportedAndEndsTheJob(
 func TestPool_AParkedAckedJobRunsNothing(
 	t *testing.T,
 ) {
-	f := newFixture(
-		t,
-		time.Second,
-	)
-	ctx, cancel := context.WithCancel(context.Background())
+	f := newFixture(t)
 	ack7 := func(
 		context.Context,
 	) error {
 		return nil
 	}
 	job := jobs.New(
-		ctx,
 		event(
 			1,
 			ack7,
 		),
-		cancel,
+		func() {},
 	)
 	halt := make(chan struct{})
 	close(halt)
 
 	f.pool.(*aggregatePool[int]).handle(
+		context.Background(),
 		"a",
 		halt,
 		job,
@@ -475,10 +434,7 @@ func TestPool_AParkedAckedJobRunsNothing(
 func TestPool_HandlesAnAggregatesJobsInQueueOrder(
 	t *testing.T,
 ) {
-	f := newFixture(
-		t,
-		time.Second,
-	)
+	f := newFixture(t)
 	var order []int64
 	f.bus.publish = func(
 		e asynxmd.Event[int],
@@ -519,56 +475,100 @@ func TestPool_HandlesAnAggregatesJobsInQueueOrder(
 	}
 }
 
-func TestPool_AnIdleWorkerRetires(
+type versionGate struct {
+	gate <-chan struct{}
+}
+
+func (g versionGate) publish(
+	e asynxmd.Event[int],
+) error {
+	if e.Version == 1 {
+		<-g.gate
+	}
+
+	return nil
+}
+
+func TestPool_AJobAParkDroppedRunsNothingAndStillHandsItsTurnOn(
 	t *testing.T,
 ) {
-	f := newFixture(
+	f := newFixture(t)
+	gate := make(chan struct{})
+	f.bus.publish = versionGate{gate: gate}.publish
+	ack := func(
+		context.Context,
+	) error {
+		return nil
+	}
+	running := f.enqueue(
 		t,
-		time.Millisecond,
+		event(
+			1,
+			nil,
+		),
 	)
+	dropped := f.enqueue(
+		t,
+		event(
+			2,
+			ack,
+		),
+	)
+	behind := f.enqueue(
+		t,
+		event(
+			3,
+			nil,
+		),
+	)
+
+	f.registry.Park(
+		"a",
+		errors.New("halted"),
+	)
+	close(gate)
+
 	if err := final(
 		t,
-		f.enqueue(
-			t,
-			event(
-				1,
-				nil,
-			),
-		),
-	); err != nil {
-		t.Fatal(err)
-	}
-
-	f.pool.Wait()
-
-	if f.registry.Wake("a") != nil {
-		t.Fatal("the record of a retired, unparked aggregate survived")
-	}
-
-	if err := final(
-		t,
-		f.enqueue(
-			t,
-			event(
-				2,
-				nil,
-			),
-		),
+		behind,
 	); err != nil {
 		t.Fatalf(
-			"a job after the retirement = %v",
+			"the job behind the dropped one = %v",
 			err,
 		)
 	}
-}
 
-func TestPool_StopDrainsWhatIsQueued(
+	if err := final(
+		t,
+		dropped,
+	); !errors.Is(
+		err,
+		asynxmd.ErrDeliveryParked,
+	) {
+		t.Fatalf(
+			"the dropped job = %v, want ErrDeliveryParked",
+			err,
+		)
+	}
+
+	assertCompleted(
+		t,
+		running,
+	)
+	if got := f.journal.list(); !slices.Equal(
+		got,
+		[]string{"live", "live"},
+	) {
+		t.Fatalf(
+			"steps = %v, want only the two live jobs to run",
+			got,
+		)
+	}
+}
+func TestPool_ClosingTheRegistryStillDeliversWhatIsQueued(
 	t *testing.T,
 ) {
-	f := newFixture(
-		t,
-		time.Hour,
-	)
+	f := newFixture(t)
 	gate := make(chan struct{})
 	f.bus.publish = func(
 		asynxmd.Event[int],
@@ -590,10 +590,9 @@ func TestPool_StopDrainsWhatIsQueued(
 		),
 	)}
 	f.registry.Close()
-	f.pool.Stop()
 	close(gate)
 
-	f.pool.Wait()
+	f.runs.Wait()
 
 	for _, ticket := range tickets {
 		assertCompleted(
@@ -603,6 +602,94 @@ func TestPool_StopDrainsWhatIsQueued(
 	}
 }
 
+func TestPool_RunPassesItsContextToEveryStep(
+	t *testing.T,
+) {
+	f := newFixture(t)
+	var acked context.Context
+	ack := func(
+		ctx context.Context,
+	) error {
+		acked = ctx
+		return nil
+	}
+	ticket := f.enqueue(
+		t,
+		event(
+			1,
+			ack,
+		),
+	)
+	if err := final(
+		t,
+		ticket,
+	); err != nil {
+		t.Fatalf(
+			"final = %v",
+			err,
+		)
+	}
+
+	assertSender(
+		t,
+		"bus",
+		f.bus.seen(),
+	)
+	assertSender(
+		t,
+		"deliverer",
+		f.deliverer.seen(),
+	)
+	assertSender(
+		t,
+		"ack",
+		acked,
+	)
+}
+
+func assertSender(
+	t *testing.T,
+	step string,
+	ctx context.Context,
+) {
+	t.Helper()
+	if ctx == nil ||
+		ctx.Value(ctxKey{}) != "sender" {
+		t.Fatalf(
+			"%s did not get the context Run was given",
+			step,
+		)
+	}
+}
+
+func TestPool_AReportedErrorCarriesTheContext(
+	t *testing.T,
+) {
+	f := newFixture(t)
+	ack := func(
+		context.Context,
+	) error {
+		return errors.New("store down")
+	}
+	if err := final(
+		t,
+		f.enqueue(
+			t,
+			event(
+				1,
+				ack,
+			),
+		),
+	); err == nil {
+		t.Fatal("final = nil, want the ack error")
+	}
+
+	assertSender(
+		t,
+		"reporter",
+		f.reports.seen(),
+	)
+}
 func assertVersion(
 	t *testing.T,
 	index int,
@@ -630,6 +717,8 @@ func assertCompleted(
 	}
 }
 
+type ctxKey struct{}
+
 type fixture struct {
 	journal   *journal
 	registry  aggregates.Registry[jobs.Job[int]]
@@ -637,14 +726,14 @@ type fixture struct {
 	reports   *fakeReporter
 	bus       *fakeBus
 	pool      Pool[int]
+	runs      sync.WaitGroup
 }
 
 func newFixture(
 	t *testing.T,
-	idleTimeout time.Duration,
 ) *fixture {
 	f := &fixture{journal: &journal{}}
-	f.registry = aggregates.New(aggregates.Hooks[jobs.Job[int]]{Spawn: f.spawn})
+	f.registry = aggregates.New(aggregates.Hooks[jobs.Job[int]]{})
 	f.deliverer = &fakeDeliverer{journal: f.journal, registry: f.registry}
 	f.reports = &fakeReporter{journal: f.journal}
 	f.bus = &fakeBus{journal: f.journal}
@@ -653,25 +742,14 @@ func newFixture(
 		f.registry,
 		f.deliverer,
 		f.reports,
-		idleTimeout,
 	)
 	t.Cleanup(f.stop)
 	return f
 }
 
-func (f *fixture) spawn(
-	aggregateID string,
-) {
-	f.pool.Spawn(aggregateID)
-}
-
 func (f *fixture) stop() {
-	if !f.registry.Close() {
-		return
-	}
-
-	f.pool.Stop()
-	f.pool.Wait()
+	f.registry.Close()
+	f.runs.Wait()
 }
 
 func (f *fixture) enqueue(
@@ -679,17 +757,47 @@ func (f *fixture) enqueue(
 	request asynxmd.DispatchRequest[int],
 ) asynxmd.Ticket {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
 	job := jobs.New(
-		ctx,
 		request,
-		cancel,
+		func() {},
 	)
-	if _, err := f.registry.Enqueue(job); err != nil {
+	admission, err := f.registry.Enqueue(job)
+	if err != nil {
 		t.Fatal(err)
 	}
 
+	if admission.Parked {
+		return job.Ticket()
+	}
+
+	ctx := context.WithValue(
+		context.Background(),
+		ctxKey{},
+		"sender",
+	)
+	f.runs.Add(1)
+	go f.run(
+		ctx,
+		job,
+		admission.Turn,
+		admission.Done,
+	)
 	return job.Ticket()
+}
+
+func (f *fixture) run(
+	ctx context.Context,
+	job jobs.Job[int],
+	turn <-chan struct{},
+	done chan<- struct{},
+) {
+	defer f.runs.Done()
+	f.pool.Run(
+		ctx,
+		job,
+		turn,
+		done,
+	)
 }
 
 func event(
@@ -719,13 +827,24 @@ func final(
 type fakeBus struct {
 	journal *journal
 	publish func(event asynxmd.Event[int]) error
+	mu      sync.Mutex
+	ctx     context.Context
+}
+
+func (b *fakeBus) seen() context.Context {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.ctx
 }
 
 // PublishSync satisfies the interface that fakeBus fakes.
 func (b *fakeBus) PublishSync(
-	_ context.Context,
+	ctx context.Context,
 	event asynxmd.Event[int],
 ) error {
+	b.mu.Lock()
+	b.ctx = ctx
+	b.mu.Unlock()
 	b.journal.add("live")
 	if b.publish == nil {
 		return nil
@@ -771,17 +890,29 @@ func (b *fakeBus) WaitForHandlers() {
 }
 
 type fakeDeliverer struct {
+	mu       sync.Mutex
+	ctx      context.Context
 	journal  *journal
 	registry aggregates.Registry[jobs.Job[int]]
 	deliver  func(job jobs.Job[int]) error
 }
 
+func (d *fakeDeliverer) seen() context.Context {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.ctx
+}
+
 // Deliver satisfies the interface that fakeDeliverer fakes.
 func (d *fakeDeliverer) Deliver(
+	ctx context.Context,
 	_ string,
 	_ <-chan struct{},
 	job jobs.Job[int],
 ) error {
+	d.mu.Lock()
+	d.ctx = ctx
+	d.mu.Unlock()
 	d.journal.add("deliver")
 	if d.deliver == nil {
 		return nil
@@ -792,11 +923,12 @@ func (d *fakeDeliverer) Deliver(
 
 // ParkThenReport satisfies the interface that fakeDeliverer fakes.
 func (d *fakeDeliverer) ParkThenReport(
+	ctx context.Context,
 	aggregateID string,
 	halt <-chan struct{},
 	job jobs.Job[int],
 	cause error,
-	report func(),
+	report func(context.Context),
 ) {
 	d.journal.add("park")
 	if job.Acked() {
@@ -807,23 +939,26 @@ func (d *fakeDeliverer) ParkThenReport(
 		)
 	}
 
-	report()
+	report(ctx)
 }
 
 type fakeReporter struct {
 	journal *journal
+	ctx     context.Context
 	mu      sync.Mutex
 	errs    []error
 }
 
 // PublishError satisfies the interface that fakeReporter fakes.
 func (r *fakeReporter) PublishError(
+	ctx context.Context,
 	_ jobs.Job[int],
 	err error,
 ) {
 	r.journal.add("report")
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.ctx = ctx
 	r.errs = append(
 		r.errs,
 		err,
@@ -832,6 +967,7 @@ func (r *fakeReporter) PublishError(
 
 // DeliveryError satisfies the interface that fakeReporter fakes.
 func (r *fakeReporter) DeliveryError(
+	context.Context,
 	jobs.Job[int],
 	error,
 	int,
@@ -840,9 +976,16 @@ func (r *fakeReporter) DeliveryError(
 
 // Panic satisfies the interface that fakeReporter fakes.
 func (r *fakeReporter) Panic(
+	context.Context,
 	jobs.Job[int],
 	any,
 ) {
+}
+
+func (r *fakeReporter) seen() context.Context {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ctx
 }
 
 func (r *fakeReporter) published() []error {

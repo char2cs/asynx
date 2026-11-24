@@ -77,24 +77,97 @@ func (f *fakeItem) state() (unrun error, completions int, err error) {
 
 type hookRecorder struct {
 	mu       sync.Mutex
-	spawned  []string
 	admitted []*fakeItem
 }
 
-func newRegistry() (aggregates.Registry[*fakeItem], *hookRecorder) {
+type testRegistry struct {
+	aggregates.Registry[*fakeItem]
+	hooks *hookRecorder
+	mu    sync.Mutex
+	begun map[*fakeItem]bool
+	dones map[*fakeItem]chan<- struct{}
+}
+
+func newRegistry() (*testRegistry, *hookRecorder) {
 	rec := &hookRecorder{}
-	return aggregates.New(aggregates.Hooks[*fakeItem]{Spawn: rec.spawn, Admit: rec.admit}),
+	return &testRegistry{
+			Registry: aggregates.New(aggregates.Hooks[*fakeItem]{Admit: rec.admit}),
+			hooks:    rec,
+			begun:    make(map[*fakeItem]bool),
+			dones:    make(map[*fakeItem]chan<- struct{}),
+		},
 		rec
 }
 
-func (h *hookRecorder) spawn(
+// Enqueue enqueues job and remembers the channel it hands its turn on with.
+func (r *testRegistry) Enqueue(
+	job *fakeItem,
+) (contracts.Admission, error) {
+	admission, err := r.Registry.Enqueue(job)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dones[job] = admission.Done
+	return admission,
+		err
+}
+
+// Pop begins the oldest job of the aggregate that is neither begun nor
+// dropped by a park, the way the next run does when its turn comes.
+func (r *testRegistry) Pop(
 	aggregateID string,
+) (*fakeItem, <-chan struct{}, bool) {
+	return r.beginFirst(r.hooks.queued(aggregateID))
+}
+
+func (r *testRegistry) beginFirst(
+	candidates []*fakeItem,
+) (job *fakeItem, halt <-chan struct{}, ok bool) {
+	if len(candidates) == 0 {
+		return nil,
+			nil,
+			false
+	}
+
+	halt, ok = r.beginOnce(candidates[0])
+	if ok {
+		return candidates[0],
+			halt,
+			true
+	}
+
+	return r.beginFirst(candidates[1:])
+}
+
+func (r *testRegistry) beginOnce(
+	job *fakeItem,
+) (halt <-chan struct{}, ok bool) {
+	if r.take(job) {
+		return nil,
+			false
+	}
+
+	return r.Begin(job)
+}
+
+func (r *testRegistry) take(
+	job *fakeItem,
+) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	was := r.begun[job]
+	r.begun[job] = true
+	return was
+}
+
+func (r *testRegistry) finish(
+	job *fakeItem,
 ) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.spawned = append(
-		h.spawned,
-		aggregateID,
+	r.mu.Lock()
+	done := r.dones[job]
+	r.mu.Unlock()
+	r.Registry.Finish(
+		job.aggregateID,
+		done,
 	)
 }
 
@@ -109,10 +182,35 @@ func (h *hookRecorder) admit(
 	)
 }
 
-func (h *hookRecorder) spawns() int {
+func (h *hookRecorder) queued(
+	aggregateID string,
+) (jobs []*fakeItem) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return len(h.spawned)
+	for _, job := range h.admitted {
+		jobs = appendOf(
+			jobs,
+			job,
+			aggregateID,
+		)
+	}
+
+	return jobs
+}
+
+func appendOf(
+	jobs []*fakeItem,
+	job *fakeItem,
+	aggregateID string,
+) []*fakeItem {
+	if job.aggregateID != aggregateID {
+		return jobs
+	}
+
+	return append(
+		jobs,
+		job,
+	)
 }
 
 func (h *hookRecorder) admits() int {
@@ -123,7 +221,7 @@ func (h *hookRecorder) admits() int {
 
 func enqueue(
 	t *testing.T,
-	r aggregates.Registry[*fakeItem],
+	r *testRegistry,
 	job *fakeItem,
 ) contracts.Admission {
 	t.Helper()
@@ -142,7 +240,7 @@ func enqueue(
 
 func pop(
 	t *testing.T,
-	r aggregates.Registry[*fakeItem],
+	r *testRegistry,
 	aggregateID string,
 ) (*fakeItem, <-chan struct{}) {
 	t.Helper()
@@ -171,7 +269,7 @@ func closed(
 
 func generation(
 	t *testing.T,
-	r aggregates.Registry[*fakeItem],
+	r *testRegistry,
 	aggregateID string,
 ) uint64 {
 	t.Helper()
@@ -188,7 +286,7 @@ func generation(
 
 func assertDroppedAsParked(
 	t *testing.T,
-	r aggregates.Registry[*fakeItem],
+	r *testRegistry,
 	job *fakeItem,
 ) {
 	t.Helper()
@@ -249,95 +347,98 @@ func assertUntouched(
 	}
 }
 
-func TestEnqueue_SpawnsOneWorkerPerAggregateAndAdmitsEveryQueuedJob(
+func TestEnqueue_ChainsEachJobBehindThePreviousJobOfItsAggregate(
 	t *testing.T,
 ) {
 	r, hooks := newRegistry()
-	if !enqueue(
+	first := enqueue(
 		t,
 		r,
 		durableItem(
 			"a",
 			1,
 		),
-	).Spawned {
-		t.Fatal("first job of a did not spawn a worker")
-	}
-
-	if enqueue(
+	)
+	second := enqueue(
 		t,
 		r,
 		liveItem(
 			"a",
 			2,
 		),
-	).Spawned {
-		t.Fatal("second job of a spawned another worker")
-	}
-
-	if !enqueue(
+	)
+	other := enqueue(
 		t,
 		r,
 		durableItem(
 			"b",
 			1,
 		),
-	).Spawned {
-		t.Fatal("first job of b did not spawn a worker")
+	)
+
+	if !closed(first.Turn) {
+		t.Fatal("the first job of an idle aggregate has to wait")
 	}
 
-	if hooks.spawns() != 2 ||
-		hooks.admits() != 3 {
+	if closed(second.Turn) {
+		t.Fatal("the second job of a was let in before the first finished")
+	}
+
+	if !closed(other.Turn) {
+		t.Fatal("the first job of b waits on another aggregate")
+	}
+
+	if hooks.admits() != 3 {
 		t.Fatalf(
-			"spawns = %d, admits = %d, want 2 and 3",
-			hooks.spawns(),
+			"admits = %d, want 3",
 			hooks.admits(),
 		)
 	}
 }
-
-func TestEnqueue_SignalsTheWakeChannel(
+func TestFinish_LetsTheNextJobOfTheAggregateIn(
 	t *testing.T,
 ) {
 	r, _ := newRegistry()
-	enqueue(
-		t,
-		r,
-		liveItem(
-			"a",
-			1,
-		),
+	first, second, third := liveItem(
+		"a",
+		1,
+	), liveItem(
+		"a",
+		2,
+	), liveItem(
+		"a",
+		3,
 	)
 	enqueue(
 		t,
 		r,
-		liveItem(
-			"a",
-			2,
-		),
+		first,
 	)
-	wake := r.Wake("a")
-	if !closed(wake) {
-		t.Fatal("wake channel not signalled by Enqueue")
+	next := enqueue(
+		t,
+		r,
+		second,
+	)
+	last := enqueue(
+		t,
+		r,
+		third,
+	)
+
+	r.finish(first)
+	if !closed(next.Turn) {
+		t.Fatal("Finish did not open the turn of the next job")
 	}
 
-	if closed(wake) {
-		t.Fatal("wake channel holds more than one signal")
+	if closed(last.Turn) {
+		t.Fatal("Finish opened the turn of a job two places behind")
 	}
 
-	enqueue(
-		t,
-		r,
-		liveItem(
-			"a",
-			3,
-		),
-	)
-	if !closed(wake) {
-		t.Fatal("wake channel not signalled again")
+	r.finish(second)
+	if !closed(last.Turn) {
+		t.Fatal("the turns did not pass on down the chain")
 	}
 }
-
 func TestPop_ReturnsJobsInEnqueueOrderWithTheirHalt(
 	t *testing.T,
 ) {
@@ -415,9 +516,8 @@ func TestEnqueue_RefusedAfterClose(
 		)
 	}
 
-	if hooks.spawns() != 0 ||
-		hooks.admits() != 0 {
-		t.Fatal("a refused job spawned a worker or was admitted")
+	if hooks.admits() != 0 {
+		t.Fatal("a refused job was admitted")
 	}
 
 	assertUntouched(
@@ -621,9 +721,8 @@ func TestPark_OfAnAggregateWithoutAQueueStillBlocksItsDurableEvents(
 		r,
 		job,
 	)
-	if hooks.admits() != 0 ||
-		hooks.spawns() != 0 {
-		t.Fatal("a refused job was admitted or spawned a worker")
+	if hooks.admits() != 0 {
+		t.Fatal("a refused job was admitted")
 	}
 }
 
@@ -835,7 +934,7 @@ func TestResumeUndelivered_ReturnsWhatTheParkLeftUndeliveredAndForgetsIt(
 
 func assertFreshHalt(
 	t *testing.T,
-	r aggregates.Registry[*fakeItem],
+	r *testRegistry,
 	old <-chan struct{},
 ) {
 	t.Helper()
@@ -1170,20 +1269,16 @@ func TestSupersede_OfAParkedAggregateClearsTheRecord(
 		t.Fatal("Supersede left the park or its record")
 	}
 
-	if r.Wake("a") != nil {
-		t.Fatal("Supersede left an empty record behind")
-	}
-
-	if !enqueue(
+	if !closed(enqueue(
 		t,
 		r,
 		durableItem(
 			"a",
 			3,
 		),
-	).Spawned ||
-		hooks.spawns() != 1 {
-		t.Fatal("a durable job after Supersede was not queued on a new worker")
+	).Turn) ||
+		hooks.admits() != 1 {
+		t.Fatal("a durable job after Supersede was not queued at once")
 	}
 }
 
@@ -1473,17 +1568,18 @@ func TestSettleIfParked_UnderAnOpenHaltDoesNothing(
 	)
 }
 
-func TestRetire_NeverRemovesAQueueThatStillHasJobs(
+func TestFinish_KeepsTheChainWhileOtherJobsAreActive(
 	t *testing.T,
 ) {
-	r, hooks := newRegistry()
+	r, _ := newRegistry()
+	first := liveItem(
+		"a",
+		1,
+	)
 	enqueue(
 		t,
 		r,
-		liveItem(
-			"a",
-			1,
-		),
+		first,
 	)
 	second := liveItem(
 		"a",
@@ -1499,81 +1595,71 @@ func TestRetire_NeverRemovesAQueueThatStillHasJobs(
 		r,
 		"a",
 	)
-
-	if r.Retire("a") {
-		t.Fatal("Retire let the worker of a queue with jobs exit")
-	}
+	r.finish(first)
 
 	if got, _ := pop(
 		t,
 		r,
 		"a",
 	); got != second {
-		t.Fatal("Retire lost a queued job")
+		t.Fatal("Finish lost a queued job")
 	}
 
-	if enqueue(
+	if closed(enqueue(
 		t,
 		r,
 		liveItem(
 			"a",
 			3,
 		),
-	).Spawned ||
-		hooks.spawns() != 1 {
-		t.Fatal("a refused Retire released the worker")
+	).Turn) {
+		t.Fatal("a Finish with a job still active let a new job overtake it")
 	}
 }
-
-func TestRetire_ReleasesAnIdleWorker(
+func TestFinish_ReleasesAnIdleAggregate(
 	t *testing.T,
 ) {
 	r, hooks := newRegistry()
+	first := liveItem(
+		"a",
+		1,
+	)
 	enqueue(
 		t,
 		r,
-		liveItem(
-			"a",
-			1,
-		),
+		first,
 	)
 	pop(
 		t,
 		r,
 		"a",
 	)
-	if !r.Retire("a") {
-		t.Fatal("Retire of an idle aggregate refused")
-	}
+	r.finish(first)
 
-	if r.Wake("a") != nil {
-		t.Fatal("Retire left an empty record behind")
-	}
-
-	if !enqueue(
+	if !closed(enqueue(
 		t,
 		r,
 		liveItem(
 			"a",
 			2,
 		),
-	).Spawned ||
-		hooks.spawns() != 2 {
-		t.Fatal("an Enqueue after Retire did not spawn a new worker")
+	).Turn) ||
+		hooks.admits() != 2 {
+		t.Fatal("an Enqueue after the last Finish had to wait")
 	}
 }
-
-func TestRetire_KeepsTheRecordOfAParkedAggregate(
+func TestFinish_KeepsTheRecordOfAParkedAggregate(
 	t *testing.T,
 ) {
-	r, hooks := newRegistry()
+	r, _ := newRegistry()
+	first := durableItem(
+		"a",
+		1,
+	)
 	enqueue(
 		t,
 		r,
-		durableItem(
-			"a",
-			1,
-		),
+		first,
 	)
 	pop(
 		t,
@@ -1590,24 +1676,21 @@ func TestRetire_KeepsTheRecordOfAParkedAggregate(
 		r,
 		"a",
 	)
-
-	if !r.Retire("a") {
-		t.Fatal("Retire of an idle parked aggregate refused")
-	}
+	r.finish(first)
 
 	if generation(
 		t,
 		r,
 		"a",
 	) != g {
-		t.Fatal("Retire changed the park")
+		t.Fatal("Finish changed the park")
 	}
 
 	if r.Unrun(
 		"a",
 		7,
 	) == nil {
-		t.Fatal("Retire dropped the undelivered versions")
+		t.Fatal("Finish dropped the undelivered versions")
 	}
 
 	if !enqueue(
@@ -1618,19 +1701,18 @@ func TestRetire_KeepsTheRecordOfAParkedAggregate(
 			8,
 		),
 	).Parked {
-		t.Fatal("a durable job passed a park that survived Retire")
+		t.Fatal("a durable job passed a park that survived Finish")
 	}
 
-	if !enqueue(
+	if !closed(enqueue(
 		t,
 		r,
 		liveItem(
 			"a",
 			9,
 		),
-	).Spawned ||
-		hooks.spawns() != 2 {
-		t.Fatal("a live job after Retire did not spawn a new worker")
+	).Turn) {
+		t.Fatal("a live job after the last Finish had to wait")
 	}
 
 	if _, undelivered := r.Lift(
@@ -1646,18 +1728,18 @@ func TestRetire_KeepsTheRecordOfAParkedAggregate(
 		)
 	}
 }
-
-func TestRetire_ThenLiftLeavesNoRecord(
+func TestFinish_ThenLiftLeavesNoRecord(
 	t *testing.T,
 ) {
 	r, _ := newRegistry()
+	first := liveItem(
+		"a",
+		1,
+	)
 	enqueue(
 		t,
 		r,
-		liveItem(
-			"a",
-			1,
-		),
+		first,
 	)
 	pop(
 		t,
@@ -1669,7 +1751,7 @@ func TestRetire_ThenLiftLeavesNoRecord(
 		errHalted,
 		1,
 	)
-	r.Retire("a")
+	r.finish(first)
 	r.Lift(
 		"a",
 		generation(
@@ -1678,15 +1760,14 @@ func TestRetire_ThenLiftLeavesNoRecord(
 			"a",
 		),
 	)
-	if r.Wake("a") != nil ||
+	if len(r.Parks()) != 0 ||
 		r.Unrun(
 			"a",
 			1,
 		) != nil {
-		t.Fatal("a lifted park of a retired aggregate left a record behind")
+		t.Fatal("a lifted park of a finished aggregate left a record behind")
 	}
 }
-
 func TestEnqueue_RacingLiftNeverQueuesADurableJobWhileParked(
 	t *testing.T,
 ) {
@@ -1797,7 +1878,7 @@ func consistent(
 
 func parkAndLift(
 	wg *sync.WaitGroup,
-	r aggregates.Registry[*fakeItem],
+	r *testRegistry,
 	done <-chan struct{},
 	violations *atomic.Int64,
 ) {
@@ -1816,7 +1897,7 @@ func parkAndLift(
 }
 
 func popWhileParked(
-	r aggregates.Registry[*fakeItem],
+	r *testRegistry,
 ) int64 {
 	job, _, ok := r.Pop("a")
 	if !ok {
@@ -1829,7 +1910,7 @@ func popWhileParked(
 
 func popAll(
 	wg *sync.WaitGroup,
-	r aggregates.Registry[*fakeItem],
+	r *testRegistry,
 	done <-chan struct{},
 ) {
 	defer wg.Done()
@@ -1839,7 +1920,7 @@ func popAll(
 }
 
 func completePopped(
-	r aggregates.Registry[*fakeItem],
+	r *testRegistry,
 ) {
 	job, halt, ok := r.Pop("a")
 	if !ok {
@@ -2187,5 +2268,77 @@ func TestInspect_IsClearAfterTheParkLifts(
 			"Cause = %v after a lift and a nil-cause park, want nil",
 			got.Cause,
 		)
+	}
+}
+
+func TestBegin_RefusesAJobAParkDropped(
+	t *testing.T,
+) {
+	r, _ := newRegistry()
+	running, dropped, kept := durableItem(
+		"a",
+		1,
+	), durableItem(
+		"a",
+		2,
+	), liveItem(
+		"a",
+		3,
+	)
+	enqueue(
+		t,
+		r,
+		running,
+	)
+	enqueue(
+		t,
+		r,
+		dropped,
+	)
+	enqueue(
+		t,
+		r,
+		kept,
+	)
+	if _, ok := r.Begin(running); !ok {
+		t.Fatal("Begin refused the head of the queue")
+	}
+
+	r.Park(
+		"a",
+		errHalted,
+	)
+	if _, ok := r.Begin(dropped); ok {
+		t.Fatal("Begin let a job the park dropped run")
+	}
+
+	if _, ok := r.Begin(kept); !ok {
+		t.Fatal("Begin refused a live job a park kept queued")
+	}
+}
+
+func TestBegin_RefusesAJobThatIsNotAtTheHead(
+	t *testing.T,
+) {
+	r, _ := newRegistry()
+	head, behind := liveItem(
+		"a",
+		1,
+	), liveItem(
+		"a",
+		2,
+	)
+	enqueue(
+		t,
+		r,
+		head,
+	)
+	enqueue(
+		t,
+		r,
+		behind,
+	)
+	if _, ok := r.Begin(behind); ok {
+		t.Fatal("Begin let a job overtake the head of its queue")
 	}
 }

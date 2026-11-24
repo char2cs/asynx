@@ -10,16 +10,15 @@ import (
 // Job is one event on its way through the dispatcher; see contracts.Job.
 type Job[T any] = contracts.Job[T]
 
-// New creates a Job for request, delivered under ctx. cancel releases ctx and
-// is called when the job completes.
+// New creates a Job for request. cancel releases the context the job is
+// delivered under, which travels beside the job and never in it, and is called
+// when the job completes.
 func New[T any](
-	ctx context.Context,
 	request asynxmd.DispatchRequest[T],
 	cancel context.CancelFunc,
 ) Job[T] {
 	return &dispatchJob[T]{
 		event:    request.Event,
-		ctx:      ctx,
 		cancel:   cancel,
 		ack:      request.Ack,
 		forget:   isForget(request),

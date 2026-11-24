@@ -1,6 +1,8 @@
 package reporter
 
 import (
+	"context"
+
 	asynxmd "github.com/char2cs/asynx/models"
 
 	"github.com/char2cs/asynx/internal/processor/internal/dispatcher/internal/contracts"
@@ -14,6 +16,7 @@ type handlerReporter[T any] struct {
 
 // PublishError calls the publish error handler, if any, swallowing its panic.
 func (r *handlerReporter[T]) PublishError(
+	ctx context.Context,
 	job contracts.Job[T],
 	err error,
 ) {
@@ -23,7 +26,7 @@ func (r *handlerReporter[T]) PublishError(
 
 	defer swallowPanic()
 	r.onPublishError(
-		job.Context(),
+		ctx,
 		job.Event(),
 		err,
 	)
@@ -31,6 +34,7 @@ func (r *handlerReporter[T]) PublishError(
 
 // DeliveryError calls the delivery error handler, if any, swallowing its panic.
 func (r *handlerReporter[T]) DeliveryError(
+	ctx context.Context,
 	job contracts.Job[T],
 	err error,
 	attempt int,
@@ -41,7 +45,7 @@ func (r *handlerReporter[T]) DeliveryError(
 
 	defer swallowPanic()
 	r.onDeliveryError(
-		job.Context(),
+		ctx,
 		job.Event(),
 		err,
 		attempt,
@@ -50,6 +54,7 @@ func (r *handlerReporter[T]) DeliveryError(
 
 // Panic calls the panic handler, if any, swallowing its panic.
 func (r *handlerReporter[T]) Panic(
+	ctx context.Context,
 	job contracts.Job[T],
 	recovered any,
 ) {
@@ -59,7 +64,7 @@ func (r *handlerReporter[T]) Panic(
 
 	defer swallowPanic()
 	r.onPanic(
-		job.Context(),
+		ctx,
 		job.Event(),
 		recovered,
 	)

@@ -96,8 +96,7 @@ func assemble[T any](
 	)
 	return &Processor[T]{
 		es: es,
-		pool: pool.New(
-			executor,
+		pool: pool.New[T](
 			cfg.Shards,
 			cfg.QueueDepth,
 			cfg.WorkersPerShard,
