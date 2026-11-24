@@ -23,7 +23,11 @@ type Writer[T any] struct {
 }
 
 // New constructs a Writer.
-func New[T any](es asynxmd.Store, ss asynxmd.SnapshotStore, schemaVersion int) *Writer[T] {
+func New[T any](
+	es asynxmd.Store,
+	ss asynxmd.SnapshotStore,
+	schemaVersion int,
+) *Writer[T] {
 	return &Writer[T]{
 		eventStore:           es,
 		snapshotStore:        ss,
@@ -53,22 +57,41 @@ func (w *Writer[T]) Write(
 	shouldSnapshot bool,
 ) (asynxmd.Event[T], error) {
 	var evt asynxmd.Event[T]
-	err := w.eventStore.Atomically(ctx, func(tx asynxmd.Tx) error {
-		var err error
-		evt, err = w.AppendTx(ctx, tx, aggregateID, eventName, expectedVersion, previousState, newState)
-		return err
-	})
+	err := w.eventStore.Atomically(
+		ctx,
+		func(
+			tx asynxmd.Tx,
+		) error {
+			var err error
+			evt, err = w.AppendTx(
+				ctx,
+				tx,
+				aggregateID,
+				eventName,
+				expectedVersion,
+				previousState,
+				newState,
+			)
+			return err
+		},
+	)
 	if err != nil {
-		return asynxmd.Event[T]{}, err
+		return asynxmd.Event[T]{},
+			err
 	}
 
 	if shouldSnapshot {
-		if err := w.Snapshot(ctx, evt); err != nil {
-			return asynxmd.Event[T]{}, err
+		if err := w.Snapshot(
+			ctx,
+			evt,
+		); err != nil {
+			return asynxmd.Event[T]{},
+				err
 		}
 	}
 
-	return evt, nil
+	return evt,
+		nil
 }
 
 // AppendTx computes the RFC 6902 diff from previousState to newState,
@@ -85,14 +108,19 @@ func (w *Writer[T]) AppendTx(
 ) (asynxmd.Event[T], error) {
 	version := expectedVersion + 1
 
-	patch, err := jsondiff.Compare(previousState, newState)
+	patch, err := jsondiff.Compare(
+		previousState,
+		newState,
+	)
 	if err != nil {
-		return asynxmd.Event[T]{}, err
+		return asynxmd.Event[T]{},
+			err
 	}
 
 	patchJSON, err := json.Marshal(patch)
 	if err != nil {
-		return asynxmd.Event[T]{}, err
+		return asynxmd.Event[T]{},
+			err
 	}
 
 	eventID := asynxutils.NewID()
@@ -109,22 +137,31 @@ func (w *Writer[T]) AppendTx(
 
 	evtJSON, err := json.Marshal(evt)
 	if err != nil {
-		return asynxmd.Event[T]{}, err
+		return asynxmd.Event[T]{},
+			err
 	}
-	if err := tx.Append(ctx, "events:"+aggregateID, version, evtJSON); err != nil {
-		return asynxmd.Event[T]{}, err
+
+	if err := tx.Append(
+		ctx,
+		"events:"+aggregateID,
+		version,
+		evtJSON,
+	); err != nil {
+		return asynxmd.Event[T]{},
+			err
 	}
 
 	return asynxmd.Event[T]{
-		ID:                eventID,
-		AggregateID:       aggregateID,
-		EventName:         eventName,
-		Version:           version,
-		SchemaVersion:     w.currentSchemaVersion,
-		OccurredAt:        now,
-		Aggregate:         newState,
-		PreviousAggregate: previousState,
-	}, nil
+			ID:                eventID,
+			AggregateID:       aggregateID,
+			EventName:         eventName,
+			Version:           version,
+			SchemaVersion:     w.currentSchemaVersion,
+			OccurredAt:        now,
+			Aggregate:         newState,
+			PreviousAggregate: previousState,
+		},
+		nil
 }
 
 // Snapshot upserts the snapshot of evt.Aggregate at evt.Version.
@@ -132,7 +169,12 @@ func (w *Writer[T]) Snapshot(
 	ctx context.Context,
 	evt asynxmd.Event[T],
 ) error {
-	return w.writeSnapshot(ctx, evt.AggregateID, evt.Version, evt.Aggregate)
+	return w.writeSnapshot(
+		ctx,
+		evt.AggregateID,
+		evt.Version,
+		evt.Aggregate,
+	)
 }
 
 // EventStore returns the backing event store.
@@ -145,7 +187,12 @@ func (w *Writer[T]) SnapshotStore() asynxmd.SnapshotStore {
 	return w.snapshotStore
 }
 
-func (w *Writer[T]) writeSnapshot(ctx context.Context, aggregateID string, version int64, state T) error {
+func (w *Writer[T]) writeSnapshot(
+	ctx context.Context,
+	aggregateID string,
+	version int64,
+	state T,
+) error {
 	snap := esmodels.SnapshotBlob[T]{
 		Version:       version,
 		SchemaVersion: w.currentSchemaVersion,
@@ -155,5 +202,11 @@ func (w *Writer[T]) writeSnapshot(ctx context.Context, aggregateID string, versi
 	if err != nil {
 		return err
 	}
-	return w.snapshotStore.Put(ctx, aggregateID, version, snapJSON)
+
+	return w.snapshotStore.Put(
+		ctx,
+		aggregateID,
+		version,
+		snapJSON,
+	)
 }

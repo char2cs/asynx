@@ -44,7 +44,11 @@ type SubscriberError struct {
 }
 
 func (e *SubscriberError) Error() string {
-	return fmt.Sprintf("subscriber %s: %v", e.Subscriber, e.Err)
+	return fmt.Sprintf(
+		"subscriber %s: %v",
+		e.Subscriber,
+		e.Err,
+	)
 }
 
 func (e *SubscriberError) Unwrap() error { return e.Err }

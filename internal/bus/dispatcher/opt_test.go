@@ -11,19 +11,32 @@ import (
 func TestWithIdleTimeout_IgnoresNonPositiveValues(
 	t *testing.T,
 ) {
-	d := newDispatcher(asynxmd.DispatcherConfig[int]{}, WithIdleTimeout[int](0), WithIdleTimeout[int](-time.Second))
+	d := newDispatcher(
+		asynxmd.DispatcherConfig[int]{},
+		WithIdleTimeout[int](0),
+		WithIdleTimeout[int](-time.Second),
+	)
 	defer d.Close(context.Background())
 	if d.idleTimeout != defaultIdleTimeout {
-		t.Fatalf("idleTimeout = %v, want the default", d.idleTimeout)
+		t.Fatalf(
+			"idleTimeout = %v, want the default",
+			d.idleTimeout,
+		)
 	}
 }
 
 func TestWithIdleTimeout_SetsAPositiveValue(
 	t *testing.T,
 ) {
-	d := newDispatcher(asynxmd.DispatcherConfig[int]{}, WithIdleTimeout[int](time.Minute))
+	d := newDispatcher(
+		asynxmd.DispatcherConfig[int]{},
+		WithIdleTimeout[int](time.Minute),
+	)
 	defer d.Close(context.Background())
 	if d.idleTimeout != time.Minute {
-		t.Fatalf("idleTimeout = %v, want 1m", d.idleTimeout)
+		t.Fatalf(
+			"idleTimeout = %v, want 1m",
+			d.idleTimeout,
+		)
 	}
 }

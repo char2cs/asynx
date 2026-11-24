@@ -88,18 +88,36 @@ func (s *memory) Append(
 	version int64,
 	data []byte,
 ) error {
-	return s.Atomically(ctx, func(tx models.Tx) error {
-		return tx.Append(ctx, streamID, version, data)
-	})
+	return s.Atomically(
+		ctx,
+		func(
+			tx models.Tx,
+		) error {
+			return tx.Append(
+				ctx,
+				streamID,
+				version,
+				data,
+			)
+		},
+	)
 }
 
 func (s *memory) Delete(
 	ctx context.Context,
 	streamID string,
 ) error {
-	return s.Atomically(ctx, func(tx models.Tx) error {
-		return tx.DeleteStream(ctx, streamID)
-	})
+	return s.Atomically(
+		ctx,
+		func(
+			tx models.Tx,
+		) error {
+			return tx.DeleteStream(
+				ctx,
+				streamID,
+			)
+		},
+	)
 }
 
 func (s *memory) Atomically(
@@ -124,6 +142,7 @@ func (s *memory) Atomically(
 	if err := fn(tx); err != nil {
 		return err
 	}
+
 	committed = true
 	return nil
 }
@@ -134,13 +153,18 @@ func (s *memory) ReadFrom(
 	fromVersion int64,
 ) ([][]byte, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil,
+			err
 	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return toBlobs(s.entriesFrom(streamID, fromVersion)), nil
+	return toBlobs(s.entriesFrom(
+			streamID,
+			fromVersion,
+		)),
+		nil
 }
 
 func (s *memory) ReadRange(
@@ -150,18 +174,23 @@ func (s *memory) ReadRange(
 	count int64,
 ) ([][]byte, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil,
+			err
 	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	entries := s.entriesFrom(streamID, fromVersion)
+	entries := s.entriesFrom(
+		streamID,
+		fromVersion,
+	)
 	if int64(len(entries)) > count {
 		entries = entries[:count]
 	}
 
-	return toBlobs(entries), nil
+	return toBlobs(entries),
+		nil
 }
 
 func (s *memory) GetReceipt(
@@ -169,14 +198,18 @@ func (s *memory) GetReceipt(
 	commandID string,
 ) (models.Receipt, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return models.Receipt{}, false, err
+		return models.Receipt{},
+			false,
+			err
 	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	r, ok := s.receipts[commandID]
-	return r, ok, nil
+	return r,
+		ok,
+		nil
 }
 
 func (s *memory) PendingDeliveries(
@@ -184,14 +217,19 @@ func (s *memory) PendingDeliveries(
 	limit int,
 ) ([]models.Delivery, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil,
+			err
 	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	n := min(limit, len(s.deliveries))
-	return slices.Clone(s.deliveries[:n]), nil
+	n := min(
+		limit,
+		len(s.deliveries),
+	)
+	return slices.Clone(s.deliveries[:n]),
+		nil
 }
 
 func (s *memory) AckDelivery(
@@ -209,9 +247,17 @@ func (s *memory) AckDelivery(
 	defer s.mu.Unlock()
 
 	target := models.Delivery{AggregateID: aggregateID, Version: version}
-	if i := slices.Index(s.deliveries, target); i >= 0 {
-		s.deliveries = slices.Delete(s.deliveries, i, i+1)
+	if i := slices.Index(
+		s.deliveries,
+		target,
+	); i >= 0 {
+		s.deliveries = slices.Delete(
+			s.deliveries,
+			i,
+			i+1,
+		)
 	}
+
 	return nil
 }
 
@@ -223,17 +269,34 @@ func (s *memory) entriesFrom(
 	if len(entries) == 0 {
 		return nil
 	}
-	startIdx, _ := slices.BinarySearchFunc(entries, fromVersion, func(e entry, v int64) int {
-		return cmp.Compare(e.version, v)
-	})
+
+	startIdx, _ := slices.BinarySearchFunc(
+		entries,
+		fromVersion,
+		func(
+			e entry,
+			v int64,
+		) int {
+			return cmp.Compare(
+				e.version,
+				v,
+			)
+		},
+	)
 	return entries[startIdx:]
 }
 
-func toBlobs(entries []entry) [][]byte {
-	result := make([][]byte, len(entries))
+func toBlobs(
+	entries []entry,
+) [][]byte {
+	result := make(
+		[][]byte,
+		len(entries),
+	)
 	for i, e := range entries {
 		result[i] = e.data
 	}
+
 	return result
 }
 
@@ -249,6 +312,7 @@ func (t *memoryTx) rollback() {
 	for i := len(t.undo) - 1; i >= 0; i-- {
 		t.undo[i]()
 	}
+
 	t.undo = nil
 }
 
@@ -269,20 +333,50 @@ func (t *memoryTx) Append(
 	defer s.mu.Unlock()
 
 	if err, ok := s.errOn[streamID]; ok {
-		delete(s.errOn, streamID)
+		delete(
+			s.errOn,
+			streamID,
+		)
 		return err
 	}
 
 	entries := s.streams[streamID]
-	idx, found := slices.BinarySearchFunc(entries, version, func(e entry, v int64) int {
-		return cmp.Compare(e.version, v)
-	})
+	idx, found := slices.BinarySearchFunc(
+		entries,
+		version,
+		func(
+			e entry,
+			v int64,
+		) int {
+			return cmp.Compare(
+				e.version,
+				v,
+			)
+		},
+	)
 	if found {
-		return fmt.Errorf("%w: version conflict (%s, v%d)", models.ErrPipelineFailed, streamID, version)
+		return fmt.Errorf(
+			"%w: version conflict (%s, v%d)",
+			models.ErrPipelineFailed,
+			streamID,
+			version,
+		)
 	}
 
-	s.streams[streamID] = slices.Insert(entries, idx, entry{version: version, data: data})
-	t.undo = append(t.undo, func() { s.removeEntry(streamID, version) })
+	s.streams[streamID] = slices.Insert(
+		entries,
+		idx,
+		entry{version: version, data: data},
+	)
+	t.undo = append(
+		t.undo,
+		func() {
+			s.removeEntry(
+				streamID,
+				version,
+			)
+		},
+	)
 	return nil
 }
 
@@ -291,16 +385,28 @@ func (s *memory) removeEntry(
 	version int64,
 ) {
 	cur := s.streams[streamID]
-	i, found := slices.BinarySearchFunc(cur, version, func(
-		e entry,
-		v int64,
-	) int {
-		return cmp.Compare(e.version, v)
-	})
+	i, found := slices.BinarySearchFunc(
+		cur,
+		version,
+		func(
+			e entry,
+			v int64,
+		) int {
+			return cmp.Compare(
+				e.version,
+				v,
+			)
+		},
+	)
 	if !found {
 		return
 	}
-	s.streams[streamID] = slices.Delete(cur, i, i+1)
+
+	s.streams[streamID] = slices.Delete(
+		cur,
+		i,
+		i+1,
+	)
 }
 
 func (t *memoryTx) DeleteStream(
@@ -316,10 +422,17 @@ func (t *memoryTx) DeleteStream(
 	defer s.mu.Unlock()
 
 	old, existed := s.streams[streamID]
-	delete(s.streams, streamID)
+	delete(
+		s.streams,
+		streamID,
+	)
 	if existed {
-		t.undo = append(t.undo, func() { s.streams[streamID] = old })
+		t.undo = append(
+			t.undo,
+			func() { s.streams[streamID] = old },
+		)
 	}
+
 	return nil
 }
 
@@ -336,10 +449,18 @@ func (t *memoryTx) DropDeliveries(
 	defer s.mu.Unlock()
 
 	old := s.deliveries
-	s.deliveries = slices.DeleteFunc(slices.Clone(old), func(d models.Delivery) bool {
-		return d.AggregateID == aggregateID
-	})
-	t.undo = append(t.undo, func() { s.deliveries = old })
+	s.deliveries = slices.DeleteFunc(
+		slices.Clone(old),
+		func(
+			d models.Delivery,
+		) bool {
+			return d.AggregateID == aggregateID
+		},
+	)
+	t.undo = append(
+		t.undo,
+		func() { s.deliveries = old },
+	)
 	return nil
 }
 
@@ -357,10 +478,23 @@ func (t *memoryTx) PutReceipt(
 	defer s.mu.Unlock()
 
 	if _, exists := s.receipts[commandID]; exists {
-		return fmt.Errorf("%w: %s", models.ErrDuplicateReceipt, commandID)
+		return fmt.Errorf(
+			"%w: %s",
+			models.ErrDuplicateReceipt,
+			commandID,
+		)
 	}
+
 	s.receipts[commandID] = r
-	t.undo = append(t.undo, func() { delete(s.receipts, commandID) })
+	t.undo = append(
+		t.undo,
+		func() {
+			delete(
+				s.receipts,
+				commandID,
+			)
+		},
+	)
 	return nil
 }
 
@@ -378,7 +512,13 @@ func (t *memoryTx) EnqueueDelivery(
 	defer s.mu.Unlock()
 
 	old := s.deliveries
-	s.deliveries = append(slices.Clone(old), models.Delivery{AggregateID: aggregateID, Version: version})
-	t.undo = append(t.undo, func() { s.deliveries = old })
+	s.deliveries = append(
+		slices.Clone(old),
+		models.Delivery{AggregateID: aggregateID, Version: version},
+	)
+	t.undo = append(
+		t.undo,
+		func() { s.deliveries = old },
+	)
 	return nil
 }

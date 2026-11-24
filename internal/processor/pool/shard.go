@@ -46,12 +46,24 @@ func newShard[T any](
 	workersPerShard int,
 ) *Shard[T] {
 	return &Shard[T]{
-		id:           id,
-		commandChan:  make(chan *models.CommandEnvelope[T], queueDepth),
-		jobQueue:     make(chan *models.CommandJob[T], max(workersPerShard, queueDepth)),
-		stopChan:     make(chan struct{}),
-		mailboxLimit: max(queueDepth, workersPerShard),
-		mailboxes:    make(map[string][]*models.CommandJob[T]),
+		id: id,
+		commandChan: make(
+			chan *models.CommandEnvelope[T],
+			queueDepth,
+		),
+		jobQueue: make(
+			chan *models.CommandJob[T],
+			max(
+				workersPerShard,
+				queueDepth,
+			),
+		),
+		stopChan: make(chan struct{}),
+		mailboxLimit: max(
+			queueDepth,
+			workersPerShard,
+		),
+		mailboxes: make(map[string][]*models.CommandJob[T]),
 	}
 }
 
@@ -83,6 +95,7 @@ func (s *Shard[T]) handleDispatch() bool {
 			close(s.jobQueue)
 			return true
 		}
+
 		s.dispatchJob(envelope)
 		if s.onDispatched != nil {
 			s.onDispatched()
@@ -105,11 +118,17 @@ func (s *Shard[T]) failQueued() {
 	}
 }
 
-func (s *Shard[T]) failEnvelope(envelope *models.CommandEnvelope[T]) {
+func (s *Shard[T]) failEnvelope(
+	envelope *models.CommandEnvelope[T],
+) {
 	if envelope == nil {
 		return
 	}
-	s.sendResult(envelope.ResultChan, models.CommandResult[T]{Err: asynxmd.ErrShuttingDown})
+
+	s.sendResult(
+		envelope.ResultChan,
+		models.CommandResult[T]{Err: asynxmd.ErrShuttingDown},
+	)
 }
 
 func (s *Shard[T]) dispatchJob(
@@ -127,7 +146,10 @@ func (s *Shard[T]) workerLoop(
 	defer doneWg.Done()
 
 	for job := range s.jobQueue {
-		s.serve(executor, job)
+		s.serve(
+			executor,
+			job,
+		)
 	}
 }
 
@@ -139,11 +161,18 @@ func (s *Shard[T]) serve(
 	job *models.CommandJob[T],
 ) {
 	aggregateID := job.Envelope.Cmd.AggregateID()
-	if !s.claim(aggregateID, job) {
+	if !s.claim(
+		aggregateID,
+		job,
+	) {
 		return
 	}
+
 	for job != nil {
-		s.executeJob(executor, job)
+		s.executeJob(
+			executor,
+			job,
+		)
 		job = s.next(aggregateID)
 	}
 }
@@ -162,28 +191,43 @@ func (s *Shard[T]) claim(
 		s.mailboxMu.Unlock()
 		return true
 	}
+
 	isFull := len(mailbox) >= s.mailboxLimit
 	if !isFull {
-		s.mailboxes[aggregateID] = append(mailbox, job)
+		s.mailboxes[aggregateID] = append(
+			mailbox,
+			job,
+		)
 	}
+
 	s.mailboxMu.Unlock()
 
 	if isFull {
-		s.sendResult(job.Envelope.ResultChan, models.CommandResult[T]{Err: asynxmd.ErrQueueFull})
+		s.sendResult(
+			job.Envelope.ResultChan,
+			models.CommandResult[T]{Err: asynxmd.ErrQueueFull},
+		)
 	}
+
 	return false
 }
 
 // next pops the aggregate's next queued command, or releases the aggregate when
 // its mailbox is empty.
-func (s *Shard[T]) next(aggregateID string) *models.CommandJob[T] {
+func (s *Shard[T]) next(
+	aggregateID string,
+) *models.CommandJob[T] {
 	s.mailboxMu.Lock()
 	defer s.mailboxMu.Unlock()
 	mailbox := s.mailboxes[aggregateID]
 	if len(mailbox) == 0 {
-		delete(s.mailboxes, aggregateID)
+		delete(
+			s.mailboxes,
+			aggregateID,
+		)
 		return nil
 	}
+
 	job := mailbox[0]
 	mailbox[0] = nil
 	s.mailboxes[aggregateID] = mailbox[1:]
@@ -195,7 +239,10 @@ func (s *Shard[T]) executeJob(
 	job *models.CommandJob[T],
 ) {
 	if err := job.Envelope.Ctx.Err(); err != nil {
-		s.sendResult(job.Envelope.ResultChan, models.CommandResult[T]{Err: asynxmd.ErrContextCancelled})
+		s.sendResult(
+			job.Envelope.ResultChan,
+			models.CommandResult[T]{Err: asynxmd.ErrContextCancelled},
+		)
 		return
 	}
 
@@ -208,7 +255,11 @@ func (s *Shard[T]) executeJob(
 	if job.Envelope.WaitHandlers {
 		result.Wait = wait
 	}
-	s.sendResult(job.Envelope.ResultChan, result)
+
+	s.sendResult(
+		job.Envelope.ResultChan,
+		result,
+	)
 }
 
 func (s *Shard[T]) sendResult(
@@ -244,12 +295,15 @@ func (s *Shard[T]) Backlog() int {
 	for _, mailbox := range s.mailboxes {
 		n += len(mailbox)
 	}
+
 	return n
 }
 
 // ForTesting: SetOnDispatched sets a callback invoked each time the dispatcher
 // reads a command from commandChan (slot is now free for new senders).
 // Do not call in production code.
-func (s *Shard[T]) SetOnDispatched(fn func()) {
+func (s *Shard[T]) SetOnDispatched(
+	fn func(),
+) {
 	s.onDispatched = fn
 }

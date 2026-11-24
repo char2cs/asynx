@@ -45,9 +45,25 @@ func New[T any](
 ) *EventStore[T] {
 	var zero T
 
-	r := replayer.New[T](eventStore, upcasters, schemaVersion, zero)
-	w := writer.New[T](eventStore, snapshotStore, schemaVersion)
-	rd := reader.New[T](eventStore, snapshotStore, r, schemaVersion, zero, onCorruption)
+	r := replayer.New[T](
+		eventStore,
+		upcasters,
+		schemaVersion,
+		zero,
+	)
+	w := writer.New[T](
+		eventStore,
+		snapshotStore,
+		schemaVersion,
+	)
+	rd := reader.New[T](
+		eventStore,
+		snapshotStore,
+		r,
+		schemaVersion,
+		zero,
+		onCorruption,
+	)
 
 	return &EventStore[T]{
 		reader:   rd,
@@ -60,7 +76,9 @@ func New[T any](
 // writes the auto-snapshot of an upcast state: it must run its function while
 // no command or Forget runs for the aggregate, and return false without running
 // it when that cannot be arranged. See reader.SnapshotGuard.
-func (es *EventStore[T]) GuardAutoSnapshots(guard reader.SnapshotGuard) {
+func (es *EventStore[T]) GuardAutoSnapshots(
+	guard reader.SnapshotGuard,
+) {
 	es.reader.SetSnapshotGuard(guard)
 }
 
@@ -70,7 +88,10 @@ func (es *EventStore[T]) Get(
 	ctx context.Context,
 	aggregateID string,
 ) (T, error) {
-	return es.reader.Get(ctx, aggregateID)
+	return es.reader.Get(
+		ctx,
+		aggregateID,
+	)
 }
 
 // Exists returns true if the aggregate has at least one event in the store.
@@ -79,7 +100,10 @@ func (es *EventStore[T]) Exists(
 	ctx context.Context,
 	aggregateID string,
 ) (bool, error) {
-	return es.reader.Exists(ctx, aggregateID)
+	return es.reader.Exists(
+		ctx,
+		aggregateID,
+	)
 }
 
 // Preload pays the cold-path cost offline by triggering a full Get.
@@ -88,12 +112,19 @@ func (es *EventStore[T]) Preload(
 	ctx context.Context,
 	aggregateID string,
 ) error {
-	return es.reader.Preload(ctx, aggregateID)
+	return es.reader.Preload(
+		ctx,
+		aggregateID,
+	)
 }
 
 // TxHook runs inside the append's transaction, after the event is appended.
 // Returning an error rolls the transaction back, discarding the event.
-type TxHook[T any] func(ctx context.Context, tx asynxmd.Tx, evt asynxmd.Event[T]) error
+type TxHook[T any] func(
+	ctx context.Context,
+	tx asynxmd.Tx,
+	evt asynxmd.Event[T],
+) error
 
 // Write loads the aggregate state, validates the command, computes the new state
 // via cmd.EmitEvent, and durably appends the event. It writes a snapshot if
@@ -109,18 +140,28 @@ func (es *EventStore[T]) Write(
 	ctx context.Context,
 	cmd asynxmd.Command[T],
 ) (asynxmd.Event[T], error) {
-	evt, err := es.WriteTx(ctx, cmd, nil)
+	evt, err := es.WriteTx(
+		ctx,
+		cmd,
+		nil,
+	)
 	if err != nil {
-		return asynxmd.Event[T]{}, err
+		return asynxmd.Event[T]{},
+			err
 	}
 
 	if cmd.ShouldSnapshot() {
-		if err := es.Snapshot(ctx, evt); err != nil {
-			return asynxmd.Event[T]{}, err
+		if err := es.Snapshot(
+			ctx,
+			evt,
+		); err != nil {
+			return asynxmd.Event[T]{},
+				err
 		}
 	}
 
-	return evt, nil
+	return evt,
+		nil
 }
 
 // WriteTx loads the aggregate state, validates the command, and in one
@@ -134,9 +175,14 @@ func (es *EventStore[T]) WriteTx(
 	// Load state and its version together so the command is validated and the
 	// event is appended against the same version. ErrNotFound yields version 0,
 	// so a first write appends at version 1.
-	current, loadedVersion, err := es.reader.Load(ctx, cmd.AggregateID())
-	if err != nil && err != asynxmd.ErrNotFound {
-		return asynxmd.Event[T]{}, err
+	current, loadedVersion, err := es.reader.Load(
+		ctx,
+		cmd.AggregateID(),
+	)
+	if err != nil &&
+		err != asynxmd.ErrNotFound {
+		return asynxmd.Event[T]{},
+			err
 	}
 
 	var currentPtr *T
@@ -145,7 +191,8 @@ func (es *EventStore[T]) WriteTx(
 	}
 
 	if err := cmd.Validate(currentPtr); err != nil {
-		return asynxmd.Event[T]{}, err
+		return asynxmd.Event[T]{},
+			err
 	}
 
 	newState := cmd.EmitEvent(currentPtr)
@@ -156,30 +203,43 @@ func (es *EventStore[T]) WriteTx(
 	}
 
 	var evt asynxmd.Event[T]
-	err = es.writer.EventStore().Atomically(ctx, func(tx asynxmd.Tx) error {
-		var err error
-		evt, err = es.writer.AppendTx(
-			ctx,
-			tx,
-			cmd.AggregateID(),
-			cmd.EventName(),
-			loadedVersion,
-			previousState,
-			newState,
-		)
-		if err != nil {
-			return err
-		}
-		if hook != nil {
-			return hook(ctx, tx, evt)
-		}
-		return nil
-	})
+	err = es.writer.EventStore().Atomically(
+		ctx,
+		func(
+			tx asynxmd.Tx,
+		) error {
+			var err error
+			evt, err = es.writer.AppendTx(
+				ctx,
+				tx,
+				cmd.AggregateID(),
+				cmd.EventName(),
+				loadedVersion,
+				previousState,
+				newState,
+			)
+			if err != nil {
+				return err
+			}
+
+			if hook != nil {
+				return hook(
+					ctx,
+					tx,
+					evt,
+				)
+			}
+
+			return nil
+		},
+	)
 	if err != nil {
-		return asynxmd.Event[T]{}, err
+		return asynxmd.Event[T]{},
+			err
 	}
 
-	return evt, nil
+	return evt,
+		nil
 }
 
 // Snapshot upserts the snapshot for evt.Aggregate at evt.Version.
@@ -187,7 +247,10 @@ func (es *EventStore[T]) Snapshot(
 	ctx context.Context,
 	evt asynxmd.Event[T],
 ) error {
-	return es.writer.Snapshot(ctx, evt)
+	return es.writer.Snapshot(
+		ctx,
+		evt,
+	)
 }
 
 // Store returns the backing event store.
@@ -200,7 +263,10 @@ func (es *EventStore[T]) DeleteSnapshot(
 	ctx context.Context,
 	aggregateID string,
 ) error {
-	return es.writer.SnapshotStore().Delete(ctx, aggregateID)
+	return es.writer.SnapshotStore().Delete(
+		ctx,
+		aggregateID,
+	)
 }
 
 // Delete removes all events and snapshots for the aggregate from the backing stores.
@@ -209,13 +275,25 @@ func (es *EventStore[T]) Delete(
 	ctx context.Context,
 	aggregateID string,
 ) error {
-	err := es.writer.EventStore().Atomically(ctx, func(tx asynxmd.Tx) error {
-		return tx.DeleteStream(ctx, "events:"+aggregateID)
-	})
+	err := es.writer.EventStore().Atomically(
+		ctx,
+		func(
+			tx asynxmd.Tx,
+		) error {
+			return tx.DeleteStream(
+				ctx,
+				"events:"+aggregateID,
+			)
+		},
+	)
 	if err != nil {
 		return err
 	}
-	return es.DeleteSnapshot(ctx, aggregateID)
+
+	return es.DeleteSnapshot(
+		ctx,
+		aggregateID,
+	)
 }
 
 // Replay iterates events in version order, upcasting each to the current
@@ -231,5 +309,11 @@ func (es *EventStore[T]) Replay(
 	toVersion int64,
 	fn asynxmd.ProjectionHandler[T],
 ) error {
-	return es.replayer.Replay(ctx, aggregateID, fromVersion, toVersion, fn)
+	return es.replayer.Replay(
+		ctx,
+		aggregateID,
+		fromVersion,
+		toVersion,
+		fn,
+	)
 }

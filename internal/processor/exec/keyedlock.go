@@ -26,52 +26,78 @@ func (k *KeyedLock) Lock(
 	key string,
 ) (unlock func(), err error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil,
+			err
 	}
 
 	k.mu.Lock()
 	if k.entries == nil {
 		k.entries = make(map[string]*lockEntry)
 	}
+
 	e, ok := k.entries[key]
 	if !ok {
-		e = &lockEntry{ch: make(chan struct{}, 1)}
+		e = &lockEntry{ch: make(
+			chan struct{},
+			1,
+		)}
 		e.ch <- struct{}{}
 		k.entries[key] = e
 	}
+
 	e.refs++
 	k.mu.Unlock()
 
 	select {
 	case <-e.ch:
 	case <-ctx.Done():
-		k.release(key, e)
-		return nil, ctx.Err()
+		k.release(
+			key,
+			e,
+		)
+		return nil,
+			ctx.Err()
 	}
 
-	return k.unlocker(key, e), nil
+	return k.unlocker(
+			key,
+			e,
+		),
+		nil
 }
 
 // TryLock takes the key if it is free right now and reports whether it did. It
 // never waits.
-func (k *KeyedLock) TryLock(key string) (unlock func(), ok bool) {
+func (k *KeyedLock) TryLock(
+	key string,
+) (unlock func(), ok bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if k.entries == nil {
 		k.entries = make(map[string]*lockEntry)
 	}
+
 	e, exists := k.entries[key]
 	if !exists {
-		e = &lockEntry{ch: make(chan struct{}, 1)}
+		e = &lockEntry{ch: make(
+			chan struct{},
+			1,
+		)}
 		e.ch <- struct{}{}
 		k.entries[key] = e
 	}
+
 	select {
 	case <-e.ch:
 		e.refs++
-		return k.unlocker(key, e), true
+		return k.unlocker(
+				key,
+				e,
+			),
+			true
 	default:
-		return nil, false
+		return nil,
+			false
 	}
 }
 
@@ -83,7 +109,10 @@ func (k *KeyedLock) unlocker(
 	return func() {
 		once.Do(func() {
 			e.ch <- struct{}{}
-			k.release(key, e)
+			k.release(
+				key,
+				e,
+			)
 		})
 	}
 }
@@ -96,7 +125,10 @@ func (k *KeyedLock) release(
 	defer k.mu.Unlock()
 	e.refs--
 	if e.refs == 0 {
-		delete(k.entries, key)
+		delete(
+			k.entries,
+			key,
+		)
 	}
 }
 

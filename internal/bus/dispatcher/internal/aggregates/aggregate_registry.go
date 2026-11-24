@@ -26,7 +26,9 @@ func (r *aggregateRegistry[J]) Enqueue(
 	if admission.Parked {
 		job.Complete(asynxmd.ErrDeliveryParked)
 	}
-	return admission, err
+
+	return admission,
+		err
 }
 
 func (r *aggregateRegistry[J]) enqueue(
@@ -35,21 +37,36 @@ func (r *aggregateRegistry[J]) enqueue(
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return Admission{}, asynxmd.ErrDispatcherClosed
+		return Admission{},
+			asynxmd.ErrDispatcherClosed
 	}
+
 	agg := job.AggregateID()
 	current, exists := r.records[agg]
 	parked := exists && current.parked
-	if parked && job.Acked() {
-		r.markParkedUnrun(current, job)
-		return Admission{Parked: true}, nil
+	if parked &&
+		job.Acked() {
+		r.markParkedUnrun(
+			current,
+			job,
+		)
+		return Admission{Parked: true},
+			nil
 	}
+
 	rec := r.recordOf(agg)
-	spawned := r.ensureWorker(agg, rec)
+	spawned := r.ensureWorker(
+		agg,
+		rec,
+	)
 	r.admit(job)
-	rec.jobs = append(rec.jobs, job)
+	rec.jobs = append(
+		rec.jobs,
+		job,
+	)
 	signal(rec.wake)
-	return Admission{Spawned: spawned}, nil
+	return Admission{Spawned: spawned},
+		nil
 }
 
 // Pop removes and returns the aggregate's oldest queued job with the halt
@@ -61,13 +78,19 @@ func (r *aggregateRegistry[J]) Pop(
 	defer r.mu.Unlock()
 	var zero J
 	rec, ok := r.records[aggregateID]
-	if !ok || len(rec.jobs) == 0 {
-		return zero, nil, false
+	if !ok ||
+		len(rec.jobs) == 0 {
+		return zero,
+			nil,
+			false
 	}
+
 	job := rec.jobs[0]
 	rec.jobs[0] = zero
 	rec.jobs = rec.jobs[1:]
-	return job, rec.halt, true
+	return job,
+		rec.halt,
+		true
 }
 
 // Wake returns the aggregate's wake channel, nil when it has no record (see
@@ -81,6 +104,7 @@ func (r *aggregateRegistry[J]) Wake(
 	if !ok {
 		return nil
 	}
+
 	return rec.wake
 }
 
@@ -95,11 +119,16 @@ func (r *aggregateRegistry[J]) Retire(
 	if !ok {
 		return true
 	}
+
 	if len(rec.jobs) > 0 {
 		return false
 	}
+
 	rec.worker = false
-	r.discardIfEmpty(aggregateID, rec)
+	r.discardIfEmpty(
+		aggregateID,
+		rec,
+	)
 	return true
 }
 
@@ -112,7 +141,10 @@ func (r *aggregateRegistry[J]) Park(
 ) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	rec := r.park(aggregateID, cause)
+	rec := r.park(
+		aggregateID,
+		cause,
+	)
 	for _, v := range undelivered {
 		rec.undelivered[v] = asynxmd.ErrDeliveryParked
 	}
@@ -129,12 +161,17 @@ func (r *aggregateRegistry[J]) ParkIfCurrent(
 	if !durable {
 		return false
 	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if isClosed(halt) {
 		return false
 	}
-	r.park(aggregateID, cause)
+
+	r.park(
+		aggregateID,
+		cause,
+	)
 	return true
 }
 
@@ -148,13 +185,19 @@ func (r *aggregateRegistry[J]) SettleIfParked(
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec, ok := r.records[aggregateID]
-	if ok && rec.parked {
-		r.markParkedUnrun(rec, job)
+	if ok &&
+		rec.parked {
+		r.markParkedUnrun(
+			rec,
+			job,
+		)
 		return true
 	}
+
 	if !isClosed(halt) {
 		return false
 	}
+
 	job.MarkUnrun(asynxmd.ErrDeliveryParked)
 	return true
 }
@@ -170,11 +213,17 @@ func (r *aggregateRegistry[J]) Lift(
 	rec, ok := r.records[aggregateID]
 	current := ok && rec.parked && rec.generation == generation
 	if !current {
-		return false, nil
+		return false,
+			nil
 	}
+
 	undelivered := slices.Sorted(maps.Keys(rec.undelivered))
-	r.lift(aggregateID, rec)
-	return true, undelivered
+	r.lift(
+		aggregateID,
+		rec,
+	)
+	return true,
+		undelivered
 }
 
 // Supersede parks the aggregate and lifts the park at once (see
@@ -184,8 +233,14 @@ func (r *aggregateRegistry[J]) Supersede(
 ) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	rec := r.park(aggregateID, nil)
-	r.lift(aggregateID, rec)
+	rec := r.park(
+		aggregateID,
+		nil,
+	)
+	r.lift(
+		aggregateID,
+		rec,
+	)
 }
 
 // Parks returns a copy of the parked aggregates and their generations.
@@ -194,8 +249,13 @@ func (r *aggregateRegistry[J]) Parks() map[string]uint64 {
 	defer r.mu.Unlock()
 	parks := make(map[string]uint64)
 	for agg, rec := range r.records {
-		addPark(parks, agg, rec)
+		addPark(
+			parks,
+			agg,
+			rec,
+		)
 	}
+
 	return parks
 }
 
@@ -207,9 +267,11 @@ func (r *aggregateRegistry[J]) Inspect(
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec, ok := r.records[aggregateID]
-	if !ok || !rec.parked {
+	if !ok ||
+		!rec.parked {
 		return asynxmd.DeliveryStatus{}
 	}
+
 	return asynxmd.DeliveryStatus{
 		Parked:      true,
 		Generation:  rec.generation,
@@ -230,6 +292,7 @@ func (r *aggregateRegistry[J]) Unrun(
 	if !ok {
 		return nil
 	}
+
 	return rec.undelivered[version]
 }
 
@@ -250,6 +313,7 @@ func (r *aggregateRegistry[J]) recordOf(
 	if ok {
 		return rec
 	}
+
 	rec = &record[J]{
 		halt:        make(chan struct{}),
 		undelivered: make(map[int64]error),
@@ -265,8 +329,12 @@ func (r *aggregateRegistry[J]) ensureWorker(
 	if rec.worker {
 		return false
 	}
+
 	rec.worker = true
-	rec.wake = make(chan struct{}, 1)
+	rec.wake = make(
+		chan struct{},
+		1,
+	)
 	rec.halt = make(chan struct{})
 	r.spawn(agg)
 	return true
@@ -278,6 +346,7 @@ func (r *aggregateRegistry[J]) spawn(
 	if r.hooks.Spawn == nil {
 		return
 	}
+
 	r.hooks.Spawn(agg)
 }
 
@@ -287,6 +356,7 @@ func (r *aggregateRegistry[J]) admit(
 	if r.hooks.Admit == nil {
 		return
 	}
+
 	r.hooks.Admit(job)
 }
 
@@ -298,17 +368,28 @@ func (r *aggregateRegistry[J]) park(
 	if rec.cause == nil {
 		rec.cause = cause
 	}
+
 	if rec.parked {
 		return rec
 	}
+
 	r.generation++
 	rec.parked = true
 	rec.generation = r.generation
 	close(rec.halt)
-	kept := make([]J, 0, len(rec.jobs))
+	kept := make(
+		[]J,
+		0,
+		len(rec.jobs),
+	)
 	for _, job := range rec.jobs {
-		kept = r.keepLive(rec, job, kept)
+		kept = r.keepLive(
+			rec,
+			job,
+			kept,
+		)
 	}
+
 	rec.jobs = kept
 	return rec
 }
@@ -319,9 +400,16 @@ func (r *aggregateRegistry[J]) keepLive(
 	kept []J,
 ) []J {
 	if !job.Acked() {
-		return append(kept, job)
+		return append(
+			kept,
+			job,
+		)
 	}
-	r.markParkedUnrun(rec, job)
+
+	r.markParkedUnrun(
+		rec,
+		job,
+	)
 	job.Complete(asynxmd.ErrDeliveryParked)
 	return kept
 }
@@ -335,7 +423,10 @@ func (r *aggregateRegistry[J]) lift(
 	rec.cause = nil
 	rec.undelivered = make(map[int64]error)
 	rec.halt = make(chan struct{})
-	r.discardIfEmpty(agg, rec)
+	r.discardIfEmpty(
+		agg,
+		rec,
+	)
 }
 
 func (r *aggregateRegistry[J]) markParkedUnrun(
@@ -352,10 +443,15 @@ func (r *aggregateRegistry[J]) discardIfEmpty(
 ) {
 	busy := rec.worker || len(rec.jobs) > 0
 	held := rec.parked || len(rec.undelivered) > 0
-	if busy || held {
+	if busy ||
+		held {
 		return
 	}
-	delete(r.records, agg)
+
+	delete(
+		r.records,
+		agg,
+	)
 }
 
 func addPark[J Item](
@@ -366,6 +462,7 @@ func addPark[J Item](
 	if !rec.parked {
 		return
 	}
+
 	parks[agg] = rec.generation
 }
 
@@ -375,6 +472,7 @@ func undeliveredOf[J Item](
 	if len(rec.undelivered) == 0 {
 		return nil
 	}
+
 	return slices.Sorted(maps.Keys(rec.undelivered))
 }
 

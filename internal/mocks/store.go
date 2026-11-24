@@ -19,14 +19,22 @@ func (t stubTx) Append(
 	v int64,
 	d []byte,
 ) error {
-	return t.appendFn(ctx, id, v, d)
+	return t.appendFn(
+		ctx,
+		id,
+		v,
+		d,
+	)
 }
 
 func (t stubTx) DeleteStream(
 	ctx context.Context,
 	id string,
 ) error {
-	return t.deleteFn(ctx, id)
+	return t.deleteFn(
+		ctx,
+		id,
+	)
 }
 
 func (stubTx) DropDeliveries(
@@ -69,14 +77,17 @@ func (s *Store) GetReceipt(
 	context.Context,
 	string,
 ) (models.Receipt, bool, error) {
-	return models.Receipt{}, false, nil
+	return models.Receipt{},
+		false,
+		nil
 }
 
 func (s *Store) PendingDeliveries(
 	context.Context,
 	int,
 ) ([]models.Delivery, error) {
-	return nil, nil
+	return nil,
+		nil
 }
 
 func (s *Store) AckDelivery(
@@ -101,7 +112,8 @@ func (s *Store) ReadFrom(
 	_ string,
 	_ int64,
 ) ([][]byte, error) {
-	return nil, nil
+	return nil,
+		nil
 }
 
 func (s *Store) ReadRange(
@@ -110,10 +122,14 @@ func (s *Store) ReadRange(
 	_ int64,
 	_ int64,
 ) ([][]byte, error) {
-	return nil, nil
+	return nil,
+		nil
 }
 
-func (s *Store) Delete(_ context.Context, _ string) error {
+func (s *Store) Delete(
+	_ context.Context,
+	_ string,
+) error {
 	return nil
 }
 
@@ -133,14 +149,17 @@ func (e *ErrStore) GetReceipt(
 	context.Context,
 	string,
 ) (models.Receipt, bool, error) {
-	return models.Receipt{}, false, e.Err
+	return models.Receipt{},
+		false,
+		e.Err
 }
 
 func (e *ErrStore) PendingDeliveries(
 	context.Context,
 	int,
 ) ([]models.Delivery, error) {
-	return nil, e.Err
+	return nil,
+		e.Err
 }
 
 func (e *ErrStore) AckDelivery(
@@ -151,19 +170,38 @@ func (e *ErrStore) AckDelivery(
 	return e.Err
 }
 
-func (e *ErrStore) Append(_ context.Context, _ string, _ int64, _ []byte) error {
+func (e *ErrStore) Append(
+	_ context.Context,
+	_ string,
+	_ int64,
+	_ []byte,
+) error {
 	return e.Err
 }
 
-func (e *ErrStore) ReadFrom(_ context.Context, _ string, _ int64) ([][]byte, error) {
-	return nil, e.Err
+func (e *ErrStore) ReadFrom(
+	_ context.Context,
+	_ string,
+	_ int64,
+) ([][]byte, error) {
+	return nil,
+		e.Err
 }
 
-func (e *ErrStore) ReadRange(_ context.Context, _ string, _ int64, _ int64) ([][]byte, error) {
-	return nil, e.Err
+func (e *ErrStore) ReadRange(
+	_ context.Context,
+	_ string,
+	_ int64,
+	_ int64,
+) ([][]byte, error) {
+	return nil,
+		e.Err
 }
 
-func (e *ErrStore) Delete(_ context.Context, _ string) error {
+func (e *ErrStore) Delete(
+	_ context.Context,
+	_ string,
+) error {
 	return e.Err
 }
 
@@ -185,14 +223,17 @@ func (c *CorruptBlobStore) GetReceipt(
 	context.Context,
 	string,
 ) (models.Receipt, bool, error) {
-	return models.Receipt{}, false, nil
+	return models.Receipt{},
+		false,
+		nil
 }
 
 func (c *CorruptBlobStore) PendingDeliveries(
 	context.Context,
 	int,
 ) ([]models.Delivery, error) {
-	return nil, nil
+	return nil,
+		nil
 }
 
 func (c *CorruptBlobStore) AckDelivery(
@@ -203,19 +244,38 @@ func (c *CorruptBlobStore) AckDelivery(
 	return nil
 }
 
-func (c *CorruptBlobStore) Append(_ context.Context, _ string, _ int64, _ []byte) error {
+func (c *CorruptBlobStore) Append(
+	_ context.Context,
+	_ string,
+	_ int64,
+	_ []byte,
+) error {
 	return nil
 }
 
-func (c *CorruptBlobStore) ReadFrom(_ context.Context, _ string, _ int64) ([][]byte, error) {
-	return [][]byte{[]byte("!!!invalid")}, nil
+func (c *CorruptBlobStore) ReadFrom(
+	_ context.Context,
+	_ string,
+	_ int64,
+) ([][]byte, error) {
+	return [][]byte{[]byte("!!!invalid")},
+		nil
 }
 
-func (c *CorruptBlobStore) ReadRange(_ context.Context, _ string, _ int64, _ int64) ([][]byte, error) {
-	return [][]byte{[]byte("!!!invalid")}, nil
+func (c *CorruptBlobStore) ReadRange(
+	_ context.Context,
+	_ string,
+	_ int64,
+	_ int64,
+) ([][]byte, error) {
+	return [][]byte{[]byte("!!!invalid")},
+		nil
 }
 
-func (c *CorruptBlobStore) Delete(_ context.Context, _ string) error {
+func (c *CorruptBlobStore) Delete(
+	_ context.Context,
+	_ string,
+) error {
 	return nil
 }
 
@@ -238,7 +298,9 @@ func (s *SnapshotStore) Get(
 	_ context.Context,
 	_ string,
 ) ([]byte, bool, error) {
-	return nil, false, nil
+	return nil,
+		false,
+		nil
 }
 
 func (s *SnapshotStore) Delete(
@@ -263,25 +325,38 @@ func (c *CountingSnapshotStore) Put(
 	version int64,
 	data []byte,
 ) error {
-	return c.Inner.Put(ctx, aggregateID, version, data)
+	return c.Inner.Put(
+		ctx,
+		aggregateID,
+		version,
+		data,
+	)
 }
 
 func (c *CountingSnapshotStore) Get(
 	ctx context.Context,
 	aggregateID string,
 ) ([]byte, bool, error) {
-	data, found, err := c.Inner.Get(ctx, aggregateID)
+	data, found, err := c.Inner.Get(
+		ctx,
+		aggregateID,
+	)
 	c.GetCalls++
 	c.GetBytes += len(data)
 
-	return data, found, err
+	return data,
+		found,
+		err
 }
 
 func (c *CountingSnapshotStore) Delete(
 	ctx context.Context,
 	aggregateID string,
 ) error {
-	return c.Inner.Delete(ctx, aggregateID)
+	return c.Inner.Delete(
+		ctx,
+		aggregateID,
+	)
 }
 
 // Reset zeroes the counters so a test can measure a single operation.

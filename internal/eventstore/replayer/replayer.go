@@ -37,6 +37,7 @@ func New[T any](
 	if cloned == nil {
 		cloned = make(map[int]asynxmd.Upcaster)
 	}
+
 	return &Replayer[T]{
 		eventStore:           es,
 		upcasters:            cloned,
@@ -66,12 +67,14 @@ func (r *Replayer[T]) Hydrate(
 	events []esmodels.InternalEvent,
 ) (HydrateResult[T], error) {
 	if len(events) == 0 {
-		return HydrateResult[T]{State: seedState}, nil
+		return HydrateResult[T]{State: seedState},
+			nil
 	}
 
 	stateJSON, err := json.Marshal(seedState)
 	if err != nil {
-		return HydrateResult[T]{}, err
+		return HydrateResult[T]{},
+			err
 	}
 
 	upcasted := false
@@ -82,22 +85,34 @@ func (r *Replayer[T]) Hydrate(
 			upcasted = true
 		}
 
-		upcastedEvt, err := r.upcastInternalEvent(ctx, evt)
+		upcastedEvt, err := r.upcastInternalEvent(
+			ctx,
+			evt,
+		)
 		if err != nil {
-			return HydrateResult[T]{}, err
+			return HydrateResult[T]{},
+				err
 		}
 
-		stateJSON, err = applyPatchesToJSON(stateJSON, upcastedEvt.Patches)
+		stateJSON, err = applyPatchesToJSON(
+			stateJSON,
+			upcastedEvt.Patches,
+		)
 		if err != nil {
-			return HydrateResult[T]{}, err
+			return HydrateResult[T]{},
+				err
 		}
 
 		lastVersion = evt.Version
 	}
 
 	var current T
-	if err := json.Unmarshal(stateJSON, &current); err != nil {
-		return HydrateResult[T]{}, err
+	if err := json.Unmarshal(
+		stateJSON,
+		&current,
+	); err != nil {
+		return HydrateResult[T]{},
+			err
 	}
 
 	result := HydrateResult[T]{State: current}
@@ -106,7 +121,8 @@ func (r *Replayer[T]) Hydrate(
 		result.LastVersion = lastVersion
 	}
 
-	return result, nil
+	return result,
+		nil
 }
 
 // Replay iterates events in version order, upcasting each to the current schema
@@ -126,7 +142,11 @@ func (r *Replayer[T]) Replay(
 	fn asynxmd.ProjectionHandler[T],
 ) error {
 	// Always start from version 1 to populate previous state correctly
-	eventBlobs, err := r.eventStore.ReadFrom(ctx, "events:"+aggregateID, 1)
+	eventBlobs, err := r.eventStore.ReadFrom(
+		ctx,
+		"events:"+aggregateID,
+		1,
+	)
 	if err != nil {
 		return err
 	}
@@ -145,44 +165,62 @@ func (r *Replayer[T]) Replay(
 
 	for _, blob := range eventBlobs {
 		var evt esmodels.InternalEvent
-		if err := json.Unmarshal(blob, &evt); err != nil {
+		if err := json.Unmarshal(
+			blob,
+			&evt,
+		); err != nil {
 			return err
 		}
 
-		upcastedEvt, err := r.upcastInternalEvent(ctx, evt)
+		upcastedEvt, err := r.upcastInternalEvent(
+			ctx,
+			evt,
+		)
 		if err != nil {
 			return err
 		}
 
-		currentJSON, err = applyPatchesToJSON(currentJSON, upcastedEvt.Patches)
+		currentJSON, err = applyPatchesToJSON(
+			currentJSON,
+			upcastedEvt.Patches,
+		)
 		if err != nil {
 			return err
 		}
 
 		var current T
-		if err := json.Unmarshal(currentJSON, &current); err != nil {
+		if err := json.Unmarshal(
+			currentJSON,
+			&current,
+		); err != nil {
 			return err
 		}
 
 		// Only invoke fn if we're within the requested range
-		if currentVersion >= fromVersion && (toVersion == 0 || currentVersion <= toVersion) {
-			fn(ctx, asynxmd.Event[T]{
-				ID:                upcastedEvt.ID,
-				AggregateID:       aggregateID,
-				EventName:         upcastedEvt.EventName,
-				Version:           upcastedEvt.Version,
-				SchemaVersion:     upcastedEvt.SchemaVersion,
-				OccurredAt:        upcastedEvt.OccurredAt,
-				Aggregate:         current,
-				PreviousAggregate: previous,
-			})
+		if currentVersion >= fromVersion &&
+			(toVersion == 0 ||
+				currentVersion <= toVersion) {
+			fn(
+				ctx,
+				asynxmd.Event[T]{
+					ID:                upcastedEvt.ID,
+					AggregateID:       aggregateID,
+					EventName:         upcastedEvt.EventName,
+					Version:           upcastedEvt.Version,
+					SchemaVersion:     upcastedEvt.SchemaVersion,
+					OccurredAt:        upcastedEvt.OccurredAt,
+					Aggregate:         current,
+					PreviousAggregate: previous,
+				},
+			)
 		}
 
 		previous = current
 		currentVersion++
 
 		// Stop if we've exceeded toVersion
-		if toVersion > 0 && currentVersion > toVersion {
+		if toVersion > 0 &&
+			currentVersion > toVersion {
 			break
 		}
 	}
@@ -206,27 +244,52 @@ func (r *Replayer[T]) upcastInternalEvent(
 			continue
 		}
 
-		upcastedPatchesJSON, err := upcaster(ctx, evt.EventName, evt.Patches)
+		upcastedPatchesJSON, err := upcaster(
+			ctx,
+			evt.EventName,
+			evt.Patches,
+		)
 		if err != nil {
-			return esmodels.InternalEvent{}, fmt.Errorf("eventstore: upcaster %d failed: %w", v, err)
+			return esmodels.InternalEvent{},
+				fmt.Errorf(
+					"eventstore: upcaster %d failed: %w",
+					v,
+					err,
+				)
 		}
 
 		evt.Patches = upcastedPatchesJSON
 		evt.SchemaVersion = v + 1
 	}
 
-	return evt, nil
+	return evt,
+		nil
 }
 
 // applyPatchesToJSON applies patches to raw JSON bytes and returns the patched bytes.
 // A nil, "null", or "[]" patch set is a no-op.
-func applyPatchesToJSON(stateJSON []byte, patches json.RawMessage) ([]byte, error) {
-	if len(patches) == 0 || bytes.Equal(patches, []byte("null")) || bytes.Equal(patches, []byte("[]")) {
-		return stateJSON, nil
+func applyPatchesToJSON(
+	stateJSON []byte,
+	patches json.RawMessage,
+) ([]byte, error) {
+	if len(patches) == 0 ||
+		bytes.Equal(
+			patches,
+			[]byte("null"),
+		) ||
+		bytes.Equal(
+			patches,
+			[]byte("[]"),
+		) {
+		return stateJSON,
+			nil
 	}
+
 	patch, err := jsonpatch.DecodePatch(patches)
 	if err != nil {
-		return nil, err
+		return nil,
+			err
 	}
+
 	return patch.Apply(stateJSON)
 }

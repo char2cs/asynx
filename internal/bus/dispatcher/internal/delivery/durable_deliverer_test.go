@@ -16,87 +16,191 @@ import (
 	"github.com/char2cs/asynx/internal/bus/dispatcher/internal/jobs"
 )
 
-func TestParkThenReport_ParksTheAggregateBeforeReporting(t *testing.T) {
+func TestParkThenReport_ParksTheAggregateBeforeReporting(
+	t *testing.T,
+) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{})
-	job, halt := f.pop(t, acked("test.event"))
+	job, halt := f.pop(
+		t,
+		acked("test.event"),
+	)
 
 	var parkedWhenTold []string
-	f.deliverer.ParkThenReport("a", halt, job, errStopped, func() {
-		parkedWhenTold = slices.Sorted(maps.Keys(f.registry.Parks()))
-	})
+	f.deliverer.ParkThenReport(
+		"a",
+		halt,
+		job,
+		errStopped,
+		func() {
+			parkedWhenTold = slices.Sorted(maps.Keys(f.registry.Parks()))
+		},
+	)
 
-	if !slices.Equal(parkedWhenTold, []string{"a"}) {
-		t.Fatalf("parked when told = %v, want [a]", parkedWhenTold)
+	if !slices.Equal(
+		parkedWhenTold,
+		[]string{"a"},
+	) {
+		t.Fatalf(
+			"parked when told = %v, want [a]",
+			parkedWhenTold,
+		)
 	}
 }
 
 var errStopped = errors.New("stopped")
 
-func TestParkThenReport_RecordsTheCause(t *testing.T) {
+func TestParkThenReport_RecordsTheCause(
+	t *testing.T,
+) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{})
-	job, halt := f.pop(t, acked("test.event"))
+	job, halt := f.pop(
+		t,
+		acked("test.event"),
+	)
 
-	f.deliverer.ParkThenReport("a", halt, job, errStopped, func() {})
+	f.deliverer.ParkThenReport(
+		"a",
+		halt,
+		job,
+		errStopped,
+		func() {},
+	)
 
-	if got := f.registry.Inspect("a"); !got.Parked || !errors.Is(got.Cause, errStopped) {
-		t.Fatalf("Inspect = %+v, want parked with %v", got, errStopped)
+	if got := f.registry.Inspect("a"); !got.Parked ||
+		!errors.Is(
+			got.Cause,
+			errStopped,
+		) {
+		t.Fatalf(
+			"Inspect = %+v, want parked with %v",
+			got,
+			errStopped,
+		)
 	}
 }
 
-func TestParkThenReport_LeavesASettledAggregateAloneButStillReports(t *testing.T) {
+func TestParkThenReport_LeavesASettledAggregateAloneButStillReports(
+	t *testing.T,
+) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{})
-	job, halt := f.pop(t, acked("test.event"))
+	job, halt := f.pop(
+		t,
+		acked("test.event"),
+	)
 	f.registry.Supersede("a")
 
 	reported := false
-	f.deliverer.ParkThenReport("a", halt, job, errStopped, func() { reported = true })
+	f.deliverer.ParkThenReport(
+		"a",
+		halt,
+		job,
+		errStopped,
+		func() { reported = true },
+	)
 
 	if len(f.registry.Parks()) != 0 {
-		t.Fatalf("parks = %v: a superseded aggregate was parked again", f.registry.Parks())
+		t.Fatalf(
+			"parks = %v: a superseded aggregate was parked again",
+			f.registry.Parks(),
+		)
 	}
+
 	if !reported {
 		t.Fatal("the report was skipped")
 	}
 }
 
-func TestParkThenReport_NeverParksForAJobWithoutAnAck(t *testing.T) {
+func TestParkThenReport_NeverParksForAJobWithoutAnAck(
+	t *testing.T,
+) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{})
-	job, halt := f.pop(t, tombstone(nil))
+	job, halt := f.pop(
+		t,
+		tombstone(nil),
+	)
 
-	f.deliverer.ParkThenReport("a", halt, job, errStopped, func() {})
+	f.deliverer.ParkThenReport(
+		"a",
+		halt,
+		job,
+		errStopped,
+		func() {},
+	)
 
 	if len(f.registry.Parks()) != 0 {
-		t.Fatalf("parks = %v, want none for a nil-Ack job", f.registry.Parks())
+		t.Fatalf(
+			"parks = %v, want none for a nil-Ack job",
+			f.registry.Parks(),
+		)
 	}
 }
 
-func TestDeliver_GiveUpParksBeforeTheParkedErrorIsReported(t *testing.T) {
+func TestDeliver_GiveUpParksBeforeTheParkedErrorIsReported(
+	t *testing.T,
+) {
 	down := errors.New("down")
 	f := newFixture(asynxmd.DispatcherConfig[int]{
 		DurableSubs: []asynxmd.DurableSub[int]{failing(down)},
 		MaxAttempts: 2,
 	})
-	job, halt := f.pop(t, acked("test.event"))
+	job, halt := f.pop(
+		t,
+		acked("test.event"),
+	)
 
-	err := f.deliverer.Deliver("a", halt, job)
-
-	if !errors.Is(err, asynxmd.ErrDeliveryParked) || !errors.Is(err, down) {
-		t.Fatalf("Deliver = %v, want ErrDeliveryParked wrapping the handler error", err)
+	err := f.deliverer.Deliver(
+		"a",
+		halt,
+		job,
+	)
+	if !errors.Is(
+		err,
+		asynxmd.ErrDeliveryParked,
+	) ||
+		!errors.Is(
+			err,
+			down,
+		) {
+		t.Fatalf(
+			"Deliver = %v, want ErrDeliveryParked wrapping the handler error",
+			err,
+		)
 	}
+
 	reports := f.reports.all()
 	last := reports[len(reports)-1]
-	if !errors.Is(last.err, asynxmd.ErrDeliveryParked) || !slices.Equal(last.parked, []string{"a"}) {
-		t.Fatalf("last report = %+v, want the park reported once the aggregate was parked", last)
+	if !errors.Is(
+		last.err,
+		asynxmd.ErrDeliveryParked,
+	) ||
+		!slices.Equal(
+			last.parked,
+			[]string{"a"},
+		) {
+		t.Fatalf(
+			"last report = %+v, want the park reported once the aggregate was parked",
+			last,
+		)
 	}
+
 	if len(reports) != 3 {
-		t.Fatalf("reports = %d, want two failed attempts and the park", len(reports))
+		t.Fatalf(
+			"reports = %d, want two failed attempts and the park",
+			len(reports),
+		)
 	}
 }
 
-func TestDeliver_AnAckedJobUnderAClosedHaltRunsNothing(t *testing.T) {
+func TestDeliver_AnAckedJobUnderAClosedHaltRunsNothing(
+	t *testing.T,
+) {
 	var runs atomic.Int32
 	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
-		Match: func(string) bool { return true },
+		Match: func(
+			string,
+		) bool {
+			return true
+		},
 		Handler: func(
 			context.Context,
 			asynxmd.Event[int],
@@ -105,18 +209,37 @@ func TestDeliver_AnAckedJobUnderAClosedHaltRunsNothing(t *testing.T) {
 			return nil
 		},
 	}}})
-	job, halt := f.pop(t, acked("test.event"))
+	job, halt := f.pop(
+		t,
+		acked("test.event"),
+	)
 	f.registry.Supersede("a")
 
-	if err := f.deliverer.Deliver("a", halt, job); !errors.Is(err, asynxmd.ErrDeliveryParked) {
-		t.Fatalf("Deliver = %v, want ErrDeliveryParked", err)
+	if err := f.deliverer.Deliver(
+		"a",
+		halt,
+		job,
+	); !errors.Is(
+		err,
+		asynxmd.ErrDeliveryParked,
+	) {
+		t.Fatalf(
+			"Deliver = %v, want ErrDeliveryParked",
+			err,
+		)
 	}
+
 	if runs.Load() != 0 {
-		t.Fatalf("handler ran %d times under a closed halt", runs.Load())
+		t.Fatalf(
+			"handler ran %d times under a closed halt",
+			runs.Load(),
+		)
 	}
 }
 
-func TestDeliver_ATombstoneIsNeverDeadLettered(t *testing.T) {
+func TestDeliver_ATombstoneIsNeverDeadLettered(
+	t *testing.T,
+) {
 	var dead atomic.Int32
 	f := newFixture(asynxmd.DispatcherConfig[int]{
 		DurableSubs: []asynxmd.DurableSub[int]{failing(errors.New("cannot forget"))},
@@ -130,17 +253,40 @@ func TestDeliver_ATombstoneIsNeverDeadLettered(t *testing.T) {
 			return nil
 		},
 	})
-	job, halt := f.pop(t, tombstone(func(context.Context) error { return nil }))
+	job, halt := f.pop(
+		t,
+		tombstone(func(
+			context.Context,
+		) error {
+			return nil
+		}),
+	)
 
-	if err := f.deliverer.Deliver("a", halt, job); !errors.Is(err, asynxmd.ErrDeliveryParked) {
-		t.Fatalf("Deliver = %v, want ErrDeliveryParked", err)
+	if err := f.deliverer.Deliver(
+		"a",
+		halt,
+		job,
+	); !errors.Is(
+		err,
+		asynxmd.ErrDeliveryParked,
+	) {
+		t.Fatalf(
+			"Deliver = %v, want ErrDeliveryParked",
+			err,
+		)
 	}
+
 	if dead.Load() != 0 {
-		t.Fatalf("dead-letter handler called %d times for a tombstone", dead.Load())
+		t.Fatalf(
+			"dead-letter handler called %d times for a tombstone",
+			dead.Load(),
+		)
 	}
 }
 
-func TestDeliver_AJobWithoutAnAckIsNeverDeadLetteredNorParked(t *testing.T) {
+func TestDeliver_AJobWithoutAnAckIsNeverDeadLetteredNorParked(
+	t *testing.T,
+) {
 	var dead atomic.Int32
 	f := newFixture(asynxmd.DispatcherConfig[int]{
 		DurableSubs: []asynxmd.DurableSub[int]{failing(errors.New("down"))},
@@ -154,20 +300,45 @@ func TestDeliver_AJobWithoutAnAckIsNeverDeadLetteredNorParked(t *testing.T) {
 			return nil
 		},
 	})
-	job, halt := f.pop(t, tombstone(nil))
+	job, halt := f.pop(
+		t,
+		tombstone(nil),
+	)
 
-	if err := f.deliverer.Deliver("a", halt, job); !errors.Is(err, asynxmd.ErrDeliveryParked) {
-		t.Fatalf("Deliver = %v, want ErrDeliveryParked", err)
+	if err := f.deliverer.Deliver(
+		"a",
+		halt,
+		job,
+	); !errors.Is(
+		err,
+		asynxmd.ErrDeliveryParked,
+	) {
+		t.Fatalf(
+			"Deliver = %v, want ErrDeliveryParked",
+			err,
+		)
 	}
-	if dead.Load() != 0 || len(f.registry.Parks()) != 0 {
-		t.Fatalf("dead letters = %d, parks = %v; want neither for a nil-Ack job", dead.Load(), f.registry.Parks())
+
+	if dead.Load() != 0 ||
+		len(f.registry.Parks()) != 0 {
+		t.Fatalf(
+			"dead letters = %d, parks = %v; want neither for a nil-Ack job",
+			dead.Load(),
+			f.registry.Parks(),
+		)
 	}
 }
 
-func TestDeliver_ATombstoneReachesEverySubscriber(t *testing.T) {
+func TestDeliver_ATombstoneReachesEverySubscriber(
+	t *testing.T,
+) {
 	var runs atomic.Int32
 	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
-		Match: func(string) bool { return false },
+		Match: func(
+			string,
+		) bool {
+			return false
+		},
 		Handler: func(
 			context.Context,
 			asynxmd.Event[int],
@@ -176,57 +347,119 @@ func TestDeliver_ATombstoneReachesEverySubscriber(t *testing.T) {
 			return nil
 		},
 	}}})
-	job, halt := f.pop(t, tombstone(nil))
+	job, halt := f.pop(
+		t,
+		tombstone(nil),
+	)
 
-	if err := f.deliverer.Deliver("a", halt, job); err != nil {
-		t.Fatalf("Deliver = %v", err)
+	if err := f.deliverer.Deliver(
+		"a",
+		halt,
+		job,
+	); err != nil {
+		t.Fatalf(
+			"Deliver = %v",
+			err,
+		)
 	}
+
 	if runs.Load() != 1 {
-		t.Fatalf("a non-matching subscriber ran %d times for a tombstone, want 1", runs.Load())
+		t.Fatalf(
+			"a non-matching subscriber ran %d times for a tombstone, want 1",
+			runs.Load(),
+		)
 	}
 }
 
-func TestDeliver_InterruptParksWithoutReportingAndEndsClosed(t *testing.T) {
+func TestDeliver_InterruptParksWithoutReportingAndEndsClosed(
+	t *testing.T,
+) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{
 		DurableSubs:  []asynxmd.DurableSub[int]{failing(errors.New("down"))},
 		MaxAttempts:  100,
 		RetryInitial: time.Hour,
 		RetryMax:     time.Hour,
 	})
-	job, halt := f.pop(t, acked("test.event"))
+	job, halt := f.pop(
+		t,
+		acked("test.event"),
+	)
 	close(f.interrupted)
 
-	if err := f.deliverer.Deliver("a", halt, job); !errors.Is(err, asynxmd.ErrDispatcherClosed) {
-		t.Fatalf("Deliver = %v, want ErrDispatcherClosed", err)
+	if err := f.deliverer.Deliver(
+		"a",
+		halt,
+		job,
+	); !errors.Is(
+		err,
+		asynxmd.ErrDispatcherClosed,
+	) {
+		t.Fatalf(
+			"Deliver = %v, want ErrDispatcherClosed",
+			err,
+		)
 	}
+
 	if _, parked := f.registry.Parks()["a"]; !parked {
 		t.Fatal("an interrupted acked delivery did not park its aggregate")
 	}
+
 	if got := len(f.reports.all()); got != 1 {
-		t.Fatalf("reports = %d, want only the failed attempt", got)
+		t.Fatalf(
+			"reports = %d, want only the failed attempt",
+			got,
+		)
 	}
 }
 
-func TestDeliver_AParkDuringTheBackoffEndsTheDelivery(t *testing.T) {
+func TestDeliver_AParkDuringTheBackoffEndsTheDelivery(
+	t *testing.T,
+) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{
 		DurableSubs:  []asynxmd.DurableSub[int]{failing(errors.New("down"))},
 		MaxAttempts:  100,
 		RetryInitial: time.Hour,
 		RetryMax:     time.Hour,
 	})
-	job, halt := f.pop(t, acked("test.event"))
-	done := make(chan error, 1)
-	go func() { done <- f.deliverer.Deliver("a", halt, job) }()
+	job, halt := f.pop(
+		t,
+		acked("test.event"),
+	)
+	done := make(
+		chan error,
+		1,
+	)
+	go func() {
+		done <- f.deliverer.Deliver(
+			"a",
+			halt,
+			job,
+		)
+	}()
 
-	waitUntil(t, func() bool { return len(f.reports.all()) == 1 })
-	f.registry.Park("a", errStopped)
+	waitUntil(
+		t,
+		func() bool { return len(f.reports.all()) == 1 },
+	)
+	f.registry.Park(
+		"a",
+		errStopped,
+	)
 
-	if err := <-done; !errors.Is(err, asynxmd.ErrDeliveryParked) {
-		t.Fatalf("Deliver = %v, want ErrDeliveryParked", err)
+	if err := <-done; !errors.Is(
+		err,
+		asynxmd.ErrDeliveryParked,
+	) {
+		t.Fatalf(
+			"Deliver = %v, want ErrDeliveryParked",
+			err,
+		)
 	}
 }
 
-func TestDeliver_ADeadLetterHandlerPanicParksTheAggregate(t *testing.T) {
+func TestDeliver_ADeadLetterHandlerPanicParksTheAggregate(
+	t *testing.T,
+) {
 	f := newFixture(asynxmd.DispatcherConfig[int]{
 		DurableSubs: []asynxmd.DurableSub[int]{failing(errors.New("down"))},
 		MaxAttempts: 1,
@@ -238,21 +471,48 @@ func TestDeliver_ADeadLetterHandlerPanicParksTheAggregate(t *testing.T) {
 			panic("dead-letter store down")
 		},
 	})
-	job, halt := f.pop(t, acked("test.event"))
+	job, halt := f.pop(
+		t,
+		acked("test.event"),
+	)
 
-	if err := f.deliverer.Deliver("a", halt, job); !errors.Is(err, asynxmd.ErrDeliveryParked) {
-		t.Fatalf("Deliver = %v, want ErrDeliveryParked", err)
+	if err := f.deliverer.Deliver(
+		"a",
+		halt,
+		job,
+	); !errors.Is(
+		err,
+		asynxmd.ErrDeliveryParked,
+	) {
+		t.Fatalf(
+			"Deliver = %v, want ErrDeliveryParked",
+			err,
+		)
 	}
+
 	reports := f.reports.all()
-	if len(reports) < 2 || !errors.Is(reports[1].err, asynxmd.ErrHandlerPanic) {
-		t.Fatalf("reports = %+v, want the dead-letter panic reported", reports)
+	if len(reports) < 2 ||
+		!errors.Is(
+			reports[1].err,
+			asynxmd.ErrHandlerPanic,
+		) {
+		t.Fatalf(
+			"reports = %+v, want the dead-letter panic reported",
+			reports,
+		)
 	}
 }
 
-func TestDeliver_AHandlerPanicIsReportedAndRetried(t *testing.T) {
+func TestDeliver_AHandlerPanicIsReportedAndRetried(
+	t *testing.T,
+) {
 	var runs atomic.Int32
 	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
-		Match: func(string) bool { return true },
+		Match: func(
+			string,
+		) bool {
+			return true
+		},
 		Handler: func(
 			context.Context,
 			asynxmd.Event[int],
@@ -260,24 +520,47 @@ func TestDeliver_AHandlerPanicIsReportedAndRetried(t *testing.T) {
 			if runs.Add(1) == 1 {
 				panic("boom")
 			}
+
 			return nil
 		},
 	}}})
-	job, halt := f.pop(t, acked("test.event"))
+	job, halt := f.pop(
+		t,
+		acked("test.event"),
+	)
 
-	if err := f.deliverer.Deliver("a", halt, job); err != nil {
-		t.Fatalf("Deliver = %v", err)
+	if err := f.deliverer.Deliver(
+		"a",
+		halt,
+		job,
+	); err != nil {
+		t.Fatalf(
+			"Deliver = %v",
+			err,
+		)
 	}
-	if len(f.reports.panics) != 1 || runs.Load() != 2 {
-		t.Fatalf("panics = %v, runs = %d; want one panic then a successful retry", f.reports.panics, runs.Load())
+
+	if len(f.reports.panics) != 1 ||
+		runs.Load() != 2 {
+		t.Fatalf(
+			"panics = %v, runs = %d; want one panic then a successful retry",
+			f.reports.panics,
+			runs.Load(),
+		)
 	}
 }
 
-func TestDeliver_ATimedOutHandlerIsReportedAndWaitedFor(t *testing.T) {
+func TestDeliver_ATimedOutHandlerIsReportedAndWaitedFor(
+	t *testing.T,
+) {
 	release := make(chan struct{})
 	f := newFixture(asynxmd.DispatcherConfig[int]{DurableSubs: []asynxmd.DurableSub[int]{{
-		Name:    "slow",
-		Match:   func(string) bool { return true },
+		Name: "slow",
+		Match: func(
+			string,
+		) bool {
+			return true
+		},
 		Timeout: time.Millisecond,
 		Handler: func(
 			context.Context,
@@ -287,22 +570,51 @@ func TestDeliver_ATimedOutHandlerIsReportedAndWaitedFor(t *testing.T) {
 			return nil
 		},
 	}}})
-	job, halt := f.pop(t, acked("test.event"))
-	done := make(chan error, 1)
-	go func() { done <- f.deliverer.Deliver("a", halt, job) }()
+	job, halt := f.pop(
+		t,
+		acked("test.event"),
+	)
+	done := make(
+		chan error,
+		1,
+	)
+	go func() {
+		done <- f.deliverer.Deliver(
+			"a",
+			halt,
+			job,
+		)
+	}()
 
-	waitUntil(t, func() bool { return len(f.reports.all()) == 1 })
+	waitUntil(
+		t,
+		func() bool { return len(f.reports.all()) == 1 },
+	)
 	select {
 	case err := <-done:
-		t.Fatalf("Deliver returned (%v) while the timed-out handler still ran", err)
+		t.Fatalf(
+			"Deliver returned (%v) while the timed-out handler still ran",
+			err,
+		)
 	default:
 	}
+
 	close(release)
 	if err := <-done; err != nil {
-		t.Fatalf("Deliver = %v", err)
+		t.Fatalf(
+			"Deliver = %v",
+			err,
+		)
 	}
-	if got := f.reports.all()[0].err; !errors.Is(got, asynxmd.ErrHandlerTimeout) {
-		t.Fatalf("reported %v, want ErrHandlerTimeout", got)
+
+	if got := f.reports.all()[0].err; !errors.Is(
+		got,
+		asynxmd.ErrHandlerTimeout,
+	) {
+		t.Fatalf(
+			"reported %v, want ErrHandlerTimeout",
+			got,
+		)
 	}
 }
 
@@ -313,7 +625,10 @@ func waitUntil(
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for !cond() {
-		failPast(t, deadline)
+		failPast(
+			t,
+			deadline,
+		)
 		time.Sleep(time.Millisecond)
 	}
 }
@@ -347,10 +662,17 @@ func newFixture(
 	if cfg.MaxAttempts == 0 {
 		cfg.MaxAttempts = 3
 	}
+
 	if cfg.RetryInitial == 0 {
 		cfg.RetryInitial, cfg.RetryMax = time.Millisecond, time.Millisecond
 	}
-	f.deliverer = New(cfg, registry, f.reports, f.interrupted)
+
+	f.deliverer = New(
+		cfg,
+		registry,
+		f.reports,
+		f.interrupted,
+	)
 	return f
 }
 
@@ -360,14 +682,21 @@ func (f *fixture) pop(
 ) (jobs.Job[int], <-chan struct{}) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	if _, err := f.registry.Enqueue(jobs.New(ctx, request, cancel)); err != nil {
+	if _, err := f.registry.Enqueue(jobs.New(
+		ctx,
+		request,
+		cancel,
+	)); err != nil {
 		t.Fatal(err)
 	}
+
 	job, halt, ok := f.registry.Pop(request.Event.AggregateID)
 	if !ok {
 		t.Fatal("the job was not queued")
 	}
-	return job, halt
+
+	return job,
+		halt
 }
 
 func acked(
@@ -375,7 +704,11 @@ func acked(
 ) asynxmd.DispatchRequest[int] {
 	return asynxmd.DispatchRequest[int]{
 		Event: asynxmd.Event[int]{AggregateID: "a", Version: 1, EventName: name},
-		Ack:   func(context.Context) error { return nil },
+		Ack: func(
+			context.Context,
+		) error {
+			return nil
+		},
 	}
 }
 
@@ -393,8 +726,12 @@ func failing(
 	err error,
 ) asynxmd.DurableSub[int] {
 	return asynxmd.DurableSub[int]{
-		Name:  "failing",
-		Match: func(string) bool { return true },
+		Name: "failing",
+		Match: func(
+			string,
+		) bool {
+			return true
+		},
 		Handler: func(
 			context.Context,
 			asynxmd.Event[int],
@@ -418,14 +755,20 @@ func (r *recordingReporter) record(
 	parked := slices.Sorted(maps.Keys(r.registry.Parks()))
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.reports = append(r.reports, report{kind: kind, err: err, parked: parked})
+	r.reports = append(
+		r.reports,
+		report{kind: kind, err: err, parked: parked},
+	)
 }
 
 func (r *recordingReporter) PublishError(
 	_ jobs.Job[int],
 	err error,
 ) {
-	r.record("publish", err)
+	r.record(
+		"publish",
+		err,
+	)
 }
 
 func (r *recordingReporter) DeliveryError(
@@ -433,7 +776,10 @@ func (r *recordingReporter) DeliveryError(
 	err error,
 	_ int,
 ) {
-	r.record("delivery", err)
+	r.record(
+		"delivery",
+		err,
+	)
 }
 
 func (r *recordingReporter) Panic(
@@ -442,7 +788,10 @@ func (r *recordingReporter) Panic(
 ) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.panics = append(r.panics, recovered)
+	r.panics = append(
+		r.panics,
+		recovered,
+	)
 }
 
 func (r *recordingReporter) all() []report {

@@ -91,6 +91,7 @@ func (j *dispatchJob[T]) Complete(
 		if j.onComplete == nil {
 			return
 		}
+
 		j.onComplete()
 	})
 }

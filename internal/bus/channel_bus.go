@@ -25,20 +25,30 @@ import (
 )
 
 // ChannelBusOpt is a functional option for NewChannelBus.
-type ChannelBusOpt[T any] func(*ChannelBus[T])
+type ChannelBusOpt[T any] func(
+	*ChannelBus[T],
+)
 
 // WithPanicHandler sets a custom callback invoked when a subscription handler
 // panics. When not set, the package-level exec.OnHandlerPanic is used.
-func WithPanicHandler[T any](fn asynxmd.PanicHandler[T]) ChannelBusOpt[T] {
-	return func(b *ChannelBus[T]) {
+func WithPanicHandler[T any](
+	fn asynxmd.PanicHandler[T],
+) ChannelBusOpt[T] {
+	return func(
+		b *ChannelBus[T],
+	) {
 		b.onPanic = fn
 	}
 }
 
 // WithTimeoutHandler sets a custom callback invoked when a subscription handler
 // exceeds its timeout. When not set, the package-level exec.OnHandlerTimeout is used.
-func WithTimeoutHandler[T any](fn asynxmd.TimeoutHandler[T]) ChannelBusOpt[T] {
-	return func(b *ChannelBus[T]) {
+func WithTimeoutHandler[T any](
+	fn asynxmd.TimeoutHandler[T],
+) ChannelBusOpt[T] {
+	return func(
+		b *ChannelBus[T],
+	) {
 		b.onTimeout = fn
 	}
 }
@@ -67,7 +77,9 @@ type ChannelBus[T any] struct {
 }
 
 // NewChannelBus returns an initialized ChannelBus ready for use.
-func NewChannelBus[T any](opts ...ChannelBusOpt[T]) *ChannelBus[T] {
+func NewChannelBus[T any](
+	opts ...ChannelBusOpt[T],
+) *ChannelBus[T] {
 	b := &ChannelBus[T]{
 		subscriptions:    make(map[string]*models.Subscription[T]),
 		compiledPatterns: make(map[string]*regexp.Regexp),
@@ -79,6 +91,7 @@ func NewChannelBus[T any](opts ...ChannelBusOpt[T]) *ChannelBus[T] {
 	for _, opt := range opts {
 		opt(b)
 	}
+
 	return b
 }
 
@@ -88,10 +101,13 @@ func (b *ChannelBus[T]) Subscribe(
 	opts ...asynxmd.SubscriptionOpt[T],
 ) (subID string, err error) {
 	if pattern == "" {
-		return "", asynxmd.ErrEmptyPattern
+		return "",
+			asynxmd.ErrEmptyPattern
 	}
+
 	if handler == nil {
-		return "", asynxmd.ErrNilHandler
+		return "",
+			asynxmd.ErrNilHandler
 	}
 
 	cfg := &asynxmd.SubscriptionConfig[T]{}
@@ -107,7 +123,8 @@ func (b *ChannelBus[T]) Subscribe(
 	b.publishMu.RUnlock()
 
 	if closed {
-		return "", asynxmd.ErrBusClosed
+		return "",
+			asynxmd.ErrBusClosed
 	}
 
 	subID = asynxutils.NewID()
@@ -119,9 +136,13 @@ func (b *ChannelBus[T]) Subscribe(
 	}
 
 	b.subscriptions[subID] = sub
-	b.idx.Store(utils.IndexWith(b.idx.Load(), sub))
+	b.idx.Store(utils.IndexWith(
+		b.idx.Load(),
+		sub,
+	))
 
-	return subID, nil
+	return subID,
+		nil
 }
 
 func (b *ChannelBus[T]) Unsubscribe(
@@ -135,8 +156,14 @@ func (b *ChannelBus[T]) Unsubscribe(
 		return nil
 	}
 
-	delete(b.subscriptions, id)
-	b.idx.Store(utils.IndexWithout(b.idx.Load(), sub))
+	delete(
+		b.subscriptions,
+		id,
+	)
+	b.idx.Store(utils.IndexWithout(
+		b.idx.Load(),
+		sub,
+	))
 
 	return nil
 }
@@ -157,8 +184,14 @@ func (b *ChannelBus[T]) Publish(
 
 	var regexMatches []*models.Subscription[T]
 	for _, sub := range idx.RegexSubs {
-		if b.matchesRegex(event.EventName, sub.Pattern) {
-			regexMatches = append(regexMatches, sub)
+		if b.matchesRegex(
+			event.EventName,
+			sub.Pattern,
+		) {
+			regexMatches = append(
+				regexMatches,
+				sub,
+			)
 		}
 	}
 
@@ -171,18 +204,38 @@ func (b *ChannelBus[T]) Publish(
 		b.publishMu.RUnlock()
 		return asynxmd.ErrBusClosed
 	}
+
 	if total > 0 {
 		b.inFlightWg.Add(total)
 	}
+
 	b.publishMu.RUnlock()
 
 	// Step 3 — lock-free: spawn one goroutine per matching handler.
 	for _, sub := range exactMatches {
-		go exec.ExecuteHandler(&b.inFlightWg, utils.MakeJob(sub, event, ctx, b.onPanic, b.onTimeout))
+		go exec.ExecuteHandler(
+			&b.inFlightWg,
+			utils.MakeJob(
+				sub,
+				event,
+				ctx,
+				b.onPanic,
+				b.onTimeout,
+			),
+		)
 	}
 
 	for _, sub := range regexMatches {
-		go exec.ExecuteHandler(&b.inFlightWg, utils.MakeJob(sub, event, ctx, b.onPanic, b.onTimeout))
+		go exec.ExecuteHandler(
+			&b.inFlightWg,
+			utils.MakeJob(
+				sub,
+				event,
+				ctx,
+				b.onPanic,
+				b.onTimeout,
+			),
+		)
 	}
 
 	return nil
@@ -206,8 +259,14 @@ func (b *ChannelBus[T]) PublishSync(
 
 	var regexMatches []*models.Subscription[T]
 	for _, sub := range idx.RegexSubs {
-		if b.matchesRegex(event.EventName, sub.Pattern) {
-			regexMatches = append(regexMatches, sub)
+		if b.matchesRegex(
+			event.EventName,
+			sub.Pattern,
+		) {
+			regexMatches = append(
+				regexMatches,
+				sub,
+			)
 		}
 	}
 
@@ -218,22 +277,39 @@ func (b *ChannelBus[T]) PublishSync(
 		b.publishMu.RUnlock()
 		return asynxmd.ErrBusClosed
 	}
+
 	var localWg sync.WaitGroup
 	if total > 0 {
 		localWg.Add(total)
 	}
+
 	b.publishMu.RUnlock()
 
-	syncJob := func(sub *models.Subscription[T]) *exec.HandlerJob[T] {
-		job := utils.MakeJob(sub, event, ctx, b.onPanic, b.onTimeout)
+	syncJob := func(
+		sub *models.Subscription[T],
+	) *exec.HandlerJob[T] {
+		job := utils.MakeJob(
+			sub,
+			event,
+			ctx,
+			b.onPanic,
+			b.onTimeout,
+		)
 		job.WaitAfterTimeout = true
 		return job
 	}
 	for _, sub := range exactMatches {
-		go exec.ExecuteHandler(&localWg, syncJob(sub))
+		go exec.ExecuteHandler(
+			&localWg,
+			syncJob(sub),
+		)
 	}
+
 	for _, sub := range regexMatches {
-		go exec.ExecuteHandler(&localWg, syncJob(sub))
+		go exec.ExecuteHandler(
+			&localWg,
+			syncJob(sub),
+		)
 	}
 
 	localWg.Wait()
@@ -271,6 +347,7 @@ func (b *ChannelBus[T]) matchesRegex(
 	if err != nil {
 		return false
 	}
+
 	return compiled.MatchString(eventName)
 }
 
@@ -281,12 +358,14 @@ func (b *ChannelBus[T]) getCompiledPattern(
 
 	if compiled, ok := b.compiledPatterns[pattern]; ok {
 		b.patternMu.RUnlock()
-		return compiled, nil
+		return compiled,
+			nil
 	}
 
 	if err, cached := b.patternErrors[pattern]; cached {
 		b.patternMu.RUnlock()
-		return nil, err
+		return nil,
+			err
 	}
 
 	b.patternMu.RUnlock()
@@ -296,18 +375,21 @@ func (b *ChannelBus[T]) getCompiledPattern(
 		b.patternMu.Lock()
 		b.patternErrors[pattern] = err
 		b.patternMu.Unlock()
-		return nil, err
+		return nil,
+			err
 	}
 
 	b.patternMu.Lock()
 	defer b.patternMu.Unlock()
 
 	if existing, ok := b.compiledPatterns[pattern]; ok {
-		return existing, nil
+		return existing,
+			nil
 	}
 
 	b.compiledPatterns[pattern] = compiled
-	return compiled, nil
+	return compiled,
+		nil
 }
 
 // WaitForHandlers blocks until all in-flight handler executions complete.

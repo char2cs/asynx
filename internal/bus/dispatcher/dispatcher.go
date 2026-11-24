@@ -52,7 +52,10 @@ func New[T any](
 	cfg asynxmd.DispatcherConfig[T],
 	opts ...Opt[T],
 ) asynxmd.Dispatcher[T] {
-	return newDispatcher(cfg, opts...)
+	return newDispatcher(
+		cfg,
+		opts...,
+	)
 }
 
 func newDispatcher[T any](
@@ -70,10 +73,26 @@ func newDispatcher[T any](
 	for _, opt := range opts {
 		opt(d)
 	}
+
 	d.registry = aggregates.New(aggregates.Hooks[jobs.Job[T]]{Spawn: d.spawn, Admit: d.tracker.Track})
-	reports := reporter.New(cfg.OnPublishError, cfg.OnDeliveryError, cfg.OnPanic)
-	deliverer := delivery.New(cfg, d.registry, reports, d.quit)
-	d.workers = workers.New(cfg.Bus, d.registry, deliverer, reports, d.idleTimeout)
+	reports := reporter.New(
+		cfg.OnPublishError,
+		cfg.OnDeliveryError,
+		cfg.OnPanic,
+	)
+	deliverer := delivery.New(
+		cfg,
+		d.registry,
+		reports,
+		d.quit,
+	)
+	d.workers = workers.New(
+		cfg.Bus,
+		d.registry,
+		deliverer,
+		reports,
+		d.idleTimeout,
+	)
 	return d
 }
 
@@ -87,41 +106,65 @@ func (d *dispatcher[T]) Enqueue(
 	ctx context.Context,
 	request asynxmd.DispatchRequest[T],
 ) (asynxmd.Ticket, error) {
-	job, release := d.newJob(ctx, request)
+	job, release := d.newJob(
+		ctx,
+		request,
+	)
 	_, err := d.registry.Enqueue(job)
 	if err != nil {
 		release()
-		return asynxmd.Ticket{}, err
+		return asynxmd.Ticket{},
+			err
 	}
-	return job.Ticket(), nil
+
+	return job.Ticket(),
+		nil
 }
 
 func (d *dispatcher[T]) newJob(
 	ctx context.Context,
 	request asynxmd.DispatchRequest[T],
 ) (jobs.Job[T], context.CancelFunc) {
-	marked := context.WithValue(context.WithoutCancel(ctx), inHandlerKey[T]{d}, request.Event.AggregateID)
+	marked := context.WithValue(
+		context.WithoutCancel(ctx),
+		inHandlerKey[T]{d},
+		request.Event.AggregateID,
+	)
 	jobCtx, cancel := context.WithCancel(marked)
-	stop := context.AfterFunc(d.base, cancel)
+	stop := context.AfterFunc(
+		d.base,
+		cancel,
+	)
 	release := func() {
 		stop()
 		cancel()
 	}
-	return jobs.New(jobCtx, request, release), release
+	return jobs.New(
+			jobCtx,
+			request,
+			release,
+		),
+		release
 }
 
 func (d *dispatcher[T]) TicketFor(
 	aggregateID string,
 	version int64,
 ) (asynxmd.Ticket, bool) {
-	return d.tracker.For(aggregateID, version)
+	return d.tracker.For(
+		aggregateID,
+		version,
+	)
 }
 
 func (d *dispatcher[T]) Unrun(
 	aggregateID string,
 	version int64,
 ) error {
-	return d.registry.Unrun(aggregateID, version)
+	return d.registry.Unrun(
+		aggregateID,
+		version,
+	)
 }
 
 func (d *dispatcher[T]) Park(
@@ -129,7 +172,11 @@ func (d *dispatcher[T]) Park(
 	cause error,
 	undelivered ...int64,
 ) {
-	d.registry.Park(aggregateID, cause, undelivered...)
+	d.registry.Park(
+		aggregateID,
+		cause,
+		undelivered...,
+	)
 }
 
 func (d *dispatcher[T]) Supersede(
@@ -146,7 +193,10 @@ func (d *dispatcher[T]) ResumeUndelivered(
 	aggregateID string,
 	generation uint64,
 ) (bool, []int64) {
-	return d.registry.Lift(aggregateID, generation)
+	return d.registry.Lift(
+		aggregateID,
+		generation,
+	)
 }
 
 func (d *dispatcher[T]) Inspect(
@@ -177,6 +227,7 @@ func (d *dispatcher[T]) Close(
 	if d.registry.Close() {
 		d.workers.Stop()
 	}
+
 	d.Interrupt()
 	done := make(chan struct{})
 	go d.awaitWorkers(done)

@@ -19,8 +19,13 @@ func (r *handlerReporter[T]) PublishError(
 	if r.onPublishError == nil {
 		return
 	}
+
 	defer func() { _ = recover() }()
-	r.onPublishError(job.Context(), job.Event(), err)
+	r.onPublishError(
+		job.Context(),
+		job.Event(),
+		err,
+	)
 }
 
 func (r *handlerReporter[T]) DeliveryError(
@@ -31,8 +36,14 @@ func (r *handlerReporter[T]) DeliveryError(
 	if r.onDeliveryError == nil {
 		return
 	}
+
 	defer func() { _ = recover() }()
-	r.onDeliveryError(job.Context(), job.Event(), err, attempt)
+	r.onDeliveryError(
+		job.Context(),
+		job.Event(),
+		err,
+		attempt,
+	)
 }
 
 func (r *handlerReporter[T]) Panic(
@@ -42,6 +53,11 @@ func (r *handlerReporter[T]) Panic(
 	if r.onPanic == nil {
 		return
 	}
+
 	defer func() { _ = recover() }()
-	r.onPanic(job.Context(), job.Event(), recovered)
+	r.onPanic(
+		job.Context(),
+		job.Event(),
+		recovered,
+	)
 }

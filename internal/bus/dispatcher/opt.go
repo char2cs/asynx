@@ -21,6 +21,7 @@ func WithIdleTimeout[T any](
 		) {
 		}
 	}
+
 	return func(
 		d *dispatcher[T],
 	) {

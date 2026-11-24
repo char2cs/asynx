@@ -17,11 +17,16 @@ func newJob(
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	var cancels atomic.Int32
-	job := jobs.New(ctx, request, func() {
-		cancels.Add(1)
-		cancel()
-	})
-	return job, &cancels
+	job := jobs.New(
+		ctx,
+		request,
+		func() {
+			cancels.Add(1)
+			cancel()
+		},
+	)
+	return job,
+		&cancels
 }
 
 func closed(
@@ -41,22 +46,42 @@ func eventRequest() asynxmd.DispatchRequest[string] {
 	}
 }
 
-func TestNew_ExposesTheEvent(t *testing.T) {
-	job, _ := newJob(t, eventRequest())
+func TestNew_ExposesTheEvent(
+	t *testing.T,
+) {
+	job, _ := newJob(
+		t,
+		eventRequest(),
+	)
+	if job.AggregateID() != "agg" ||
+		job.Version() != 3 {
+		t.Fatalf(
+			"got (%q, %d), want (agg, 3)",
+			job.AggregateID(),
+			job.Version(),
+		)
+	}
 
-	if job.AggregateID() != "agg" || job.Version() != 3 {
-		t.Fatalf("got (%q, %d), want (agg, 3)", job.AggregateID(), job.Version())
-	}
 	if job.Event().EventName != "Created" {
-		t.Fatalf("event name = %q", job.Event().EventName)
+		t.Fatalf(
+			"event name = %q",
+			job.Event().EventName,
+		)
 	}
+
 	if job.Context() == nil {
 		t.Fatal("context is nil")
 	}
 }
 
-func TestNew_KindsDecideRouting(t *testing.T) {
-	ack := func(context.Context) error { return nil }
+func TestNew_KindsDecideRouting(
+	t *testing.T,
+) {
+	ack := func(
+		context.Context,
+	) error {
+		return nil
+	}
 	forgetEvent := asynxmd.Event[string]{AggregateID: "agg", EventName: asynxmd.ForgetEventName}
 	tests := []struct {
 		name     string
@@ -72,9 +97,18 @@ func TestNew_KindsDecideRouting(t *testing.T) {
 		{"forget redelivery", asynxmd.DispatchRequest[string]{Event: forgetEvent, Kind: asynxmd.DispatchRedelivery}, true, true, true},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assertKindRouting(t, tt.request, [3]bool{tt.durable, tt.forget, tt.skipLive})
-		})
+		t.Run(
+			tt.name,
+			func(
+				t *testing.T,
+			) {
+				assertKindRouting(
+					t,
+					tt.request,
+					[3]bool{tt.durable, tt.forget, tt.skipLive},
+				)
+			},
+		)
 	}
 }
 
@@ -84,17 +118,31 @@ func assertKindRouting(
 	want [3]bool,
 ) {
 	t.Helper()
-	job, _ := newJob(t, request)
+	job, _ := newJob(
+		t,
+		request,
+	)
 
 	got := [3]bool{job.Durable(), job.Forget(), job.SkipLive()}
 	if got != want {
-		t.Fatalf("got durable=%v forget=%v skipLive=%v", job.Durable(), job.Forget(), job.SkipLive())
+		t.Fatalf(
+			"got durable=%v forget=%v skipLive=%v",
+			job.Durable(),
+			job.Forget(),
+			job.SkipLive(),
+		)
 	}
+
 	if (job.Ack() != nil) != (request.Ack != nil) {
 		t.Fatalf("ack presence mismatch")
 	}
+
 	if job.Acked() != (request.Ack != nil) {
-		t.Fatalf("acked = %v, want %v", job.Acked(), request.Ack != nil)
+		t.Fatalf(
+			"acked = %v, want %v",
+			job.Acked(),
+			request.Ack != nil,
+		)
 	}
 }
 
@@ -118,13 +166,27 @@ func TestEnqueue_TheKindSelectsWhoReceivesTheEvent(
 	}
 	for _, c := range cases {
 		request := asynxmd.DispatchRequest[string]{Event: asynxmd.Event[string]{EventName: c.name}, Kind: c.kind}
-		job, _ := newJob(t, request)
+		job, _ := newJob(
+			t,
+			request,
+		)
 		got := routing{forget: job.Forget(), skipLive: job.SkipLive()}
-		t.Run(fmt.Sprintf("kind %d, event %q", c.kind, c.name), func(
-			t *testing.T,
-		) {
-			assertRouting(t, got, c.want)
-		})
+		t.Run(
+			fmt.Sprintf(
+				"kind %d, event %q",
+				c.kind,
+				c.name,
+			),
+			func(
+				t *testing.T,
+			) {
+				assertRouting(
+					t,
+					got,
+					c.want,
+				)
+			},
+		)
 	}
 }
 
@@ -135,6 +197,10 @@ func assertRouting[R comparable](
 ) {
 	t.Helper()
 	if got != want {
-		t.Errorf("opts = %+v, want %+v", got, want)
+		t.Errorf(
+			"opts = %+v, want %+v",
+			got,
+			want,
+		)
 	}
 }

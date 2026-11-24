@@ -31,6 +31,7 @@ func (c CreateOrderCmd) Validate(
 	if c.Total <= 0 {
 		return models.ErrValidation
 	}
+
 	return nil
 }
 
@@ -60,11 +61,15 @@ func (c UpdateOrderCmd) ShouldSnapshot() bool {
 	return c.Snapshot
 }
 
-func (c UpdateOrderCmd) Validate(_ *Order) error {
+func (c UpdateOrderCmd) Validate(
+	_ *Order,
+) error {
 	return nil
 }
 
-func (c UpdateOrderCmd) EmitEvent(_ *Order) Order {
+func (c UpdateOrderCmd) EmitEvent(
+	_ *Order,
+) Order {
 	return c.NewState
 }
 
@@ -87,9 +92,11 @@ func (c CancelOrderCmd) ShouldSnapshot() bool {
 func (c CancelOrderCmd) Validate(
 	current *Order,
 ) error {
-	if current == nil || current.Status == "Cancelled" {
+	if current == nil ||
+		current.Status == "Cancelled" {
 		return models.ErrValidation
 	}
+
 	return nil
 }
 

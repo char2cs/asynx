@@ -14,11 +14,15 @@ type OrderReporter struct {
 	mu sync.Mutex
 }
 
-func (r *OrderReporter) Handle(ctx context.Context, event models.Event[domain.Order]) {
+func (r *OrderReporter) Handle(
+	ctx context.Context,
+	event models.Event[domain.Order],
+) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	fmt.Printf("[EVENT] %s - Order %s: %s → %s\n",
+	fmt.Printf(
+		"[EVENT] %s - Order %s: %s → %s\n",
 		event.EventName,
 		event.Aggregate.ID,
 		event.PreviousAggregate.Status,
@@ -32,26 +36,38 @@ type OrderNotifier struct {
 	outbox []string
 }
 
-func (n *OrderNotifier) Handle(ctx context.Context, event models.Event[domain.Order]) {
+func (n *OrderNotifier) Handle(
+	ctx context.Context,
+	event models.Event[domain.Order],
+) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	switch event.EventName {
 	case "OrderCreated":
-		n.outbox = append(n.outbox, fmt.Sprintf(
-			"📧 Confirmation email sent for order %s",
-			event.Aggregate.ID,
-		))
+		n.outbox = append(
+			n.outbox,
+			fmt.Sprintf(
+				"📧 Confirmation email sent for order %s",
+				event.Aggregate.ID,
+			),
+		)
 	case "OrderConfirmed":
-		n.outbox = append(n.outbox, fmt.Sprintf(
-			"🎉 Order %s confirmed! Warehouse notified.",
-			event.Aggregate.ID,
-		))
+		n.outbox = append(
+			n.outbox,
+			fmt.Sprintf(
+				"🎉 Order %s confirmed! Warehouse notified.",
+				event.Aggregate.ID,
+			),
+		)
 	case "OrderShipped":
-		n.outbox = append(n.outbox, fmt.Sprintf(
-			"📦 Order %s shipped! Customer notified.",
-			event.Aggregate.ID,
-		))
+		n.outbox = append(
+			n.outbox,
+			fmt.Sprintf(
+				"📦 Order %s shipped! Customer notified.",
+				event.Aggregate.ID,
+			),
+		)
 	}
 }
 

@@ -12,6 +12,7 @@ func jittered(
 	if half <= 0 {
 		return delay
 	}
+
 	return half + rand.N(half+1)
 }
 

@@ -12,7 +12,9 @@ import (
 	"github.com/char2cs/asynx/store"
 )
 
-func run(ctx context.Context) error {
+func run(
+	ctx context.Context,
+) error {
 	// ========================================================================
 	// Setup: Create Asynx Instance using Public API
 	// ========================================================================
@@ -44,8 +46,14 @@ func run(ctx context.Context) error {
 	notifier := &projections.OrderNotifier{}
 
 	// Subscribe to order events
-	ax.Subscribe("Order.*", reporter.Handle) // Match: OrderCreated, OrderConfirmed, OrderShipped
-	ax.Subscribe("Order.*", notifier.Handle)
+	ax.Subscribe(
+		"Order.*",
+		reporter.Handle,
+	) // Match: OrderCreated, OrderConfirmed, OrderShipped
+	ax.Subscribe(
+		"Order.*",
+		notifier.Handle,
+	)
 
 	// ========================================================================
 	// Execution: Submit Commands
@@ -63,36 +71,72 @@ func run(ctx context.Context) error {
 			ShipTo: "123 Main St",
 		}
 
-		if _, err := ax.Send(ctx, cmd); err != nil {
-			fmt.Printf("❌ Failed to create order %s: %v\n", orderID, err)
+		if _, err := ax.Send(
+			ctx,
+			cmd,
+		); err != nil {
+			fmt.Printf(
+				"❌ Failed to create order %s: %v\n",
+				orderID,
+				err,
+			)
 			continue
 		}
-		fmt.Printf("✓ Order %s created\n", orderID)
+
+		fmt.Printf(
+			"✓ Order %s created\n",
+			orderID,
+		)
 	}
+
 	ax.WaitPublish() // Wait for event handlers
 	fmt.Println()
 
 	// Confirm orders
 	for _, orderID := range orders {
 		cmd := commands.ConfirmOrderCmd{ID: orderID}
-		if _, err := ax.Send(ctx, cmd); err != nil {
-			fmt.Printf("❌ Failed to confirm order %s: %v\n", orderID, err)
+		if _, err := ax.Send(
+			ctx,
+			cmd,
+		); err != nil {
+			fmt.Printf(
+				"❌ Failed to confirm order %s: %v\n",
+				orderID,
+				err,
+			)
 			continue
 		}
-		fmt.Printf("✓ Order %s confirmed\n", orderID)
+
+		fmt.Printf(
+			"✓ Order %s confirmed\n",
+			orderID,
+		)
 	}
+
 	ax.WaitPublish() // Wait for event handlers
 	fmt.Println()
 
 	// Ship orders
 	for _, orderID := range orders {
 		cmd := commands.ShipOrderCmd{ID: orderID}
-		if _, err := ax.Send(ctx, cmd); err != nil {
-			fmt.Printf("❌ Failed to ship order %s: %v\n", orderID, err)
+		if _, err := ax.Send(
+			ctx,
+			cmd,
+		); err != nil {
+			fmt.Printf(
+				"❌ Failed to ship order %s: %v\n",
+				orderID,
+				err,
+			)
 			continue
 		}
-		fmt.Printf("✓ Order %s shipped\n", orderID)
+
+		fmt.Printf(
+			"✓ Order %s shipped\n",
+			orderID,
+		)
 	}
+
 	ax.WaitPublish() // Wait for event handlers
 	fmt.Println()
 
@@ -102,14 +146,29 @@ func run(ctx context.Context) error {
 	fmt.Println("Step 4: Verifying final state...")
 
 	for _, orderID := range orders {
-		order, err := ax.Get(ctx, orderID)
+		order, err := ax.Get(
+			ctx,
+			orderID,
+		)
 		if err != nil {
-			fmt.Printf("❌ Failed to load order %s: %v\n", orderID, err)
+			fmt.Printf(
+				"❌ Failed to load order %s: %v\n",
+				orderID,
+				err,
+			)
 			continue
 		}
 
-		orderJSON, _ := json.MarshalIndent(order, "", "  ")
-		fmt.Printf("Order %s:\n%s\n\n", orderID, string(orderJSON))
+		orderJSON, _ := json.MarshalIndent(
+			order,
+			"",
+			"  ",
+		)
+		fmt.Printf(
+			"Order %s:\n%s\n\n",
+			orderID,
+			string(orderJSON),
+		)
 	}
 
 	// ========================================================================
@@ -117,14 +176,21 @@ func run(ctx context.Context) error {
 	// ========================================================================
 	fmt.Println("Step 5: Notifications sent:")
 	for i, notification := range notifier.GetOutbox() {
-		fmt.Printf("%d. %s\n", i+1, notification)
+		fmt.Printf(
+			"%d. %s\n",
+			i+1,
+			notification,
+		)
 	}
 
 	// ========================================================================
 	// Cleanup: Graceful Shutdown
 	// ========================================================================
 	if err := ax.Shutdown(ctx); err != nil {
-		fmt.Printf("❌ Shutdown error: %v\n", err)
+		fmt.Printf(
+			"❌ Shutdown error: %v\n",
+			err,
+		)
 		return err
 	}
 

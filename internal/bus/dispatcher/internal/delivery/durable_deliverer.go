@@ -29,12 +29,15 @@ func (d *durableDeliverer[T]) Deliver(
 	job jobs.Job[T],
 ) error {
 	pending := d.subscribersFor(job)
-	if job.Acked() && isClosed(halt) {
+	if job.Acked() &&
+		isClosed(halt) {
 		return asynxmd.ErrDeliveryParked
 	}
+
 	if len(pending) == 0 {
 		return nil
 	}
+
 	loop := &retryLoop[T]{
 		deliverer:   d,
 		aggregateID: aggregateID,
@@ -46,6 +49,7 @@ func (d *durableDeliverer[T]) Deliver(
 	}
 	for loop.step() {
 	}
+
 	return loop.err
 }
 
@@ -56,7 +60,12 @@ func (d *durableDeliverer[T]) ParkThenReport(
 	cause error,
 	report func(),
 ) {
-	d.registry.ParkIfCurrent(aggregateID, halt, job.Acked(), cause)
+	d.registry.ParkIfCurrent(
+		aggregateID,
+		halt,
+		job.Acked(),
+		cause,
+	)
 	report()
 }
 
@@ -65,8 +74,13 @@ func (d *durableDeliverer[T]) subscribersFor(
 ) []asynxmd.DurableSub[T] {
 	var subs []asynxmd.DurableSub[T]
 	for _, sub := range d.subs {
-		subs = appendReceiver(subs, sub, job)
+		subs = appendReceiver(
+			subs,
+			sub,
+			job,
+		)
 	}
+
 	return subs
 }
 
@@ -78,9 +92,17 @@ func (d *durableDeliverer[T]) attempt(
 	var failed []asynxmd.DurableSub[T]
 	var errs []error
 	for _, sub := range pending {
-		failed, errs = d.try(job, sub, attempt, failed, errs)
+		failed, errs = d.try(
+			job,
+			sub,
+			attempt,
+			failed,
+			errs,
+		)
 	}
-	return failed, errors.Join(errs...)
+
+	return failed,
+		errors.Join(errs...)
 }
 
 func (d *durableDeliverer[T]) try(
@@ -90,13 +112,30 @@ func (d *durableDeliverer[T]) try(
 	failed []asynxmd.DurableSub[T],
 	errs []error,
 ) ([]asynxmd.DurableSub[T], []error) {
-	err := d.runDurable(job, sub, attempt)
+	err := d.runDurable(
+		job,
+		sub,
+		attempt,
+	)
 	if err == nil {
-		return failed, errs
+		return failed,
+			errs
 	}
+
 	failure := &asynxmd.SubscriberError{Subscriber: sub.Name, Err: err}
-	d.reports.DeliveryError(job, failure, attempt)
-	return append(failed, sub), append(errs, failure)
+	d.reports.DeliveryError(
+		job,
+		failure,
+		attempt,
+	)
+	return append(
+			failed,
+			sub,
+		),
+		append(
+			errs,
+			failure,
+		)
 }
 
 func (d *durableDeliverer[T]) runDurable(
@@ -105,17 +144,32 @@ func (d *durableDeliverer[T]) runDurable(
 	attempt int,
 ) error {
 	if sub.Timeout <= 0 {
-		return d.callRecovering(job, sub)
+		return d.callRecovering(
+			job,
+			sub,
+		)
 	}
-	result := make(chan error, 1)
-	go d.callInto(result, job, sub)
+
+	result := make(
+		chan error,
+		1,
+	)
+	go d.callInto(
+		result,
+		job,
+		sub,
+	)
 	timer := time.NewTimer(sub.Timeout)
 	defer timer.Stop()
 	select {
 	case err := <-result:
 		return err
 	case <-timer.C:
-		d.reportTimeout(job, sub, attempt)
+		d.reportTimeout(
+			job,
+			sub,
+			attempt,
+		)
 		return <-result
 	}
 }
@@ -127,9 +181,17 @@ func (d *durableDeliverer[T]) reportTimeout(
 ) {
 	timedOut := &asynxmd.SubscriberError{
 		Subscriber: sub.Name,
-		Err:        fmt.Errorf("%w after %v", asynxmd.ErrHandlerTimeout, sub.Timeout),
+		Err: fmt.Errorf(
+			"%w after %v",
+			asynxmd.ErrHandlerTimeout,
+			sub.Timeout,
+		),
 	}
-	d.reports.DeliveryError(job, timedOut, attempt)
+	d.reports.DeliveryError(
+		job,
+		timedOut,
+		attempt,
+	)
 }
 
 func (d *durableDeliverer[T]) callInto(
@@ -137,15 +199,24 @@ func (d *durableDeliverer[T]) callInto(
 	job jobs.Job[T],
 	sub asynxmd.DurableSub[T],
 ) {
-	result <- d.callRecovering(job, sub)
+	result <- d.callRecovering(
+		job,
+		sub,
+	)
 }
 
 func (d *durableDeliverer[T]) callRecovering(
 	job jobs.Job[T],
 	sub asynxmd.DurableSub[T],
 ) (err error) {
-	defer d.recoverHandlerPanic(job, &err)
-	return sub.Handler(job.Context(), job.Event())
+	defer d.recoverHandlerPanic(
+		job,
+		&err,
+	)
+	return sub.Handler(
+		job.Context(),
+		job.Event(),
+	)
 }
 
 func (d *durableDeliverer[T]) recoverHandlerPanic(
@@ -156,8 +227,16 @@ func (d *durableDeliverer[T]) recoverHandlerPanic(
 	if recovered == nil {
 		return
 	}
-	d.reports.Panic(job, recovered)
-	*err = fmt.Errorf("%w: %v", asynxmd.ErrHandlerPanic, recovered)
+
+	d.reports.Panic(
+		job,
+		recovered,
+	)
+	*err = fmt.Errorf(
+		"%w: %v",
+		asynxmd.ErrHandlerPanic,
+		recovered,
+	)
 }
 
 func (d *durableDeliverer[T]) wait(
@@ -170,12 +249,21 @@ func (d *durableDeliverer[T]) wait(
 	defer timer.Stop()
 	select {
 	case <-d.interrupted:
-		d.ParkThenReport(aggregateID, halt, job, asynxmd.ErrDispatcherClosed, func() {})
+		d.ParkThenReport(
+			aggregateID,
+			halt,
+			job,
+			asynxmd.ErrDispatcherClosed,
+			func() {},
+		)
 		return asynxmd.ErrDispatcherClosed
 	case <-halt:
 		return asynxmd.ErrDeliveryParked
 	case <-timer.C:
-		return backoffEnded(job, halt)
+		return backoffEnded(
+			job,
+			halt,
+		)
 	}
 }
 
@@ -183,9 +271,11 @@ func backoffEnded[T any](
 	job jobs.Job[T],
 	halt <-chan struct{},
 ) error {
-	if job.Acked() && isClosed(halt) {
+	if job.Acked() &&
+		isClosed(halt) {
 		return asynxmd.ErrDeliveryParked
 	}
+
 	return nil
 }
 
@@ -199,13 +289,34 @@ func (d *durableDeliverer[T]) giveUp(
 	if isClosed(halt) {
 		return asynxmd.ErrDeliveryParked
 	}
-	if d.deadLettered(job, last, attempt) {
+
+	if d.deadLettered(
+		job,
+		last,
+		attempt,
+	) {
 		return nil
 	}
-	parked := fmt.Errorf("%w after %d attempts: %w", asynxmd.ErrDeliveryParked, attempt, last)
-	d.ParkThenReport(aggregateID, halt, job, parked, func() {
-		d.reports.DeliveryError(job, parked, attempt)
-	})
+
+	parked := fmt.Errorf(
+		"%w after %d attempts: %w",
+		asynxmd.ErrDeliveryParked,
+		attempt,
+		last,
+	)
+	d.ParkThenReport(
+		aggregateID,
+		halt,
+		job,
+		parked,
+		func() {
+			d.reports.DeliveryError(
+				job,
+				parked,
+				attempt,
+			)
+		},
+	)
 	return parked
 }
 
@@ -217,12 +328,32 @@ func (d *durableDeliverer[T]) deadLettered(
 	if !d.deadLetters(job) {
 		return false
 	}
-	err := d.callDeadLetter(job, last)
+
+	err := d.callDeadLetter(
+		job,
+		last,
+	)
 	if err != nil {
-		d.reports.DeliveryError(job, fmt.Errorf("dead-letter handler: %w", err), attempt)
+		d.reports.DeliveryError(
+			job,
+			fmt.Errorf(
+				"dead-letter handler: %w",
+				err,
+			),
+			attempt,
+		)
 		return false
 	}
-	d.reports.DeliveryError(job, fmt.Errorf("dead-lettered after %d attempts: %w", attempt, last), attempt)
+
+	d.reports.DeliveryError(
+		job,
+		fmt.Errorf(
+			"dead-lettered after %d attempts: %w",
+			attempt,
+			last,
+		),
+		attempt,
+	)
 	return true
 }
 
@@ -232,6 +363,7 @@ func (d *durableDeliverer[T]) deadLetters(
 	if d.deadLetter == nil {
 		return false
 	}
+
 	return job.Acked() && !job.Forget()
 }
 
@@ -240,7 +372,11 @@ func (d *durableDeliverer[T]) callDeadLetter(
 	last error,
 ) (err error) {
 	defer recoverAsError(&err)
-	return d.deadLetter(job.Context(), job.Event(), last)
+	return d.deadLetter(
+		job.Context(),
+		job.Event(),
+		last,
+	)
 }
 
 func appendReceiver[T any](
@@ -248,10 +384,15 @@ func appendReceiver[T any](
 	sub asynxmd.DurableSub[T],
 	job jobs.Job[T],
 ) []asynxmd.DurableSub[T] {
-	if !job.Forget() && !sub.Match(job.Event().EventName) {
+	if !job.Forget() &&
+		!sub.Match(job.Event().EventName) {
 		return subs
 	}
-	return append(subs, sub)
+
+	return append(
+		subs,
+		sub,
+	)
 }
 
 func recoverAsError(
@@ -261,5 +402,10 @@ func recoverAsError(
 	if recovered == nil {
 		return
 	}
-	*err = fmt.Errorf("%w: %v", asynxmd.ErrHandlerPanic, recovered)
+
+	*err = fmt.Errorf(
+		"%w: %v",
+		asynxmd.ErrHandlerPanic,
+		recovered,
+	)
 }

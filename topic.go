@@ -17,12 +17,25 @@ import (
 //   - Middle * → [^.]+ (segment-bounded — aggregate/action have no dots)
 //   - Literal segments → regexp.QuoteMeta
 //   - Result is anchored: ^...$
-func Topic(pattern string) string {
-	parts := strings.SplitN(pattern, ".", 3)
+func Topic(
+	pattern string,
+) string {
+	parts := strings.SplitN(
+		pattern,
+		".",
+		3,
+	)
 	for i, p := range parts {
-		parts[i] = segmentPattern(p, i == len(parts)-1)
+		parts[i] = segmentPattern(
+			p,
+			i == len(parts)-1,
+		)
 	}
-	return "^" + strings.Join(parts, `\.`) + "$"
+
+	return "^" + strings.Join(
+		parts,
+		`\.`,
+	) + "$"
 }
 
 func segmentPattern(
@@ -32,8 +45,10 @@ func segmentPattern(
 	if segment != "*" {
 		return regexp.QuoteMeta(segment)
 	}
+
 	if isLast {
 		return ".*"
 	}
+
 	return "[^.]+"
 }

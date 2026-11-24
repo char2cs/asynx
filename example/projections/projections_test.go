@@ -13,7 +13,9 @@ import (
 // OrderReporter Tests
 // ============================================================================
 
-func TestOrderReporter_Handle_OrderCreated(t *testing.T) {
+func TestOrderReporter_Handle_OrderCreated(
+	t *testing.T,
+) {
 	reporter := &OrderReporter{}
 	ctx := context.Background()
 	event := models.Event[domain.Order]{
@@ -29,10 +31,15 @@ func TestOrderReporter_Handle_OrderCreated(t *testing.T) {
 	}
 
 	// Should not panic
-	reporter.Handle(ctx, event)
+	reporter.Handle(
+		ctx,
+		event,
+	)
 }
 
-func TestOrderReporter_Handle_OrderConfirmed(t *testing.T) {
+func TestOrderReporter_Handle_OrderConfirmed(
+	t *testing.T,
+) {
 	reporter := &OrderReporter{}
 	ctx := context.Background()
 	event := models.Event[domain.Order]{
@@ -53,10 +60,15 @@ func TestOrderReporter_Handle_OrderConfirmed(t *testing.T) {
 		},
 	}
 
-	reporter.Handle(ctx, event)
+	reporter.Handle(
+		ctx,
+		event,
+	)
 }
 
-func TestOrderReporter_Handle_OrderShipped(t *testing.T) {
+func TestOrderReporter_Handle_OrderShipped(
+	t *testing.T,
+) {
 	reporter := &OrderReporter{}
 	ctx := context.Background()
 	event := models.Event[domain.Order]{
@@ -77,10 +89,15 @@ func TestOrderReporter_Handle_OrderShipped(t *testing.T) {
 		},
 	}
 
-	reporter.Handle(ctx, event)
+	reporter.Handle(
+		ctx,
+		event,
+	)
 }
 
-func TestOrderReporter_Handle_Concurrent(t *testing.T) {
+func TestOrderReporter_Handle_Concurrent(
+	t *testing.T,
+) {
 	reporter := &OrderReporter{}
 	ctx := context.Background()
 	wg := sync.WaitGroup{}
@@ -88,7 +105,9 @@ func TestOrderReporter_Handle_Concurrent(t *testing.T) {
 	// Simulate concurrent event handling
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
-		go func(index int) {
+		go func(
+			index int,
+		) {
 			defer wg.Done()
 			event := models.Event[domain.Order]{
 				EventName: "OrderCreated",
@@ -97,7 +116,10 @@ func TestOrderReporter_Handle_Concurrent(t *testing.T) {
 					Status: domain.OrderPending,
 				},
 			}
-			reporter.Handle(ctx, event)
+			reporter.Handle(
+				ctx,
+				event,
+			)
 		}(i)
 	}
 
@@ -108,7 +130,9 @@ func TestOrderReporter_Handle_Concurrent(t *testing.T) {
 // OrderNotifier Tests
 // ============================================================================
 
-func TestOrderNotifier_Handle_OrderCreated(t *testing.T) {
+func TestOrderNotifier_Handle_OrderCreated(
+	t *testing.T,
+) {
 	notifier := &OrderNotifier{}
 	ctx := context.Background()
 	event := models.Event[domain.Order]{
@@ -122,18 +146,30 @@ func TestOrderNotifier_Handle_OrderCreated(t *testing.T) {
 		},
 	}
 
-	notifier.Handle(ctx, event)
+	notifier.Handle(
+		ctx,
+		event,
+	)
 	outbox := notifier.GetOutbox()
-
 	if len(outbox) != 1 {
-		t.Errorf("GetOutbox() length = %d, want 1", len(outbox))
+		t.Errorf(
+			"GetOutbox() length = %d, want 1",
+			len(outbox),
+		)
 	}
+
 	if outbox[0] != "📧 Confirmation email sent for order ORD-001" {
-		t.Errorf("GetOutbox()[0] = %q, want %q", outbox[0], "📧 Confirmation email sent for order ORD-001")
+		t.Errorf(
+			"GetOutbox()[0] = %q, want %q",
+			outbox[0],
+			"📧 Confirmation email sent for order ORD-001",
+		)
 	}
 }
 
-func TestOrderNotifier_Handle_OrderConfirmed(t *testing.T) {
+func TestOrderNotifier_Handle_OrderConfirmed(
+	t *testing.T,
+) {
 	notifier := &OrderNotifier{}
 	ctx := context.Background()
 	event := models.Event[domain.Order]{
@@ -147,18 +183,30 @@ func TestOrderNotifier_Handle_OrderConfirmed(t *testing.T) {
 		},
 	}
 
-	notifier.Handle(ctx, event)
+	notifier.Handle(
+		ctx,
+		event,
+	)
 	outbox := notifier.GetOutbox()
-
 	if len(outbox) != 1 {
-		t.Errorf("GetOutbox() length = %d, want 1", len(outbox))
+		t.Errorf(
+			"GetOutbox() length = %d, want 1",
+			len(outbox),
+		)
 	}
+
 	if outbox[0] != "🎉 Order ORD-002 confirmed! Warehouse notified." {
-		t.Errorf("GetOutbox()[0] = %q, want %q", outbox[0], "🎉 Order ORD-002 confirmed! Warehouse notified.")
+		t.Errorf(
+			"GetOutbox()[0] = %q, want %q",
+			outbox[0],
+			"🎉 Order ORD-002 confirmed! Warehouse notified.",
+		)
 	}
 }
 
-func TestOrderNotifier_Handle_OrderShipped(t *testing.T) {
+func TestOrderNotifier_Handle_OrderShipped(
+	t *testing.T,
+) {
 	notifier := &OrderNotifier{}
 	ctx := context.Background()
 	event := models.Event[domain.Order]{
@@ -172,18 +220,30 @@ func TestOrderNotifier_Handle_OrderShipped(t *testing.T) {
 		},
 	}
 
-	notifier.Handle(ctx, event)
+	notifier.Handle(
+		ctx,
+		event,
+	)
 	outbox := notifier.GetOutbox()
-
 	if len(outbox) != 1 {
-		t.Errorf("GetOutbox() length = %d, want 1", len(outbox))
+		t.Errorf(
+			"GetOutbox() length = %d, want 1",
+			len(outbox),
+		)
 	}
+
 	if outbox[0] != "📦 Order ORD-003 shipped! Customer notified." {
-		t.Errorf("GetOutbox()[0] = %q, want %q", outbox[0], "📦 Order ORD-003 shipped! Customer notified.")
+		t.Errorf(
+			"GetOutbox()[0] = %q, want %q",
+			outbox[0],
+			"📦 Order ORD-003 shipped! Customer notified.",
+		)
 	}
 }
 
-func TestOrderNotifier_Handle_UnknownEvent(t *testing.T) {
+func TestOrderNotifier_Handle_UnknownEvent(
+	t *testing.T,
+) {
 	notifier := &OrderNotifier{}
 	ctx := context.Background()
 	event := models.Event[domain.Order]{
@@ -193,15 +253,22 @@ func TestOrderNotifier_Handle_UnknownEvent(t *testing.T) {
 		},
 	}
 
-	notifier.Handle(ctx, event)
+	notifier.Handle(
+		ctx,
+		event,
+	)
 	outbox := notifier.GetOutbox()
-
 	if len(outbox) != 0 {
-		t.Errorf("GetOutbox() length = %d, want 0", len(outbox))
+		t.Errorf(
+			"GetOutbox() length = %d, want 0",
+			len(outbox),
+		)
 	}
 }
 
-func TestOrderNotifier_Handle_MultipleEvents(t *testing.T) {
+func TestOrderNotifier_Handle_MultipleEvents(
+	t *testing.T,
+) {
 	notifier := &OrderNotifier{}
 	ctx := context.Background()
 
@@ -218,17 +285,31 @@ func TestOrderNotifier_Handle_MultipleEvents(t *testing.T) {
 		Aggregate: domain.Order{ID: "ORD-001"},
 	}
 
-	notifier.Handle(ctx, event1)
-	notifier.Handle(ctx, event2)
-	notifier.Handle(ctx, event3)
+	notifier.Handle(
+		ctx,
+		event1,
+	)
+	notifier.Handle(
+		ctx,
+		event2,
+	)
+	notifier.Handle(
+		ctx,
+		event3,
+	)
 
 	outbox := notifier.GetOutbox()
 	if len(outbox) != 3 {
-		t.Errorf("GetOutbox() length = %d, want 3", len(outbox))
+		t.Errorf(
+			"GetOutbox() length = %d, want 3",
+			len(outbox),
+		)
 	}
 }
 
-func TestOrderNotifier_Handle_Concurrent(t *testing.T) {
+func TestOrderNotifier_Handle_Concurrent(
+	t *testing.T,
+) {
 	notifier := &OrderNotifier{}
 	ctx := context.Background()
 	wg := sync.WaitGroup{}
@@ -236,7 +317,9 @@ func TestOrderNotifier_Handle_Concurrent(t *testing.T) {
 	// Simulate concurrent event handling
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
-		go func(index int) {
+		go func(
+			index int,
+		) {
 			defer wg.Done()
 			event := models.Event[domain.Order]{
 				EventName: "OrderCreated",
@@ -244,7 +327,10 @@ func TestOrderNotifier_Handle_Concurrent(t *testing.T) {
 					ID: "ORD-001",
 				},
 			}
-			notifier.Handle(ctx, event)
+			notifier.Handle(
+				ctx,
+				event,
+			)
 		}(i)
 	}
 
@@ -252,15 +338,22 @@ func TestOrderNotifier_Handle_Concurrent(t *testing.T) {
 
 	outbox := notifier.GetOutbox()
 	if len(outbox) != 10 {
-		t.Errorf("GetOutbox() length after concurrent calls = %d, want 10", len(outbox))
+		t.Errorf(
+			"GetOutbox() length after concurrent calls = %d, want 10",
+			len(outbox),
+		)
 	}
 }
 
-func TestOrderNotifier_GetOutbox_EmptyInitially(t *testing.T) {
+func TestOrderNotifier_GetOutbox_EmptyInitially(
+	t *testing.T,
+) {
 	notifier := &OrderNotifier{}
 	outbox := notifier.GetOutbox()
-
 	if len(outbox) != 0 {
-		t.Errorf("GetOutbox() on fresh notifier = %d, want 0", len(outbox))
+		t.Errorf(
+			"GetOutbox() on fresh notifier = %d, want 0",
+			len(outbox),
+		)
 	}
 }

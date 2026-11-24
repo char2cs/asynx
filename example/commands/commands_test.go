@@ -11,28 +11,47 @@ import (
 // CreateOrderCmd Tests
 // ============================================================================
 
-func TestCreateOrderCmd_AggregateID(t *testing.T) {
+func TestCreateOrderCmd_AggregateID(
+	t *testing.T,
+) {
 	cmd := CreateOrderCmd{ID: "ORD-001"}
 	if got := cmd.AggregateID(); got != "ORD-001" {
-		t.Errorf("AggregateID() = %q, want %q", got, "ORD-001")
+		t.Errorf(
+			"AggregateID() = %q, want %q",
+			got,
+			"ORD-001",
+		)
 	}
 }
 
-func TestCreateOrderCmd_EventName(t *testing.T) {
+func TestCreateOrderCmd_EventName(
+	t *testing.T,
+) {
 	cmd := CreateOrderCmd{}
 	if got := cmd.EventName(); got != "OrderCreated" {
-		t.Errorf("EventName() = %q, want %q", got, "OrderCreated")
+		t.Errorf(
+			"EventName() = %q, want %q",
+			got,
+			"OrderCreated",
+		)
 	}
 }
 
-func TestCreateOrderCmd_ShouldSnapshot(t *testing.T) {
+func TestCreateOrderCmd_ShouldSnapshot(
+	t *testing.T,
+) {
 	cmd := CreateOrderCmd{}
 	if got := cmd.ShouldSnapshot(); got != false {
-		t.Errorf("ShouldSnapshot() = %v, want false", got)
+		t.Errorf(
+			"ShouldSnapshot() = %v, want false",
+			got,
+		)
 	}
 }
 
-func TestCreateOrderCmd_Validate_ValidCommand(t *testing.T) {
+func TestCreateOrderCmd_Validate_ValidCommand(
+	t *testing.T,
+) {
 	cmd := CreateOrderCmd{
 		ID:     "ORD-001",
 		Total:  99.99,
@@ -41,11 +60,16 @@ func TestCreateOrderCmd_Validate_ValidCommand(t *testing.T) {
 	}
 	err := cmd.Validate(nil)
 	if err != nil {
-		t.Errorf("Validate(nil) = %v, want nil", err)
+		t.Errorf(
+			"Validate(nil) = %v, want nil",
+			err,
+		)
 	}
 }
 
-func TestCreateOrderCmd_Validate_InvalidTotal(t *testing.T) {
+func TestCreateOrderCmd_Validate_InvalidTotal(
+	t *testing.T,
+) {
 	cmd := CreateOrderCmd{
 		ID:     "ORD-001",
 		Total:  0,
@@ -54,11 +78,17 @@ func TestCreateOrderCmd_Validate_InvalidTotal(t *testing.T) {
 	}
 	err := cmd.Validate(nil)
 	if err != models.ErrValidation {
-		t.Errorf("Validate(nil) with Total=0 = %v, want %v", err, models.ErrValidation)
+		t.Errorf(
+			"Validate(nil) with Total=0 = %v, want %v",
+			err,
+			models.ErrValidation,
+		)
 	}
 }
 
-func TestCreateOrderCmd_Validate_NegativeTotal(t *testing.T) {
+func TestCreateOrderCmd_Validate_NegativeTotal(
+	t *testing.T,
+) {
 	cmd := CreateOrderCmd{
 		ID:     "ORD-001",
 		Total:  -10.0,
@@ -67,11 +97,17 @@ func TestCreateOrderCmd_Validate_NegativeTotal(t *testing.T) {
 	}
 	err := cmd.Validate(nil)
 	if err != models.ErrValidation {
-		t.Errorf("Validate(nil) with negative Total = %v, want %v", err, models.ErrValidation)
+		t.Errorf(
+			"Validate(nil) with negative Total = %v, want %v",
+			err,
+			models.ErrValidation,
+		)
 	}
 }
 
-func TestCreateOrderCmd_Validate_InvalidItems(t *testing.T) {
+func TestCreateOrderCmd_Validate_InvalidItems(
+	t *testing.T,
+) {
 	cmd := CreateOrderCmd{
 		ID:     "ORD-001",
 		Total:  99.99,
@@ -80,11 +116,17 @@ func TestCreateOrderCmd_Validate_InvalidItems(t *testing.T) {
 	}
 	err := cmd.Validate(nil)
 	if err != models.ErrValidation {
-		t.Errorf("Validate(nil) with Items=0 = %v, want %v", err, models.ErrValidation)
+		t.Errorf(
+			"Validate(nil) with Items=0 = %v, want %v",
+			err,
+			models.ErrValidation,
+		)
 	}
 }
 
-func TestCreateOrderCmd_Validate_NegativeItems(t *testing.T) {
+func TestCreateOrderCmd_Validate_NegativeItems(
+	t *testing.T,
+) {
 	cmd := CreateOrderCmd{
 		ID:     "ORD-001",
 		Total:  99.99,
@@ -93,11 +135,17 @@ func TestCreateOrderCmd_Validate_NegativeItems(t *testing.T) {
 	}
 	err := cmd.Validate(nil)
 	if err != models.ErrValidation {
-		t.Errorf("Validate(nil) with negative Items = %v, want %v", err, models.ErrValidation)
+		t.Errorf(
+			"Validate(nil) with negative Items = %v, want %v",
+			err,
+			models.ErrValidation,
+		)
 	}
 }
 
-func TestCreateOrderCmd_Validate_AlreadyExists(t *testing.T) {
+func TestCreateOrderCmd_Validate_AlreadyExists(
+	t *testing.T,
+) {
 	cmd := CreateOrderCmd{
 		ID:     "ORD-001",
 		Total:  99.99,
@@ -113,11 +161,17 @@ func TestCreateOrderCmd_Validate_AlreadyExists(t *testing.T) {
 	}
 	err := cmd.Validate(current)
 	if err != models.ErrValidation {
-		t.Errorf("Validate(current) when already exists = %v, want %v", err, models.ErrValidation)
+		t.Errorf(
+			"Validate(current) when already exists = %v, want %v",
+			err,
+			models.ErrValidation,
+		)
 	}
 }
 
-func TestCreateOrderCmd_EmitEvent(t *testing.T) {
+func TestCreateOrderCmd_EmitEvent(
+	t *testing.T,
+) {
 	cmd := CreateOrderCmd{
 		ID:     "ORD-001",
 		Total:  99.99,
@@ -125,21 +179,44 @@ func TestCreateOrderCmd_EmitEvent(t *testing.T) {
 		ShipTo: "123 Main St",
 	}
 	event := cmd.EmitEvent(nil)
-
 	if event.ID != "ORD-001" {
-		t.Errorf("EmitEvent().ID = %q, want %q", event.ID, "ORD-001")
+		t.Errorf(
+			"EmitEvent().ID = %q, want %q",
+			event.ID,
+			"ORD-001",
+		)
 	}
+
 	if event.Status != domain.OrderPending {
-		t.Errorf("EmitEvent().Status = %q, want %q", event.Status, domain.OrderPending)
+		t.Errorf(
+			"EmitEvent().Status = %q, want %q",
+			event.Status,
+			domain.OrderPending,
+		)
 	}
+
 	if event.Total != 99.99 {
-		t.Errorf("EmitEvent().Total = %v, want %v", event.Total, 99.99)
+		t.Errorf(
+			"EmitEvent().Total = %v, want %v",
+			event.Total,
+			99.99,
+		)
 	}
+
 	if event.Items != 2 {
-		t.Errorf("EmitEvent().Items = %d, want %d", event.Items, 2)
+		t.Errorf(
+			"EmitEvent().Items = %d, want %d",
+			event.Items,
+			2,
+		)
 	}
+
 	if event.ShipTo != "123 Main St" {
-		t.Errorf("EmitEvent().ShipTo = %q, want %q", event.ShipTo, "123 Main St")
+		t.Errorf(
+			"EmitEvent().ShipTo = %q, want %q",
+			event.ShipTo,
+			"123 Main St",
+		)
 	}
 }
 
@@ -147,36 +224,61 @@ func TestCreateOrderCmd_EmitEvent(t *testing.T) {
 // ConfirmOrderCmd Tests
 // ============================================================================
 
-func TestConfirmOrderCmd_AggregateID(t *testing.T) {
+func TestConfirmOrderCmd_AggregateID(
+	t *testing.T,
+) {
 	cmd := ConfirmOrderCmd{ID: "ORD-001"}
 	if got := cmd.AggregateID(); got != "ORD-001" {
-		t.Errorf("AggregateID() = %q, want %q", got, "ORD-001")
+		t.Errorf(
+			"AggregateID() = %q, want %q",
+			got,
+			"ORD-001",
+		)
 	}
 }
 
-func TestConfirmOrderCmd_EventName(t *testing.T) {
+func TestConfirmOrderCmd_EventName(
+	t *testing.T,
+) {
 	cmd := ConfirmOrderCmd{}
 	if got := cmd.EventName(); got != "OrderConfirmed" {
-		t.Errorf("EventName() = %q, want %q", got, "OrderConfirmed")
+		t.Errorf(
+			"EventName() = %q, want %q",
+			got,
+			"OrderConfirmed",
+		)
 	}
 }
 
-func TestConfirmOrderCmd_ShouldSnapshot(t *testing.T) {
+func TestConfirmOrderCmd_ShouldSnapshot(
+	t *testing.T,
+) {
 	cmd := ConfirmOrderCmd{}
 	if got := cmd.ShouldSnapshot(); got != false {
-		t.Errorf("ShouldSnapshot() = %v, want false", got)
+		t.Errorf(
+			"ShouldSnapshot() = %v, want false",
+			got,
+		)
 	}
 }
 
-func TestConfirmOrderCmd_Validate_NoCurrentOrder(t *testing.T) {
+func TestConfirmOrderCmd_Validate_NoCurrentOrder(
+	t *testing.T,
+) {
 	cmd := ConfirmOrderCmd{ID: "ORD-001"}
 	err := cmd.Validate(nil)
 	if err != models.ErrValidation {
-		t.Errorf("Validate(nil) = %v, want %v", err, models.ErrValidation)
+		t.Errorf(
+			"Validate(nil) = %v, want %v",
+			err,
+			models.ErrValidation,
+		)
 	}
 }
 
-func TestConfirmOrderCmd_Validate_NotPending(t *testing.T) {
+func TestConfirmOrderCmd_Validate_NotPending(
+	t *testing.T,
+) {
 	cmd := ConfirmOrderCmd{ID: "ORD-001"}
 	current := &domain.Order{
 		ID:     "ORD-001",
@@ -187,11 +289,17 @@ func TestConfirmOrderCmd_Validate_NotPending(t *testing.T) {
 	}
 	err := cmd.Validate(current)
 	if err != models.ErrValidation {
-		t.Errorf("Validate(Confirmed) = %v, want %v", err, models.ErrValidation)
+		t.Errorf(
+			"Validate(Confirmed) = %v, want %v",
+			err,
+			models.ErrValidation,
+		)
 	}
 }
 
-func TestConfirmOrderCmd_Validate_Shipped(t *testing.T) {
+func TestConfirmOrderCmd_Validate_Shipped(
+	t *testing.T,
+) {
 	cmd := ConfirmOrderCmd{ID: "ORD-001"}
 	current := &domain.Order{
 		ID:     "ORD-001",
@@ -202,11 +310,17 @@ func TestConfirmOrderCmd_Validate_Shipped(t *testing.T) {
 	}
 	err := cmd.Validate(current)
 	if err != models.ErrValidation {
-		t.Errorf("Validate(Shipped) = %v, want %v", err, models.ErrValidation)
+		t.Errorf(
+			"Validate(Shipped) = %v, want %v",
+			err,
+			models.ErrValidation,
+		)
 	}
 }
 
-func TestConfirmOrderCmd_Validate_ValidCommand(t *testing.T) {
+func TestConfirmOrderCmd_Validate_ValidCommand(
+	t *testing.T,
+) {
 	cmd := ConfirmOrderCmd{ID: "ORD-001"}
 	current := &domain.Order{
 		ID:     "ORD-001",
@@ -217,11 +331,16 @@ func TestConfirmOrderCmd_Validate_ValidCommand(t *testing.T) {
 	}
 	err := cmd.Validate(current)
 	if err != nil {
-		t.Errorf("Validate(Pending) = %v, want nil", err)
+		t.Errorf(
+			"Validate(Pending) = %v, want nil",
+			err,
+		)
 	}
 }
 
-func TestConfirmOrderCmd_EmitEvent(t *testing.T) {
+func TestConfirmOrderCmd_EmitEvent(
+	t *testing.T,
+) {
 	cmd := ConfirmOrderCmd{ID: "ORD-001"}
 	current := &domain.Order{
 		ID:     "ORD-001",
@@ -231,21 +350,44 @@ func TestConfirmOrderCmd_EmitEvent(t *testing.T) {
 		ShipTo: "123 Main St",
 	}
 	event := cmd.EmitEvent(current)
-
 	if event.ID != "ORD-001" {
-		t.Errorf("EmitEvent().ID = %q, want %q", event.ID, "ORD-001")
+		t.Errorf(
+			"EmitEvent().ID = %q, want %q",
+			event.ID,
+			"ORD-001",
+		)
 	}
+
 	if event.Status != domain.OrderConfirmed {
-		t.Errorf("EmitEvent().Status = %q, want %q", event.Status, domain.OrderConfirmed)
+		t.Errorf(
+			"EmitEvent().Status = %q, want %q",
+			event.Status,
+			domain.OrderConfirmed,
+		)
 	}
+
 	if event.Total != 99.99 {
-		t.Errorf("EmitEvent().Total = %v, want %v", event.Total, 99.99)
+		t.Errorf(
+			"EmitEvent().Total = %v, want %v",
+			event.Total,
+			99.99,
+		)
 	}
+
 	if event.Items != 2 {
-		t.Errorf("EmitEvent().Items = %d, want %d", event.Items, 2)
+		t.Errorf(
+			"EmitEvent().Items = %d, want %d",
+			event.Items,
+			2,
+		)
 	}
+
 	if event.ShipTo != "123 Main St" {
-		t.Errorf("EmitEvent().ShipTo = %q, want %q", event.ShipTo, "123 Main St")
+		t.Errorf(
+			"EmitEvent().ShipTo = %q, want %q",
+			event.ShipTo,
+			"123 Main St",
+		)
 	}
 }
 
@@ -253,36 +395,61 @@ func TestConfirmOrderCmd_EmitEvent(t *testing.T) {
 // ShipOrderCmd Tests
 // ============================================================================
 
-func TestShipOrderCmd_AggregateID(t *testing.T) {
+func TestShipOrderCmd_AggregateID(
+	t *testing.T,
+) {
 	cmd := ShipOrderCmd{ID: "ORD-001"}
 	if got := cmd.AggregateID(); got != "ORD-001" {
-		t.Errorf("AggregateID() = %q, want %q", got, "ORD-001")
+		t.Errorf(
+			"AggregateID() = %q, want %q",
+			got,
+			"ORD-001",
+		)
 	}
 }
 
-func TestShipOrderCmd_EventName(t *testing.T) {
+func TestShipOrderCmd_EventName(
+	t *testing.T,
+) {
 	cmd := ShipOrderCmd{}
 	if got := cmd.EventName(); got != "OrderShipped" {
-		t.Errorf("EventName() = %q, want %q", got, "OrderShipped")
+		t.Errorf(
+			"EventName() = %q, want %q",
+			got,
+			"OrderShipped",
+		)
 	}
 }
 
-func TestShipOrderCmd_ShouldSnapshot(t *testing.T) {
+func TestShipOrderCmd_ShouldSnapshot(
+	t *testing.T,
+) {
 	cmd := ShipOrderCmd{}
 	if got := cmd.ShouldSnapshot(); got != true {
-		t.Errorf("ShouldSnapshot() = %v, want true", got)
+		t.Errorf(
+			"ShouldSnapshot() = %v, want true",
+			got,
+		)
 	}
 }
 
-func TestShipOrderCmd_Validate_NoCurrentOrder(t *testing.T) {
+func TestShipOrderCmd_Validate_NoCurrentOrder(
+	t *testing.T,
+) {
 	cmd := ShipOrderCmd{ID: "ORD-001"}
 	err := cmd.Validate(nil)
 	if err != models.ErrValidation {
-		t.Errorf("Validate(nil) = %v, want %v", err, models.ErrValidation)
+		t.Errorf(
+			"Validate(nil) = %v, want %v",
+			err,
+			models.ErrValidation,
+		)
 	}
 }
 
-func TestShipOrderCmd_Validate_NotConfirmed(t *testing.T) {
+func TestShipOrderCmd_Validate_NotConfirmed(
+	t *testing.T,
+) {
 	cmd := ShipOrderCmd{ID: "ORD-001"}
 	current := &domain.Order{
 		ID:     "ORD-001",
@@ -293,11 +460,17 @@ func TestShipOrderCmd_Validate_NotConfirmed(t *testing.T) {
 	}
 	err := cmd.Validate(current)
 	if err != models.ErrValidation {
-		t.Errorf("Validate(Pending) = %v, want %v", err, models.ErrValidation)
+		t.Errorf(
+			"Validate(Pending) = %v, want %v",
+			err,
+			models.ErrValidation,
+		)
 	}
 }
 
-func TestShipOrderCmd_Validate_AlreadyShipped(t *testing.T) {
+func TestShipOrderCmd_Validate_AlreadyShipped(
+	t *testing.T,
+) {
 	cmd := ShipOrderCmd{ID: "ORD-001"}
 	current := &domain.Order{
 		ID:     "ORD-001",
@@ -308,11 +481,17 @@ func TestShipOrderCmd_Validate_AlreadyShipped(t *testing.T) {
 	}
 	err := cmd.Validate(current)
 	if err != models.ErrValidation {
-		t.Errorf("Validate(Shipped) = %v, want %v", err, models.ErrValidation)
+		t.Errorf(
+			"Validate(Shipped) = %v, want %v",
+			err,
+			models.ErrValidation,
+		)
 	}
 }
 
-func TestShipOrderCmd_Validate_ValidCommand(t *testing.T) {
+func TestShipOrderCmd_Validate_ValidCommand(
+	t *testing.T,
+) {
 	cmd := ShipOrderCmd{ID: "ORD-001"}
 	current := &domain.Order{
 		ID:     "ORD-001",
@@ -323,11 +502,16 @@ func TestShipOrderCmd_Validate_ValidCommand(t *testing.T) {
 	}
 	err := cmd.Validate(current)
 	if err != nil {
-		t.Errorf("Validate(Confirmed) = %v, want nil", err)
+		t.Errorf(
+			"Validate(Confirmed) = %v, want nil",
+			err,
+		)
 	}
 }
 
-func TestShipOrderCmd_EmitEvent(t *testing.T) {
+func TestShipOrderCmd_EmitEvent(
+	t *testing.T,
+) {
 	cmd := ShipOrderCmd{ID: "ORD-001"}
 	current := &domain.Order{
 		ID:     "ORD-001",
@@ -337,37 +521,78 @@ func TestShipOrderCmd_EmitEvent(t *testing.T) {
 		ShipTo: "123 Main St",
 	}
 	event := cmd.EmitEvent(current)
-
 	if event.ID != "ORD-001" {
-		t.Errorf("EmitEvent().ID = %q, want %q", event.ID, "ORD-001")
+		t.Errorf(
+			"EmitEvent().ID = %q, want %q",
+			event.ID,
+			"ORD-001",
+		)
 	}
+
 	if event.Status != domain.OrderShipped {
-		t.Errorf("EmitEvent().Status = %q, want %q", event.Status, domain.OrderShipped)
+		t.Errorf(
+			"EmitEvent().Status = %q, want %q",
+			event.Status,
+			domain.OrderShipped,
+		)
 	}
+
 	if event.Total != 99.99 {
-		t.Errorf("EmitEvent().Total = %v, want %v", event.Total, 99.99)
+		t.Errorf(
+			"EmitEvent().Total = %v, want %v",
+			event.Total,
+			99.99,
+		)
 	}
+
 	if event.Items != 2 {
-		t.Errorf("EmitEvent().Items = %d, want %d", event.Items, 2)
+		t.Errorf(
+			"EmitEvent().Items = %d, want %d",
+			event.Items,
+			2,
+		)
 	}
+
 	if event.ShipTo != "123 Main St" {
-		t.Errorf("EmitEvent().ShipTo = %q, want %q", event.ShipTo, "123 Main St")
+		t.Errorf(
+			"EmitEvent().ShipTo = %q, want %q",
+			event.ShipTo,
+			"123 Main St",
+		)
 	}
 }
 
-func TestOrderStatusConstants(t *testing.T) {
+func TestOrderStatusConstants(
+	t *testing.T,
+) {
 	if domain.OrderPending != "Pending" {
-		t.Errorf("OrderPending = %q, want %q", domain.OrderPending, "Pending")
+		t.Errorf(
+			"OrderPending = %q, want %q",
+			domain.OrderPending,
+			"Pending",
+		)
 	}
+
 	if domain.OrderConfirmed != "Confirmed" {
-		t.Errorf("OrderConfirmed = %q, want %q", domain.OrderConfirmed, "Confirmed")
+		t.Errorf(
+			"OrderConfirmed = %q, want %q",
+			domain.OrderConfirmed,
+			"Confirmed",
+		)
 	}
+
 	if domain.OrderShipped != "Shipped" {
-		t.Errorf("OrderShipped = %q, want %q", domain.OrderShipped, "Shipped")
+		t.Errorf(
+			"OrderShipped = %q, want %q",
+			domain.OrderShipped,
+			"Shipped",
+		)
 	}
 }
 
-func TestOrderStruct(t *testing.T) {
+func TestOrderStruct(
+	t *testing.T,
+) {
 	order := domain.Order{
 		ID:     "ORD-001",
 		Status: domain.OrderPending,
@@ -375,20 +600,43 @@ func TestOrderStruct(t *testing.T) {
 		Items:  2,
 		ShipTo: "123 Main St",
 	}
-
 	if order.ID != "ORD-001" {
-		t.Errorf("ID = %q, want %q", order.ID, "ORD-001")
+		t.Errorf(
+			"ID = %q, want %q",
+			order.ID,
+			"ORD-001",
+		)
 	}
+
 	if order.Status != domain.OrderPending {
-		t.Errorf("Status = %q, want %q", order.Status, domain.OrderPending)
+		t.Errorf(
+			"Status = %q, want %q",
+			order.Status,
+			domain.OrderPending,
+		)
 	}
+
 	if order.Total != 99.99 {
-		t.Errorf("Total = %v, want %v", order.Total, 99.99)
+		t.Errorf(
+			"Total = %v, want %v",
+			order.Total,
+			99.99,
+		)
 	}
+
 	if order.Items != 2 {
-		t.Errorf("Items = %d, want %d", order.Items, 2)
+		t.Errorf(
+			"Items = %d, want %d",
+			order.Items,
+			2,
+		)
 	}
+
 	if order.ShipTo != "123 Main St" {
-		t.Errorf("ShipTo = %q, want %q", order.ShipTo, "123 Main St")
+		t.Errorf(
+			"ShipTo = %q, want %q",
+			order.ShipTo,
+			"123 Main St",
+		)
 	}
 }

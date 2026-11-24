@@ -36,7 +36,11 @@ type SnapshotGuard func(
 // SetSnapshotGuard installs the guard a lock-free read takes before writing an
 // auto-snapshot. Without one the write is only checked against the stream, not
 // serialised with anything.
-func (r *Reader[T]) SetSnapshotGuard(guard SnapshotGuard) { r.guard = guard }
+func (r *Reader[T]) SetSnapshotGuard(
+	guard SnapshotGuard,
+) {
+	r.guard = guard
+}
 
 // New constructs a Reader. onCorruption is called when a snapshot cannot be
 // deserialized; pass nil to silently fall back to the cold path.
@@ -74,8 +78,13 @@ func (r *Reader[T]) Get(
 	ctx context.Context,
 	aggregateID string,
 ) (T, error) {
-	state, _, err := r.load(ctx, aggregateID, false)
-	return state, err
+	state, _, err := r.load(
+		ctx,
+		aggregateID,
+		false,
+	)
+	return state,
+		err
 }
 
 // Load returns the current aggregate state together with its version — the
@@ -88,7 +97,11 @@ func (r *Reader[T]) Load(
 	ctx context.Context,
 	aggregateID string,
 ) (T, int64, error) {
-	return r.load(ctx, aggregateID, true)
+	return r.load(
+		ctx,
+		aggregateID,
+		true,
+	)
 }
 
 func (r *Reader[T]) load(
@@ -96,36 +109,68 @@ func (r *Reader[T]) load(
 	aggregateID string,
 	lockHeld bool,
 ) (T, int64, error) {
-	snapBlob, found, err := r.snapshotStore.Get(ctx, aggregateID)
+	snapBlob, found, err := r.snapshotStore.Get(
+		ctx,
+		aggregateID,
+	)
 	if err != nil {
-		return r.stateZeroValue, 0, err
+		return r.stateZeroValue,
+			0,
+			err
 	}
 
 	if !found {
-		return r.coldPath(ctx, aggregateID, lockHeld)
+		return r.coldPath(
+			ctx,
+			aggregateID,
+			lockHeld,
+		)
 	}
 
 	var snap esmodels.SnapshotBlob[T]
-	if err := json.Unmarshal(snapBlob, &snap); err != nil {
+	if err := json.Unmarshal(
+		snapBlob,
+		&snap,
+	); err != nil {
 		if r.onCorruption != nil {
 			r.onCorruption(err)
 		}
-		return r.coldPath(ctx, aggregateID, lockHeld)
+
+		return r.coldPath(
+			ctx,
+			aggregateID,
+			lockHeld,
+		)
 	}
 
-	eventBlobs, err := r.eventStore.ReadFrom(ctx, "events:"+aggregateID, snap.Version+1)
+	eventBlobs, err := r.eventStore.ReadFrom(
+		ctx,
+		"events:"+aggregateID,
+		snap.Version+1,
+	)
 	if err != nil {
-		return r.stateZeroValue, 0, err
+		return r.stateZeroValue,
+			0,
+			err
 	}
 
 	events, err := deserializeEvents(eventBlobs)
 	if err != nil {
-		return r.stateZeroValue, 0, err
+		return r.stateZeroValue,
+			0,
+			err
 	}
 
-	result, err := r.replayer.Hydrate(ctx, aggregateID, snap.State, events)
+	result, err := r.replayer.Hydrate(
+		ctx,
+		aggregateID,
+		snap.State,
+		events,
+	)
 	if err != nil {
-		return r.stateZeroValue, 0, err
+		return r.stateZeroValue,
+			0,
+			err
 	}
 
 	loadedVersion := snap.Version
@@ -134,10 +179,18 @@ func (r *Reader[T]) load(
 	}
 
 	if result.DidUpcast {
-		r.saveUpcasted(ctx, aggregateID, lockHeld, result, events[len(events)-1].ID)
+		r.saveUpcasted(
+			ctx,
+			aggregateID,
+			lockHeld,
+			result,
+			events[len(events)-1].ID,
+		)
 	}
 
-	return result.State, loadedVersion, nil
+	return result.State,
+		loadedVersion,
+		nil
 }
 
 // coldPath performs a full replay from event 1 using the zero value as seed.
@@ -146,32 +199,57 @@ func (r *Reader[T]) coldPath(
 	aggregateID string,
 	lockHeld bool,
 ) (T, int64, error) {
-	eventBlobs, err := r.eventStore.ReadFrom(ctx, "events:"+aggregateID, 1)
+	eventBlobs, err := r.eventStore.ReadFrom(
+		ctx,
+		"events:"+aggregateID,
+		1,
+	)
 	if err != nil {
-		return r.stateZeroValue, 0, err
+		return r.stateZeroValue,
+			0,
+			err
 	}
 
 	if len(eventBlobs) == 0 {
-		return r.stateZeroValue, 0, asynxmd.ErrNotFound
+		return r.stateZeroValue,
+			0,
+			asynxmd.ErrNotFound
 	}
 
 	events, err := deserializeEvents(eventBlobs)
 	if err != nil {
-		return r.stateZeroValue, 0, err
+		return r.stateZeroValue,
+			0,
+			err
 	}
 
-	result, err := r.replayer.Hydrate(ctx, aggregateID, r.stateZeroValue, events)
+	result, err := r.replayer.Hydrate(
+		ctx,
+		aggregateID,
+		r.stateZeroValue,
+		events,
+	)
 	if err != nil {
-		return r.stateZeroValue, 0, err
+		return r.stateZeroValue,
+			0,
+			err
 	}
 
 	loadedVersion := events[len(events)-1].Version
 
 	if result.DidUpcast {
-		r.saveUpcasted(ctx, aggregateID, lockHeld, result, events[len(events)-1].ID)
+		r.saveUpcasted(
+			ctx,
+			aggregateID,
+			lockHeld,
+			result,
+			events[len(events)-1].ID,
+		)
 	}
 
-	return result.State, loadedVersion, nil
+	return result.State,
+		loadedVersion,
+		nil
 }
 
 // saveUpcasted writes the auto-snapshot of an upcast state. It is best-effort:
@@ -191,14 +269,25 @@ func (r *Reader[T]) saveUpcasted(
 	lastEventID string,
 ) {
 	save := func() {
-		_ = r.writeAutoSnapshot(ctx, aggregateID, result.LastVersion, result.State)
+		_ = r.writeAutoSnapshot(
+			ctx,
+			aggregateID,
+			result.LastVersion,
+			result.State,
+		)
 	}
 	if lockHeld {
 		save()
 		return
 	}
+
 	saveIfStreamUnchanged := func() {
-		if r.streamHolds(ctx, aggregateID, result.LastVersion, lastEventID) {
+		if r.streamHolds(
+			ctx,
+			aggregateID,
+			result.LastVersion,
+			lastEventID,
+		) {
 			save()
 		}
 	}
@@ -206,7 +295,11 @@ func (r *Reader[T]) saveUpcasted(
 		saveIfStreamUnchanged()
 		return
 	}
-	r.guard(aggregateID, saveIfStreamUnchanged)
+
+	r.guard(
+		aggregateID,
+		saveIfStreamUnchanged,
+	)
 }
 
 // streamHolds reports whether the aggregate's event at version is still the
@@ -218,14 +311,22 @@ func (r *Reader[T]) streamHolds(
 	version int64,
 	eventID string,
 ) bool {
-	blobs, err := r.eventStore.ReadRange(ctx, "events:"+aggregateID, version, 1)
-	if err != nil || len(blobs) != 1 {
+	blobs, err := r.eventStore.ReadRange(
+		ctx,
+		"events:"+aggregateID,
+		version,
+		1,
+	)
+	if err != nil ||
+		len(blobs) != 1 {
 		return false
 	}
+
 	events, err := deserializeEvents(blobs)
 	if err != nil {
 		return false
 	}
+
 	return events[0].Version == version && events[0].ID == eventID
 }
 
@@ -245,7 +346,13 @@ func (r *Reader[T]) writeAutoSnapshot(
 	if err != nil {
 		return err
 	}
-	return r.snapshotStore.Put(ctx, aggregateID, version, snapJSON)
+
+	return r.snapshotStore.Put(
+		ctx,
+		aggregateID,
+		version,
+		snapJSON,
+	)
 }
 
 // Exists returns true if the aggregate has at least one event.
@@ -254,12 +361,19 @@ func (r *Reader[T]) Exists(
 	ctx context.Context,
 	aggregateID string,
 ) (bool, error) {
-	events, err := r.eventStore.ReadRange(ctx, "events:"+aggregateID, 1, 1)
+	events, err := r.eventStore.ReadRange(
+		ctx,
+		"events:"+aggregateID,
+		1,
+		1,
+	)
 	if err != nil {
-		return false, err
+		return false,
+			err
 	}
 
-	return len(events) > 0, nil
+	return len(events) > 0,
+		nil
 }
 
 // Preload pays the cold-path cost offline by triggering a full Get and
@@ -270,8 +384,15 @@ func (r *Reader[T]) Preload(
 	ctx context.Context,
 	aggregateID string,
 ) error {
-	_, err := r.Get(ctx, aggregateID)
-	if err != nil && !errors.Is(err, asynxmd.ErrNotFound) {
+	_, err := r.Get(
+		ctx,
+		aggregateID,
+	)
+	if err != nil &&
+		!errors.Is(
+			err,
+			asynxmd.ErrNotFound,
+		) {
 		return err
 	}
 
@@ -279,15 +400,30 @@ func (r *Reader[T]) Preload(
 }
 
 // deserializeEvents unmarshals a slice of raw event blobs into InternalEvents.
-func deserializeEvents(blobs [][]byte) ([]esmodels.InternalEvent, error) {
-	events := make([]esmodels.InternalEvent, 0, len(blobs))
+func deserializeEvents(
+	blobs [][]byte,
+) ([]esmodels.InternalEvent, error) {
+	events := make(
+		[]esmodels.InternalEvent,
+		0,
+		len(blobs),
+	)
 	for _, blob := range blobs {
 		var evt esmodels.InternalEvent
-		if err := json.Unmarshal(blob, &evt); err != nil {
-			return nil, err
+		if err := json.Unmarshal(
+			blob,
+			&evt,
+		); err != nil {
+			return nil,
+				err
 		}
-		events = append(events, evt)
+
+		events = append(
+			events,
+			evt,
+		)
 	}
 
-	return events, nil
+	return events,
+		nil
 }

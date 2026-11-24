@@ -17,7 +17,9 @@ type ForgetCommand[T any] struct {
 }
 
 // NewForgetCommand constructs a ForgetCommand for the given aggregate.
-func NewForgetCommand[T any](aggregateID string) *ForgetCommand[T] {
+func NewForgetCommand[T any](
+	aggregateID string,
+) *ForgetCommand[T] {
 	return &ForgetCommand[T]{id: aggregateID}
 }
 
@@ -25,18 +27,28 @@ func (c *ForgetCommand[T]) AggregateID() string  { return c.id }
 func (c *ForgetCommand[T]) EventName() string    { return models.ForgetEventName }
 func (c *ForgetCommand[T]) ShouldSnapshot() bool { return false }
 
-func (c *ForgetCommand[T]) Validate(current *T) error {
+func (c *ForgetCommand[T]) Validate(
+	current *T,
+) error {
 	if current == nil {
-		return fmt.Errorf("%w: aggregate %s not found", models.ErrValidation, c.id)
+		return fmt.Errorf(
+			"%w: aggregate %s not found",
+			models.ErrValidation,
+			c.id,
+		)
 	}
+
 	c.last = current
 	return nil
 }
 
-func (c *ForgetCommand[T]) EmitEvent(_ *T) T {
+func (c *ForgetCommand[T]) EmitEvent(
+	_ *T,
+) T {
 	if c.last == nil {
 		var zero T
 		return zero
 	}
+
 	return *c.last
 }

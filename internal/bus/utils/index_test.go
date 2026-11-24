@@ -16,29 +16,45 @@ func emptyIndex[T any]() *models.PublishIndex[T] {
 	}
 }
 
-func newSub(pattern string) *models.Subscription[string] {
+func newSub(
+	pattern string,
+) *models.Subscription[string] {
 	return &models.Subscription[string]{
 		Pattern: pattern,
-		Handler: func(_ context.Context, _ asynxmd.Event[string]) {},
+		Handler: func(
+			_ context.Context,
+			_ asynxmd.Event[string],
+		) {
+		},
 	}
 }
 
 // --- IsExactPattern ---
 
 // 1. Plain string → true.
-func TestIsExactPattern_PlainString(t *testing.T) {
+func TestIsExactPattern_PlainString(
+	t *testing.T,
+) {
 	for _, p := range []string{"hello", "OrderPlaced", "a", "foo-bar_baz"} {
 		if !utils.IsExactPattern(p) {
-			t.Errorf("IsExactPattern(%q) = false, want true", p)
+			t.Errorf(
+				"IsExactPattern(%q) = false, want true",
+				p,
+			)
 		}
 	}
 }
 
 // 2. Regex metacharacters → false.
-func TestIsExactPattern_RegexChars(t *testing.T) {
+func TestIsExactPattern_RegexChars(
+	t *testing.T,
+) {
 	for _, p := range []string{"^hello", "hello.*", "hell[o", "hello.", "Order+"} {
 		if utils.IsExactPattern(p) {
-			t.Errorf("IsExactPattern(%q) = true, want false", p)
+			t.Errorf(
+				"IsExactPattern(%q) = true, want false",
+				p,
+			)
 		}
 	}
 }
@@ -46,59 +62,94 @@ func TestIsExactPattern_RegexChars(t *testing.T) {
 // --- IndexWith ---
 
 // 3. Exact pattern, empty index → creates new entry.
-func TestIndexWith_ExactNewEntry(t *testing.T) {
+func TestIndexWith_ExactNewEntry(
+	t *testing.T,
+) {
 	idx := emptyIndex[string]()
 	sub := newSub("OrderPlaced")
 
-	got := utils.IndexWith(idx, sub)
-
+	got := utils.IndexWith(
+		idx,
+		sub,
+	)
 	if len(got.ExactSubs["OrderPlaced"]) != 1 {
-		t.Errorf("expected 1 sub, got %d", len(got.ExactSubs["OrderPlaced"]))
+		t.Errorf(
+			"expected 1 sub, got %d",
+			len(got.ExactSubs["OrderPlaced"]),
+		)
 	}
+
 	if got.ExactSubs["OrderPlaced"][0] != sub {
 		t.Error("sub pointer mismatch")
 	}
 }
 
 // 4. Exact, same key again → appended.
-func TestIndexWith_ExactSameKeyAppended(t *testing.T) {
+func TestIndexWith_ExactSameKeyAppended(
+	t *testing.T,
+) {
 	sub1 := newSub("OrderPlaced")
 	sub2 := newSub("OrderPlaced")
 
-	idx := utils.IndexWith(emptyIndex[string](), sub1)
-	idx = utils.IndexWith(idx, sub2)
+	idx := utils.IndexWith(
+		emptyIndex[string](),
+		sub1,
+	)
+	idx = utils.IndexWith(
+		idx,
+		sub2,
+	)
 
 	subs := idx.ExactSubs["OrderPlaced"]
 	if len(subs) != 2 {
-		t.Fatalf("expected 2 subs, got %d", len(subs))
+		t.Fatalf(
+			"expected 2 subs, got %d",
+			len(subs),
+		)
 	}
-	if subs[0] != sub1 || subs[1] != sub2 {
+
+	if subs[0] != sub1 ||
+		subs[1] != sub2 {
 		t.Error("sub order/pointer mismatch")
 	}
 }
 
 // 5. Regex pattern → added to RegexSubs.
-func TestIndexWith_Regex(t *testing.T) {
+func TestIndexWith_Regex(
+	t *testing.T,
+) {
 	sub := newSub("^Order.*")
-	idx := utils.IndexWith(emptyIndex[string](), sub)
-
+	idx := utils.IndexWith(
+		emptyIndex[string](),
+		sub,
+	)
 	if len(idx.RegexSubs) != 1 {
-		t.Fatalf("expected 1 regex sub, got %d", len(idx.RegexSubs))
+		t.Fatalf(
+			"expected 1 regex sub, got %d",
+			len(idx.RegexSubs),
+		)
 	}
+
 	if idx.RegexSubs[0] != sub {
 		t.Error("sub pointer mismatch")
 	}
+
 	if len(idx.ExactSubs) != 0 {
 		t.Error("exact subs should be empty")
 	}
 }
 
 // 6. COW — original PublishIndex unchanged.
-func TestIndexWith_COW(t *testing.T) {
+func TestIndexWith_COW(
+	t *testing.T,
+) {
 	orig := emptyIndex[string]()
 	sub := newSub("OrderPlaced")
 
-	_ = utils.IndexWith(orig, sub)
+	_ = utils.IndexWith(
+		orig,
+		sub,
+	)
 
 	if len(orig.ExactSubs) != 0 {
 		t.Error("original index was mutated by IndexWith")
@@ -108,11 +159,19 @@ func TestIndexWith_COW(t *testing.T) {
 // --- IndexWithout ---
 
 // 7. Exact, only sub → key deleted.
-func TestIndexWithout_ExactOnlySub(t *testing.T) {
+func TestIndexWithout_ExactOnlySub(
+	t *testing.T,
+) {
 	sub := newSub("OrderPlaced")
-	idx := utils.IndexWith(emptyIndex[string](), sub)
+	idx := utils.IndexWith(
+		emptyIndex[string](),
+		sub,
+	)
 
-	got := utils.IndexWithout(idx, sub)
+	got := utils.IndexWithout(
+		idx,
+		sub,
+	)
 
 	if _, ok := got.ExactSubs["OrderPlaced"]; ok {
 		t.Error("key should have been deleted")
@@ -120,46 +179,83 @@ func TestIndexWithout_ExactOnlySub(t *testing.T) {
 }
 
 // 8. Exact, multiple subs → one removed, others remain.
-func TestIndexWithout_ExactMultipleSubs(t *testing.T) {
+func TestIndexWithout_ExactMultipleSubs(
+	t *testing.T,
+) {
 	sub1 := newSub("OrderPlaced")
 	sub2 := newSub("OrderPlaced")
-	idx := utils.IndexWith(emptyIndex[string](), sub1)
-	idx = utils.IndexWith(idx, sub2)
+	idx := utils.IndexWith(
+		emptyIndex[string](),
+		sub1,
+	)
+	idx = utils.IndexWith(
+		idx,
+		sub2,
+	)
 
-	got := utils.IndexWithout(idx, sub1)
+	got := utils.IndexWithout(
+		idx,
+		sub1,
+	)
 
 	subs := got.ExactSubs["OrderPlaced"]
 	if len(subs) != 1 {
-		t.Fatalf("expected 1 sub remaining, got %d", len(subs))
+		t.Fatalf(
+			"expected 1 sub remaining, got %d",
+			len(subs),
+		)
 	}
+
 	if subs[0] != sub2 {
 		t.Error("wrong sub remaining")
 	}
 }
 
 // 9. Regex → removed from RegexSubs.
-func TestIndexWithout_Regex(t *testing.T) {
+func TestIndexWithout_Regex(
+	t *testing.T,
+) {
 	sub1 := newSub("^Order.*")
 	sub2 := newSub("^Payment.*")
-	idx := utils.IndexWith(emptyIndex[string](), sub1)
-	idx = utils.IndexWith(idx, sub2)
+	idx := utils.IndexWith(
+		emptyIndex[string](),
+		sub1,
+	)
+	idx = utils.IndexWith(
+		idx,
+		sub2,
+	)
 
-	got := utils.IndexWithout(idx, sub1)
-
+	got := utils.IndexWithout(
+		idx,
+		sub1,
+	)
 	if len(got.RegexSubs) != 1 {
-		t.Fatalf("expected 1 regex sub, got %d", len(got.RegexSubs))
+		t.Fatalf(
+			"expected 1 regex sub, got %d",
+			len(got.RegexSubs),
+		)
 	}
+
 	if got.RegexSubs[0] != sub2 {
 		t.Error("wrong regex sub remaining")
 	}
 }
 
 // 10. COW — original unchanged after IndexWithout.
-func TestIndexWithout_COW(t *testing.T) {
+func TestIndexWithout_COW(
+	t *testing.T,
+) {
 	sub := newSub("OrderPlaced")
-	idx := utils.IndexWith(emptyIndex[string](), sub)
+	idx := utils.IndexWith(
+		emptyIndex[string](),
+		sub,
+	)
 
-	_ = utils.IndexWithout(idx, sub)
+	_ = utils.IndexWithout(
+		idx,
+		sub,
+	)
 
 	if len(idx.ExactSubs["OrderPlaced"]) != 1 {
 		t.Error("original index was mutated by IndexWithout")
@@ -173,15 +269,22 @@ func buildExactIndex(
 	idx := emptyIndex[string]()
 	for i := range n {
 		sub := &models.Subscription[string]{
-			Pattern: fmt.Sprintf("Event%d", i),
+			Pattern: fmt.Sprintf(
+				"Event%d",
+				i,
+			),
 			Handler: func(
 				_ context.Context,
 				_ asynxmd.Event[string],
 			) {
 			},
 		}
-		idx = utils.IndexWith(idx, sub)
+		idx = utils.IndexWith(
+			idx,
+			sub,
+		)
 	}
+
 	return idx
 }
 
@@ -190,19 +293,30 @@ func buildRegexIndex(
 	n int,
 ) (*models.PublishIndex[string], []*models.Subscription[string]) {
 	idx := emptyIndex[string]()
-	subs := make([]*models.Subscription[string], n)
+	subs := make(
+		[]*models.Subscription[string],
+		n,
+	)
 	for i := range n {
 		subs[i] = &models.Subscription[string]{
-			Pattern: fmt.Sprintf("^Event%d.*", i),
+			Pattern: fmt.Sprintf(
+				"^Event%d.*",
+				i,
+			),
 			Handler: func(
 				_ context.Context,
 				_ asynxmd.Event[string],
 			) {
 			},
 		}
-		idx = utils.IndexWith(idx, subs[i])
+		idx = utils.IndexWith(
+			idx,
+			subs[i],
+		)
 	}
-	return idx, subs
+
+	return idx,
+		subs
 }
 
 // BenchmarkIsExactPattern measures the regexp.QuoteMeta comparison used to
@@ -210,20 +324,26 @@ func buildRegexIndex(
 func BenchmarkIsExactPattern(
 	b *testing.B,
 ) {
-	b.Run("exact", func(
-		b *testing.B,
-	) {
-		for range b.N {
-			utils.IsExactPattern("OrderPlaced")
-		}
-	})
-	b.Run("regex", func(
-		b *testing.B,
-	) {
-		for range b.N {
-			utils.IsExactPattern("^Order.*")
-		}
-	})
+	b.Run(
+		"exact",
+		func(
+			b *testing.B,
+		) {
+			for range b.N {
+				utils.IsExactPattern("OrderPlaced")
+			}
+		},
+	)
+	b.Run(
+		"regex",
+		func(
+			b *testing.B,
+		) {
+			for range b.N {
+				utils.IsExactPattern("^Order.*")
+			}
+		},
+	)
 }
 
 // BenchmarkIndexWith_Exact measures COW cost of adding one exact-match sub to
@@ -233,24 +353,33 @@ func BenchmarkIndexWith_Exact(
 	b *testing.B,
 ) {
 	for _, n := range []int{0, 100, 1_000, 10_000} {
-		b.Run(fmt.Sprintf("%d_existing", n), func(
-			b *testing.B,
-		) {
-			idx := buildExactIndex(n)
-			sub := &models.Subscription[string]{
-				Pattern: "NewEvent",
-				Handler: func(
-					_ context.Context,
-					_ asynxmd.Event[string],
-				) {
-				},
-			}
-			b.ReportAllocs()
-			b.ResetTimer()
-			for range b.N {
-				utils.IndexWith(idx, sub)
-			}
-		})
+		b.Run(
+			fmt.Sprintf(
+				"%d_existing",
+				n,
+			),
+			func(
+				b *testing.B,
+			) {
+				idx := buildExactIndex(n)
+				sub := &models.Subscription[string]{
+					Pattern: "NewEvent",
+					Handler: func(
+						_ context.Context,
+						_ asynxmd.Event[string],
+					) {
+					},
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					utils.IndexWith(
+						idx,
+						sub,
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -260,24 +389,33 @@ func BenchmarkIndexWith_Regex(
 	b *testing.B,
 ) {
 	for _, n := range []int{0, 100, 1_000, 10_000} {
-		b.Run(fmt.Sprintf("%d_existing", n), func(
-			b *testing.B,
-		) {
-			idx, _ := buildRegexIndex(n)
-			sub := &models.Subscription[string]{
-				Pattern: "^NewEvent.*",
-				Handler: func(
-					_ context.Context,
-					_ asynxmd.Event[string],
-				) {
-				},
-			}
-			b.ReportAllocs()
-			b.ResetTimer()
-			for range b.N {
-				utils.IndexWith(idx, sub)
-			}
-		})
+		b.Run(
+			fmt.Sprintf(
+				"%d_existing",
+				n,
+			),
+			func(
+				b *testing.B,
+			) {
+				idx, _ := buildRegexIndex(n)
+				sub := &models.Subscription[string]{
+					Pattern: "^NewEvent.*",
+					Handler: func(
+						_ context.Context,
+						_ asynxmd.Event[string],
+					) {
+					},
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					utils.IndexWith(
+						idx,
+						sub,
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -286,17 +424,26 @@ func BenchmarkIndexWithout_Exact(
 	b *testing.B,
 ) {
 	for _, n := range []int{1, 100, 1_000, 10_000} {
-		b.Run(fmt.Sprintf("%d_existing", n), func(
-			b *testing.B,
-		) {
-			idx := buildExactIndex(n)
-			target := idx.ExactSubs["Event0"][0]
-			b.ReportAllocs()
-			b.ResetTimer()
-			for range b.N {
-				utils.IndexWithout(idx, target)
-			}
-		})
+		b.Run(
+			fmt.Sprintf(
+				"%d_existing",
+				n,
+			),
+			func(
+				b *testing.B,
+			) {
+				idx := buildExactIndex(n)
+				target := idx.ExactSubs["Event0"][0]
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					utils.IndexWithout(
+						idx,
+						target,
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -305,16 +452,25 @@ func BenchmarkIndexWithout_Regex(
 	b *testing.B,
 ) {
 	for _, n := range []int{1, 100, 1_000, 10_000} {
-		b.Run(fmt.Sprintf("%d_existing", n), func(
-			b *testing.B,
-		) {
-			idx, subs := buildRegexIndex(n)
-			target := subs[0]
-			b.ReportAllocs()
-			b.ResetTimer()
-			for range b.N {
-				utils.IndexWithout(idx, target)
-			}
-		})
+		b.Run(
+			fmt.Sprintf(
+				"%d_existing",
+				n,
+			),
+			func(
+				b *testing.B,
+			) {
+				idx, subs := buildRegexIndex(n)
+				target := subs[0]
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					utils.IndexWithout(
+						idx,
+						target,
+					)
+				}
+			},
+		)
 	}
 }

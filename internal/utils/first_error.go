@@ -12,7 +12,9 @@ func FirstError[E any](
 	var failure error
 	_ = slices.IndexFunc(
 		items,
-		func(item E) bool {
+		func(
+			item E,
+		) bool {
 			failure = try(item)
 			return failure != nil
 		},

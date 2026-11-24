@@ -27,19 +27,37 @@ func IndexWith[T any](
 	sub *models.Subscription[T],
 ) *models.PublishIndex[T] {
 	if !IsExactPattern(sub.Pattern) {
-		newRegex := make([]*models.Subscription[T], len(old.RegexSubs)+1)
-		copy(newRegex, old.RegexSubs)
+		newRegex := make(
+			[]*models.Subscription[T],
+			len(old.RegexSubs)+1,
+		)
+		copy(
+			newRegex,
+			old.RegexSubs,
+		)
 		newRegex[len(old.RegexSubs)] = sub
 		return &models.PublishIndex[T]{ExactSubs: old.ExactSubs, RegexSubs: newRegex}
 	}
 
 	existing := old.ExactSubs[sub.Pattern]
-	newSlice := make([]*models.Subscription[T], len(existing)+1)
-	copy(newSlice, existing)
+	newSlice := make(
+		[]*models.Subscription[T],
+		len(existing)+1,
+	)
+	copy(
+		newSlice,
+		existing,
+	)
 	newSlice[len(existing)] = sub
 
-	newExact := make(map[string][]*models.Subscription[T], len(old.ExactSubs)+1)
-	maps.Copy(newExact, old.ExactSubs)
+	newExact := make(
+		map[string][]*models.Subscription[T],
+		len(old.ExactSubs)+1,
+	)
+	maps.Copy(
+		newExact,
+		old.ExactSubs,
+	)
 	newExact[sub.Pattern] = newSlice
 
 	return &models.PublishIndex[T]{ExactSubs: newExact, RegexSubs: old.RegexSubs}
@@ -51,7 +69,10 @@ func IndexWithout[T any](
 	sub *models.Subscription[T],
 ) *models.PublishIndex[T] {
 	if !IsExactPattern(sub.Pattern) {
-		newRegex := withoutSub(old.RegexSubs, sub)
+		newRegex := withoutSub(
+			old.RegexSubs,
+			sub,
+		)
 		return &models.PublishIndex[T]{
 			ExactSubs: old.ExactSubs,
 			RegexSubs: newRegex,
@@ -59,11 +80,23 @@ func IndexWithout[T any](
 	}
 
 	existing := old.ExactSubs[sub.Pattern]
-	newSlice := withoutSub(existing, sub)
+	newSlice := withoutSub(
+		existing,
+		sub,
+	)
 
-	newExact := make(map[string][]*models.Subscription[T], len(old.ExactSubs))
-	maps.Copy(newExact, old.ExactSubs)
-	delete(newExact, sub.Pattern)
+	newExact := make(
+		map[string][]*models.Subscription[T],
+		len(old.ExactSubs),
+	)
+	maps.Copy(
+		newExact,
+		old.ExactSubs,
+	)
+	delete(
+		newExact,
+		sub.Pattern,
+	)
 	if len(newSlice) > 0 {
 		newExact[sub.Pattern] = newSlice
 	}
@@ -78,5 +111,12 @@ func withoutSub[T any](
 	subs []*models.Subscription[T],
 	sub *models.Subscription[T],
 ) []*models.Subscription[T] {
-	return slices.DeleteFunc(slices.Clone(subs), func(s *models.Subscription[T]) bool { return s == sub })
+	return slices.DeleteFunc(
+		slices.Clone(subs),
+		func(
+			s *models.Subscription[T],
+		) bool {
+			return s == sub
+		},
+	)
 }

@@ -18,7 +18,11 @@ func newJob(
 	request := asynxmd.DispatchRequest[string]{
 		Event: asynxmd.Event[string]{AggregateID: aggregateID, Version: version},
 	}
-	return jobs.New(context.Background(), request, func() {})
+	return jobs.New(
+		context.Background(),
+		request,
+		func() {},
+	)
 }
 
 func closed(
@@ -60,63 +64,103 @@ func (j *observedJob) Ticket() asynxmd.Ticket {
 	return j.Job.Ticket()
 }
 
-func TestTracker_ForUnknownEvent(t *testing.T) {
+func TestTracker_ForUnknownEvent(
+	t *testing.T,
+) {
 	tr := tracker.New[string]()
 
-	if _, ok := tr.For("agg", 1); ok {
+	if _, ok := tr.For(
+		"agg",
+		1,
+	); ok {
 		t.Fatal("found an event that was never tracked")
 	}
 }
 
-func TestTracker_ForLifecycle(t *testing.T) {
+func TestTracker_ForLifecycle(
+	t *testing.T,
+) {
 	tr := tracker.New[string]()
-	job := newJob("agg", 1)
+	job := newJob(
+		"agg",
+		1,
+	)
 	tr.Track(job)
 
-	ticket, ok := tr.For("agg", 1)
+	ticket, ok := tr.For(
+		"agg",
+		1,
+	)
 	if !ok {
 		t.Fatal("tracked event not found")
 	}
+
 	if closed(ticket.Final) {
 		t.Fatal("final closed before completion")
 	}
-	if _, ok := tr.For("agg", 2); ok {
+
+	if _, ok := tr.For(
+		"agg",
+		2,
+	); ok {
 		t.Fatal("found another version")
 	}
 
 	job.Complete(nil)
 
-	if _, ok := tr.For("agg", 1); ok {
+	if _, ok := tr.For(
+		"agg",
+		1,
+	); ok {
 		t.Fatal("completed event still tracked")
 	}
+
 	if !closed(ticket.Final) {
 		t.Fatal("ticket final not closed")
 	}
 }
 
-func TestTracker_RetrackedEventReplacesKey(t *testing.T) {
+func TestTracker_RetrackedEventReplacesKey(
+	t *testing.T,
+) {
 	tr := tracker.New[string]()
-	old := newJob("agg", 1)
-	replacement := newJob("agg", 1)
+	old := newJob(
+		"agg",
+		1,
+	)
+	replacement := newJob(
+		"agg",
+		1,
+	)
 	tr.Track(old)
 	tr.Track(replacement)
 
 	old.Complete(nil)
 
-	ticket, ok := tr.For("agg", 1)
+	ticket, ok := tr.For(
+		"agg",
+		1,
+	)
 	if !ok {
 		t.Fatal("the old job removed the job that replaced it")
 	}
+
 	if ticket.Final != replacement.Ticket().Final {
 		t.Fatal("ticket is not the replacement's")
 	}
+
 	replacement.Complete(nil)
-	if _, ok := tr.For("agg", 1); ok {
+	if _, ok := tr.For(
+		"agg",
+		1,
+	); ok {
 		t.Fatal("replacement still tracked after completion")
 	}
 }
 
-func TestTracker_IdleWithNothingInFlight(t *testing.T) {
+func TestTracker_IdleWithNothingInFlight(
+	t *testing.T,
+) {
 	tr := tracker.New[string]()
 
 	select {
@@ -126,10 +170,18 @@ func TestTracker_IdleWithNothingInFlight(t *testing.T) {
 	}
 }
 
-func TestTracker_IdleWaitsForJobsInFlight(t *testing.T) {
+func TestTracker_IdleWaitsForJobsInFlight(
+	t *testing.T,
+) {
 	tr := tracker.New[string]()
-	first := newJob("a", 1)
-	second := newJob("b", 1)
+	first := newJob(
+		"a",
+		1,
+	)
+	second := newJob(
+		"b",
+		1,
+	)
 	tr.Track(first)
 	tr.Track(second)
 	returned := idleReturns(tr)
@@ -149,13 +201,21 @@ func TestTracker_IdleWaitsForJobsInFlight(t *testing.T) {
 	}
 }
 
-func TestTracker_IdleIgnoresJobsTrackedAfterItStarted(t *testing.T) {
+func TestTracker_IdleIgnoresJobsTrackedAfterItStarted(
+	t *testing.T,
+) {
 	tr := tracker.New[string]()
-	early := observe(newJob("a", 1))
+	early := observe(newJob(
+		"a",
+		1,
+	))
 	tr.Track(early)
 	returned := idleReturns(tr)
 	<-early.asked
-	late := newJob("b", 1)
+	late := newJob(
+		"b",
+		1,
+	)
 	tr.Track(late)
 
 	early.Complete(nil)
@@ -165,5 +225,6 @@ func TestTracker_IdleIgnoresJobsTrackedAfterItStarted(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Idle waited for a job tracked after it was called")
 	}
+
 	late.Complete(nil)
 }

@@ -59,16 +59,22 @@ type Job[T any] interface {
 
 	// MarkUnrun settles a job whose handlers never ran and records why. It has
 	// no effect on a job that already settled.
-	MarkUnrun(err error)
+	MarkUnrun(
+		err error,
+	)
 
 	// Complete ends the job's delivery with err: it cancels the job's context,
 	// closes the ticket's Final channel and runs the completion callback. Only
 	// the first call takes effect.
-	Complete(err error)
+	Complete(
+		err error,
+	)
 
 	// OnComplete sets the callback Complete runs once, replacing any previous
 	// one. Set it before the job is shared between goroutines.
-	OnComplete(callback func())
+	OnComplete(
+		callback func(),
+	)
 }
 
 // New creates a Job for request, delivered under ctx. cancel releases ctx and
@@ -96,6 +102,7 @@ func isForget[T any](
 	if request.Kind == asynxmd.DispatchTombstone {
 		return true
 	}
+
 	return request.Kind == asynxmd.DispatchRedelivery &&
 		request.Event.EventName == asynxmd.ForgetEventName
 }

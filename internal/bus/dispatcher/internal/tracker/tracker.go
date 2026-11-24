@@ -14,7 +14,9 @@ type Tracker[T any] interface {
 	// tracked for the same (aggregate, version). It takes over the job's
 	// completion callback: when the job completes it removes itself, and never
 	// the job that replaced it.
-	Track(job jobs.Job[T])
+	Track(
+		job jobs.Job[T],
+	)
 
 	// For returns the ticket of the job tracked for (aggregateID, version), or
 	// false when there is none: it was never tracked or its delivery is over.

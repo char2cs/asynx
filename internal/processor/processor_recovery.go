@@ -18,6 +18,7 @@ func (p *Processor[T]) Paused() []string {
 	if p.dispatcher == nil {
 		return nil
 	}
+
 	return slices.Sorted(maps.Keys(p.dispatcher.Parks()))
 }
 
@@ -31,6 +32,7 @@ func (p *Processor[T]) Inspect(
 	if p.dispatcher == nil {
 		return asynxmd.DeliveryStatus{}
 	}
+
 	return p.dispatcher.Inspect(aggregateID)
 }
 
@@ -57,31 +59,57 @@ func (p *Processor[T]) Resume(
 	if p.dispatcher == nil {
 		return nil
 	}
+
 	if batch <= 0 {
 		batch = 100
 	}
+
 	parks := p.dispatcher.Parks()
 	halted := slices.Sorted(maps.Keys(parks))
 	if len(halted) == 0 {
 		return nil
 	}
-	wanted := make(map[string]struct{}, len(halted))
+
+	wanted := make(
+		map[string]struct{},
+		len(halted),
+	)
 	for _, agg := range halted {
 		wanted[agg] = struct{}{}
 	}
-	backlogs, _, err := p.pendingByAggregate(ctx, batch, func(id string) bool {
-		_, isParked := wanted[id]
-		return isParked
-	})
+
+	backlogs, _, err := p.pendingByAggregate(
+		ctx,
+		batch,
+		func(
+			id string,
+		) bool {
+			_, isParked := wanted[id]
+			return isParked
+		},
+	)
 	if err != nil {
 		return err
 	}
 
 	var errs []error
-	_ = slices.IndexFunc(halted, func(agg string) bool {
-		errs = append(errs, p.resumeAggregate(ctx, agg, parks[agg], backlogs[agg]))
-		return ctx.Err() != nil
-	})
+	_ = slices.IndexFunc(
+		halted,
+		func(
+			agg string,
+		) bool {
+			errs = append(
+				errs,
+				p.resumeAggregate(
+					ctx,
+					agg,
+					parks[agg],
+					backlogs[agg],
+				),
+			)
+			return ctx.Err() != nil
+		},
+	)
 	return errors.Join(errs...)
 }
 
@@ -100,18 +128,46 @@ func (p *Processor[T]) resumeAggregate(
 	park uint64,
 	scanned []asynxmd.Delivery,
 ) error {
-	return p.executor.WithLock(ctx, agg, func() error {
-		lifted, undelivered := p.dispatcher.ResumeUndelivered(agg, park)
-		if !lifted {
-			return nil
-		}
-		remaining, err := p.redeliver(ctx, agg, withUndelivered(agg, scanned, undelivered))
-		if err == nil {
-			return nil
-		}
-		p.dispatcher.Park(agg, err, stillUndelivered(undelivered, remaining)...)
-		return fmt.Errorf("asynx: resume %s: %w", agg, err)
-	})
+	return p.executor.WithLock(
+		ctx,
+		agg,
+		func() error {
+			lifted, undelivered := p.dispatcher.ResumeUndelivered(
+				agg,
+				park,
+			)
+			if !lifted {
+				return nil
+			}
+
+			remaining, err := p.redeliver(
+				ctx,
+				agg,
+				withUndelivered(
+					agg,
+					scanned,
+					undelivered,
+				),
+			)
+			if err == nil {
+				return nil
+			}
+
+			p.dispatcher.Park(
+				agg,
+				err,
+				stillUndelivered(
+					undelivered,
+					remaining,
+				)...,
+			)
+			return fmt.Errorf(
+				"asynx: resume %s: %w",
+				agg,
+				err,
+			)
+		},
+	)
 }
 
 // withUndelivered adds the undelivered versions to the scanned entries. The
@@ -124,8 +180,12 @@ func withUndelivered(
 ) []asynxmd.Delivery {
 	backlog := slices.Clone(scanned)
 	for _, v := range undelivered {
-		backlog = append(backlog, asynxmd.Delivery{AggregateID: agg, Version: v})
+		backlog = append(
+			backlog,
+			asynxmd.Delivery{AggregateID: agg, Version: v},
+		)
 	}
+
 	return backlog
 }
 
@@ -137,10 +197,18 @@ func stillUndelivered(
 	undelivered []int64,
 	remaining []int64,
 ) []int64 {
-	return slices.DeleteFunc(slices.Clone(undelivered), func(v int64) bool {
-		_, notEnqueued := slices.BinarySearch(remaining, v)
-		return !notEnqueued
-	})
+	return slices.DeleteFunc(
+		slices.Clone(undelivered),
+		func(
+			v int64,
+		) bool {
+			_, notEnqueued := slices.BinarySearch(
+				remaining,
+				v,
+			)
+			return !notEnqueued
+		},
+	)
 }
 
 // Recover re-enqueues every unacknowledged delivery, in enqueue order, on the
@@ -165,16 +233,36 @@ func (p *Processor[T]) Recover(
 	if p.dispatcher == nil {
 		return nil
 	}
+
 	if batch <= 0 {
 		batch = 100
 	}
-	backlogs, order, err := p.pendingByAggregate(ctx, batch, func(string) bool { return true })
+
+	backlogs, order, err := p.pendingByAggregate(
+		ctx,
+		batch,
+		func(
+			string,
+		) bool {
+			return true
+		},
+	)
 	if err != nil {
 		return err
 	}
-	return utils.FirstError(order, func(agg string) error {
-		return p.recoverAggregate(ctx, agg, backlogs[agg])
-	})
+
+	return utils.FirstError(
+		order,
+		func(
+			agg string,
+		) error {
+			return p.recoverAggregate(
+				ctx,
+				agg,
+				backlogs[agg],
+			)
+		},
+	)
 }
 
 func (p *Processor[T]) recoverAggregate(
@@ -182,18 +270,37 @@ func (p *Processor[T]) recoverAggregate(
 	agg string,
 	backlog []asynxmd.Delivery,
 ) error {
-	undelivered, err := p.redeliver(ctx, agg, backlog)
+	undelivered, err := p.redeliver(
+		ctx,
+		agg,
+		backlog,
+	)
 	if err == nil {
 		return nil
 	}
-	if recoveryMustStop(ctx, err) {
-		return fmt.Errorf("asynx: recovery: %w", err)
+
+	if recoveryMustStop(
+		ctx,
+		err,
+	) {
+		return fmt.Errorf(
+			"asynx: recovery: %w",
+			err,
+		)
 	}
-	p.dispatcher.Park(agg, err, undelivered...)
+
+	p.dispatcher.Park(
+		agg,
+		err,
+		undelivered...,
+	)
 	p.reportPublishError(
 		ctx,
 		asynxmd.Event[T]{AggregateID: agg, Version: backlog[0].Version},
-		fmt.Errorf("recovery: %w", err),
+		fmt.Errorf(
+			"recovery: %w",
+			err,
+		),
 	)
 	return nil
 }
@@ -205,7 +312,11 @@ func recoveryMustStop(
 	if ctx.Err() != nil {
 		return true
 	}
-	return errors.Is(err, asynxmd.ErrDispatcherClosed)
+
+	return errors.Is(
+		err,
+		asynxmd.ErrDispatcherClosed,
+	)
 }
 
 // scanPending calls visit for every pending delivery once, in enqueue order. It
@@ -217,7 +328,12 @@ func (p *Processor[T]) scanPending(
 	batch int,
 	visit func(asynxmd.Delivery) error,
 ) error {
-	return p.scanFrom(ctx, batch, make(map[asynxmd.Delivery]struct{}), visit)
+	return p.scanFrom(
+		ctx,
+		batch,
+		make(map[asynxmd.Delivery]struct{}),
+		visit,
+	)
 }
 
 func (p *Processor[T]) scanFrom(
@@ -226,18 +342,39 @@ func (p *Processor[T]) scanFrom(
 	seen map[asynxmd.Delivery]struct{},
 	visit func(asynxmd.Delivery) error,
 ) error {
-	pending, err := p.es.Store().PendingDeliveries(ctx, limit)
+	pending, err := p.es.Store().PendingDeliveries(
+		ctx,
+		limit,
+	)
 	if err != nil {
-		return fmt.Errorf("asynx: recovery: %w", err)
+		return fmt.Errorf(
+			"asynx: recovery: %w",
+			err,
+		)
 	}
-	err = visitUnseen(pending, seen, visit)
+
+	err = visitUnseen(
+		pending,
+		seen,
+		visit,
+	)
 	if err != nil {
-		return fmt.Errorf("asynx: recovery: %w", err)
+		return fmt.Errorf(
+			"asynx: recovery: %w",
+			err,
+		)
 	}
+
 	if len(pending) < limit {
 		return nil
 	}
-	return p.scanFrom(ctx, limit*2, seen, visit)
+
+	return p.scanFrom(
+		ctx,
+		limit*2,
+		seen,
+		visit,
+	)
 }
 
 func visitUnseen(
@@ -245,12 +382,20 @@ func visitUnseen(
 	seen map[asynxmd.Delivery]struct{},
 	visit func(asynxmd.Delivery) error,
 ) error {
-	unseen := slices.DeleteFunc(slices.Clone(pending), func(d asynxmd.Delivery) bool {
-		_, again := seen[d]
-		seen[d] = struct{}{}
-		return again
-	})
-	return utils.FirstError(unseen, visit)
+	unseen := slices.DeleteFunc(
+		slices.Clone(pending),
+		func(
+			d asynxmd.Delivery,
+		) bool {
+			_, again := seen[d]
+			seen[d] = struct{}{}
+			return again
+		},
+	)
+	return utils.FirstError(
+		unseen,
+		visit,
+	)
 }
 
 // pendingByAggregate reads the delivery log and groups the entries of the
@@ -262,17 +407,33 @@ func (p *Processor[T]) pendingByAggregate(
 	want func(aggregateID string) bool,
 ) (backlogs map[string][]asynxmd.Delivery, order []string, err error) {
 	backlogs = make(map[string][]asynxmd.Delivery)
-	err = p.scanPending(ctx, batch, func(d asynxmd.Delivery) error {
-		if !want(d.AggregateID) {
+	err = p.scanPending(
+		ctx,
+		batch,
+		func(
+			d asynxmd.Delivery,
+		) error {
+			if !want(d.AggregateID) {
+				return nil
+			}
+
+			if _, known := backlogs[d.AggregateID]; !known {
+				order = append(
+					order,
+					d.AggregateID,
+				)
+			}
+
+			backlogs[d.AggregateID] = append(
+				backlogs[d.AggregateID],
+				d,
+			)
 			return nil
-		}
-		if _, known := backlogs[d.AggregateID]; !known {
-			order = append(order, d.AggregateID)
-		}
-		backlogs[d.AggregateID] = append(backlogs[d.AggregateID], d)
-		return nil
-	})
-	return backlogs, order, err
+		},
+	)
+	return backlogs,
+		order,
+		err
 }
 
 // redeliver rebuilds the events behind one aggregate's pending deliveries and
@@ -287,13 +448,27 @@ func (p *Processor[T]) redeliver(
 	backlog []asynxmd.Delivery,
 ) (notEnqueued []int64, err error) {
 	if len(backlog) == 0 {
-		return nil, nil
+		return nil,
+			nil
 	}
-	vanished, err := p.enqueueBacklog(ctx, agg, backlog)
+
+	vanished, err := p.enqueueBacklog(
+		ctx,
+		agg,
+		backlog,
+	)
 	if err != nil {
-		return slices.Sorted(maps.Keys(vanished)), err
+		return slices.Sorted(maps.Keys(vanished)),
+			err
 	}
-	return nil, p.ackVanished(ctx, agg, backlog, vanished)
+
+	return nil,
+		p.ackVanished(
+			ctx,
+			agg,
+			backlog,
+			vanished,
+		)
 }
 
 // enqueueBacklog replays the stream once and enqueues the events the backlog
@@ -303,11 +478,20 @@ func (p *Processor[T]) enqueueBacklog(
 	agg string,
 	backlog []asynxmd.Delivery,
 ) (vanished map[int64]struct{}, err error) {
-	vanished = make(map[int64]struct{}, len(backlog))
+	vanished = make(
+		map[int64]struct{},
+		len(backlog),
+	)
 	lowest, highest := backlog[0].Version, backlog[0].Version
 	for _, d := range backlog {
 		vanished[d.Version] = struct{}{}
-		lowest, highest = min(lowest, d.Version), max(highest, d.Version)
+		lowest, highest = min(
+			lowest,
+			d.Version,
+		), max(
+			highest,
+			d.Version,
+		)
 	}
 
 	enqueuer := &backlogEnqueuer[T]{
@@ -325,10 +509,17 @@ func (p *Processor[T]) enqueueBacklog(
 			_ context.Context,
 			evt asynxmd.Event[T],
 		) {
-			enqueuer.enqueue(ctx, evt)
+			enqueuer.enqueue(
+				ctx,
+				evt,
+			)
 		},
 	)
-	return vanished, errors.Join(replayErr, enqueuer.err)
+	return vanished,
+		errors.Join(
+			replayErr,
+			enqueuer.err,
+		)
 }
 
 func (p *Processor[T]) ackVanished(
@@ -337,10 +528,20 @@ func (p *Processor[T]) ackVanished(
 	backlog []asynxmd.Delivery,
 	vanished map[int64]struct{},
 ) error {
-	return utils.FirstError(backlog, func(d asynxmd.Delivery) error {
-		if _, isVanished := vanished[d.Version]; !isVanished {
-			return nil
-		}
-		return p.es.Store().AckDelivery(ctx, agg, d.Version)
-	})
+	return utils.FirstError(
+		backlog,
+		func(
+			d asynxmd.Delivery,
+		) error {
+			if _, isVanished := vanished[d.Version]; !isVanished {
+				return nil
+			}
+
+			return p.es.Store().AckDelivery(
+				ctx,
+				agg,
+				d.Version,
+			)
+		},
+	)
 }

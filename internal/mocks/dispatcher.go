@@ -47,8 +47,12 @@ func (d *Dispatcher[T]) Factory() models.DispatcherFactory[T] {
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		d.config = config
-		d.calls = append(d.calls, "Factory")
-		return d, nil
+		d.calls = append(
+			d.calls,
+			"Factory",
+		)
+		return d,
+			nil
 	}
 }
 
@@ -105,12 +109,21 @@ func (d *Dispatcher[T]) Enqueue(
 ) (models.Ticket, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.calls = append(d.calls, "Enqueue")
+	d.calls = append(
+		d.calls,
+		"Enqueue",
+	)
 	if d.enqueueErr != nil {
-		return models.Ticket{}, d.enqueueErr
+		return models.Ticket{},
+			d.enqueueErr
 	}
-	d.requests = append(d.requests, request)
-	return settledTicket(), nil
+
+	d.requests = append(
+		d.requests,
+		request,
+	)
+	return settledTicket(),
+		nil
 }
 
 // TicketFor records the call and reports that no ticket is held.
@@ -119,7 +132,8 @@ func (d *Dispatcher[T]) TicketFor(
 	_ int64,
 ) (models.Ticket, bool) {
 	d.record("TicketFor")
-	return models.Ticket{}, false
+	return models.Ticket{},
+		false
 }
 
 // Unrun records the call and succeeds.
@@ -139,14 +153,22 @@ func (d *Dispatcher[T]) Park(
 ) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.calls = append(d.calls, "Park")
-	d.parkCalls = append(d.parkCalls, ParkCall{AggregateID: aggregateID, Cause: cause, Undelivered: undelivered})
+	d.calls = append(
+		d.calls,
+		"Park",
+	)
+	d.parkCalls = append(
+		d.parkCalls,
+		ParkCall{AggregateID: aggregateID, Cause: cause, Undelivered: undelivered},
+	)
 	if d.causes[aggregateID] == nil {
 		d.causes[aggregateID] = cause
 	}
+
 	if _, parked := d.parks[aggregateID]; parked {
 		return
 	}
+
 	d.nextPark++
 	d.parks[aggregateID] = d.nextPark
 }
@@ -159,11 +181,15 @@ func (d *Dispatcher[T]) Inspect(
 ) models.DeliveryStatus {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.calls = append(d.calls, "Inspect")
+	d.calls = append(
+		d.calls,
+		"Inspect",
+	)
 	generation, parked := d.parks[aggregateID]
 	if !parked {
 		return models.DeliveryStatus{}
 	}
+
 	return models.DeliveryStatus{Parked: true, Generation: generation, Cause: d.causes[aggregateID]}
 }
 
@@ -173,16 +199,28 @@ func (d *Dispatcher[T]) Supersede(
 ) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.calls = append(d.calls, "Supersede")
-	delete(d.parks, aggregateID)
-	delete(d.causes, aggregateID)
+	d.calls = append(
+		d.calls,
+		"Supersede",
+	)
+	delete(
+		d.parks,
+		aggregateID,
+	)
+	delete(
+		d.causes,
+		aggregateID,
+	)
 }
 
 // Parks records the call and returns the parked aggregates with their generations.
 func (d *Dispatcher[T]) Parks() map[string]uint64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.calls = append(d.calls, "Parks")
+	d.calls = append(
+		d.calls,
+		"Parks",
+	)
 	return maps.Clone(d.parks)
 }
 
@@ -193,13 +231,25 @@ func (d *Dispatcher[T]) ResumeUndelivered(
 ) (bool, []int64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.calls = append(d.calls, "ResumeUndelivered")
+	d.calls = append(
+		d.calls,
+		"ResumeUndelivered",
+	)
 	if d.parks[aggregateID] != generation {
-		return false, nil
+		return false,
+			nil
 	}
-	delete(d.parks, aggregateID)
-	delete(d.causes, aggregateID)
-	return true, nil
+
+	delete(
+		d.parks,
+		aggregateID,
+	)
+	delete(
+		d.causes,
+		aggregateID,
+	)
+	return true,
+		nil
 }
 
 // InHandler reports false: the fake runs no handler.
@@ -242,7 +292,10 @@ func (d *Dispatcher[T]) record(
 ) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.calls = append(d.calls, call)
+	d.calls = append(
+		d.calls,
+		call,
+	)
 }
 
 func settledTicket() models.Ticket {

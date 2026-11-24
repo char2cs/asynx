@@ -43,7 +43,10 @@ func (p *aggregatePool[T]) work(
 ) {
 	defer p.wg.Done()
 	wake := p.registry.Wake(aggregateID)
-	for p.cycle(aggregateID, wake) {
+	for p.cycle(
+		aggregateID,
+		wake,
+	) {
 	}
 }
 
@@ -52,7 +55,10 @@ func (p *aggregatePool[T]) cycle(
 	wake <-chan struct{},
 ) bool {
 	p.drain(aggregateID)
-	return !p.await(aggregateID, wake)
+	return !p.await(
+		aggregateID,
+		wake,
+	)
 }
 
 func (p *aggregatePool[T]) await(
@@ -86,7 +92,12 @@ func (p *aggregatePool[T]) next(
 	if !ok {
 		return false
 	}
-	p.handle(aggregateID, halt, job)
+
+	p.handle(
+		aggregateID,
+		halt,
+		job,
+	)
 	return true
 }
 
@@ -96,9 +107,19 @@ func (p *aggregatePool[T]) handle(
 	job jobs.Job[T],
 ) {
 	var outcome error
-	defer finish(job, &outcome)
-	defer p.recoverDispatcherPanic(job, &outcome)
-	outcome = p.deliver(aggregateID, halt, job)
+	defer finish(
+		job,
+		&outcome,
+	)
+	defer p.recoverDispatcherPanic(
+		job,
+		&outcome,
+	)
+	outcome = p.deliver(
+		aggregateID,
+		halt,
+		job,
+	)
 }
 
 func (p *aggregatePool[T]) recoverDispatcherPanic(
@@ -109,8 +130,15 @@ func (p *aggregatePool[T]) recoverDispatcherPanic(
 	if recovered == nil {
 		return
 	}
-	err := fmt.Errorf("asynx: dispatcher panic: %v", recovered)
-	p.reports.PublishError(job, err)
+
+	err := fmt.Errorf(
+		"asynx: dispatcher panic: %v",
+		recovered,
+	)
+	p.reports.PublishError(
+		job,
+		err,
+	)
 	*outcome = err
 }
 
@@ -119,18 +147,33 @@ func (p *aggregatePool[T]) deliver(
 	halt <-chan struct{},
 	job jobs.Job[T],
 ) error {
-	if p.heldByPark(aggregateID, halt, job) {
+	if p.heldByPark(
+		aggregateID,
+		halt,
+		job,
+	) {
 		return asynxmd.ErrDeliveryParked
 	}
+
 	p.publishLive(job)
 	if !job.Durable() {
 		return nil
 	}
-	err := p.deliverer.Deliver(aggregateID, halt, job)
+
+	err := p.deliverer.Deliver(
+		aggregateID,
+		halt,
+		job,
+	)
 	if err != nil {
 		return err
 	}
-	return p.ack(aggregateID, halt, job)
+
+	return p.ack(
+		aggregateID,
+		halt,
+		job,
+	)
 }
 
 func (p *aggregatePool[T]) heldByPark(
@@ -141,27 +184,41 @@ func (p *aggregatePool[T]) heldByPark(
 	if !job.Acked() {
 		return false
 	}
-	return p.registry.SettleIfParked(aggregateID, halt, job)
+
+	return p.registry.SettleIfParked(
+		aggregateID,
+		halt,
+		job,
+	)
 }
 
 func (p *aggregatePool[T]) publishLive(
 	job jobs.Job[T],
 ) {
-	if p.bus == nil || job.SkipLive() {
+	if p.bus == nil ||
+		job.SkipLive() {
 		return
 	}
+
 	err := p.publish(job)
 	if err == nil {
 		return
 	}
-	p.reports.PublishError(job, err)
+
+	p.reports.PublishError(
+		job,
+		err,
+	)
 }
 
 func (p *aggregatePool[T]) publish(
 	job jobs.Job[T],
 ) (err error) {
 	defer recoverBusPanic(&err)
-	return p.bus.PublishSync(job.Context(), job.Event())
+	return p.bus.PublishSync(
+		job.Context(),
+		job.Event(),
+	)
 }
 
 func (p *aggregatePool[T]) ack(
@@ -173,13 +230,24 @@ func (p *aggregatePool[T]) ack(
 	if ack == nil {
 		return nil
 	}
+
 	err := ack(job.Context())
 	if err == nil {
 		return nil
 	}
-	p.deliverer.ParkThenReport(aggregateID, halt, job, err, func() {
-		p.reports.PublishError(job, err)
-	})
+
+	p.deliverer.ParkThenReport(
+		aggregateID,
+		halt,
+		job,
+		err,
+		func() {
+			p.reports.PublishError(
+				job,
+				err,
+			)
+		},
+	)
 	return err
 }
 
@@ -198,5 +266,9 @@ func recoverBusPanic(
 	if recovered == nil {
 		return
 	}
-	*err = fmt.Errorf("asynx: bus panic: %v", recovered)
+
+	*err = fmt.Errorf(
+		"asynx: bus panic: %v",
+		recovered,
+	)
 }

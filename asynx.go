@@ -81,7 +81,9 @@ type Asynx[T any] interface {
 	// ResumeDeliveries redelivers the paused aggregates' pending events, in
 	// order, ahead of any live event, to the durable subscribers only (live
 	// subscribers do not replay). Call it once the cause is fixed.
-	ResumeDeliveries(ctx context.Context) error
+	ResumeDeliveries(
+		ctx context.Context,
+	) error
 
 	// OnForget registers a handler invoked when any aggregate is forgotten.
 	// The handler receives the tombstone event; Event.Aggregate holds the last known state.
@@ -176,14 +178,20 @@ func (i *asynxImpl[T]) Send(
 	ctx context.Context,
 	cmd models.Command[T],
 ) (models.Event[T], error) {
-	return i.proc.Send(ctx, cmd)
+	return i.proc.Send(
+		ctx,
+		cmd,
+	)
 }
 
 func (i *asynxImpl[T]) SendWait(
 	ctx context.Context,
 	cmd models.Command[T],
 ) (models.Event[T], error) {
-	return i.proc.SendWait(ctx, cmd)
+	return i.proc.SendWait(
+		ctx,
+		cmd,
+	)
 }
 
 func (i *asynxImpl[T]) Shutdown(
@@ -196,21 +204,30 @@ func (i *asynxImpl[T]) Get(
 	ctx context.Context,
 	aggregateID string,
 ) (T, error) {
-	return i.es.Get(ctx, aggregateID)
+	return i.es.Get(
+		ctx,
+		aggregateID,
+	)
 }
 
 func (i *asynxImpl[T]) Exists(
 	ctx context.Context,
 	aggregateID string,
 ) (bool, error) {
-	return i.es.Exists(ctx, aggregateID)
+	return i.es.Exists(
+		ctx,
+		aggregateID,
+	)
 }
 
 func (i *asynxImpl[T]) Preload(
 	ctx context.Context,
 	aggregateID string,
 ) error {
-	return i.es.Preload(ctx, aggregateID)
+	return i.es.Preload(
+		ctx,
+		aggregateID,
+	)
 }
 
 func (i *asynxImpl[T]) Subscribe(
@@ -218,10 +235,16 @@ func (i *asynxImpl[T]) Subscribe(
 	handler models.ProjectionHandler[T],
 	opts ...models.SubscriptionOpt[T],
 ) (string, error) {
-	return i.bus.Subscribe(pattern, handler, opts...)
+	return i.bus.Subscribe(
+		pattern,
+		handler,
+		opts...,
+	)
 }
 
-func (i *asynxImpl[T]) Unsubscribe(id string) error {
+func (i *asynxImpl[T]) Unsubscribe(
+	id string,
+) error {
 	return i.bus.Unsubscribe(id)
 }
 
@@ -230,17 +253,30 @@ func (i *asynxImpl[T]) Listen(
 	count int,
 ) (<-chan models.Event[T], func(), error) {
 	if pattern == "" {
-		return nil, nil, models.ErrEmptyPattern
+		return nil,
+			nil,
+			models.ErrEmptyPattern
 	}
 
-	l := newListener(i.bus, count)
-	id, err := i.bus.Subscribe(Topic(pattern), l.handle)
+	l := newListener(
+		i.bus,
+		count,
+	)
+	id, err := i.bus.Subscribe(
+		Topic(pattern),
+		l.handle,
+	)
 	if err != nil {
-		return nil, nil, err
+		return nil,
+			nil,
+			err
 	}
+
 	l.publishSubscription(id)
 
-	return l.ch, l.unsubscribe, nil
+	return l.ch,
+		l.unsubscribe,
+		nil
 }
 
 // listener feeds a Listen channel. In bounded mode (count > 0) the channel has
@@ -270,9 +306,13 @@ func newListener[T any](
 	if capacity <= 0 {
 		capacity = 16
 	}
+
 	return &listener[T]{
-		bus:        bus,
-		ch:         make(chan models.Event[T], capacity),
+		bus: bus,
+		ch: make(
+			chan models.Event[T],
+			capacity,
+		),
 		count:      count,
 		done:       make(chan struct{}),
 		subIDReady: make(chan struct{}),
@@ -286,39 +326,50 @@ func (l *listener[T]) handle(
 	if l.closed.Load() {
 		return
 	}
+
 	if l.count <= 0 {
 		l.sendUnbounded(evt)
 		return
 	}
+
 	l.sendBounded(evt)
 }
 
-func (l *listener[T]) sendUnbounded(evt models.Event[T]) {
+func (l *listener[T]) sendUnbounded(
+	evt models.Event[T],
+) {
 	select {
 	case <-l.done:
 	case l.ch <- evt:
 	}
 }
 
-func (l *listener[T]) sendBounded(evt models.Event[T]) {
+func (l *listener[T]) sendBounded(
+	evt models.Event[T],
+) {
 	withinCount := l.received.Add(1) <= int64(l.count)
 	if !withinCount {
 		return
 	}
+
 	if !l.deliver(evt) {
 		return
 	}
+
 	go l.unsubscribeWhenPublished()
 }
 
 // deliver sends evt and reports whether it was the last one the listener takes.
-func (l *listener[T]) deliver(evt models.Event[T]) (isLast bool) {
+func (l *listener[T]) deliver(
+	evt models.Event[T],
+) (isLast bool) {
 	l.sendMu.Lock()
 	defer l.sendMu.Unlock()
 
 	if l.closed.Load() {
 		return false
 	}
+
 	l.ch <- evt
 	l.delivered++
 	isLast = l.delivered == int64(l.count)
@@ -326,6 +377,7 @@ func (l *listener[T]) deliver(evt models.Event[T]) (isLast bool) {
 		l.closed.Store(true)
 		l.closeChLocked()
 	}
+
 	return isLast
 }
 
@@ -339,11 +391,14 @@ func (l *listener[T]) closeChLocked() {
 	if l.chClosed {
 		return
 	}
+
 	l.chClosed = true
 	close(l.ch)
 }
 
-func (l *listener[T]) publishSubscription(id string) {
+func (l *listener[T]) publishSubscription(
+	id string,
+) {
 	l.sendMu.Lock()
 	l.subID = id
 	l.sendMu.Unlock()
@@ -351,9 +406,13 @@ func (l *listener[T]) publishSubscription(id string) {
 }
 
 func (l *listener[T]) unsubscribe() {
-	if !l.closed.CompareAndSwap(false, true) {
+	if !l.closed.CompareAndSwap(
+		false,
+		true,
+	) {
 		return
 	}
+
 	close(l.done)
 	_ = l.bus.Unsubscribe(l.subID)
 
@@ -361,6 +420,7 @@ func (l *listener[T]) unsubscribe() {
 	if !isBounded {
 		return
 	}
+
 	l.sendMu.Lock()
 	l.closeChLocked()
 	l.sendMu.Unlock()
@@ -370,19 +430,26 @@ func (i *asynxImpl[T]) SubscribeWait(
 	ctx context.Context,
 	pattern string,
 ) (models.Event[T], error) {
-	ch, unsub, err := i.Listen(pattern, 1)
+	ch, unsub, err := i.Listen(
+		pattern,
+		1,
+	)
 	if err != nil {
 		var zero models.Event[T]
-		return zero, err
+		return zero,
+			err
 	}
+
 	defer unsub()
 
 	select {
 	case evt := <-ch:
-		return evt, nil
+		return evt,
+			nil
 	case <-ctx.Done():
 		var zero models.Event[T]
-		return zero, ctx.Err()
+		return zero,
+			ctx.Err()
 	}
 }
 
@@ -393,7 +460,13 @@ func (i *asynxImpl[T]) Replay(
 	toVersion int64,
 	fn models.ProjectionHandler[T],
 ) error {
-	return i.es.Replay(ctx, aggregateID, fromVersion, toVersion, fn)
+	return i.es.Replay(
+		ctx,
+		aggregateID,
+		fromVersion,
+		toVersion,
+		fn,
+	)
 }
 
 // WaitPublish blocks until all async event publishes complete.
@@ -403,8 +476,14 @@ func (i *asynxImpl[T]) WaitPublish() {
 	i.bus.WaitForHandlers()
 }
 
-func (i *asynxImpl[T]) Forget(ctx context.Context, aggregateID string) error {
-	return i.proc.Forget(ctx, aggregateID)
+func (i *asynxImpl[T]) Forget(
+	ctx context.Context,
+	aggregateID string,
+) error {
+	return i.proc.Forget(
+		ctx,
+		aggregateID,
+	)
 }
 
 func (i *asynxImpl[T]) PausedAggregates() []string {
@@ -417,13 +496,23 @@ func (i *asynxImpl[T]) InspectDelivery(
 	return i.proc.Inspect(aggregateID)
 }
 
-func (i *asynxImpl[T]) ResumeDeliveries(ctx context.Context) error {
-	return i.proc.Resume(ctx, recoveryBatch)
+func (i *asynxImpl[T]) ResumeDeliveries(
+	ctx context.Context,
+) error {
+	return i.proc.Resume(
+		ctx,
+		recoveryBatch,
+	)
 }
 
 // OnForget registers fn to run when an aggregate is forgotten. The dots of the
 // subscription pattern are escaped so the bus treats it as a literal, not a
 // wildcard.
-func (i *asynxImpl[T]) OnForget(fn models.ForgetHandler[T]) (string, error) {
-	return i.bus.Subscribe("asynx\\.aggregate\\.forget", models.ProjectionHandler[T](fn))
+func (i *asynxImpl[T]) OnForget(
+	fn models.ForgetHandler[T],
+) (string, error) {
+	return i.bus.Subscribe(
+		"asynx\\.aggregate\\.forget",
+		models.ProjectionHandler[T](fn),
+	)
 }

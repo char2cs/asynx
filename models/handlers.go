@@ -40,7 +40,10 @@ type PublishErrorHandler[T any] func(
 
 // ForgetHandler is called when an aggregate is forgotten.
 // It receives the tombstone event; Event.Aggregate holds the aggregate's last known state.
-type ForgetHandler[T any] func(context.Context, Event[T])
+type ForgetHandler[T any] func(
+	context.Context,
+	Event[T],
+)
 
 // DurableHandler is the callback of a durable subscriber (Builder.WithSubscriber).
 // Unlike a ProjectionHandler it reports failure: a non-nil error, a panic or
@@ -50,7 +53,10 @@ type ForgetHandler[T any] func(context.Context, Event[T])
 // event is dead-lettered or the aggregate parked), or the process shuts down.
 // Because delivery is at-least-once, a handler must be idempotent (dedupe on
 // AggregateID and Version).
-type DurableHandler[T any] func(context.Context, Event[T]) error
+type DurableHandler[T any] func(
+	context.Context,
+	Event[T],
+) error
 
 // DeliveryErrorHandler observes a failed durable delivery attempt. attempt
 // counts from 1 for the event's current failing streak. Its error is a
@@ -69,7 +75,11 @@ type DeliveryErrorHandler[T any] func(
 // (errors.As finds the first; unwrap with Unwrap() []error for each). Returning nil records the event as dealt with: the delivery is
 // acknowledged, skipped, and the aggregate's later events flow again. Returning
 // an error parks the aggregate instead (see ErrDeliveryParked).
-type DeadLetterHandler[T any] func(context.Context, Event[T], error) error
+type DeadLetterHandler[T any] func(
+	context.Context,
+	Event[T],
+	error,
+) error
 
 // ForgetEventName is the EventName of the tombstone Forget writes. Every
 // durable subscriber receives it, whatever its pattern, so it can drop

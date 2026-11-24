@@ -2,7 +2,9 @@ package models
 
 import "time"
 
-type SubscriptionOpt[T any] func(*SubscriptionConfig[T])
+type SubscriptionOpt[T any] func(
+	*SubscriptionConfig[T],
+)
 
 type SubscriptionConfig[T any] struct {
 	Fallback ProjectionHandler[T]
@@ -13,7 +15,9 @@ type SubscriptionConfig[T any] struct {
 func WithFallback[T any](
 	handler ProjectionHandler[T],
 ) SubscriptionOpt[T] {
-	return func(cfg *SubscriptionConfig[T]) {
+	return func(
+		cfg *SubscriptionConfig[T],
+	) {
 		cfg.Fallback = handler
 	}
 }
@@ -25,7 +29,9 @@ func WithFallback[T any](
 func WithHandlerTimeout[T any](
 	d time.Duration,
 ) SubscriptionOpt[T] {
-	return func(cfg *SubscriptionConfig[T]) {
+	return func(
+		cfg *SubscriptionConfig[T],
+	) {
 		cfg.Timeout = d
 	}
 }

@@ -44,30 +44,64 @@ func ExecuteHandler[T any](
 
 	panicFn := panicCallback(job)
 	timeoutFn := timeoutCallback(job)
-	defer fallBackOnPanic(job, panicFn, timeoutFn)
+	defer fallBackOnPanic(
+		job,
+		panicFn,
+		timeoutFn,
+	)
 
-	executeWithTimeout(job.Ctx, job.Handler, job.Event, job.Timeout, panicFn, timeoutFn, job.WaitAfterTimeout)
+	executeWithTimeout(
+		job.Ctx,
+		job.Handler,
+		job.Event,
+		job.Timeout,
+		panicFn,
+		timeoutFn,
+		job.WaitAfterTimeout,
+	)
 }
 
-func panicCallback[T any](job *HandlerJob[T]) func(any) {
-	return func(v any) {
+func panicCallback[T any](
+	job *HandlerJob[T],
+) func(any) {
+	return func(
+		v any,
+	) {
 		defer func() { _ = recover() }()
 		if job.OnPanic == nil {
-			OnHandlerPanic(v, job)
+			OnHandlerPanic(
+				v,
+				job,
+			)
 			return
 		}
-		job.OnPanic(job.Ctx, job.Event, v)
+
+		job.OnPanic(
+			job.Ctx,
+			job.Event,
+			v,
+		)
 	}
 }
 
-func timeoutCallback[T any](job *HandlerJob[T]) func() {
+func timeoutCallback[T any](
+	job *HandlerJob[T],
+) func() {
 	return func() {
 		defer func() { _ = recover() }()
 		if job.OnTimeout == nil {
-			OnHandlerTimeout(job.Event, job.Timeout)
+			OnHandlerTimeout(
+				job.Event,
+				job.Timeout,
+			)
 			return
 		}
-		job.OnTimeout(job.Ctx, job.Event, job.Timeout)
+
+		job.OnTimeout(
+			job.Ctx,
+			job.Event,
+			job.Timeout,
+		)
 	}
 }
 
@@ -85,7 +119,12 @@ func fallBackOnPanic[T any](
 	if job.FallbackHandler == nil {
 		return
 	}
-	runFallback(job, panicFn, timeoutFn)
+
+	runFallback(
+		job,
+		panicFn,
+		timeoutFn,
+	)
 }
 
 func runFallback[T any](
@@ -98,7 +137,15 @@ func runFallback[T any](
 			panicFn(recovered)
 		}
 	}()
-	executeWithTimeout(job.Ctx, job.FallbackHandler, job.Event, job.Timeout, panicFn, timeoutFn, job.WaitAfterTimeout)
+	executeWithTimeout(
+		job.Ctx,
+		job.FallbackHandler,
+		job.Event,
+		job.Timeout,
+		panicFn,
+		timeoutFn,
+		job.WaitAfterTimeout,
+	)
 }
 
 // ExecuteWithTimeout calls handler inline when timeout is zero, or in a
@@ -113,7 +160,15 @@ func ExecuteWithTimeout[T any](
 	onPanic func(any),
 	onTimeout func(),
 ) {
-	executeWithTimeout(ctx, handler, event, timeout, onPanic, onTimeout, false)
+	executeWithTimeout(
+		ctx,
+		handler,
+		event,
+		timeout,
+		onPanic,
+		onTimeout,
+		false,
+	)
 }
 
 // executeWithTimeout is ExecuteWithTimeout with the option to keep waiting for
@@ -128,12 +183,21 @@ func executeWithTimeout[T any](
 	waitAfterTimeout bool,
 ) {
 	if timeout == 0 {
-		handler(ctx, event)
+		handler(
+			ctx,
+			event,
+		)
 		return
 	}
 
 	done := make(chan struct{})
-	go runGuarded(ctx, handler, event, onPanic, done)
+	go runGuarded(
+		ctx,
+		handler,
+		event,
+		onPanic,
+		done,
+	)
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -141,7 +205,11 @@ func executeWithTimeout[T any](
 	select {
 	case <-done:
 	case <-timer.C:
-		afterTimeout(onTimeout, waitAfterTimeout, done)
+		afterTimeout(
+			onTimeout,
+			waitAfterTimeout,
+			done,
+		)
 	}
 }
 
@@ -154,14 +222,21 @@ func runGuarded[T any](
 ) {
 	defer close(done)
 	defer reportPanic(onPanic)
-	handler(ctx, event)
+	handler(
+		ctx,
+		event,
+	)
 }
 
-func reportPanic(onPanic func(any)) {
+func reportPanic(
+	onPanic func(any),
+) {
 	recovered := recover()
-	if recovered == nil || onPanic == nil {
+	if recovered == nil ||
+		onPanic == nil {
 		return
 	}
+
 	defer func() { _ = recover() }()
 	onPanic(recovered)
 }
@@ -174,6 +249,7 @@ func afterTimeout(
 	if onTimeout != nil {
 		onTimeout()
 	}
+
 	if waitAfterTimeout {
 		<-done
 	}

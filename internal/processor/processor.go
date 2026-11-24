@@ -64,7 +64,9 @@ const (
 
 var errNilDispatcher = errors.New("asynx: the dispatcher factory returned no dispatcher")
 
-type ProcessorOpt[T any] func(*processorConfig[T])
+type ProcessorOpt[T any] func(
+	*processorConfig[T],
+)
 
 type processorConfig[T any] struct {
 	shards              int
@@ -120,6 +122,7 @@ func WithDeliveryMaxAttempts[T any](
 	if n <= 0 {
 		return ignored[T]
 	}
+
 	return func(
 		cfg *processorConfig[T],
 	) {
@@ -148,8 +151,14 @@ func WithDeliveryRetry[T any](
 	return func(
 		cfg *processorConfig[T],
 	) {
-		cfg.dispatcher.RetryInitial = positiveOr(initial, cfg.dispatcher.RetryInitial)
-		cfg.dispatcher.RetryMax = positiveOr(max, cfg.dispatcher.RetryMax)
+		cfg.dispatcher.RetryInitial = positiveOr(
+			initial,
+			cfg.dispatcher.RetryInitial,
+		)
+		cfg.dispatcher.RetryMax = positiveOr(
+			max,
+			cfg.dispatcher.RetryMax,
+		)
 	}
 }
 
@@ -165,50 +174,84 @@ func positiveOr(
 	if value <= 0 {
 		return fallback
 	}
+
 	return value
 }
 
 // WithSyncProjections registers projections that run inside each event's
 // transaction.
-func WithSyncProjections[T any](p []exec.SyncProjection[T]) ProcessorOpt[T] {
-	return func(cfg *processorConfig[T]) {
-		cfg.executorOpts = append(cfg.executorOpts, exec.WithSyncProjections(p))
+func WithSyncProjections[T any](
+	p []exec.SyncProjection[T],
+) ProcessorOpt[T] {
+	return func(
+		cfg *processorConfig[T],
+	) {
+		cfg.executorOpts = append(
+			cfg.executorOpts,
+			exec.WithSyncProjections(p),
+		)
 	}
 }
 
 // WithDurableDelivery records a delivery entry for every event whose name
 // match accepts and acknowledges it once handlers finish; see Processor.Recover.
-func WithDurableDelivery[T any](match func(eventName string) bool) ProcessorOpt[T] {
-	return func(cfg *processorConfig[T]) {
-		cfg.executorOpts = append(cfg.executorOpts, exec.WithDurableDelivery[T](match))
+func WithDurableDelivery[T any](
+	match func(eventName string) bool,
+) ProcessorOpt[T] {
+	return func(
+		cfg *processorConfig[T],
+	) {
+		cfg.executorOpts = append(
+			cfg.executorOpts,
+			exec.WithDurableDelivery[T](match),
+		)
 	}
 }
 
 // WithSnapshotErrorHandler sets the callback for failed post-commit snapshots.
-func WithSnapshotErrorHandler[T any](fn func(context.Context, asynxmd.Event[T], error)) ProcessorOpt[T] {
-	return func(cfg *processorConfig[T]) {
-		cfg.executorOpts = append(cfg.executorOpts, exec.WithSnapshotErrorHandler(fn))
+func WithSnapshotErrorHandler[T any](
+	fn func(context.Context, asynxmd.Event[T], error),
+) ProcessorOpt[T] {
+	return func(
+		cfg *processorConfig[T],
+	) {
+		cfg.executorOpts = append(
+			cfg.executorOpts,
+			exec.WithSnapshotErrorHandler(fn),
+		)
 	}
 }
 
-func WithShards[T any](count int) ProcessorOpt[T] {
-	return func(cfg *processorConfig[T]) {
+func WithShards[T any](
+	count int,
+) ProcessorOpt[T] {
+	return func(
+		cfg *processorConfig[T],
+	) {
 		if count > 0 {
 			cfg.shards = count
 		}
 	}
 }
 
-func WithQueueDepth[T any](depth int) ProcessorOpt[T] {
-	return func(cfg *processorConfig[T]) {
+func WithQueueDepth[T any](
+	depth int,
+) ProcessorOpt[T] {
+	return func(
+		cfg *processorConfig[T],
+	) {
 		if depth > 0 {
 			cfg.queueDepth = depth
 		}
 	}
 }
 
-func WithWorkersPerShard[T any](count int) ProcessorOpt[T] {
-	return func(cfg *processorConfig[T]) {
+func WithWorkersPerShard[T any](
+	count int,
+) ProcessorOpt[T] {
+	return func(
+		cfg *processorConfig[T],
+	) {
 		if count > 0 {
 			cfg.workersPerShard = count
 		}
@@ -218,8 +261,12 @@ func WithWorkersPerShard[T any](count int) ProcessorOpt[T] {
 // WithPublishErrorHandler sets a callback invoked when Bus.PublishSync returns a
 // non-nil error inside the dispatcher. When not set, publish errors are silently
 // dropped.
-func WithPublishErrorHandler[T any](fn asynxmd.PublishErrorHandler[T]) ProcessorOpt[T] {
-	return func(cfg *processorConfig[T]) {
+func WithPublishErrorHandler[T any](
+	fn asynxmd.PublishErrorHandler[T],
+) ProcessorOpt[T] {
+	return func(
+		cfg *processorConfig[T],
+	) {
 		cfg.publishErrorHandler = fn
 	}
 }
@@ -234,6 +281,7 @@ func WithDispatcherFactory[T any](
 	if f == nil {
 		return ignored[T]
 	}
+
 	return func(
 		cfg *processorConfig[T],
 	) {
@@ -251,29 +299,38 @@ func New[T any](
 	opts ...ProcessorOpt[T],
 ) (*Processor[T], error) {
 	cfg := configure(opts...)
-	d, err := newDispatcher(cfg, bus)
+	d, err := newDispatcher(
+		cfg,
+		bus,
+	)
 	if err != nil {
-		return nil, err
+		return nil,
+			err
 	}
 
-	executor := exec.New(es, d, cfg.executorOpts...)
+	executor := exec.New(
+		es,
+		d,
+		cfg.executorOpts...,
+	)
 	es.GuardAutoSnapshots(executor.WithLockIfFree)
 	return &Processor[T]{
-		es: es,
-		pool: pool.New(
-			executor,
-			cfg.shards,
-			cfg.queueDepth,
-			cfg.workersPerShard,
-		),
-		router: queue.New(
-			cfg.shards,
-		),
-		executor:     executor,
-		dispatcher:   d,
-		onPublishErr: cfg.publishErrorHandler,
-		bus:          bus,
-	}, nil
+			es: es,
+			pool: pool.New(
+				executor,
+				cfg.shards,
+				cfg.queueDepth,
+				cfg.workersPerShard,
+			),
+			router: queue.New(
+				cfg.shards,
+			),
+			executor:     executor,
+			dispatcher:   d,
+			onPublishErr: cfg.publishErrorHandler,
+			bus:          bus,
+		},
+		nil
 }
 
 func newDispatcher[T any](
@@ -281,22 +338,34 @@ func newDispatcher[T any](
 	bus asynxmd.Bus[T],
 ) (asynxmd.Dispatcher[T], error) {
 	factory := cfg.dispatcherFactory
-	if factory == nil && bus == nil {
-		return nil, nil
+	if factory == nil &&
+		bus == nil {
+		return nil,
+			nil
 	}
+
 	if factory == nil {
 		factory = defaultDispatcher[T]
 	}
+
 	cfg.dispatcher.Bus = bus
 	cfg.dispatcher.OnPublishError = cfg.publishErrorHandler
 	d, err := factory(cfg.dispatcher)
 	if err != nil {
-		return nil, fmt.Errorf("asynx: dispatcher factory: %w", err)
+		return nil,
+			fmt.Errorf(
+				"asynx: dispatcher factory: %w",
+				err,
+			)
 	}
+
 	if isNil(d) {
-		return nil, errNilDispatcher
+		return nil,
+			errNilDispatcher
 	}
-	return d, nil
+
+	return d,
+		nil
 }
 
 func isNil(
@@ -305,6 +374,7 @@ func isNil(
 	if value == nil {
 		return true
 	}
+
 	rv := reflect.ValueOf(value)
 	switch rv.Kind() {
 	case reflect.Pointer,
@@ -315,6 +385,7 @@ func isNil(
 		reflect.Interface:
 		return rv.IsNil()
 	}
+
 	return false
 }
 
@@ -334,16 +405,19 @@ func configure[T any](
 	for _, opt := range opts {
 		opt(cfg)
 	}
+
 	if cfg.queueDepth <= 0 {
 		cfg.queueDepth = cfg.workersPerShard
 	}
+
 	return cfg
 }
 
 func defaultDispatcher[T any](
 	cfg asynxmd.DispatcherConfig[T],
 ) (asynxmd.Dispatcher[T], error) {
-	return dispatcher.New(cfg), nil
+	return dispatcher.New(cfg),
+		nil
 }
 
 func (p *Processor[T]) reportPublishError(
@@ -354,8 +428,13 @@ func (p *Processor[T]) reportPublishError(
 	if p.onPublishErr == nil {
 		return
 	}
+
 	defer func() { _ = recover() }()
-	p.onPublishErr(ctx, event, err)
+	p.onPublishErr(
+		ctx,
+		event,
+		err,
+	)
 }
 
 func (p *Processor[T]) Send(
@@ -363,12 +442,15 @@ func (p *Processor[T]) Send(
 	cmd asynxmd.Command[T],
 ) (asynxmd.Event[T], error) {
 	if !p.beginSend() {
-		return asynxmd.Event[T]{}, asynxmd.ErrShuttingDown
+		return asynxmd.Event[T]{},
+			asynxmd.ErrShuttingDown
 	}
+
 	defer p.sends.Done()
 
 	if err := ctx.Err(); err != nil {
-		return asynxmd.Event[T]{}, asynxmd.ErrContextCancelled
+		return asynxmd.Event[T]{},
+			asynxmd.ErrContextCancelled
 	}
 
 	shardIndex := p.router.Route(
@@ -376,12 +458,19 @@ func (p *Processor[T]) Send(
 	)
 	shard := p.pool.Shards()[shardIndex]
 	envelope := &models.CommandEnvelope[T]{
-		Cmd:        cmd,
-		Ctx:        ctx,
-		ResultChan: make(chan models.CommandResult[T], 1),
+		Cmd: cmd,
+		Ctx: ctx,
+		ResultChan: make(
+			chan models.CommandResult[T],
+			1,
+		),
 	}
 
-	return p.sendAndWait(ctx, shard, envelope)
+	return p.sendAndWait(
+		ctx,
+		shard,
+		envelope,
+	)
 }
 
 func (p *Processor[T]) SendWait(
@@ -389,16 +478,24 @@ func (p *Processor[T]) SendWait(
 	cmd asynxmd.Command[T],
 ) (asynxmd.Event[T], error) {
 	if !p.beginSend() {
-		return asynxmd.Event[T]{}, asynxmd.ErrShuttingDown
+		return asynxmd.Event[T]{},
+			asynxmd.ErrShuttingDown
 	}
+
 	defer p.sends.Done()
 
-	if p.dispatcher != nil && p.dispatcher.InHandler(ctx, cmd.AggregateID()) {
-		return asynxmd.Event[T]{}, asynxmd.ErrSendWaitFromHandler
+	if p.dispatcher != nil &&
+		p.dispatcher.InHandler(
+			ctx,
+			cmd.AggregateID(),
+		) {
+		return asynxmd.Event[T]{},
+			asynxmd.ErrSendWaitFromHandler
 	}
 
 	if err := ctx.Err(); err != nil {
-		return asynxmd.Event[T]{}, asynxmd.ErrContextCancelled
+		return asynxmd.Event[T]{},
+			asynxmd.ErrContextCancelled
 	}
 
 	shardIndex := p.router.Route(
@@ -406,13 +503,20 @@ func (p *Processor[T]) SendWait(
 	)
 	shard := p.pool.Shards()[shardIndex]
 	envelope := &models.CommandEnvelope[T]{
-		Cmd:          cmd,
-		Ctx:          ctx,
-		ResultChan:   make(chan models.CommandResult[T], 1),
+		Cmd: cmd,
+		Ctx: ctx,
+		ResultChan: make(
+			chan models.CommandResult[T],
+			1,
+		),
 		WaitHandlers: true,
 	}
 
-	return p.sendAndWait(ctx, shard, envelope)
+	return p.sendAndWait(
+		ctx,
+		shard,
+		envelope,
+	)
 }
 
 func (p *Processor[T]) isShuttingDown() bool {
@@ -428,6 +532,7 @@ func (p *Processor[T]) beginSend() bool {
 	if p.isShuttingDown() {
 		return false
 	}
+
 	p.sends.Add(1)
 	return true
 }
@@ -440,9 +545,11 @@ func (p *Processor[T]) sendAndWait(
 	select {
 	case shard.CommandChan() <- envelope:
 	case <-ctx.Done():
-		return asynxmd.Event[T]{}, asynxmd.ErrContextCancelled
+		return asynxmd.Event[T]{},
+			asynxmd.ErrContextCancelled
 	default:
-		return asynxmd.Event[T]{}, asynxmd.ErrQueueFull
+		return asynxmd.Event[T]{},
+			asynxmd.ErrQueueFull
 	}
 
 	if p.onSendPending != nil {
@@ -451,9 +558,13 @@ func (p *Processor[T]) sendAndWait(
 
 	select {
 	case result := <-envelope.ResultChan:
-		return awaitHandlers(ctx, result)
+		return awaitHandlers(
+			ctx,
+			result,
+		)
 	case <-ctx.Done():
-		return asynxmd.Event[T]{}, asynxmd.ErrContextCancelled
+		return asynxmd.Event[T]{},
+			asynxmd.ErrContextCancelled
 	}
 }
 
@@ -461,35 +572,52 @@ func awaitHandlers[T any](
 	ctx context.Context,
 	result models.CommandResult[T],
 ) (asynxmd.Event[T], error) {
-	if result.Err != nil || result.Wait == nil {
-		return result.Event, result.Err
+	if result.Err != nil ||
+		result.Wait == nil {
+		return result.Event,
+			result.Err
 	}
+
 	err := result.Wait(ctx)
-	if errors.Is(err, asynxmd.ErrContextCancelled) {
-		return result.Event, asynxmd.ErrContextCancelled
+	if errors.Is(
+		err,
+		asynxmd.ErrContextCancelled,
+	) {
+		return result.Event,
+			asynxmd.ErrContextCancelled
 	}
-	return result.Event, err
+
+	return result.Event,
+		err
 }
 
 // Shutdown stops accepting work, waits for the commands and Forgets in flight,
 // then closes the dispatcher and the bus. If ctx ends first it returns the
 // error and can be called again to finish; once it has completed, or while
 // another call runs, it returns ErrAlreadyShuttingDown.
-func (p *Processor[T]) Shutdown(ctx context.Context) error {
+func (p *Processor[T]) Shutdown(
+	ctx context.Context,
+) error {
 	if !p.beginShutdown() {
 		return asynxmd.ErrAlreadyShuttingDown
 	}
+
 	err := p.runShutdown(ctx)
 	p.endShutdown(err)
 	return err
 }
 
-func (p *Processor[T]) runShutdown(ctx context.Context) error {
+func (p *Processor[T]) runShutdown(
+	ctx context.Context,
+) error {
 	if p.dispatcher != nil {
 		p.dispatcher.Interrupt()
 	}
 
-	if err := waitGroup(ctx, &p.sends); err != nil {
+	if err := waitGroup(
+		ctx,
+		&p.sends,
+	); err != nil {
 		return err
 	}
 
@@ -497,7 +625,10 @@ func (p *Processor[T]) runShutdown(ctx context.Context) error {
 		return err
 	}
 
-	if err := waitGroup(ctx, &p.forgets); err != nil {
+	if err := waitGroup(
+		ctx,
+		&p.forgets,
+	); err != nil {
 		return err
 	}
 
@@ -511,21 +642,26 @@ func (p *Processor[T]) runShutdown(ctx context.Context) error {
 func (p *Processor[T]) beginShutdown() bool {
 	p.lifeMu.Lock()
 	defer p.lifeMu.Unlock()
-	if p.shutdown == shuttingDownNow || p.shutdown == shutDown {
+	if p.shutdown == shuttingDownNow ||
+		p.shutdown == shutDown {
 		return false
 	}
+
 	p.shutdown = shuttingDownNow
 	p.shuttingDown.Store(true)
 	return true
 }
 
-func (p *Processor[T]) endShutdown(err error) {
+func (p *Processor[T]) endShutdown(
+	err error,
+) {
 	p.lifeMu.Lock()
 	defer p.lifeMu.Unlock()
 	if err != nil {
 		p.shutdown = shutdownFailed
 		return
 	}
+
 	p.shutdown = shutDown
 }
 
@@ -544,17 +680,23 @@ func waitGroup(
 	}
 }
 
-func (p *Processor[T]) closeDispatcher(ctx context.Context) error {
+func (p *Processor[T]) closeDispatcher(
+	ctx context.Context,
+) error {
 	if p.dispatcher == nil {
 		return nil
 	}
+
 	return p.dispatcher.Close(ctx)
 }
 
-func (p *Processor[T]) closeBus(ctx context.Context) error {
+func (p *Processor[T]) closeBus(
+	ctx context.Context,
+) error {
 	if p.bus == nil {
 		return nil
 	}
+
 	return p.bus.Close(ctx)
 }
 
@@ -569,7 +711,9 @@ func (p *Processor[T]) WaitPublish() {
 // ForTesting: SetOnSendPending sets a callback invoked after a command is
 // enqueued but before Send or SendWait blocks waiting for its result.
 // Do not call in production code.
-func (p *Processor[T]) SetOnSendPending(fn func()) {
+func (p *Processor[T]) SetOnSendPending(
+	fn func(),
+) {
 	p.onSendPending = fn
 }
 
@@ -585,6 +729,7 @@ func (p *Processor[T]) Forget(
 		p.lifeMu.Unlock()
 		return asynxmd.ErrShuttingDown
 	}
+
 	p.forgets.Add(1)
 	p.lifeMu.Unlock()
 	defer p.forgets.Done()
@@ -592,5 +737,9 @@ func (p *Processor[T]) Forget(
 	if err := ctx.Err(); err != nil {
 		return asynxmd.ErrContextCancelled
 	}
-	return p.executor.Forget(ctx, aggregateID)
+
+	return p.executor.Forget(
+		ctx,
+		aggregateID,
+	)
 }

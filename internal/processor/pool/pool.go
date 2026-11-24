@@ -36,7 +36,10 @@ func New[T any](
 	queueDepth int,
 	workersPerShard int,
 ) *ShardPool[T] {
-	shards := make([]*Shard[T], numShards)
+	shards := make(
+		[]*Shard[T],
+		numShards,
+	)
 	for i := range numShards {
 		shards[i] = newShard[T](
 			i,
@@ -59,7 +62,9 @@ func (p *ShardPool[T]) Shards() []*Shard[T] {
 	return p.shards
 }
 
-func (p *ShardPool[T]) start(executor *exec.CommandExecutor[T]) {
+func (p *ShardPool[T]) start(
+	executor *exec.CommandExecutor[T],
+) {
 	for _, shard := range p.shards {
 		p.dispatcherDoneWg.Add(1)
 		go shard.dispatchCommands(
@@ -76,7 +81,9 @@ func (p *ShardPool[T]) start(executor *exec.CommandExecutor[T]) {
 	}
 }
 
-func (p *ShardPool[T]) Drain(ctx context.Context) error {
+func (p *ShardPool[T]) Drain(
+	ctx context.Context,
+) error {
 	p.signalStop()
 
 	if err := p.waitDispatchers(ctx); err != nil {
@@ -92,7 +99,9 @@ func (p *ShardPool[T]) signalStop() {
 	}
 }
 
-func (p *ShardPool[T]) waitDispatchers(ctx context.Context) error {
+func (p *ShardPool[T]) waitDispatchers(
+	ctx context.Context,
+) error {
 	done := make(chan struct{})
 	go func() {
 		p.dispatcherDoneWg.Wait()
@@ -107,7 +116,9 @@ func (p *ShardPool[T]) waitDispatchers(ctx context.Context) error {
 	}
 }
 
-func (p *ShardPool[T]) waitWorkers(ctx context.Context) error {
+func (p *ShardPool[T]) waitWorkers(
+	ctx context.Context,
+) error {
 	done := make(chan struct{})
 	go func() {
 		p.doneWg.Wait()

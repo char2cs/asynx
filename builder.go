@@ -106,7 +106,9 @@ func (b *Builder[T]) WithPanicHandler(
 // WithCorruptionHook registers a callback invoked when a snapshot cannot be
 // deserialized. The hook receives the deserialization error and is called
 // before falling back to the cold replay path.
-func (b *Builder[T]) WithCorruptionHook(fn func(error)) *Builder[T] {
+func (b *Builder[T]) WithCorruptionHook(
+	fn func(error),
+) *Builder[T] {
 	b.corruptionHook = fn
 	return b
 }
@@ -115,15 +117,22 @@ func (b *Builder[T]) WithCorruptionHook(fn func(error)) *Builder[T] {
 // non-nil error inside an async publish goroutine. The event has already been
 // durably written to the event store; this callback is for observability only.
 // When not set, publish errors are silently dropped.
-func (b *Builder[T]) WithPublishErrorHandler(fn models.PublishErrorHandler[T]) *Builder[T] {
+func (b *Builder[T]) WithPublishErrorHandler(
+	fn models.PublishErrorHandler[T],
+) *Builder[T] {
 	b.publishErrorHandler = fn
 	return b
 }
 
 // WithForgetHandler registers a ForgetHandler at build time.
 // Equivalent to calling OnForget after Build. Multiple calls register multiple handlers.
-func (b *Builder[T]) WithForgetHandler(fn models.ForgetHandler[T]) *Builder[T] {
-	b.forgetHandlers = append(b.forgetHandlers, fn)
+func (b *Builder[T]) WithForgetHandler(
+	fn models.ForgetHandler[T],
+) *Builder[T] {
+	b.forgetHandlers = append(
+		b.forgetHandlers,
+		fn,
+	)
 	return b
 }
 
@@ -140,7 +149,10 @@ func (b *Builder[T]) WithSyncProjection(
 	pattern string,
 	fn func(ctx context.Context, tx models.Tx, evt models.Event[T]) error,
 ) *Builder[T] {
-	b.syncProjections = append(b.syncProjections, syncProjectionDef[T]{pattern: pattern, fn: fn})
+	b.syncProjections = append(
+		b.syncProjections,
+		syncProjectionDef[T]{pattern: pattern, fn: fn},
+	)
 	return b
 }
 
@@ -180,14 +192,19 @@ func (b *Builder[T]) WithSubscriber(
 	handler models.DurableHandler[T],
 	opts ...models.SubscriptionOpt[T],
 ) *Builder[T] {
-	b.subscribers = append(b.subscribers, subscriberDef[T]{pattern: pattern, handler: handler, opts: opts})
+	b.subscribers = append(
+		b.subscribers,
+		subscriberDef[T]{pattern: pattern, handler: handler, opts: opts},
+	)
 	return b
 }
 
 // WithDeliveryErrorHandler sets a callback invoked for every failed attempt of
 // a durable delivery (handler error, panic or timeout), with the attempt number
 // of the current failing streak. When not set, failures are retried silently.
-func (b *Builder[T]) WithDeliveryErrorHandler(fn models.DeliveryErrorHandler[T]) *Builder[T] {
+func (b *Builder[T]) WithDeliveryErrorHandler(
+	fn models.DeliveryErrorHandler[T],
+) *Builder[T] {
 	b.deliveryErrHandler = fn
 	return b
 }
@@ -213,7 +230,9 @@ func (b *Builder[T]) WithDeliveryRetry(
 // is delivered for it, and the failure is reported to the
 // delivery error handler with ErrDeliveryParked. Other aggregates are
 // unaffected. ResumeDeliveries (or a restart) redelivers a parked aggregate.
-func (b *Builder[T]) WithDeliveryMaxAttempts(n int) *Builder[T] {
+func (b *Builder[T]) WithDeliveryMaxAttempts(
+	n int,
+) *Builder[T] {
 	b.maxAttempts = n
 	return b
 }
@@ -225,7 +244,9 @@ func (b *Builder[T]) WithDeliveryMaxAttempts(n int) *Builder[T] {
 // Returning nil acknowledges the event as dealt with (typically
 // after storing it somewhere for inspection) and lets the aggregate's later
 // events flow; returning an error parks the aggregate.
-func (b *Builder[T]) WithDeadLetterHandler(fn models.DeadLetterHandler[T]) *Builder[T] {
+func (b *Builder[T]) WithDeadLetterHandler(
+	fn models.DeadLetterHandler[T],
+) *Builder[T] {
 	b.deadLetter = fn
 	return b
 }
@@ -234,7 +255,9 @@ func (b *Builder[T]) WithDeadLetterHandler(fn models.DeadLetterHandler[T]) *Buil
 // Snapshots are a derived cache written after the event commits, so a failure
 // never fails the command or blocks delivery. When not set, snapshot errors are
 // dropped.
-func (b *Builder[T]) WithSnapshotErrorHandler(fn func(context.Context, models.Event[T], error)) *Builder[T] {
+func (b *Builder[T]) WithSnapshotErrorHandler(
+	fn func(context.Context, models.Event[T], error),
+) *Builder[T] {
 	b.snapshotErrHandler = fn
 	return b
 }
@@ -268,11 +291,13 @@ func (b *Builder[T]) WithDispatcher(
 // defaults.
 func (b *Builder[T]) Build() (Asynx[T], error) {
 	if b.eventStore == nil {
-		return nil, models.ErrMissingEventStore
+		return nil,
+			models.ErrMissingEventStore
 	}
 
 	if b.snapshotStore == nil {
-		return nil, models.ErrMissingSnapshotStore
+		return nil,
+			models.ErrMissingSnapshotStore
 	}
 
 	activeBus := b.activeBus()
@@ -287,12 +312,19 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 
 	procOpts, err := b.processorOpts()
 	if err != nil {
-		return nil, err
+		return nil,
+			err
 	}
-	proc, err := processor.New(es, activeBus, procOpts...)
+
+	proc, err := processor.New(
+		es,
+		activeBus,
+		procOpts...,
+	)
 	if err != nil {
 		closeAbandonedBus(activeBus)
-		return nil, err
+		return nil,
+			err
 	}
 
 	instance := &asynxImpl[T]{
@@ -302,33 +334,44 @@ func (b *Builder[T]) Build() (Asynx[T], error) {
 	}
 
 	built := false
-	defer shutdownUnlessBuilt(proc, &built)
+	defer shutdownUnlessBuilt(
+		proc,
+		&built,
+	)
 
-	err = b.finish(instance, proc)
+	err = b.finish(
+		instance,
+		proc,
+	)
 	if err != nil {
-		return nil, err
+		return nil,
+			err
 	}
 
 	built = true
-	return instance, nil
+	return instance,
+		nil
 }
 
 func (b *Builder[T]) activeBus() models.Bus[T] {
 	if b.bus != nil {
 		return b.bus
 	}
+
 	if b.panicHandler != nil {
 		return bus.NewChannelBus[T](
 			bus.WithPanicHandler[T](b.panicHandler),
 		)
 	}
+
 	return bus.NewChannelBus[T]()
 }
 
 func (b *Builder[T]) processorOpts() ([]processor.ProcessorOpt[T], error) {
 	syncs, err := b.compileSyncProjections()
 	if err != nil {
-		return nil, err
+		return nil,
+			err
 	}
 
 	procOpts := []processor.ProcessorOpt[T]{
@@ -337,23 +380,48 @@ func (b *Builder[T]) processorOpts() ([]processor.ProcessorOpt[T], error) {
 		processor.WithWorkersPerShard[T](b.shardingOpts.WorkersPerShard),
 	}
 	if len(syncs) > 0 {
-		procOpts = append(procOpts, processor.WithSyncProjections(syncs))
+		procOpts = append(
+			procOpts,
+			processor.WithSyncProjections(syncs),
+		)
 	}
+
 	durableSubs, durableMatch, err := b.compileDurable()
 	if err != nil {
-		return nil, err
+		return nil,
+			err
 	}
-	procOpts = append(procOpts, b.durableOpts(durableSubs, durableMatch)...)
+
+	procOpts = append(
+		procOpts,
+		b.durableOpts(
+			durableSubs,
+			durableMatch,
+		)...,
+	)
 	if b.snapshotErrHandler != nil {
-		procOpts = append(procOpts, processor.WithSnapshotErrorHandler(b.snapshotErrHandler))
+		procOpts = append(
+			procOpts,
+			processor.WithSnapshotErrorHandler(b.snapshotErrHandler),
+		)
 	}
+
 	if b.publishErrorHandler != nil {
-		procOpts = append(procOpts, processor.WithPublishErrorHandler[T](b.publishErrorHandler))
+		procOpts = append(
+			procOpts,
+			processor.WithPublishErrorHandler[T](b.publishErrorHandler),
+		)
 	}
+
 	if b.dispatcherFactory != nil {
-		procOpts = append(procOpts, processor.WithDispatcherFactory(b.dispatcherFactory))
+		procOpts = append(
+			procOpts,
+			processor.WithDispatcherFactory(b.dispatcherFactory),
+		)
 	}
-	return procOpts, nil
+
+	return procOpts,
+		nil
 }
 
 func (b *Builder[T]) durableOpts(
@@ -363,23 +431,46 @@ func (b *Builder[T]) durableOpts(
 	if durableMatch == nil {
 		return nil
 	}
+
 	opts := []processor.ProcessorOpt[T]{
 		processor.WithDurableDelivery[T](durableMatch),
 		processor.WithDurableSubscribers(durableSubs),
 	}
 	if b.deliveryErrHandler != nil {
-		opts = append(opts, processor.WithDeliveryErrorHandler(b.deliveryErrHandler))
+		opts = append(
+			opts,
+			processor.WithDeliveryErrorHandler(b.deliveryErrHandler),
+		)
 	}
+
 	if b.panicHandler != nil {
-		opts = append(opts, processor.WithDeliveryPanicHandler(b.panicHandler))
+		opts = append(
+			opts,
+			processor.WithDeliveryPanicHandler(b.panicHandler),
+		)
 	}
-	opts = append(opts, processor.WithDeliveryRetry[T](b.retryInitial, b.retryMax))
+
+	opts = append(
+		opts,
+		processor.WithDeliveryRetry[T](
+			b.retryInitial,
+			b.retryMax,
+		),
+	)
 	if b.maxAttempts > 0 {
-		opts = append(opts, processor.WithDeliveryMaxAttempts[T](b.maxAttempts))
+		opts = append(
+			opts,
+			processor.WithDeliveryMaxAttempts[T](b.maxAttempts),
+		)
 	}
+
 	if b.deadLetter != nil {
-		opts = append(opts, processor.WithDeadLetterHandler(b.deadLetter))
+		opts = append(
+			opts,
+			processor.WithDeadLetterHandler(b.deadLetter),
+		)
 	}
+
 	return opts
 }
 
@@ -389,7 +480,9 @@ func (b *Builder[T]) finish(
 ) error {
 	err := internalutils.FirstError(
 		b.forgetHandlers,
-		func(fn models.ForgetHandler[T]) error {
+		func(
+			fn models.ForgetHandler[T],
+		) error {
 			_, err := instance.OnForget(fn)
 			return err
 		},
@@ -401,7 +494,11 @@ func (b *Builder[T]) finish(
 	if len(b.subscribers) == 0 {
 		return nil
 	}
-	return proc.Recover(context.Background(), recoveryBatch)
+
+	return proc.Recover(
+		context.Background(),
+		recoveryBatch,
+	)
 }
 
 func shutdownUnlessBuilt[T any](
@@ -411,7 +508,11 @@ func shutdownUnlessBuilt[T any](
 	if *built {
 		return
 	}
-	sctx, cancel := context.WithTimeout(context.Background(), failedBuildShutdown)
+
+	sctx, cancel := context.WithTimeout(
+		context.Background(),
+		failedBuildShutdown,
+	)
 	defer cancel()
 	_ = proc.Shutdown(sctx)
 }
@@ -421,7 +522,10 @@ func shutdownUnlessBuilt[T any](
 func closeAbandonedBus[T any](
 	activeBus models.Bus[T],
 ) {
-	ctx, cancel := context.WithTimeout(context.Background(), failedBuildShutdown)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		failedBuildShutdown,
+	)
 	defer cancel()
 	_ = activeBus.Close(ctx)
 }
@@ -434,32 +538,49 @@ const failedBuildShutdown = 30 * time.Second
 const recoveryBatch = 100
 
 func (b *Builder[T]) compileSyncProjections() ([]exec.SyncProjection[T], error) {
-	out := make([]exec.SyncProjection[T], 0, len(b.syncProjections))
+	out := make(
+		[]exec.SyncProjection[T],
+		0,
+		len(b.syncProjections),
+	)
 	for _, def := range b.syncProjections {
 		sp, err := compileSyncProjection(def)
 		if err != nil {
-			return nil, err
+			return nil,
+				err
 		}
-		out = append(out, sp)
+
+		out = append(
+			out,
+			sp,
+		)
 	}
-	return out, nil
+
+	return out,
+		nil
 }
 
 func compileSyncProjection[T any](
 	def syncProjectionDef[T],
 ) (exec.SyncProjection[T], error) {
 	if def.pattern == "" {
-		return exec.SyncProjection[T]{}, models.ErrEmptyPattern
+		return exec.SyncProjection[T]{},
+			models.ErrEmptyPattern
 	}
+
 	if def.fn == nil {
-		return exec.SyncProjection[T]{}, models.ErrNilHandler
+		return exec.SyncProjection[T]{},
+			models.ErrNilHandler
 	}
 
 	match, err := matcher(def.pattern)
 	if err != nil {
-		return exec.SyncProjection[T]{}, err
+		return exec.SyncProjection[T]{},
+			err
 	}
-	return exec.SyncProjection[T]{Match: match, Fn: def.fn}, nil
+
+	return exec.SyncProjection[T]{Match: match, Fn: def.fn},
+		nil
 }
 
 // compileDurable validates the durable subscribers and returns them with a
@@ -467,27 +588,47 @@ func compileSyncProjection[T any](
 // none). Events nobody durable listens to get no delivery entry.
 func (b *Builder[T]) compileDurable() ([]models.DurableSub[T], func(string) bool, error) {
 	if len(b.subscribers) == 0 {
-		return nil, nil, nil
+		return nil,
+			nil,
+			nil
 	}
 
 	subs, err := b.compileSubscribers()
 	if err != nil {
-		return nil, nil, err
+		return nil,
+			nil,
+			err
 	}
 
-	return subs, wantedBy(subs), nil
+	return subs,
+		wantedBy(subs),
+		nil
 }
 
 func (b *Builder[T]) compileSubscribers() ([]models.DurableSub[T], error) {
-	subs := make([]models.DurableSub[T], 0, len(b.subscribers))
+	subs := make(
+		[]models.DurableSub[T],
+		0,
+		len(b.subscribers),
+	)
 	for i, def := range b.subscribers {
-		sub, err := compileSubscriber(i, def)
+		sub, err := compileSubscriber(
+			i,
+			def,
+		)
 		if err != nil {
-			return nil, err
+			return nil,
+				err
 		}
-		subs = append(subs, sub)
+
+		subs = append(
+			subs,
+			sub,
+		)
 	}
-	return subs, nil
+
+	return subs,
+		nil
 }
 
 func compileSubscriber[T any](
@@ -495,45 +636,81 @@ func compileSubscriber[T any](
 	def subscriberDef[T],
 ) (models.DurableSub[T], error) {
 	if def.pattern == "" {
-		return models.DurableSub[T]{}, models.ErrEmptyPattern
+		return models.DurableSub[T]{},
+			models.ErrEmptyPattern
 	}
+
 	if def.handler == nil {
-		return models.DurableSub[T]{}, models.ErrNilHandler
+		return models.DurableSub[T]{},
+			models.ErrNilHandler
 	}
 
 	cfg := &models.SubscriptionConfig[T]{}
 	for _, opt := range def.opts {
 		opt(cfg)
 	}
+
 	if cfg.Fallback != nil {
-		return models.DurableSub[T]{}, models.ErrFallbackUnsupported
+		return models.DurableSub[T]{},
+			models.ErrFallbackUnsupported
 	}
 
 	m, err := matcher(def.pattern)
 	if err != nil {
-		return models.DurableSub[T]{}, err
+		return models.DurableSub[T]{},
+			err
 	}
-	name := fmt.Sprintf("%s#%d", def.pattern, index+1)
-	return models.DurableSub[T]{Name: name, Match: m, Handler: def.handler, Timeout: cfg.Timeout}, nil
+
+	name := fmt.Sprintf(
+		"%s#%d",
+		def.pattern,
+		index+1,
+	)
+	return models.DurableSub[T]{Name: name, Match: m, Handler: def.handler, Timeout: cfg.Timeout},
+		nil
 }
 
-func wantedBy[T any](subs []models.DurableSub[T]) func(string) bool {
-	return func(name string) bool {
-		return slices.ContainsFunc(subs, func(sub models.DurableSub[T]) bool {
-			return sub.Match(name)
-		})
+func wantedBy[T any](
+	subs []models.DurableSub[T],
+) func(string) bool {
+	return func(
+		name string,
+	) bool {
+		return slices.ContainsFunc(
+			subs,
+			func(
+				sub models.DurableSub[T],
+			) bool {
+				return sub.Match(name)
+			},
+		)
 	}
 }
 
 // matcher mirrors the bus's pattern rule: an exact event name, or an
 // (unanchored) regular expression when the pattern has metacharacters.
-func matcher(pattern string) (func(string) bool, error) {
+func matcher(
+	pattern string,
+) (func(string) bool, error) {
 	if utils.IsExactPattern(pattern) {
-		return func(name string) bool { return name == pattern }, nil
+		return func(
+				name string,
+			) bool {
+				return name == pattern
+			},
+			nil
 	}
+
 	re, err := regexp.Compile(pattern)
 	if err != nil {
-		return nil, fmt.Errorf("asynx: invalid pattern %q: %w", pattern, err)
+		return nil,
+			fmt.Errorf(
+				"asynx: invalid pattern %q: %w",
+				pattern,
+				err,
+			)
 	}
-	return re.MatchString, nil
+
+	return re.MatchString,
+		nil
 }

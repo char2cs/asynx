@@ -7,7 +7,8 @@ import "errors"
 type ErrMarshal struct{}
 
 func (e ErrMarshal) MarshalJSON() ([]byte, error) {
-	return nil, errors.New("marshal error")
+	return nil,
+		errors.New("marshal error")
 }
 
 // BadUnmarshal marshals successfully (returns {}) but always fails
@@ -15,8 +16,15 @@ func (e ErrMarshal) MarshalJSON() ([]byte, error) {
 // json.Unmarshal error paths in tests.
 type BadUnmarshal struct{}
 
-func (b BadUnmarshal) MarshalJSON() ([]byte, error) { return []byte(`{}`), nil }
-func (b *BadUnmarshal) UnmarshalJSON([]byte) error  { return errors.New("unmarshal error") }
+func (b BadUnmarshal) MarshalJSON() ([]byte, error) {
+	return []byte(`{}`),
+		nil
+}
+func (b *BadUnmarshal) UnmarshalJSON(
+	[]byte,
+) error {
+	return errors.New("unmarshal error")
+}
 
 // CountedMarshal counts MarshalJSON calls and returns an error on call
 // number FailAt. All other calls return {}. Use as a pointer type parameter
@@ -29,7 +37,10 @@ type CountedMarshal struct {
 func (c *CountedMarshal) MarshalJSON() ([]byte, error) {
 	c.N++
 	if c.N == c.FailAt {
-		return nil, errors.New("marshal error")
+		return nil,
+			errors.New("marshal error")
 	}
-	return []byte(`{}`), nil
+
+	return []byte(`{}`),
+		nil
 }

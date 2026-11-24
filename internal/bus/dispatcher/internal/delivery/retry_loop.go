@@ -20,22 +20,43 @@ type retryLoop[T any] struct {
 }
 
 func (l *retryLoop[T]) step() bool {
-	failed, last := l.deliverer.attempt(l.job, l.pending, l.attempt)
+	failed, last := l.deliverer.attempt(
+		l.job,
+		l.pending,
+		l.attempt,
+	)
 	l.settleAfterFirst()
 	l.pending = failed
 	if len(failed) == 0 {
 		return false
 	}
+
 	if l.attempt >= l.deliverer.maxAttempts {
-		l.err = l.deliverer.giveUp(l.aggregateID, l.halt, l.job, last, l.attempt)
+		l.err = l.deliverer.giveUp(
+			l.aggregateID,
+			l.halt,
+			l.job,
+			last,
+			l.attempt,
+		)
 		return false
 	}
-	l.err = l.deliverer.wait(l.aggregateID, l.halt, l.job, l.backoff)
+
+	l.err = l.deliverer.wait(
+		l.aggregateID,
+		l.halt,
+		l.job,
+		l.backoff,
+	)
 	if l.err != nil {
 		return false
 	}
+
 	l.attempt++
-	l.backoff = min(l.backoff*2, l.deliverer.retryMax)
+	l.backoff = min(
+		l.backoff*2,
+		l.deliverer.retryMax,
+	)
 	return true
 }
 
@@ -43,5 +64,6 @@ func (l *retryLoop[T]) settleAfterFirst() {
 	if l.attempt != 1 {
 		return
 	}
+
 	l.job.MarkSettled()
 }

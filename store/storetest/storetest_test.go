@@ -12,12 +12,30 @@ import (
 	"github.com/char2cs/asynx/store"
 )
 
-func TestRun_PassesOnTheMemoryStore(t *testing.T) {
-	Run(t, func(*testing.T) models.Store { return store.New() })
+func TestRun_PassesOnTheMemoryStore(
+	t *testing.T,
+) {
+	Run(
+		t,
+		func(
+			*testing.T,
+		) models.Store {
+			return store.New()
+		},
+	)
 }
 
-func TestMemorySnapshotStoreConforms(t *testing.T) {
-	RunSnapshots(t, func(*testing.T) models.SnapshotStore { return store.NewSnapshots() })
+func TestMemorySnapshotStoreConforms(
+	t *testing.T,
+) {
+	RunSnapshots(
+		t,
+		func(
+			*testing.T,
+		) models.SnapshotStore {
+			return store.NewSnapshots()
+		},
+	)
 }
 
 // recorder stands in for *testing.T so a scenario can fail without failing the
@@ -36,7 +54,11 @@ func (r *recorder) Errorf(
 	r.failed.Store(true)
 }
 
-func (r *recorder) Error(...any) { r.failed.Store(true) }
+func (r *recorder) Error(
+	...any,
+) {
+	r.failed.Store(true)
+}
 
 func (r *recorder) Fatalf(
 	string,
@@ -46,7 +68,9 @@ func (r *recorder) Fatalf(
 	runtime.Goexit()
 }
 
-func (r *recorder) Fatal(...any) {
+func (r *recorder) Fatal(
+	...any,
+) {
 	r.failed.Store(true)
 	runtime.Goexit()
 }
@@ -62,12 +86,16 @@ func failures[S any](
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			didFail := runScenario(check, subject)
+			didFail := runScenario(
+				check,
+				subject,
+			)
 			mu.Lock()
 			failed[name] = didFail
 			mu.Unlock()
 		}()
 	}
+
 	wg.Wait()
 	return failed
 }
@@ -80,19 +108,25 @@ func runScenario[S any](
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		check(r, subject)
+		check(
+			r,
+			subject,
+		)
 	}()
 	<-done
 	return r.failed.Load()
 }
 
-func countFailed(failed map[string]bool) int {
+func countFailed(
+	failed map[string]bool,
+) int {
 	n := 0
 	for _, f := range failed {
 		if f {
 			n++
 		}
 	}
+
 	return n
 }
 
@@ -123,7 +157,8 @@ func (brokenStore) ReadFrom(
 	string,
 	int64,
 ) ([][]byte, error) {
-	return nil, errBroken
+	return nil,
+		errBroken
 }
 
 func (brokenStore) ReadRange(
@@ -132,21 +167,25 @@ func (brokenStore) ReadRange(
 	int64,
 	int64,
 ) ([][]byte, error) {
-	return nil, errBroken
+	return nil,
+		errBroken
 }
 
 func (brokenStore) GetReceipt(
 	context.Context,
 	string,
 ) (models.Receipt, bool, error) {
-	return models.Receipt{}, false, errBroken
+	return models.Receipt{},
+		false,
+		errBroken
 }
 
 func (brokenStore) PendingDeliveries(
 	context.Context,
 	int,
 ) ([]models.Delivery, error) {
-	return nil, errBroken
+	return nil,
+		errBroken
 }
 
 func (brokenStore) AckDelivery(
@@ -157,22 +196,41 @@ func (brokenStore) AckDelivery(
 	return errBroken
 }
 
-func TestSuite_FlagsStoresThatDoNotKeepWhatTheyAccepted(t *testing.T) {
-	failed := failures(storeScenarios(), models.Store(hollowStore{Store: store.New()}))
+func TestSuite_FlagsStoresThatDoNotKeepWhatTheyAccepted(
+	t *testing.T,
+) {
+	failed := failures(
+		storeScenarios(),
+		models.Store(hollowStore{Store: store.New()}),
+	)
 
 	if got, total := countFailed(failed), len(failed); got < total/2 {
-		t.Fatalf("only %d of %d scenarios failed a store that keeps nothing", got, total)
+		t.Fatalf(
+			"only %d of %d scenarios failed a store that keeps nothing",
+			got,
+			total,
+		)
 	}
+
 	if !failed["AppendCommitsAndReadFromReturnsInOrder"] {
 		t.Fatal("a store that keeps nothing passed the append scenario")
 	}
 }
 
-func TestSuite_FlagsStoresThatFail(t *testing.T) {
-	failed := failures(storeScenarios(), models.Store(brokenStore{Store: store.New()}))
+func TestSuite_FlagsStoresThatFail(
+	t *testing.T,
+) {
+	failed := failures(
+		storeScenarios(),
+		models.Store(brokenStore{Store: store.New()}),
+	)
 
 	if got, total := countFailed(failed), len(failed); got < total/2 {
-		t.Fatalf("only %d of %d scenarios failed a store that errors on everything", got, total)
+		t.Fatalf(
+			"only %d of %d scenarios failed a store that errors on everything",
+			got,
+			total,
+		)
 	}
 }
 
@@ -204,7 +262,9 @@ func (failingSnapshots) Get(
 	context.Context,
 	string,
 ) ([]byte, bool, error) {
-	return nil, false, errBroken
+	return nil,
+		false,
+		errBroken
 }
 
 func (failingSnapshots) Delete(
@@ -214,18 +274,35 @@ func (failingSnapshots) Delete(
 	return errBroken
 }
 
-func TestSnapshotSuite_FlagsStoresThatDoNotKeepWhatTheyAccepted(t *testing.T) {
-	failed := failures(snapshotScenarios(), models.SnapshotStore(forgetfulSnapshots{SnapshotStore: store.NewSnapshots()}))
-
-	if !failed["PutThenGetReturnsTheBytes"] || !failed["PutReplacesTheSnapshot"] {
-		t.Fatalf("a snapshot store that keeps nothing passed: %v", failed)
+func TestSnapshotSuite_FlagsStoresThatDoNotKeepWhatTheyAccepted(
+	t *testing.T,
+) {
+	failed := failures(
+		snapshotScenarios(),
+		models.SnapshotStore(forgetfulSnapshots{SnapshotStore: store.NewSnapshots()}),
+	)
+	if !failed["PutThenGetReturnsTheBytes"] ||
+		!failed["PutReplacesTheSnapshot"] {
+		t.Fatalf(
+			"a snapshot store that keeps nothing passed: %v",
+			failed,
+		)
 	}
 }
 
-func TestSnapshotSuite_FlagsStoresThatFail(t *testing.T) {
-	failed := failures(snapshotScenarios(), models.SnapshotStore(failingSnapshots{SnapshotStore: store.NewSnapshots()}))
+func TestSnapshotSuite_FlagsStoresThatFail(
+	t *testing.T,
+) {
+	failed := failures(
+		snapshotScenarios(),
+		models.SnapshotStore(failingSnapshots{SnapshotStore: store.NewSnapshots()}),
+	)
 
 	if got, total := countFailed(failed), len(failed); got < total/2 {
-		t.Fatalf("only %d of %d scenarios failed a store that errors on everything", got, total)
+		t.Fatalf(
+			"only %d of %d scenarios failed a store that errors on everything",
+			got,
+			total,
+		)
 	}
 }
