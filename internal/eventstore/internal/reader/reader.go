@@ -18,10 +18,11 @@ import (
 // Reading is a query except for one deliberate side effect: when replay had to
 // upcast an old event, the reader seals the migration by storing the upcast
 // state as a snapshot, so later reads take the warm path. That write is best
-// effort and its failure is dropped without a report, because the state it
-// would have cached is already durable in the event store and a missing
-// snapshot only costs a slower next read; there is no observer for it
-// (the corruption callback is about undecodable snapshots, not failed writes).
+// effort: a failed write never fails the read, because the state it would have
+// cached is already durable in the event store and a missing snapshot only
+// costs a slower next read. The failure is reported to the handler installed
+// with SetSnapshotErrorHandler and is dropped when none is installed (the
+// corruption callback is about undecodable snapshots, not failed writes).
 //
 // Reader holds no per-call state and is safe for concurrent use, with one
 // exception: SetSnapshotGuard must be called before the reader is shared.
@@ -33,6 +34,23 @@ type Reader[T any] struct {
 	onCorruption         func(error)
 	currentSchemaVersion int
 	guard                esmodels.SnapshotGuard
+	onSnapshotError      func(context.Context, asynxmd.Event[T], error)
+}
+
+// SetSnapshotErrorHandler installs the callback that observes a failed
+// auto-snapshot write. It is called synchronously on the goroutine that
+// performed the read, after the read's state was computed and before the read
+// returns, with the aggregate id, the version the snapshot was meant for and
+// the write error; see the exported builder option for the Event fields that
+// are populated. For a lock-free Get the callback runs inside the snapshot
+// guard, so the aggregate's command lock is held while it runs and it should
+// return quickly. A panic in the callback is contained and never breaks the
+// read. A nil callback, the default, drops the failure. Call it before the
+// reader is used from more than one goroutine.
+func (r *Reader[T]) SetSnapshotErrorHandler(
+	fn func(context.Context, asynxmd.Event[T], error),
+) {
+	r.onSnapshotError = fn
 }
 
 // SetSnapshotGuard installs the guard a lock-free Get takes before storing an
@@ -84,7 +102,8 @@ func New[T any](
 //   - Storage errors propagated from the stores.
 //   - Upcaster failures propagated.
 //
-// A failed or skipped auto-snapshot write is not an error and is not reported.
+// A failed or skipped auto-snapshot write is not an error; a failed one is
+// reported to the snapshot error handler when one is installed.
 func (r *Reader[T]) Get(
 	ctx context.Context,
 	aggregateID string,
@@ -116,8 +135,8 @@ func (r *Reader[T]) Get(
 //
 // The caller must hold the aggregate's command lock. That is what lets Load
 // store the auto-snapshot of an upcast state directly, without the guard or the
-// stream check Get needs; as with Get, a failed write is dropped without a
-// report.
+// stream check Get needs; as with Get, a failed write does not fail the read and
+// is reported to the snapshot error handler when one is installed.
 func (r *Reader[T]) Load(
 	ctx context.Context,
 	aggregateID string,

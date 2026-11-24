@@ -3,6 +3,7 @@ package reader
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/char2cs/asynx/internal/eventstore/internal/replayer"
@@ -459,5 +460,285 @@ func TestLoad_AutoSnapshot_DoesNotUseTheGuard(
 		"agg1",
 	); !found {
 		t.Fatal("Load did not write the auto-snapshot")
+	}
+}
+
+func seedUpcastableOrder(
+	t *testing.T,
+	mem store.Memory,
+) {
+	t.Helper()
+
+	err := mem.Append(
+		context.Background(),
+		"events:agg1",
+		1,
+		makeEventBlob(
+			t,
+			"e1",
+			"Created",
+			1,
+			1,
+			json.RawMessage(`[{"op":"replace","path":"/Status","value":"Shipped"}]`),
+		),
+	)
+	if err != nil {
+		t.Fatalf(
+			"seed: %v",
+			err,
+		)
+	}
+}
+
+type snapshotFailure struct {
+	event asynxmd.Event[order]
+	err   error
+}
+
+func recordSnapshotFailures(
+	failures *[]snapshotFailure,
+) func(context.Context, asynxmd.Event[order], error) {
+	return func(
+		_ context.Context,
+		event asynxmd.Event[order],
+		err error,
+	) {
+		*failures = append(
+			*failures,
+			snapshotFailure{
+				event: event,
+				err:   err,
+			},
+		)
+	}
+}
+
+func assertSingleSnapshotFailure(
+	t *testing.T,
+	failures []snapshotFailure,
+) {
+	t.Helper()
+
+	if len(failures) != 1 {
+		t.Fatalf(
+			"handler calls = %d, want 1",
+			len(failures),
+		)
+	}
+
+	got := failures[0]
+	if !errors.Is(
+		got.err,
+		storageErr,
+	) {
+		t.Errorf(
+			"err = %v, want %v",
+			got.err,
+			storageErr,
+		)
+	}
+
+	if got.event.AggregateID != "agg1" ||
+		got.event.Version != 1 ||
+		got.event.ID != "e1" ||
+		got.event.SchemaVersion != 2 ||
+		got.event.Aggregate.Status != "Shipped" {
+		t.Errorf(
+			"event = %+v, want agg1 v1 e1 schema 2 Shipped",
+			got.event,
+		)
+	}
+}
+
+func TestGet_AutoSnapshotFailure_ReportsToTheHandlerOnce(
+	t *testing.T,
+) {
+	mem := store.New()
+	ss := store.NewSnapshots()
+	seedUpcastableOrder(
+		t,
+		mem,
+	)
+	ss.SetError(
+		"agg1",
+		storageErr,
+	)
+	var failures []snapshotFailure
+	r := upcastingReader(
+		mem,
+		ss,
+	)
+	r.SetSnapshotErrorHandler(recordSnapshotFailures(&failures))
+
+	state, err := r.Get(
+		context.Background(),
+		"agg1",
+	)
+	if err != nil {
+		t.Fatalf(
+			"Get: %v",
+			err,
+		)
+	}
+
+	if state.Status != "Shipped" {
+		t.Errorf(
+			"Status = %q, want Shipped",
+			state.Status,
+		)
+	}
+
+	assertSingleSnapshotFailure(
+		t,
+		failures,
+	)
+}
+
+func TestLoad_AutoSnapshotFailure_ReportsToTheHandlerOnce(
+	t *testing.T,
+) {
+	mem := store.New()
+	ss := store.NewSnapshots()
+	seedUpcastableOrder(
+		t,
+		mem,
+	)
+	ss.SetError(
+		"agg1",
+		storageErr,
+	)
+	var failures []snapshotFailure
+	r := upcastingReader(
+		mem,
+		ss,
+	)
+	r.SetSnapshotErrorHandler(recordSnapshotFailures(&failures))
+
+	state, version, err := r.Load(
+		context.Background(),
+		"agg1",
+	)
+	if err != nil ||
+		version != 1 ||
+		state.Status != "Shipped" {
+		t.Fatalf(
+			"Load = %+v, %d, %v; want Shipped, 1, nil",
+			state,
+			version,
+			err,
+		)
+	}
+
+	assertSingleSnapshotFailure(
+		t,
+		failures,
+	)
+}
+
+func TestGet_AutoSnapshotSuccess_DoesNotCallTheHandler(
+	t *testing.T,
+) {
+	mem := store.New()
+	ss := store.NewSnapshots()
+	seedUpcastableOrder(
+		t,
+		mem,
+	)
+	var failures []snapshotFailure
+	r := upcastingReader(
+		mem,
+		ss,
+	)
+	r.SetSnapshotErrorHandler(recordSnapshotFailures(&failures))
+
+	_, err := r.Get(
+		context.Background(),
+		"agg1",
+	)
+	if err != nil {
+		t.Fatalf(
+			"Get: %v",
+			err,
+		)
+	}
+
+	if len(failures) != 0 {
+		t.Errorf(
+			"handler calls = %d, want 0",
+			len(failures),
+		)
+	}
+}
+
+func TestGet_AutoSnapshotFailure_NilHandlerDropsTheError(
+	t *testing.T,
+) {
+	mem := store.New()
+	ss := store.NewSnapshots()
+	seedUpcastableOrder(
+		t,
+		mem,
+	)
+	ss.SetError(
+		"agg1",
+		storageErr,
+	)
+	r := upcastingReader(
+		mem,
+		ss,
+	)
+	r.SetSnapshotErrorHandler(nil)
+
+	state, err := r.Get(
+		context.Background(),
+		"agg1",
+	)
+	if err != nil ||
+		state.Status != "Shipped" {
+		t.Fatalf(
+			"Get = %+v, %v; want Shipped, nil",
+			state,
+			err,
+		)
+	}
+}
+
+func TestGet_AutoSnapshotFailure_HandlerPanicDoesNotBreakTheRead(
+	t *testing.T,
+) {
+	mem := store.New()
+	ss := store.NewSnapshots()
+	seedUpcastableOrder(
+		t,
+		mem,
+	)
+	ss.SetError(
+		"agg1",
+		storageErr,
+	)
+	r := upcastingReader(
+		mem,
+		ss,
+	)
+	panicking := func(
+		context.Context,
+		asynxmd.Event[order],
+		error,
+	) {
+		panic("handler blew up")
+	}
+	r.SetSnapshotErrorHandler(panicking)
+
+	state, err := r.Get(
+		context.Background(),
+		"agg1",
+	)
+	if err != nil ||
+		state.Status != "Shipped" {
+		t.Fatalf(
+			"Get = %+v, %v; want Shipped, nil",
+			state,
+			err,
+		)
 	}
 }

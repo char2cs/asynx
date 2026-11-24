@@ -849,63 +849,12 @@ func mustMarshal(
 
 var _ = mustMarshal
 
-func TestDelete_AfterWrite_GetReturnsErrNotFound(
+func TestDeleteSnapshot_KeepsTheEventsSoGetRebuildsFromThem(
 	t *testing.T,
 ) {
-	s := store.New()
-	ss := store.NewSnapshots()
 	es := New[order](
-		s,
-		ss,
-		nil,
-		1,
-		nil,
-	)
-	ctx := context.Background()
-
-	if _, err := es.Write(
-		ctx,
-		cmd(order{ID: "1", Status: "Pending", Total: 100}),
-	); err != nil {
-		t.Fatalf(
-			"Write: %v",
-			err,
-		)
-	}
-
-	if err := es.Delete(
-		ctx,
-		"agg1",
-	); err != nil {
-		t.Fatalf(
-			"Delete: %v",
-			err,
-		)
-	}
-
-	_, err := es.Get(
-		ctx,
-		"agg1",
-	)
-	if !errors.Is(
-		err,
-		asynxmd.ErrNotFound,
-	) {
-		t.Fatalf(
-			"expected ErrNotFound after Delete, got %v",
-			err,
-		)
-	}
-}
-
-func TestDelete_RemovesSnapshot(
-	t *testing.T,
-) {
-	s := store.New()
-	ss := store.NewSnapshots()
-	es := New[order](
-		s,
-		ss,
+		store.New(),
+		store.NewSnapshots(),
 		nil,
 		1,
 		nil,
@@ -922,32 +871,31 @@ func TestDelete_RemovesSnapshot(
 		)
 	}
 
-	if err := es.Delete(
+	if err := es.DeleteSnapshot(
 		ctx,
 		"agg1",
 	); err != nil {
 		t.Fatalf(
-			"Delete: %v",
+			"DeleteSnapshot: %v",
 			err,
 		)
 	}
 
-	_, err := es.Get(
+	got, err := es.Get(
 		ctx,
 		"agg1",
 	)
-	if !errors.Is(
-		err,
-		asynxmd.ErrNotFound,
-	) {
+	if err != nil ||
+		got.Status != "Snapped" {
 		t.Fatalf(
-			"expected ErrNotFound after Delete (snapshot path), got %v",
+			"Get = %+v, %v; want the state rebuilt from the events",
+			got,
 			err,
 		)
 	}
 }
 
-func TestDelete_NonExistentAggregate_NoError(
+func TestDeleteSnapshot_NonExistentAggregate_NoError(
 	t *testing.T,
 ) {
 	es := New[order](
@@ -957,29 +905,45 @@ func TestDelete_NonExistentAggregate_NoError(
 		1,
 		nil,
 	)
-	if err := es.Delete(
+	if err := es.DeleteSnapshot(
 		context.Background(),
 		"ghost",
 	); err != nil {
 		t.Errorf(
-			"Delete on non-existent aggregate: %v (want nil)",
+			"DeleteSnapshot on non-existent aggregate: %v (want nil)",
 			err,
 		)
 	}
 }
 
-func TestDelete_StoreError_ReturnsError(
+type deleteFailsSnapshots struct {
+	asynxmd.SnapshotStore
+	err error
+}
+
+// Delete always fails with the configured error.
+func (d deleteFailsSnapshots) Delete(
+	context.Context,
+	string,
+) error {
+	return d.err
+}
+
+func TestDeleteSnapshot_StoreError_ReturnsError(
 	t *testing.T,
 ) {
 	sentinel := errors.New("store error")
 	es := New[order](
-		&mockstores.ErrStore{Err: sentinel},
-		store.NewSnapshots(),
+		store.New(),
+		deleteFailsSnapshots{
+			SnapshotStore: store.NewSnapshots(),
+			err:           sentinel,
+		},
 		nil,
 		1,
 		nil,
 	)
-	err := es.Delete(
+	err := es.DeleteSnapshot(
 		context.Background(),
 		"agg1",
 	)
@@ -1022,14 +986,13 @@ func TestWrite_GetStorageError_ReturnsError(
 	}
 }
 
-func TestEventStore_DeleteRemovesSnapshotWithoutPrefix(
+func TestEventStore_DeleteSnapshotRemovesSnapshotWithoutPrefix(
 	t *testing.T,
 ) {
 	ctx := context.Background()
-	events := store.New()
 	snaps := store.NewSnapshots()
 	es := New[order](
-		events,
+		store.New(),
 		snaps,
 		nil,
 		1,
@@ -1057,7 +1020,7 @@ func TestEventStore_DeleteRemovesSnapshotWithoutPrefix(
 		t.Fatal("snapshot missing before delete — key must be the raw aggregateID")
 	}
 
-	if err := es.Delete(
+	if err := es.DeleteSnapshot(
 		ctx,
 		"agg-1",
 	); err != nil {
@@ -1071,7 +1034,7 @@ func TestEventStore_DeleteRemovesSnapshotWithoutPrefix(
 		ctx,
 		"agg-1",
 	); found {
-		t.Error("snapshot still present after Delete")
+		t.Error("snapshot still present after DeleteSnapshot")
 	}
 }
 

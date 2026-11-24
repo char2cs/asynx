@@ -860,6 +860,82 @@ func TestGuarantee_SnapshotFailureIsReportedNotFatal(
 	}
 }
 
+func TestGuarantee_AutoSnapshotFailureOnReadIsReportedNotFatal(
+	t *testing.T,
+) {
+	events := store.New()
+	ss := store.NewSnapshots()
+	old := build(
+		t,
+		asynx.New[mocks.Order]().
+			WithEventStore(events).
+			WithSnapshotStore(ss),
+	)
+	_, err := old.Send(
+		context.Background(),
+		mocks.UpdateOrderCmd{ID: "agg", NewState: mocks.Order{ID: "agg", Status: "Old"}},
+	)
+	if err != nil {
+		t.Fatalf(
+			"Send: %v",
+			err,
+		)
+	}
+
+	var reported atomic.Int32
+	countReport := func(
+		context.Context,
+		models.Event[mocks.Order],
+		error,
+	) {
+		reported.Add(1)
+	}
+	identity := func(
+		_ context.Context,
+		_ string,
+		patches []byte,
+	) ([]byte, error) {
+		return patches,
+			nil
+	}
+	upgraded := build(
+		t,
+		asynx.New[mocks.Order]().
+			WithEventStore(events).
+			WithSnapshotStore(ss).
+			WithSchemaVersion(2).
+			WithUpcaster(
+				1,
+				identity,
+			).
+			WithSnapshotErrorHandler(countReport),
+	)
+
+	ss.SetError(
+		"agg",
+		errors.New("snapshot disk full"),
+	)
+	got, err := upgraded.Get(
+		context.Background(),
+		"agg",
+	)
+	if err != nil ||
+		got.Status != "Old" {
+		t.Fatalf(
+			"Get = %+v, %v; want Old, nil",
+			got,
+			err,
+		)
+	}
+
+	if reported.Load() != 1 {
+		t.Fatalf(
+			"reported = %d, want 1",
+			reported.Load(),
+		)
+	}
+}
+
 func forgetOrSend(
 	t *testing.T,
 	inst asynx.Asynx[mocks.Order],

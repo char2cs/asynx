@@ -3,6 +3,7 @@ package eventstore
 import (
 	"github.com/char2cs/asynx/internal/eventstore/internal/core"
 	"github.com/char2cs/asynx/internal/eventstore/internal/ports"
+	"github.com/char2cs/asynx/internal/eventstore/options"
 	asynxmd "github.com/char2cs/asynx/models"
 )
 
@@ -28,19 +29,26 @@ type EventStore[T any] interface {
 // version stamped on new events and the target of every upcast. onCorruption is
 // called with the decoding error when a stored snapshot cannot be read, and the
 // store then rebuilds state from events; pass nil to rebuild silently. The
-// callback may run on any goroutine that reads.
+// callback may run on any goroutine that reads. opts adjust optional
+// behaviour, such as options.WithSnapshotErrorHandler.
 func New[T any](
 	eventStore asynxmd.Store,
 	snapshotStore asynxmd.SnapshotStore,
 	upcasters map[int]asynxmd.Upcaster,
 	schemaVersion int,
 	onCorruption func(error),
+	opts ...options.Option[T],
 ) EventStore[T] {
-	return core.New[T](
+	es := core.New[T](
 		eventStore,
 		snapshotStore,
 		upcasters,
 		schemaVersion,
 		onCorruption,
 	)
+	for _, opt := range opts {
+		opt(es)
+	}
+
+	return es
 }

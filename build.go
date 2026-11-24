@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/char2cs/asynx/internal/bus"
 	"github.com/char2cs/asynx/internal/eventstore"
+	"github.com/char2cs/asynx/internal/eventstore/options"
 	"github.com/char2cs/asynx/internal/firsterror"
 	"github.com/char2cs/asynx/internal/processor"
 	procmodels "github.com/char2cs/asynx/internal/processor/models"
@@ -119,6 +120,7 @@ func (b *Builder[T]) newEventStore() eventstore.EventStore[T] {
 		maps.Clone(b.upcasters),
 		b.schemaVersion,
 		b.corruptionHook,
+		options.WithSnapshotErrorHandler(b.snapshotErrHandler),
 	)
 }
 

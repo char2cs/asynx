@@ -29,7 +29,80 @@ func newTestWriter(
 	)
 }
 
-func TestWrite_AppendsEventAndReturnsPublicEvent(
+func appendEvent[T any](
+	ctx context.Context,
+	w *Writer[T],
+	aggregateID string,
+	eventName string,
+	expectedVersion int64,
+	previousState T,
+	newState T,
+) (evt asynxmd.Event[T], err error) {
+	appendInTx := func(
+		tx asynxmd.Tx,
+	) (txErr error) {
+		evt, txErr = w.AppendTx(
+			ctx,
+			tx,
+			aggregateID,
+			eventName,
+			expectedVersion,
+			previousState,
+			newState,
+		)
+		return txErr
+	}
+
+	err = w.EventStore().Atomically(
+		ctx,
+		appendInTx,
+	)
+	if err != nil {
+		return asynxmd.Event[T]{},
+			err
+	}
+
+	return evt,
+		nil
+}
+
+func appendSnapshotted[T any](
+	ctx context.Context,
+	w *Writer[T],
+	aggregateID string,
+	eventName string,
+	expectedVersion int64,
+	previousState T,
+	newState T,
+) (asynxmd.Event[T], error) {
+	evt, err := appendEvent(
+		ctx,
+		w,
+		aggregateID,
+		eventName,
+		expectedVersion,
+		previousState,
+		newState,
+	)
+	if err != nil {
+		return asynxmd.Event[T]{},
+			err
+	}
+
+	err = w.Snapshot(
+		ctx,
+		evt,
+	)
+	if err != nil {
+		return asynxmd.Event[T]{},
+			err
+	}
+
+	return evt,
+		nil
+}
+
+func TestAppendTx_AppendsEventAndReturnsPublicEvent(
 	t *testing.T,
 ) {
 	es := store.New()
@@ -41,8 +114,9 @@ func TestWrite_AppendsEventAndReturnsPublicEvent(
 	prev := order{Status: "Pending", Total: 50}
 	next := order{Status: "Shipped", Total: 50}
 
-	evt, err := w.Write(
+	evt, err := appendEvent(
 		context.Background(),
+		w,
 		"agg1",
 		"Shipped",
 		0,
@@ -92,7 +166,7 @@ func TestWrite_AppendsEventAndReturnsPublicEvent(
 	}
 }
 
-func TestWrite_PatchRecordsOnlyDiff(
+func TestAppendTx_PatchRecordsOnlyDiff(
 	t *testing.T,
 ) {
 	es := store.New()
@@ -101,8 +175,9 @@ func TestWrite_PatchRecordsOnlyDiff(
 		store.NewSnapshots(),
 	)
 
-	_, err := w.Write(
+	_, err := appendEvent(
 		context.Background(),
+		w,
 		"agg1",
 		"Updated",
 		0,
@@ -153,7 +228,7 @@ func TestWrite_PatchRecordsOnlyDiff(
 	}
 }
 
-func TestWrite_VersionIncrements(
+func TestAppendTx_VersionIncrements(
 	t *testing.T,
 ) {
 	w := newTestWriter(
@@ -177,8 +252,9 @@ func assertWriteVersion(
 ) {
 	t.Helper()
 
-	evt, err := w.Write(
+	evt, err := appendEvent(
 		context.Background(),
+		w,
 		"agg1",
 		"Event",
 		i-1,
@@ -203,7 +279,7 @@ func assertWriteVersion(
 	}
 }
 
-func TestWrite_AppendsAtExpectedVersionPlusOne(
+func TestAppendTx_AppendsAtExpectedVersionPlusOne(
 	t *testing.T,
 ) {
 	w := newTestWriter(
@@ -212,8 +288,9 @@ func TestWrite_AppendsAtExpectedVersionPlusOne(
 	)
 	ctx := context.Background()
 
-	evt, err := w.Write(
+	evt, err := appendEvent(
 		ctx,
+		w,
 		"agg1",
 		"Next",
 		7,
@@ -235,7 +312,7 @@ func TestWrite_AppendsAtExpectedVersionPlusOne(
 	}
 }
 
-func TestWrite_WritesSnapshot_WhenRequested(
+func TestSnapshot_WritesTheEventState(
 	t *testing.T,
 ) {
 	es := store.New()
@@ -245,8 +322,9 @@ func TestWrite_WritesSnapshot_WhenRequested(
 		ss,
 	)
 
-	_, err := w.WriteSnapshotted(
+	_, err := appendSnapshotted(
 		context.Background(),
+		w,
 		"agg1",
 		"Created",
 		0,
@@ -287,7 +365,7 @@ func TestWrite_WritesSnapshot_WhenRequested(
 	}
 }
 
-func TestWrite_NoSnapshot_WhenNotRequested(
+func TestAppendTx_NeverWritesASnapshot(
 	t *testing.T,
 ) {
 	ss := store.NewSnapshots()
@@ -296,8 +374,9 @@ func TestWrite_NoSnapshot_WhenNotRequested(
 		ss,
 	)
 
-	_, err := w.Write(
+	_, err := appendEvent(
 		context.Background(),
+		w,
 		"agg1",
 		"Created",
 		0,
@@ -320,7 +399,7 @@ func TestWrite_NoSnapshot_WhenNotRequested(
 	}
 }
 
-func TestWrite_EventStoreError_ReturnsError(
+func TestAppendTx_EventStoreError_ReturnsError(
 	t *testing.T,
 ) {
 	w := newTestWriter(
@@ -328,8 +407,9 @@ func TestWrite_EventStoreError_ReturnsError(
 		store.NewSnapshots(),
 	)
 
-	_, err := w.Write(
+	_, err := appendEvent(
 		context.Background(),
+		w,
 		"agg1",
 		"Evt",
 		0,
@@ -347,7 +427,7 @@ func TestWrite_EventStoreError_ReturnsError(
 	}
 }
 
-func TestWrite_EventStoreAppendError(
+func TestAppendTx_EventStoreAppendError(
 	t *testing.T,
 ) {
 	es := store.New()
@@ -361,8 +441,9 @@ func TestWrite_EventStoreAppendError(
 		store.NewSnapshots(),
 	)
 
-	_, err := w.Write(
+	_, err := appendEvent(
 		context.Background(),
+		w,
 		"agg1",
 		"Evt",
 		0,
@@ -380,7 +461,7 @@ func TestWrite_EventStoreAppendError(
 	}
 }
 
-func TestWrite_SnapshotStoreError_ReturnsError(
+func TestAppendTx_SnapshotStoreError_ReturnsError(
 	t *testing.T,
 ) {
 	ss := store.NewSnapshots()
@@ -393,8 +474,9 @@ func TestWrite_SnapshotStoreError_ReturnsError(
 		ss,
 	)
 
-	_, err := w.WriteSnapshotted(
+	_, err := appendSnapshotted(
 		context.Background(),
+		w,
 		"agg1",
 		"Evt",
 		0,
@@ -412,7 +494,7 @@ func TestWrite_SnapshotStoreError_ReturnsError(
 	}
 }
 
-func TestWrite_MarshalPreviousStateError(
+func TestAppendTx_MarshalPreviousStateError(
 	t *testing.T,
 ) {
 	w := New[mocks.ErrMarshal](
@@ -421,8 +503,9 @@ func TestWrite_MarshalPreviousStateError(
 		1,
 	)
 
-	_, err := w.Write(
+	_, err := appendEvent(
 		context.Background(),
+		w,
 		"agg1",
 		"Evt",
 		0,
@@ -434,7 +517,7 @@ func TestWrite_MarshalPreviousStateError(
 	}
 }
 
-func TestWrite_MarshalNewStateError(
+func TestAppendTx_MarshalNewStateError(
 	t *testing.T,
 ) {
 	w := New[*mocks.CountedMarshal](
@@ -444,8 +527,9 @@ func TestWrite_MarshalNewStateError(
 	)
 
 	cm := &mocks.CountedMarshal{FailAt: 2}
-	_, err := w.Write(
+	_, err := appendEvent(
 		context.Background(),
+		w,
 		"agg1",
 		"Evt",
 		0,
@@ -457,7 +541,7 @@ func TestWrite_MarshalNewStateError(
 	}
 }
 
-func TestWriteSnapshot_MarshalStateError(
+func TestSnapshot_MarshalStateError(
 	t *testing.T,
 ) {
 	w := New[*mocks.CountedMarshal](
@@ -467,8 +551,9 @@ func TestWriteSnapshot_MarshalStateError(
 	)
 
 	cm := &mocks.CountedMarshal{FailAt: 3}
-	_, err := w.WriteSnapshotted(
+	_, err := appendSnapshotted(
 		context.Background(),
+		w,
 		"agg1",
 		"Evt",
 		0,
@@ -580,8 +665,9 @@ func writeSnapshotted(
 	t.Helper()
 
 	next := order{ID: "agg-1", Total: float64(i), Status: "Pending"}
-	_, err := w.WriteSnapshotted(
+	_, err := appendSnapshotted(
 		context.Background(),
+		w,
 		"agg-1",
 		"OrderUpdated",
 		int64(i),
@@ -641,8 +727,9 @@ func plainWrite(
 	prev order,
 	next order,
 ) error {
-	_, err := w.Write(
+	_, err := appendEvent(
 		context.Background(),
+		w,
 		"agg1",
 		"Updated",
 		0,
@@ -657,8 +744,9 @@ func snapshottedWrite(
 	prev order,
 	next order,
 ) error {
-	_, err := w.WriteSnapshotted(
+	_, err := appendSnapshotted(
 		context.Background(),
+		w,
 		"agg1",
 		"Updated",
 		0,

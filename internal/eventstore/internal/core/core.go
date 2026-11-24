@@ -80,6 +80,22 @@ func (es *EventStore[T]) GuardAutoSnapshots(
 	es.reader.SetSnapshotGuard(guard)
 }
 
+// ObserveAutoSnapshotErrors installs the callback that observes a failed
+// auto-snapshot write made by the read path (Get, Load and Preload cache a
+// snapshot after an upcast). The failed write never fails the read; the
+// callback is called synchronously on the reading goroutine with an Event
+// carrying the aggregate id (AggregateID), the version the snapshot was for
+// (Version), the id of that version's event (ID), the schema version
+// (SchemaVersion) and the state that failed to be cached (Aggregate); the
+// other fields are zero. A panic in the callback is contained. A nil callback,
+// the default, drops the failure. Call it once, while wiring, before the store
+// is used from several goroutines.
+func (es *EventStore[T]) ObserveAutoSnapshotErrors(
+	fn func(context.Context, asynxmd.Event[T], error),
+) {
+	es.reader.SetSnapshotErrorHandler(fn)
+}
+
 // Get returns the current aggregate state using the optimal path (warm or
 // cold). Returns ErrNotFound if the aggregate has never been written.
 func (es *EventStore[T]) Get(
@@ -338,39 +354,6 @@ func (es *EventStore[T]) DeleteSnapshot(
 	aggregateID string,
 ) error {
 	return es.writer.SnapshotStore().Delete(
-		ctx,
-		aggregateID,
-	)
-}
-
-// Delete removes all events and snapshots for the aggregate from the backing
-// stores: first the event stream, in one transaction, then the snapshot.
-// Idempotent, deleting a non-existent aggregate is not an error. If removing the
-// snapshot fails the events are already gone and the error is returned; calling
-// Delete again finishes the job. The caller must keep commands for the
-// aggregate out while it runs.
-func (es *EventStore[T]) Delete(
-	ctx context.Context,
-	aggregateID string,
-) error {
-	deleteStream := func(
-		tx asynxmd.Tx,
-	) error {
-		return tx.DeleteStream(
-			ctx,
-			"events:"+aggregateID,
-		)
-	}
-
-	err := es.writer.EventStore().Atomically(
-		ctx,
-		deleteStream,
-	)
-	if err != nil {
-		return err
-	}
-
-	return es.DeleteSnapshot(
 		ctx,
 		aggregateID,
 	)

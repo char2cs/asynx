@@ -178,7 +178,8 @@ ax.Subscribe(asynx.Topic("order.*.ORD-001"), handler)
 
 **Fallback handler (failure resilience):**
 ```go
-// If primary panics, fallback runs instead
+// If the primary panics or exceeds its WithHandlerTimeout, the fallback runs
+// once with the same event; a panic in the fallback ends the job
 ax.Subscribe("Order.*",
 	primaryHandler,
 	models.WithFallback[Order](fallbackHandler),
@@ -313,7 +314,7 @@ func upcastOrderV1toV2(ctx context.Context, eventName string, patches []byte) ([
 | `WithDeliveryErrorHandler(fn)` / `WithDeliveryRetry(initial, max)` | Observe failed durable deliveries / tune retry backoff | silent / 100ms→30s | No |
 | `WithDeliveryMaxAttempts(n)` / `WithDeadLetterHandler(fn)` | Stop retrying after `n` attempts; dead-letter or park the aggregate | 20 / park | No |
 | `WithDispatcher(factory)` | Replace the delivery dispatcher ([contract](./docs/spec/dispatcher.md)) | In-memory dispatcher | No |
-| `WithSnapshotErrorHandler(fn)` | Observe failed (non-fatal) snapshot writes | Silently dropped | No |
+| `WithSnapshotErrorHandler(fn)` | Observe failed (non-fatal) snapshot writes, both post-commit and the auto-snapshot a read caches after an upcast | Silently dropped | No |
 | `WithListenerErrorHandler(fn)` | Observe a failed unsubscribe behind `Listen` / `SubscribeWait` (only a custom `WithBus` bus can fail one) | Silently dropped | No |
 
 **Configure concurrency:**

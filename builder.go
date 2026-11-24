@@ -306,10 +306,25 @@ func (b *Builder[T]) WithDeadLetterHandler(
 	return b
 }
 
-// WithSnapshotErrorHandler sets a callback invoked when a snapshot write fails.
-// Snapshots are a derived cache written after the event commits, so a failure
-// never fails the command or blocks delivery. When not set, snapshot errors are
-// dropped.
+// WithSnapshotErrorHandler sets a callback that observes failed snapshot
+// writes. Snapshots are a derived cache, so a failure never fails the command
+// or the read and never blocks delivery. Two kinds of write are observed:
+//
+//   - The snapshot a command asks for (ShouldSnapshot), written after its event
+//     committed. fn receives the committed event in full and runs on the
+//     goroutine that executed the command.
+//   - The auto-snapshot a read (Get, Load or Preload) caches after it had to
+//     upcast old events. fn receives an Event with only what a read knows:
+//     AggregateID, Version (the version the snapshot was meant for), ID (the
+//     id of that version's event), SchemaVersion (the current schema version)
+//     and Aggregate (the state that was not cached); EventName, OccurredAt and
+//     PreviousAggregate are zero. fn runs synchronously on the goroutine that
+//     performed the read, before the read returns; for a lock-free Get it runs
+//     while the aggregate's command lock is held, so it should return quickly.
+//
+// A failed read-side write does not change what the read returns. A panic in
+// fn during a read is contained and never breaks the read. When not set, or
+// set to nil, snapshot errors of both kinds are dropped.
 func (b *Builder[T]) WithSnapshotErrorHandler(
 	fn func(context.Context, models.Event[T], error),
 ) *Builder[T] {

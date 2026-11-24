@@ -158,7 +158,7 @@ Same signature as `ProjectionHandler[T]`. The tombstone event provides the final
 Delete(ctx context.Context, aggregateID string) error
 ```
 
-Called by `EventStore.Delete` on both the event store and snapshot store (which may be the same backing instance). Implementations must handle the no-op case cleanly.
+Called by Forget on both the event store and snapshot store (which may be the same backing instance). Implementations must handle the no-op case cleanly.
 
 ---
 
@@ -202,9 +202,9 @@ Forget(ctx, aggregateID)
   │     ├─ es.Write(ctx, cmd)                  ← tombstone event written
   │     └─ bus.PublishSync(ctx, tombstone)     ← ForgetHandlers called synchronously
   │
-  └─ es.Delete(ctx, aggregateID)
-        ├─ eventStore.Delete(ctx, aggregateID)
-        ├─ snapshotStore.Delete(ctx, aggregateID)
+  └─ erase the aggregate's data (no EventStore.Delete: the executor composes it)
+        ├─ es.DeleteSnapshot(ctx, aggregateID)        ← snapshot first, so no stale one survives
+        ├─ tx.DeleteStream(ctx, "events:"+aggregateID) ← events, in one transaction
         └─ evict from in-memory cache
 ```
 

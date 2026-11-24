@@ -11,9 +11,9 @@ import (
 	"github.com/wI2L/jsondiff"
 )
 
-// Writer computes RFC 6902 diffs between state transitions and durably appends
-// them as InternalEvents to the event stream. It optionally writes a snapshot
-// when the command requests one.
+// Writer computes RFC 6902 diffs between state transitions and appends them as
+// InternalEvents to the event stream inside a transaction the caller owns, and
+// upserts snapshots on request.
 //
 // Writer is stateless and safe for concurrent use.
 type Writer[T any] struct {
@@ -37,93 +37,17 @@ func New[T any](
 	}
 }
 
-// Write appends the event at expectedVersion+1, where expectedVersion is the
-// version of the state the command was validated against (0 for a brand-new
-// aggregate). Appending at the validated version is what makes the store's
-// (aggregateID, version) uniqueness act as optimistic-concurrency control: two
-// writers that validated against the same state target the same version, so one
-// wins and the other gets ErrPipelineFailed.
-//
-// The append runs in its own transaction and no snapshot is written; see
-// WriteSnapshotted. The command executor does not use this method: it composes
-// AppendTx and Snapshot itself so it can enlist projections and treat snapshot
-// failures as non-fatal.
-func (w *Writer[T]) Write(
-	ctx context.Context,
-	aggregateID string,
-	eventName string,
-	expectedVersion int64,
-	previousState T,
-	newState T,
-) (evt asynxmd.Event[T], err error) {
-	appendEvent := func(
-		tx asynxmd.Tx,
-	) (txErr error) {
-		evt, txErr = w.AppendTx(
-			ctx,
-			tx,
-			aggregateID,
-			eventName,
-			expectedVersion,
-			previousState,
-			newState,
-		)
-		return txErr
-	}
-
-	err = w.eventStore.Atomically(
-		ctx,
-		appendEvent,
-	)
-	if err != nil {
-		return asynxmd.Event[T]{},
-			err
-	}
-
-	return evt,
-		nil
-}
-
-// WriteSnapshotted is Write followed by a snapshot of the new state. If the
-// snapshot write fails, the append is not rolled back (the event is durable)
-// but the error is returned to the caller.
-func (w *Writer[T]) WriteSnapshotted(
-	ctx context.Context,
-	aggregateID string,
-	eventName string,
-	expectedVersion int64,
-	previousState T,
-	newState T,
-) (asynxmd.Event[T], error) {
-	evt, err := w.Write(
-		ctx,
-		aggregateID,
-		eventName,
-		expectedVersion,
-		previousState,
-		newState,
-	)
-	if err != nil {
-		return asynxmd.Event[T]{},
-			err
-	}
-
-	err = w.Snapshot(
-		ctx,
-		evt,
-	)
-	if err != nil {
-		return asynxmd.Event[T]{},
-			err
-	}
-
-	return evt,
-		nil
-}
-
 // AppendTx computes the RFC 6902 diff from previousState to newState,
 // serializes it as an InternalEvent and appends it at expectedVersion+1 inside
-// tx. It returns the public Event[T].
+// tx, where expectedVersion is the version of the state the command was
+// validated against (0 for a brand-new aggregate). Appending at the validated
+// version is what makes the store's (aggregateID, version) uniqueness act as
+// optimistic-concurrency control: two writers that validated against the same
+// state target the same version, so one wins and the other gets
+// ErrPipelineFailed. It returns the public Event[T]. The caller owns the
+// transaction, so it can enlist projections and other writes with the append,
+// and writes the snapshot itself with Snapshot, treating a failure there as
+// non-fatal.
 func (w *Writer[T]) AppendTx(
 	ctx context.Context,
 	tx asynxmd.Tx,

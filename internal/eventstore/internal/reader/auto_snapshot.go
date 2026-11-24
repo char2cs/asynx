@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	esmodels "github.com/char2cs/asynx/internal/eventstore/models"
+	asynxmd "github.com/char2cs/asynx/models"
 )
 
 func (r *Reader[T]) sealUpcastLockHeld(
@@ -83,6 +84,41 @@ func (r *Reader[T]) storeAutoSnapshot(
 		loaded.state,
 	)
 	if err != nil {
+		r.reportSnapshotError(
+			ctx,
+			aggregateID,
+			loaded,
+			err,
+		)
+	}
+}
+
+func (r *Reader[T]) reportSnapshotError(
+	ctx context.Context,
+	aggregateID string,
+	loaded loadedState[T],
+	err error,
+) {
+	if r.onSnapshotError == nil {
+		return
+	}
+
+	defer dropSnapshotHandlerPanic()
+	r.onSnapshotError(
+		ctx,
+		asynxmd.Event[T]{
+			ID:            loaded.lastEventID,
+			AggregateID:   aggregateID,
+			Version:       loaded.version,
+			SchemaVersion: r.currentSchemaVersion,
+			Aggregate:     loaded.state,
+		},
+		err,
+	)
+}
+
+func dropSnapshotHandlerPanic() {
+	if recover() != nil {
 		return
 	}
 }
