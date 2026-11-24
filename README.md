@@ -314,6 +314,7 @@ func upcastOrderV1toV2(ctx context.Context, eventName string, patches []byte) ([
 | `WithDeliveryMaxAttempts(n)` / `WithDeadLetterHandler(fn)` | Stop retrying after `n` attempts; dead-letter or park the aggregate | 20 / park | No |
 | `WithDispatcher(factory)` | Replace the delivery dispatcher ([contract](./docs/spec/dispatcher.md)) | In-memory dispatcher | No |
 | `WithSnapshotErrorHandler(fn)` | Observe failed (non-fatal) snapshot writes | Silently dropped | No |
+| `WithListenerErrorHandler(fn)` | Observe a failed unsubscribe behind `Listen` / `SubscribeWait` (only a custom `WithBus` bus can fail one) | Silently dropped | No |
 
 **Configure concurrency:**
 ```go
